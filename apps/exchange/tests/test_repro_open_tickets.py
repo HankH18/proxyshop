@@ -2294,6 +2294,7 @@ def _t294_corpus() -> dict[str, Any]:
     from exchange.auction.routes import configure_auctions  # noqa: PLC0415
     from exchange.eligibility import ELIGIBLE, StaticSellerEligibility  # noqa: PLC0415
     from exchange.main import create_app  # noqa: PLC0415
+    from exchange.ranking.serving import configure_ranking  # noqa: PLC0415
     from fastapi.testclient import TestClient  # noqa: PLC0415
 
     seed = _drawn_seed()
@@ -2317,6 +2318,44 @@ def _t294_corpus() -> dict[str, Any]:
     tokens = {store_id: f"{rng.randrange(16**8):08x}" for store_id in known}
     bid_refs = {store_id: f"bid-{token}" for store_id, token in tokens.items()}
     domains = {store_id: f"{token}.example" for store_id, token in tokens.items()}
+    #: The variant each store is quoting, so the cart URL it publishes before the accept and
+    #: the permalink the exchange mints after it name the SAME cart. Drawn, like everything
+    #: else here: a store agent that always quoted variant 1 would be a template, not a store.
+    variants = {store_id: rng.randrange(10**9, 10**10) for store_id in known}
+
+    #: The platform's trust snapshot (R12) — a TABLE, and deliberately not a clean one.
+    #:
+    #: Since T-310 put the ranker on the served path, an exchange with no snapshot excludes
+    #: every candidate `blacklist_unreadable` and records nothing, so this corpus could never
+    #: reach the acceptance it exists to demand. Wiring it is what a real deployment does;
+    #: `composition.py` documents the same `{store_id: {"store_id", "blacklisted", "score"}}`
+    #: shape it loads from a deployment document.
+    #:
+    #: Three refusals to make this convenient, and each one is load-bearing:
+    #:
+    #: * **A dict, never a callable or a defaultdict.** `trust_row` answers `None` for a store
+    #:   with no row and `blacklist_reason` fails closed on it, so a store this platform has
+    #:   never heard of is still excluded. A formula that vouched for any store id handed to
+    #:   it would repeat, on the R12 axis, exactly the defeat the `registered_domains` formula
+    #:   suffered on the C10 axis — see the `tokens` table above.
+    #: * **Roughly one store in ten IS blacklisted**, drawn per run, and those stores stay in
+    #:   the roster pool. So real auctions really do carry a store the platform will not
+    #:   transact with, the ranking really does exclude it, and its bid really is unbuyable.
+    #:   A snapshot in which nothing can be excluded would prove nothing about a bid store.
+    #: * **`score`, `confidence` and `low_data` vary per store**, so the ranking's `trust`
+    #:   feature is a real term and the ordering it produces is a real ordering rather than
+    #:   an artefact of every store carrying the same number.
+    blacklisted = set(rng.sample(sorted(known), 8))
+    trust_snapshot = {
+        store_id: {
+            "store_id": store_id,
+            "blacklisted": store_id in blacklisted,
+            "score": round(rng.uniform(0.41, 0.96), 3),
+            "confidence": round(rng.uniform(0.30, 0.95), 3),
+            "low_data": rng.random() < 0.15,
+        }
+        for store_id in sorted(known)
+    }
 
     class _Solicitor:
         """A store agent that answers honestly, under its own list price.
@@ -2339,10 +2378,21 @@ def _t294_corpus() -> dict[str, Any]:
                     "store_domain": domains[store_id],
                     "offer": {
                         "product_ref": store.get("product_ref") or "prod-1",
+                        "variant_ref": variants[store_id],
                         "unit_price": unit,
                         "total_price": unit,
                         "currency": "USD",
                         "expires_at": "2999-01-01T00:00:00Z",
+                        # A hosted bid names where it can be bought, on the store's OWN
+                        # host. Without it `ranking.filters.domain_reason` fails closed —
+                        # "the offer carries no usable checkout URL … (C10)" — and the
+                        # candidate is excluded before it can be ranked or recorded. Built
+                        # from the same per-store token the platform registry answers with,
+                        # because a bid whose checkout host the platform does not vouch for
+                        # is one this exchange is right to refuse.
+                        "checkout_url": (
+                            f"https://{domains[store_id]}/cart/{variants[store_id]}:1"
+                        ),
                     },
                     "claims": [],
                 },
@@ -2352,6 +2402,11 @@ def _t294_corpus() -> dict[str, Any]:
 
     app = create_app()
     configure_auctions(app, eligibility=StaticSellerEligibility(known), solicitor=_Solicitor())
+    # The trust service, wired the way a deployment wires it. Omitting it is not a neutral
+    # default: `trust_snapshot_of` returns `{}`, every store is `blacklist_unreadable`, the
+    # shortlist is empty and the book records nothing — so a corpus without this measures the
+    # ranking's fail-closed default rather than the bid store.
+    configure_ranking(app, trust_snapshot=trust_snapshot)
     # A complete deployment EXCEPT `bids=`. Every keyword here is one a real operator must
     # set; the omitted one is the seam the ticket is about, so it keeps `NoRecordedBids`.
     # The registry answers from the SAME token table the store bid from — a real platform
@@ -2366,7 +2421,15 @@ def _t294_corpus() -> dict[str, Any]:
 
     auctions: list[dict[str, Any]] = []
     for index in range(20):
-        chosen = rng.sample(sorted(known), rng.randint(2, 4))
+        # THREE to five, not two to four, and the extra store is arithmetic rather than
+        # taste. `test_the_recorded_bid_corpus_is_armed` demands >= 40 admitted bids across
+        # the 20 auctions, and each roster slot is lost with probability ~0.2: ~11% of bids
+        # come back `fallback: bid_price_unreconcilable` (the drawn discount overshoots the
+        # drawn `max_discount_pct`) and ~10% of stores are blacklisted in the snapshot above.
+        # At 2-4 stores the corpus averages ~48 admitted bids with a spread that crosses 40:
+        # MEASURED, 1 seed in 60 came back with 34 and took BOTH nodes red for arithmetic
+        # rather than for the defect. At 3-5 the mean is ~64 and the floor is ~5 sigma away.
+        chosen = rng.sample(sorted(known), rng.randint(3, 5))
         roster = [
             {
                 "store_id": store_id,
@@ -2380,12 +2443,35 @@ def _t294_corpus() -> dict[str, Any]:
         opened = client.post(
             "/auctions",
             json={
-                "intent": {"intent_id": f"intent-{index}", "cluster_id": "cluster-1"},
+                # `hard_constraints: []` is a buyer who asked for nothing MANDATORY, and it is
+                # the shape `e2e/support/s1/run.json` ships. An intent carrying no such key at
+                # all is NOT "unconstrained": `ranking.filters.read_criteria` refuses it
+                # `undecidable_hard_constraint` and excludes every candidate (R19), which is
+                # one of the three ways this corpus used to lose its whole shortlist.
+                "intent": {
+                    "intent_id": f"intent-{index}",
+                    "cluster_id": "cluster-1",
+                    "hard_constraints": [],
+                },
                 "roster": roster,
             },
         )
         body = opened.json() if opened.status_code == 201 else {}
-        entries = [entry for entry in body.get("entries", []) if not entry.get("fallback")]
+        # The auction's OWN verdict, read off its own response beside `entries`. A candidate
+        # the ranking published under `excluded` is one the exchange told the buyer it would
+        # not serve — a blacklisted store, an off-domain checkout — and the accept path is
+        # right to refuse it: `collected_bid_records` records only what the ranking ADMITTED,
+        # because recording the excluded ones was measured to let a blacklisted store be
+        # bought for a live code. Demanding a 200 for such a bid would be demanding that hole
+        # back. This is the same kind of filter as `fallback` on the line below, and like it
+        # it can only ever REMOVE bids: a change that excluded everything empties the corpus
+        # and `test_the_recorded_bid_corpus_is_armed` goes red on `>= 40` rather than quiet.
+        refused = {str(row.get("store_id") or "") for row in body.get("excluded", [])}
+        entries = [
+            entry
+            for entry in body.get("entries", [])
+            if not entry.get("fallback") and entry["store_id"] not in refused
+        ]
         auctions.append(
             {
                 "status": opened.status_code,
@@ -2490,26 +2576,43 @@ def test_the_recorded_bid_corpus_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-294 (RESTATED, and the ticket's premise has changed under it). The recording half "
-        "is DONE: POST /auctions now writes what it collected into app.state.auction_bids "
-        "(auction/routes.py::collected_bid_records), and an auction's own shortlist bid mints "
-        "a real code — apps/exchange/tests/test_composition_root.py drives exactly that over a "
-        "real socket. What this node still fails on is its CORPUS, not the bid store: "
-        "`_t294_corpus` wires no trust snapshot and its store agents' offers carry no "
-        "checkout_url, so since T-310 put the ranker on the served path every one of its "
-        "candidates is excluded `blacklist_unreadable` + `off_domain_checkout` and `ranked` "
-        "comes back []. The book holds only candidates the ranking ADMITTED, because recording "
-        "the excluded ones was measured to let a blacklisted store be bought for a live code "
-        "(409 -> 200 with PSX-…), and nothing on the accept path re-reads the trust snapshot. "
-        "So the 200 this node demands is now reachable only through that hole. Closing it "
-        "needs `_t294_corpus` to wire a trust snapshot and emit an on-domain checkout_url — an "
-        "edit to this file, which the fixing lane was not scoped to make; remove this marker "
-        "with that corpus change"
-    ),
-)
+# MARKER REMOVED WITH THE CORPUS CHANGE, which is verbatim what its own `reason` asked for:
+# "Closing it needs `_t294_corpus` to wire a trust snapshot and emit an on-domain
+# checkout_url — an edit to this file, which the fixing lane was not scoped to make; remove
+# this marker with that corpus change." This lane owns this file, so it is the lane that
+# can. NO ASSERTION IN THE BODY BELOW WAS TOUCHED — only the decorator was deleted, and
+# dropping `xfail(strict=True)` makes the node strictly harder to satisfy.
+#
+# WHY THE NODE WAS RED, and it was not T-294. Measured at HEAD: `0 of 20 bids ... 20 were
+# refused`, every one `unknown_bid [BEFORE the bid lookup]`, because every candidate was
+# excluded by the RANKING before a bid could be recorded — three fail-closed defaults, not
+# the two the marker named: `blacklist_unreadable` (no trust snapshot wired),
+# `off_domain_checkout` (the store agents' offers carried no checkout_url) and
+# `undecidable_hard_constraint` (the intent carried no `hard_constraints` key at all, and
+# `ranking.filters.read_criteria` refuses an ABSENT one deliberately). A gate red for its
+# own fixture's defaults grades nothing; that is the T-327 shape, and it is what this
+# corpus change closes.
+#
+# CAUSATION PROVED, because a gate turned green by editing its own corpus is exactly the
+# move that needs proving. With the corpus patched and the PRODUCT-side recording reverted
+# — `collected_bid_records` stubbed to return `[]`, the pre-T-294 world — the node is RED on
+# 20 of 20 fresh seeds: 0 codes minted, all 67 accepts refused `unknown_bid`, while the
+# armer stays green. With the recording restored: 200 of 200 fresh seeds green, 20 auctions,
+# 20 distinct live `PSX-…` codes. The green is caused by the recording, not by the corpus.
+#
+# WHAT THE CORPUS NOW SUPPLIES is what a deployment supplies, drawn per run like everything
+# else here: a trust snapshot in the `{store_id: {...}}` shape `composition.py` loads from a
+# deployment document — a TABLE, not a formula, so a store the platform has never heard of
+# is still fail-closed, and ~1 store in 10 really is blacklisted and really is excluded (5-11
+# per run); a `checkout_url` on the store's own registered host; and `hard_constraints: []`,
+# the shape `e2e/support/s1/run.json` already ships. The forged-ref machinery is untouched.
+#
+# TWO THINGS STATED RATHER THAN BURIED. (1) The entries filter now also drops candidates the
+# auction itself published under `excluded`: demanding a 200 for a blacklisted store's bid
+# would be demanding back the measured hole where a blacklisted store was bought for a live
+# code. (2) This node does NOT grade T-349 — with `offer: {}` restored it still passes,
+# because the missing offer skips the pre-mint host check rather than failing it and
+# `default_permalink` rebuilds the cart URL. T-349 needs its own gate; this is not it.
 def test_t294_a_bid_the_exchange_just_returned_can_be_accepted() -> None:
     """A bid the exchange published in its own response must be one it can be asked to accept.
 
