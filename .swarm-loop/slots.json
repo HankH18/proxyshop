@@ -4,40 +4,30 @@
     "0": "the primary checkout \u2014 the run's frozen metric commands measure there, and their command strings may never change"
   },
   "leases": {
-    "5": {
-      "claimed_at": "2026-09-05T16:43:14",
-      "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/money-path",
-      "branch": "task/money-path"
-    },
-    "6": {
-      "claimed_at": "2026-09-05T16:43:14",
-      "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/buyer-identity",
-      "branch": "task/buyer-identity"
-    },
     "1": {
-      "claimed_at": "2026-09-05T17:15:07",
-      "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/lane-trust",
-      "branch": "task/lane-trust"
+      "claimed_at": "2026-09-05T22:07:44",
+      "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/exch-dos",
+      "branch": "task/exch-dos"
     },
     "2": {
-      "claimed_at": "2026-09-05T17:15:08",
-      "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/lane-merchant",
-      "branch": "task/lane-merchant"
+      "claimed_at": "2026-09-05T22:07:44",
+      "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/buyer-auth",
+      "branch": "task/buyer-auth"
     },
     "3": {
-      "claimed_at": "2026-09-05T17:15:08",
-      "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/lane-ingest",
-      "branch": "task/lane-ingest"
+      "claimed_at": "2026-09-05T22:07:45",
+      "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/contracts-api",
+      "branch": "task/contracts-api"
     },
     "4": {
-      "claimed_at": "2026-09-05T17:15:09",
-      "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/lane-store-agent",
-      "branch": "task/lane-store-agent"
+      "claimed_at": "2026-09-05T22:07:45",
+      "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/sim-stub",
+      "branch": "task/sim-stub"
     },
-    "7": {
-      "claimed_at": "2026-09-05T17:15:09",
-      "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/lane-exchange",
-      "branch": "task/lane-exchange"
+    "5": {
+      "claimed_at": "2026-09-05T22:07:46",
+      "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/support-lane",
+      "branch": "task/support-lane"
     }
   }
 }
