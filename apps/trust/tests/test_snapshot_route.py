@@ -6,6 +6,12 @@ advertises, which is what a client can rely on. The docker-marked tests grade th
 that the route really reads ``app.sellers``, ``ledger.trust_observations`` and
 ``app.seller_blacklist`` as ``trust_rw``, which is the half an injected fixture cannot prove
 and the half that breaks in a deployment.
+
+Both layers grade the SERVER half, and only that. T-064's acceptance 3 is "the exchange
+client caches the trust snapshot and refreshes it on a version bump"; nothing in this file
+exercises a client, a cache or a refresh, because none exists —
+``git grep SNAPSHOT_VERSION -- . ':(exclude)apps/trust'`` returns nothing. Those three live
+in ``apps/exchange`` and are that lane's to build.
 """
 
 from __future__ import annotations
@@ -159,11 +165,16 @@ def test_a_listed_store_is_served_blacklisted() -> None:
 
 
 def test_the_response_carries_the_version_the_exchange_caches_on() -> None:
-    """T-064 acceptance 3's cache key, served where the published body has no room for it.
+    """T-064 acceptance 3's cache KEY, served where the published body has no room for it.
 
     The published response is ``store_id -> TrustSnapshot`` and nothing else, so the envelope's
     ``version`` has nowhere to go in the body. It is served as ``ETag`` and spelled out in
-    ``X-Trust-Snapshot-Version``; a client caches on the first and refetches when it changes.
+    ``X-Trust-Snapshot-Version``.
+
+    Despite this test's name, nothing on the exchange side caches on it: no such client exists,
+    and this asserts only that the key is SERVED. A client that caches on the ETag and refetches
+    when it changes is what would deliver acceptance 3's refresh, and building it is
+    ``apps/exchange``'s work, not this route's.
     """
     from trust.scoring import Blacklist
     from trust.snapshot import SNAPSHOT_VERSION

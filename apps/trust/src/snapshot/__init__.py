@@ -13,7 +13,9 @@ resolve to the same objects — see :mod:`trust._shared._binding`.
 :mod:`.delisting`                 S2's second half: the ``blacklisted`` /
                                   ``blacklist_expired`` ledger events a snapshot implies.
 :data:`EPISODE_FLOOR_DIMENSIONS`  the dimensions that count is derived over, and why.
-:data:`SNAPSHOT_VERSION`          what the exchange client caches on and refreshes against.
+:data:`SNAPSHOT_VERSION`          what the exchange client caches on and refreshes against —
+                                  specified by T-064 acceptance 3, and no such client exists
+                                  yet; T-261 landed the server half.
 ================================  ======================================================
 
 Every entry carries all SIX dimensions with ``alpha``/``beta``/``decayed_at``/``coverage``,

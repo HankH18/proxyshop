@@ -585,9 +585,11 @@ def test_two_builds_of_the_same_input_compare_equal(e6_as_of, e6_obs):
 def test_snapshot_version_is_a_non_empty_string_and_is_what_version_carries():
     """``SNAPSHOT_VERSION`` is a real, non-empty string the served document reports verbatim.
 
-    The exchange client caches on it and refreshes when it changes. An empty or absent version
-    means a cache keyed on nothing, which serves a five-dimension snapshot forever after the
-    sixth dimension lands -- and every ranking decision made from it is quietly stale.
+    The exchange client is specified to cache on it and refresh when it changes (T-064
+    acceptance 3); no such client exists yet, so this grades the constant, not the caching. An
+    empty or absent version means a cache keyed on nothing, which serves a five-dimension
+    snapshot forever after the sixth dimension lands -- and every ranking decision made from it
+    is quietly stale.
     """
     assert isinstance(SNAPSHOT_VERSION, str)
     assert SNAPSHOT_VERSION.strip() == SNAPSHOT_VERSION

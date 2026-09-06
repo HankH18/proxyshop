@@ -1,4 +1,4 @@
-"""``GET /snapshot`` — the served TrustSnapshot the exchange caches (T-064 acceptance 3).
+"""``GET /snapshot`` — the TrustSnapshot the exchange is specified to cache (T-064 acc. 3).
 
 T-261. ``build_snapshot`` was built and graded long before this file existed, and there was
 no way to ASK for its output: ``apps/trust/src/main.py`` discovers routers by globbing
@@ -34,10 +34,14 @@ The thing the exchange is specified to cache on is :data:`~.builder.SNAPSHOT_VER
 the published body has nowhere to put it — the mapping's values are ``TrustSnapshot``\\ s and
 nothing else. It is served as ``ETag`` (so a conditional GET is available to any client that
 wants one) and, spelled out, as ``X-Trust-Snapshot-Version``, alongside
-``X-Trust-Score-Version`` and ``X-Trust-As-Of``. A client caches on the ETag and refetches
-when it changes, which is the "refreshes on a version bump" behaviour without inventing a
-body shape the contract does not declare. ``snapshot_version`` also appears on every entry,
+``X-Trust-Score-Version`` and ``X-Trust-As-Of``. A client that caches on the ETag and
+refetches when it changes gets the "refreshes on a version bump" behaviour without inventing
+a body shape the contract does not declare. ``snapshot_version`` also appears on every entry,
 which the published ``TrustSnapshot`` DOES admit.
+
+No such client exists yet — ``git grep SNAPSHOT_VERSION -- . ':(exclude)apps/trust'`` returns
+nothing. What lands here is the cache KEY, served; the caching and the refresh are acceptance
+3 itself and are still to be built in ``apps/exchange``.
 
 Where the data comes from
 -------------------------
