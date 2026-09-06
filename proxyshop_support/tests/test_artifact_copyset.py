@@ -1993,31 +1993,70 @@ def test_t314_the_shopify_stub_image_is_not_declared_unbuilt_by_its_own_compose_
 # Delete the COPY and the importer goes with it, so the checker has nothing to hang the
 # report on and says the image is fine.
 #
-# Measured at HEAD on the real ``apps/trust/Dockerfile``, sabotaged in memory (drop both
-# ``COPY packages/verification/...`` lines, keep ``ln -s ... /app/.pkgroot/claim_verification``):
+# Measured on the real ``apps/trust/Dockerfile``, sabotaged by dropping both
+# ``COPY packages/verification/...`` lines and KEEPING
+# ``ln -s ../packages/verification/src /app/.pkgroot/claim_verification``:
 #
 #     _unwired_for(sabotaged)                              -> {}          SILENT
 #     package_wiring(sabotaged, "claim_verification")      -> (False, "no COPY covers packages/verification/src/")
-#     shipped modules importing claim_verification          -> none
-#     the file's own suite on the sabotaged spec            -> 10 passed
+#     shipped modules importing claim_verification         -> none
+#     image_import_report("apps/trust/Dockerfile")         -> 0 broken, sabotaged AND at baseline
 #
-# Two refinements to the ticket record, both measured:
+# Three refinements to the ticket record, all measured — and every number below was
+# re-measured in the worktree this comment ships in, because two of them were wrong before:
 #
-# * The record says the fix is "one rule over the dangling-symlink branch at :428". Line 428
-#   is docstring prose, and the dangling-link branch (the ``return False, "... the link
-#   dangles"`` inside :func:`package_wiring`'s link loop) is not what produces this verdict —
-#   ``copies_directory(spec, provider) is None`` returns ``no COPY covers …`` several
-#   branches earlier and the link loop is never reached. The rule belongs over
+# * The record says the fix is "one rule over the dangling-symlink branch at :428". Its
+#   LINE NUMBER was right for the revision it was written against — at ``a31098b``, :428 is
+#   the ``return False, f"{link} -> {pointed} … the link dangles"`` inside
+#   :func:`package_wiring`'s link loop. (It has since drifted onto docstring prose in this
+#   same function, and an earlier correction here resolved the number against HEAD and
+#   therefore gave the wrong reason. Line numbers rot; that is the lesson, not the finding.)
+#   What the record gets wrong is the CONCLUSION: that branch is not what produces this
+#   verdict. Traced with ``sys.settrace`` over
+#   ``package_wiring(sabotaged, "claim_verification")``, the only statements that execute
+#   are the ``first_party_packages().get(package)`` lookup, its ``None`` guard, the
+#   ``copies_directory(spec, provider) is None`` test and its
+#   ``return False, f"no COPY covers {provider}/"`` (:435/436/438/439 at this revision).
+#   The ``for target, link in spec.links`` loop runs ZERO times. The rule belongs over
 #   :func:`_unwired_for`'s use of ``wired``, not over that branch.
-# * The record says "the real-image control DID catch this sabotage". The
-#   container-shaped runtime control in this file does NOT: on the sabotaged tree it
-#   reports the same two pre-existing failures it reports at baseline and adds none,
-#   because ``apps/trust/src/verification/__init__.py`` resolves the package through a PEP
-#   562 ``__getattr__`` that no static or import-time probe triggers. The ONLY thing in the
-#   repo that catches it is ``apps/trust/tests/test_repro_open_tickets.py::
-#   test_the_trust_image_copy_set_can_resolve_the_claim_verifier``, which asks for the
-#   ATTRIBUTE. So this blind spot is guarded by exactly one test, in one lane, for one
-#   package — and 23 witnesses across 8 of the 9 images have the same shape.
+# * The record says "the real-image control DID catch this sabotage". The container-shaped
+#   runtime control in this file does NOT, and it has no pre-existing failures to hide
+#   behind either: ``image_import_report`` reports ZERO broken modules for the trust image
+#   on the sabotaged tree AND zero at baseline — all nine images are 0 broken at baseline —
+#   so the sabotage adds nothing to it. The reason is that
+#   ``apps/trust/src/verification/__init__.py`` resolves the package through a PEP 562
+#   ``__getattr__`` that no static or import-time probe triggers.
+# * An earlier draft of THIS COMMENT said exactly one test in the repo catches it, and
+#   named only the attribute probe. That is the draft's error, not the record's: the record
+#   credits two catchers ("the real-image control DID catch this sabotage, and the T-193
+#   probe did"), and its SECOND one is real — "the T-193 probe" is the static gate named
+#   below, which does catch it. Only the record's first attribution is wrong, and the
+#   bullet above is where that is settled. There are TWO catchers, in two lanes, catching
+#   by two different mechanisms. Measured by sabotaging the Dockerfile on disk and running
+#   every test file in the repo that reads a Dockerfile at all — ten of them, which is all
+#   of them, since nothing in the suite builds an image; these are the ones that turn red:
+#
+#       apps/trust/tests/test_repro_open_tickets.py::
+#           test_the_trust_image_copy_set_can_resolve_the_claim_verifier
+#       — materialises the COPY set into a temp tree, recreates the ``ln -s`` pairs from
+#         the Dockerfile, and asks a subprocess for the ATTRIBUTE
+#         ``trust.verification.verify``; fails with the seam's own ModuleNotFoundError.
+#
+#       packages/verification/tests/test_repro_open_tickets.py::
+#           test_the_trust_image_ships_the_verifier_its_own_seam_reaches_for
+#       — purely STATIC: asserts some ``COPY`` source starts with ``packages/verification``
+#         and that ``claim_verification`` appears in the Dockerfile text. Live (not xfail)
+#         and green at baseline, red under the sabotage. It never builds anything, so it
+#         survives exactly the false-green mechanism the runtime half is exposed to.
+#
+#   The armed control below also turns red, because its "every real image is clean today"
+#   clause is precisely this shape — but that control ships WITH this ticket, so it is not
+#   evidence about what the repo covered before it.
+#
+# So the blind spot is guarded by two tests, in two lanes, for ONE package — while
+# :func:`_t334_witnesses` derives 16 witnesses (7 distinct packages) with the same shape,
+# 11 of which (5 distinct packages) survive :func:`_t334_sabotaged` into
+# :func:`_t334_cases`. Either count spans 8 of the 9 images.
 #
 # The property below is stated over the CLAIM the image makes rather than over what
 # survives in it: an image whose build puts a package's name on one of its own sys.path

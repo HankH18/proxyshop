@@ -54,8 +54,23 @@ condition below must hold and each one fails CLOSED:
    ``pytest.fail`` raised in a teardown hook — is counted here and not there, so an
    unexplained failing report stops the re-stamp even though nothing classified it.
 
-Registering it
---------------
+Registering it — NOT DONE IN THIS CHECKOUT
+------------------------------------------
+Read this before you conclude T-210 is closed. The block below is a RECIPE, not a record:
+at this revision the root ``conftest.py`` imports nothing from this module. Measured —
+``grep -rn lock_exit_status`` over the tree (venv and node_modules excluded) returns hits in
+exactly two files, this one's own docstring and
+``proxyshop_support/tests/test_lock_exit_status.py``, and none in ``conftest.py``. So in
+every ordinary run the hooks below are never registered, ``session.exitstatus`` is never
+re-stamped, and this module is dead code that only the ``-p`` runs at the end of this
+docstring reach. T-210's own gate — ``proxyshop_support/tests/test_repro_open_tickets.py::
+test_t210_lock_contention_and_a_product_defect_do_not_share_an_exit_status``, still carrying
+its ``xfail(strict=True)`` — is correspondingly still RED, and correctly so.
+
+The remaining wiring is five names in the root ``conftest.py``, which is outside the write
+scope of the lane that built this module — that is why it is a recipe here rather than a
+diff there.
+
 Not automatic on purpose: a plugin that installs itself by import is a plugin nobody can
 find when it misbehaves. In the root ``conftest.py`` — which is itself a pytest plugin, so
 every ``pytest_*`` name in its namespace becomes a hook::
@@ -92,8 +107,10 @@ from proxyshop_support.neo4j_lock import Neo4jLockTimeout
 LOCK_CONTENTION_EXIT_STATUS = 77
 
 #: pytest's ``ExitCode.TESTS_FAILED``. Spelled as an int rather than imported so this module
-#: stays importable with no pytest in the environment — it is imported by the root conftest,
-#: which runs before plugins are resolved.
+#: stays importable with no pytest in the environment — the wiring this module is written
+#: for puts it in the root ``conftest.py``, which runs before plugins are resolved. That is
+#: the INTENDED wiring, not a description of this checkout: see "Registering it" above —
+#: the root conftest imports nothing from here at this revision.
 _TESTS_FAILED = 1
 
 

@@ -47,17 +47,46 @@ def load_repo_script(name: str) -> ModuleType:
     """Import ``scripts/<name>.py`` by path, whatever else claims the bare name.
 
     Args:
-        name: the script's stem, e.g. ``"check_verify_contracts"``.
+        name: the script's stem, e.g. ``"check_verify_contracts"``. ONE path component —
+            see the containment check below.
 
     Returns:
         The loaded module. Its ``__file__`` is always ``scripts/<name>.py`` under this
         checkout — assert on that if you need proof rather than trust.
 
     Raises:
+        ValueError: ``name`` is not a single path component under ``scripts/``. This
+            helper's whole promise is "the frozen file at ``scripts/<name>.py``", and a
+            name that traverses is a name that breaks the promise silently.
         FileNotFoundError: there is no such script. A missing frozen gate script is a
             finding, not something to paper over with a fallback import.
     """
+    # CONTAINMENT. `name` is interpolated into a path and the result is EXECUTED, so a
+    # traversing name is arbitrary code, not a bad lookup: measured before this check
+    # existed, `load_repo_script("../conftest")` resolved `scripts/../conftest.py`,
+    # exec'd the ROOT conftest, and returned it bound under the module name
+    # `_proxyshop_repo_scripts.../conftest`. Every call site today passes a literal, so
+    # nothing abused it — but "no caller does this yet" is not a guard.
+    #
+    # Two independent conditions, because either alone is easy to argue around: the stem
+    # must be a single path component, and the file it names must land directly inside
+    # SCRIPTS once symlinks are resolved.
+    # ``Path("..").name`` is ``".."`` and ``Path(".").name`` is ``""``, so the component
+    # test alone lets ``".."`` through to ``scripts/...py`` — contained, but nonsense.
+    # Naming both explicitly keeps the refusal about intent rather than about pathlib.
+    if not name or name in {".", ".."} or name != Path(name).name:
+        raise ValueError(
+            f"load_repo_script({name!r}): a script name is ONE path component (a stem like "
+            f"'check_verify_contracts'), not a path. This name is interpolated into "
+            f"{SCRIPTS}/<name>.py and the result is executed, so a traversing name would "
+            f"run a file this helper never promised to load."
+        )
     path = SCRIPTS / f"{name}.py"
+    if path.resolve().parent != SCRIPTS.resolve():
+        raise ValueError(
+            f"load_repo_script({name!r}): {path} resolves to {path.resolve()}, which is not "
+            f"directly inside {SCRIPTS.resolve()}."
+        )
     if not path.is_file():
         raise FileNotFoundError(
             f"{path} does not exist. This helper deliberately has no bare-import fallback: "

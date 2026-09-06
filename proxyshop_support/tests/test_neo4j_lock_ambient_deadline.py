@@ -76,8 +76,21 @@ CHILD_LOCK_WAIT = 14.0
 #: substring collided with the repair's own diagnostic, which explains what it is sparing
 #: the reader from and therefore quotes the phrase: the gate went red on its own
 #: explanation. Requiring the ``(>N.Ns)`` that only pytest-timeout's real message carries
-#: separates the kill from any prose about it. Written by ``pytest_timeout.py`` in
-#: site-packages, so the oracle for this half is outside this lane's write scope.
+#: separates the kill from any prose about it.
+#:
+#: **Provenance, stated because it is easy to get backwards.** This regex is a HARDCODED
+#: TRANSCRIPTION, not something read out of site-packages at run time. Its original is
+#: ``pytest_timeout.PYTEST_FAILURE_MESSAGE``, which at the pinned pytest-timeout **2.4.0**
+#: (``[dependency-groups] dev`` in the root ``pyproject.toml``) is
+#: ``"Timeout (>%ss) from pytest-timeout."`` — so the pattern below matches it exactly
+#: today, verified against the installed ``site-packages/pytest_timeout.py``.
+#:
+#: If a future bump reworded that message the pattern would stop matching and this
+#: NEGATIVE assertion would silently stop biting. That is tolerable, and deliberately so:
+#: the POSITIVE assertion in the same test (``DIAGNOSIS in output``) is what actually holds
+#: the line, and it reads the repo's own message rather than the plugin's. Re-check this
+#: transcription when the pytest-timeout pin moves; the version above is the fact that
+#: matters, not the file path.
 PYTEST_TIMEOUT_KILL = re.compile(r"Timeout \(>[0-9.]+s\) from pytest-timeout")
 
 #: The first line of :func:`~proxyshop_support.neo4j_lock._timeout_message`.
