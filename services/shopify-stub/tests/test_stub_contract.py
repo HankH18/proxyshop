@@ -7,10 +7,12 @@ pinned from outside, and this file exercises both against the real fixture rathe
 against a copy of it:
 
 * ``shopify_stub.app:app``, which the root ``conftest.py``'s ``shopify_stub_url`` fixture
-  imports by that exact path and serves. That fixture ``pytest.skip``s when the import
-  fails, so a broken app would leave a *green* suite everywhere else in the repo. The test
-  below asserts the fixture actually produced a working server, which converts that silent
-  skip into a failure here.
+  imports by that exact path and serves. That fixture **used to** ``pytest.skip`` when the
+  import failed, which is why the test below was written; T-205 removed the swallow, so a
+  broken app now reaches the reporter as an ``ImportError`` or ``AttributeError`` in its own
+  name and no longer needs converting. The test below still earns its place, for a reason the
+  fixture cannot cover either way: importing ``app`` and serving it are different claims, and
+  only this test makes the second one.
 * ``services/shopify-stub/fixtures/recorded`` existing, which the frozen scaffold smoke test
   checks.
 
@@ -40,9 +42,14 @@ VARIANT_ID = int(SEED_VARIANT["variant_id"])
 async def test_the_root_fixture_serves_a_working_stub(shopify_stub_url: str) -> None:
     """The pinned import path really is served, not merely importable.
 
-    ``shopify_stub_url`` skips rather than fails when ``shopify_stub.app:app`` cannot be
-    imported. A skip is indistinguishable from a pass in the metrics, so this test does the
-    work the fixture declines to: it makes a request and checks the answer.
+    ``shopify_stub_url`` **used to** skip rather than fail when ``shopify_stub.app:app`` could
+    not be imported, and a skip is indistinguishable from a pass in the metrics, so this test
+    was written to do the work the fixture declined to. T-205 fixed the fixture: the import
+    failure is loud on its own now, and this test no longer has to cover for it.
+
+    What keeps this test here is the half the fixture still cannot answer — an entry point that
+    imports and exposes ``app`` is not yet one that serves a request. So it makes a request and
+    checks the answer.
     """
     async with httpx.AsyncClient(base_url=shopify_stub_url) as client:
         health = await client.get("/healthz")

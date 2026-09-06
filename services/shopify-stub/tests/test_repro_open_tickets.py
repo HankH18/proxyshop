@@ -1,11 +1,16 @@
 """Reproduction gates for the open `services/shopify-stub` findings.
 
-Each test here asserts the behaviour that SHOULD hold and therefore fails against the tree as
-it stands. It carries ``xfail(strict=True)`` so an ordinary run reports ``xfailed`` and the
-repo-wide build gate stays green, while the ticket's own gate
-(``pytest <file> -q --runxfail -k <name>``) reports a real failure with the test SELECTED. When
-the defect is repaired the test XPASSes, which ``strict=True`` turns into a failure — so the
-marker cannot outlive the bug.
+Each test here asserts the behaviour that SHOULD hold. **While its defect is open** it carries
+``xfail(strict=True)``, so an ordinary run reports ``xfailed`` and the repo-wide build gate
+stays green, while the ticket's own gate (``pytest <file> -q --runxfail -k <name>``) reports a
+real failure with the test SELECTED. When the defect is repaired the test XPASSes, which
+``strict=True`` turns into a failure — so the marker cannot outlive the bug, and the lane that
+repairs the defect is the lane that removes it.
+
+**A test here whose marker is gone is no longer a reproduction.** It is a live regression guard
+that must pass in its own name on every ordinary run, ``--runxfail`` or not, and must fail in
+its own name if the defect returns. T-205's two guards are in that state; T-253 and T-255 are
+still reproductions.
 
 Every ``xfail`` gate here is paired with a ``..._is_armed`` control that is NOT xfail. That
 separation is load-bearing: under ``xfail(strict=True)`` **any** exception in the graded body
@@ -13,7 +18,8 @@ is reported ``xfailed``, which is green, so a probe that had quietly stopped wor
 indistinguishable from the defect it is meant to detect — and under the ticket's own
 ``--runxfail`` gate every dead-probe state reads as "still broken". The preconditions that
 make the red meaningful therefore live in the control, where they fail in their own name
-during ``make verify``.
+during ``make verify``. T-205's guards need no separate control: not being xfail, every
+precondition they assert already fails in its own name, and both carry theirs inline.
 
 Covered here: T-205 (**FIXED** — its marker was removed with the repair, so it is now a live
 regression guard rather than a reproduction), T-253, T-255.
@@ -28,6 +34,7 @@ from __future__ import annotations
 import builtins
 import importlib.util
 import sys
+import types
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -76,6 +83,32 @@ def _with_broken_stub_import() -> Iterator[None]:
         builtins.__import__ = real_import
 
 
+def _with_stub_app_missing_its_app_attribute() -> Iterator[None]:
+    """``shopify_stub.app`` imports cleanly but no longer exposes ``app``.
+
+    The OTHER half of what the fixture used to swallow. ``except (ImportError, AttributeError)``
+    named two failures and ``_with_broken_stub_import`` drives only the first; a module that
+    imports fine and has lost the one attribute the whole repo pins is the second, and nothing
+    anywhere exercised it.
+
+    A stand-in module is handed back rather than the real one with ``app`` deleted, because
+    deleting the attribute would mutate a module every later test in the session shares — the
+    breakage has to end when this generator does.
+    """
+    real_import = builtins.__import__
+
+    def without_app(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name == STUB_ENTRY_POINT:
+            return types.ModuleType(STUB_ENTRY_POINT)
+        return real_import(name, *args, **kwargs)
+
+    builtins.__import__ = without_app
+    try:
+        yield
+    finally:
+        builtins.__import__ = real_import
+
+
 # =============================================================================================
 # T-205 — the root `shopify_stub_url` fixture turned an ImportError into a skip. FIXED.
 # =============================================================================================
@@ -85,6 +118,14 @@ def _with_broken_stub_import() -> Iterator[None]:
 # `except (ImportError, AttributeError): pytest.skip(...)`, so a broken entry point reaches
 # the reporter as an error in its own name. This test is now a LIVE regression guard and must
 # fail in its own name if the swallow ever returns. Not one assertion in its body was touched.
+#
+# TWO GUARDS, ONE PER ARM OF THE SWALLOW. The removed `except` named `(ImportError,
+# AttributeError)`, and the guard directly below breaks the IMPORT, so on its own it covered
+# half the repair: a `shopify_stub.app` that imports fine and simply stopped defining `app`
+# went untested. `test_the_stub_url_fixture_does_not_turn_a_missing_app_attribute_into_a_skip`
+# covers the other half. Both arms are proven independently load-bearing — reinstating a
+# swallow that catches ONLY ImportError reds the first and leaves the second green, and
+# catching ONLY AttributeError does the reverse (measured; the numbers are in the commit body).
 #
 # WHAT ESTABLISHED THE DEFECT IS GONE, measured rather than argued, all on this branch:
 #   * before the change the gate was RED — "Failed: the fixture converted an ImportError into
@@ -172,6 +213,52 @@ def test_the_stub_url_fixture_does_not_turn_a_broken_import_into_a_skip() -> Non
         finally:
             generator.close()
         pytest.fail("the synthetic import breakage never fired; this probe is wrong")
+    finally:
+        next(breaker, None)
+
+
+def test_the_stub_url_fixture_does_not_turn_a_missing_app_attribute_into_a_skip() -> None:
+    """The second arm of the same repair, which was unguarded when the repair landed.
+
+    The swallow this ticket removed read ``except (ImportError, AttributeError)`` and named
+    TWO failures. The guard above breaks the *import*, so it exercised only the first, and a
+    ``shopify_stub.app`` that imports perfectly and simply does not define ``app`` — a rename,
+    a factory-only refactor, a lost module-level assignment — had nothing testing it at all.
+    The repair covered both; the gate covered one. This closes that.
+
+    ``AttributeError`` is the exception the fixture's ``module.app`` raises today.
+    ``ImportError`` is accepted beside it because a legitimate respelling to
+    ``from shopify_stub.app import app`` raises that instead for a missing attribute, and both
+    are loud errors in their own name. What is refused is the skip, in either spelling.
+    """
+    fixture = getattr(_root_conftest().shopify_stub_url, "__wrapped__", None)
+    assert fixture is not None, (
+        "positive control: shopify_stub_url must still be a pytest fixture wrapping a "
+        "generator function, or this probe is measuring the wrong thing"
+    )
+
+    breaker = _with_stub_app_missing_its_app_attribute()
+    next(breaker)
+    try:
+        # Positive control on the stand-in itself. If it still carried `app`, nothing in the
+        # fixture could raise, the final `pytest.fail` would be the only outcome, and a
+        # passing run would mean the opposite of what it looks like.
+        stand_in = builtins.__import__(STUB_ENTRY_POINT, fromlist=["app"])
+        assert not hasattr(stand_in, "app"), (
+            "the stand-in shopify_stub.app still exposes `app`, so the missing-attribute path "
+            "is never taken; this probe is measuring nothing"
+        )
+
+        generator = fixture()
+        try:
+            next(generator)
+        except pytest.skip.Exception as skipped:
+            pytest.fail(f"the fixture converted a missing `app` attribute into a skip: {skipped}")
+        except (AttributeError, ImportError):
+            return  # the behaviour asked for: the breakage reaches the reporter as an error
+        finally:
+            generator.close()
+        pytest.fail("the synthetic missing-`app` breakage never fired; this probe is wrong")
     finally:
         next(breaker, None)
 

@@ -468,10 +468,24 @@ def shopify_stub_url() -> Iterator[str]:
     # of the real ``ImportError`` names the module that actually failed — strictly more than
     # the swallowed message ever said.
     #
-    # ``__import__`` rather than ``importlib.import_module`` is load-bearing, not style:
-    # ``services/shopify-stub/tests/test_repro_open_tickets.py`` proves this fixture no longer
-    # swallows by patching ``builtins.__import__``, which ``importlib.import_module`` does not
-    # consult. Changing this line to ``import_module`` would make that guard unable to fire.
+    # ``__import__`` rather than ``importlib.import_module`` is a real coupling and not style,
+    # but only as strong as what was measured. The two guards in
+    # ``services/shopify-stub/tests/test_repro_open_tickets.py`` drive this line by patching
+    # ``builtins.__import__``, which ``import_module`` does not consult. All four cells were
+    # run rather than reasoned about:
+    #
+    #   __import__    + no swallow          -> passes
+    #   import_module + no swallow          -> FAILS "the synthetic import breakage never
+    #                                          fired; this probe is wrong"
+    #   import_module + swallow reinstated  -> FAILS, same dead-probe message
+    #   __import__    + swallow reinstated  -> FAILS "the fixture converted an ImportError
+    #                                          into a skip"
+    #
+    # So swapping in ``import_module`` reds the gate immediately and CANNOT hide a returning
+    # swallow — an earlier draft of this comment claimed it could, and the matrix says
+    # otherwise. What the swap actually costs is the DIAGNOSIS: the message stops naming the
+    # defect and starts saying the probe is broken, pointing the next reader at the wrong
+    # file. Change the line if you have a reason; change the guards in the same commit.
     module = __import__("shopify_stub.app", fromlist=["app"])
     app = module.app
     with serve(app) as base_url:
