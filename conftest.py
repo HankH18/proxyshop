@@ -448,16 +448,46 @@ def shopify_stub_url() -> Iterator[str]:
     Yields:
         e.g. ``"http://127.0.0.1:53412"``, no trailing slash. Point an ``httpx.Client`` at it.
 
-    Skips (never fails) while ``services/shopify-stub`` is still empty, so the scaffold and
-    every ticket that lands before T-013 stay green.
+    Raises:
+        ImportError / AttributeError, in their own name, when ``shopify_stub.app:app`` cannot
+        be reached. **T-205**: this used to ``pytest.skip`` on exactly those two exceptions.
+        That was right while ``services/shopify-stub`` was an empty scaffold and T-013 had not
+        landed — the condition has been false for a long time, and what was left was a fixture
+        that answered "the stub is broken" with the same word it answers "the stub does not
+        exist yet". A skip is scored like a pass, so the pinned entry point could break and
+        report green. Measured on this tree before the change, with a synthetic
+        ``ModuleNotFoundError`` inside ``shopify_stub.app``:
+        ``proxyshop_support/tests/test_shared_runtime.py::test_shopify_stub_url_fixture_is_wired_to_the_stub``
+        reported **1 passed, rc=0** — the one silently-green test. (The 521 tests under
+        ``services/shopify-stub`` do *not* go green: ``tests/_fixtures_stub.py:26`` imports the
+        stub at module scope, so that directory dies rc=4 as a collection error, loudly.)
     """
     from proxyshop_support.asgi_server import serve
 
-    try:
-        module = __import__("shopify_stub.app", fromlist=["app"])
-        app = module.app
-    except (ImportError, AttributeError) as exc:
-        pytest.skip(f"services/shopify-stub does not expose `shopify_stub.app:app` yet ({exc})")
+    # No ``try``. A broken entry point must reach the reporter as an error, and the traceback
+    # of the real ``ImportError`` names the module that actually failed — strictly more than
+    # the swallowed message ever said.
+    #
+    # ``__import__`` rather than ``importlib.import_module`` is a real coupling and not style,
+    # but only as strong as what was measured. The two guards in
+    # ``services/shopify-stub/tests/test_repro_open_tickets.py`` drive this line by patching
+    # ``builtins.__import__``, which ``import_module`` does not consult. All four cells were
+    # run rather than reasoned about:
+    #
+    #   __import__    + no swallow          -> passes
+    #   import_module + no swallow          -> FAILS "the synthetic import breakage never
+    #                                          fired; this probe is wrong"
+    #   import_module + swallow reinstated  -> FAILS, same dead-probe message
+    #   __import__    + swallow reinstated  -> FAILS "the fixture converted an ImportError
+    #                                          into a skip"
+    #
+    # So swapping in ``import_module`` reds the gate immediately and CANNOT hide a returning
+    # swallow — an earlier draft of this comment claimed it could, and the matrix says
+    # otherwise. What the swap actually costs is the DIAGNOSIS: the message stops naming the
+    # defect and starts saying the probe is broken, pointing the next reader at the wrong
+    # file. Change the line if you have a reason; change the guards in the same commit.
+    module = __import__("shopify_stub.app", fromlist=["app"])
+    app = module.app
     with serve(app) as base_url:
         yield base_url
 
