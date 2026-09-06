@@ -77,7 +77,9 @@ __all__ = [
     "MAX_HARD_CONSTRAINT_BYTES",
     "MAX_HARD_CONSTRAINTS",
     "MAX_IDENTIFIER_LENGTH",
+    "MAX_RECORDED_OFFER_VALUE_CHARS",
     "MAX_ROSTER_ENTRIES",
+    "RECORDED_OFFER_FIELDS",
     "NullSolicitor",
     "bid_window_seconds",
     "collected_bid_records",
@@ -152,6 +154,47 @@ class NullSolicitor:
 #: ``{"field": ..., "op": "gte", "value": ...}``. An identifier is a name, not a document.
 MAX_HARD_CONSTRAINT_BYTES = 16 * 1024
 MAX_IDENTIFIER_LENGTH = 128
+
+#: The offer keys a recorded bid carries into the book, and the ONLY ones.
+#:
+#: **This whitelist is a memory bound, not tidiness, and it was measured.** T-349 put the
+#: store's offer into the book where the book used to hold ``{}``; the offer is a document the
+#: STORE wrote, capped only by ``composition.MAX_BID_RESPONSE_BYTES`` (256 KiB), and
+#: ``InMemoryAuctionBids.record`` deep-copies each record while ``collect_bids`` builds one
+#: entry per roster ROW — so 500 duplicate rows naming one store multiply one fat reply 500
+#: times. Driven at exactly that shape with a 214 KB offer, all of it in one padding field::
+#:
+#:     record whitelisted   ->  book retained 827.4 MiB   (against a 256 MiB container)
+#:     record projected     ->  book retained     0.6 MiB
+#:
+#: The set is every key the accept and checkout path actually READS — ``checkout_url``,
+#: ``expires_at`` and ``quantity`` in ``checkout/codes.py``, ``variant_ref``/``variant_id`` and
+#: the prices in ``checkout/provider.py``, ``discount`` in ``checkout/discounts.py`` — and
+#: nothing else. A key the accept path does not read is a key the book has no reason to hold,
+#: which is the same discipline ``ranking.candidates.CANDIDATE_FIELDS`` applies one layer up.
+RECORDED_OFFER_FIELDS: tuple[str, ...] = (
+    "checkout_url",
+    "currency",
+    "discount",
+    "expires_at",
+    "product_ref",
+    "quantity",
+    "total_price",
+    "unit_price",
+    "variant_id",
+    "variant_ref",
+)
+
+#: The most one recorded offer VALUE may weigh, in characters.
+#:
+#: The whitelist above bounds the number of fields; this bounds their size, because a store
+#: that cannot add a padding key can still put 256 KiB inside ``checkout_url``. A bid carrying
+#: an over-long value is NOT recorded — not truncated, because a truncated checkout URL is a
+#: wrong checkout URL and sending a shopper to one is worse than refusing the bid, and not
+#: silently emptied, because an offer with its URL removed reads as a fallback and would take
+#: the R10 handoff. An unrecorded bid is refused ``unknown_bid``, which is the same fail-closed
+#: direction everything else on this path takes. 4096 is far above any real cart permalink.
+MAX_RECORDED_OFFER_VALUE_CHARS = 4096
 
 
 class RosterEntry(BaseModel):
@@ -483,6 +526,34 @@ def _bid_book(request: Request) -> Any:
     return book
 
 
+def _recordable_offer(offer: Any) -> dict[str, Any] | None:
+    """``offer`` projected onto :data:`RECORDED_OFFER_FIELDS`, or ``None`` to drop the bid.
+
+    ``None`` means "do not record this bid at all" and is returned when any kept value is
+    longer than :data:`MAX_RECORDED_OFFER_VALUE_CHARS`. See that constant for why dropping
+    beats truncating and beats emptying.
+
+    ``discount`` is the one nested value in the set, so it is projected in turn rather than
+    copied: it is read for a ``type`` and a ``value`` (``checkout/discounts.py``) and a store
+    could otherwise park its padding one level down.
+    """
+    if not isinstance(offer, Mapping):
+        return {}
+    kept: dict[str, Any] = {}
+    for field in RECORDED_OFFER_FIELDS:
+        if field not in offer:
+            continue
+        value = offer[field]
+        if field == "discount" and isinstance(value, Mapping):
+            value = {key: value[key] for key in ("type", "value") if key in value}
+        if isinstance(value, str) and len(value) > MAX_RECORDED_OFFER_VALUE_CHARS:
+            return None
+        if isinstance(value, (Mapping, list, tuple, set)) and len(value) > 64:
+            return None
+        kept[field] = value
+    return kept
+
+
 def merged_candidates(
     rows: Sequence[Mapping[str, Any]],
     projected: Sequence[Mapping[str, Any]],
@@ -634,10 +705,15 @@ def collected_bid_records(
         if not bid_id:
             continue
         store_id = str(candidate.get("store_id") or "")
+        offer = _recordable_offer(candidate.get("offer"))
+        if offer is None:
+            # Over-long value: the bid is dropped rather than recorded in a shape that is
+            # either wrong (truncated URL) or misread (missing URL reads as a fallback).
+            continue
         record: dict[str, Any] = {
             "bid_id": bid_id,
             "store_id": store_id,
-            "offer": candidate.get("offer") or {},
+            "offer": offer,
         }
         domain = candidate.get("store_domain")
         if domain:

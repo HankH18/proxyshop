@@ -170,6 +170,16 @@ DEFAULT_BID_BOOK_CAPACITY = 512
 #: ``ShortlistStore`` (also 512) and the auction store. 20,000 records is roughly 14 MB at the
 #: same measurement, and is still 40 concurrent auctions at the roster ceiling or 4,000 at the
 #: size an auction actually has. Oldest auction first, same as the count cap.
+#:
+#: **THAT PER-RECORD FIGURE WAS TAKEN WHEN A RECORD CARRIED ``offer: {}``, and T-349 changed
+#: what a record holds.** A record now carries the store's offer, so a count cap stopped
+#: being a memory cap on its own: driven at 500 duplicate roster rows naming one store whose
+#: reply carried a 214 KB padding field, this book retained **827.4 MiB** against that same
+#: 256 MiB container. The size half of the bound therefore lives with the record now —
+#: ``auction/routes.py``'s ``RECORDED_OFFER_FIELDS`` whitelist and
+#: ``MAX_RECORDED_OFFER_VALUE_CHARS`` — and the same shape re-measures at **1.5 MiB**, back
+#: within noise of the 1.1 MiB the empty-offer book held. Anyone changing what a record
+#: carries has to re-measure both halves, which is why this paragraph names the probe.
 DEFAULT_BID_BOOK_RECORDS = 20_000
 
 
