@@ -458,8 +458,8 @@ def _list_price_bid(
     ``float(entry.get("list_price", 0.0))`` raises on ``list_price: "cheap"`` — from *here*, on the
     fallback path, so a silent store on an unreadable row took the whole auction down the same way
     an unreadable *bid* price did. An unreadable list price is therefore treated exactly as a
-    MISSING one always was (``0.0``), which is not a new free item: it is the one the absent field
-    already minted, and ``RosterEntry.list_price`` refuses both at the door.
+    MISSING one: as a roster that states no price the exchange can charge, which mints no offer
+    at all. ``RosterEntry.list_price`` refuses both at the door.
 
     ``expires_at`` is the exchange's own answer, derived from ``deadline`` — see
     :func:`fallback_expires_at` for why it is R10's second half and why it can only come from
@@ -469,9 +469,9 @@ def _list_price_bid(
     resolved one layer out, in ``ranking.candidates``, where the registry lookup already happens
     for every candidate.
 
-    **A row that prices the product at nothing mints no price and no expiry** (T-277). ``list_price
-    0.0`` is a caller stating, legibly, that the product is free, and minting an offer from that
-    statement published a rankable 0.00 with no bid involved at all — the free item
+    **A row the exchange cannot price above zero mints no price and no expiry** (T-277).
+    ``list_price 0.0`` is a caller stating, legibly, that the product is free, and minting an offer
+    from that statement published a rankable 0.00 with no bid involved at all — the free item
     ``RosterEntry.list_price``'s ``Field(gt=0.0)`` closed at the HTTP door, still live one caller
     down. ``orchestration/solicitation.py``, ``services/sim/src/runner.py`` and the frozen
     ``test_e3_exchange.py`` all call :func:`collect_bids` directly, and this module's own docstring
@@ -482,13 +482,24 @@ def _list_price_bid(
     ``expires_at``, which ``ranking.filters.expiry_reason`` already fails closed on. A negative
     list price goes the same way, for the same reason and one sign further.
 
-    ABSENT and UNREADABLE list prices keep their historical ``0.0`` — pinned by
-    ``test_repro_untrusted_roster.py``'s ``test_t224_an_unreadable_roster_value_cannot_raise_out_of
-    _the_collector_either`` and ``test_an_unreadable_roster_list_price_keeps_the_price_wall_on``,
-    the second of which pins it explicitly so the present/absent distinction cannot collapse. They
-    are the same free item downstream and this repair does not reach them; that residue is
-    reported with the ticket rather than closed by widening a rule past the assertions that hold
-    it in place.
+    **ABSENT and UNREADABLE list prices go the same way, and that is T-277's second spelling.**
+    They used to keep a historical ``0.0``, which is the identical free item reached by omitting
+    the field or by writing junk into it instead of writing the zero: ``_number`` answers ``None``
+    for all three, and the branch above then minted a live, rankable 0.00 for a store that never
+    bid. ``RosterEntry.list_price``'s own docstring already measures the absent case — ``POST
+    /auctions`` with ``{"store_id": "s1", "tier": 1, "product_ref": "prod-1"}`` and no solicitor
+    gave ``HTTP 201, entries=[{fallback: true, unit_price: 0.0}]`` — and
+    ``test_repro_verifier_findings.py::test_t273_an_offer_stating_only_a_unit_price_is_not_turned
+    _into_a_rankable_zero`` already refuses "a rankable 0.00 offer minted from a roster row that
+    carries no list_price at all" one caller down. The door refuses all three spellings
+    (``Field(gt=0.0, allow_inf_nan=False)``); the library callers this docstring names do not get
+    that door, which is the whole reason the rule lives here. The two assertions that spelled the
+    old value — in ``test_repro_untrusted_roster.py`` — recorded what the defect produced, not a
+    contract anything depends on, and they are updated with this change; see the comments at each.
+
+    The question this branch asks is therefore "can the exchange name a price it could charge for
+    this product", not "did the caller write a zero", and there is exactly one answer for every
+    way of failing it.
     """
     listed = _number(entry.get("list_price"))
     offer: dict[str, Any] = {
@@ -498,15 +509,16 @@ def _list_price_bid(
         # live. This instant is the auction's, never a store's.
         "expires_at": fallback_expires_at(deadline),
     }
-    if listed is not None and listed <= 0.0:
-        # The roster prices the product at nothing. There is no offer to mint, so none is: an
-        # unpriced, undated entry is refused by every filter downstream, where a 0.00 would have
-        # been preferred by every one of them.
+    if listed is None or listed <= 0.0:
+        # The roster does not price this product at anything the exchange could charge — it
+        # priced it at nothing, or it priced it in a way nothing can read, or it did not price
+        # it at all. There is no offer to mint, so none is: an unpriced, undated entry is
+        # refused by every filter downstream, where a 0.00 would have been preferred by every
+        # one of them.
         offer["expires_at"] = None
     else:
-        list_price = 0.0 if listed is None else listed
-        offer["unit_price"] = list_price
-        offer["total_price"] = list_price
+        offer["unit_price"] = listed
+        offer["total_price"] = listed
     return {
         "auction_id": auction_id,
         "store_id": str(entry["store_id"]),

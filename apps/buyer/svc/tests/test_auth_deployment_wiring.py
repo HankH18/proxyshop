@@ -922,3 +922,255 @@ def test_a_retry_that_also_fails_is_reported_and_not_swallowed(
     )
     for fragment in ("dana", "reyes", "example.com"):
         assert fragment not in answered.text.casefold(), answered.text
+
+
+# =======================================================================================
+# T-361 — the login gesture could not complete in ANY deployment
+#
+# ``build_auth_service`` decided the vault, the account directory and the publisher, and
+# never once decided where the link goes: ``build_auth_service().deliver is magic_link._drop``
+# was True on every production path. ``_drop`` is deliberately inert — "a service booted
+# without a mail transport should fail to log buyers in, not publish bearer credentials to
+# stdout" — so the route answered 202 Accepted, the buyer waited for a mail that was thrown
+# away in-process, and nothing anywhere reported a problem. T-141 was recorded CLOSED as
+# "REFUTED"; the code says otherwise, which is what makes this worth a gate rather than a
+# comment.
+#
+# Two halves, and both are the fix:
+#   * a deployment that HAS configured a transport really mails the token, and the link the
+#     buyer clicks really opens a session;
+#   * a deployment that has NOT configured one refuses the route out loud instead of
+#     accepting a login it cannot deliver.
+# =======================================================================================
+
+TRANSPORT_ENVS = (
+    "PROXYSHOP_BUYER_MAGIC_LINK_SMTP_URL",
+    "PROXYSHOP_BUYER_MAGIC_LINK_SENDER",
+    "PROXYSHOP_BUYER_MAGIC_LINK_BASE_URL",
+)
+
+
+class _SMTPSession:
+    """One connection to the fake MTA. Records instead of sending."""
+
+    def __init__(self, mailbox: _Mailbox) -> None:
+        self._mailbox = mailbox
+        self.started_tls = False
+        self.logged_in: tuple[str, str] | None = None
+
+    def __enter__(self) -> _SMTPSession:
+        return self
+
+    def __exit__(self, *_exc: Any) -> bool:
+        return False
+
+    def starttls(self, *_a: Any, **_k: Any) -> None:
+        self.started_tls = True
+
+    def login(self, user: str, password: str) -> None:
+        self.logged_in = (user, password)
+
+    def send_message(self, message: Any) -> None:
+        self._mailbox.sent.append(message)
+
+    def quit(self) -> None:
+        return None
+
+
+class _Mailbox:
+    """A stand-in MTA: records every connection and every message handed to it."""
+
+    def __init__(self) -> None:
+        self.opened: list[tuple[str, int]] = []
+        self.timeouts: list[Any] = []
+        self.sessions: list[_SMTPSession] = []
+        self.sent: list[Any] = []
+
+    def transport(self, host: str, port: int, *_a: Any, timeout: Any = None, **_k: Any) -> Any:
+        self.opened.append((host, port))
+        self.timeouts.append(timeout)
+        session = _SMTPSession(self)
+        self.sessions.append(session)
+        return session
+
+    def link(self) -> str:
+        assert len(self.sent) == 1, f"{len(self.sent)} messages were sent"
+        body = self.sent[0].get_content()
+        for word in body.split():
+            if word.startswith("http"):
+                return word.rstrip(".,")
+        raise AssertionError(f"no link in the delivered mail:\n{body}")
+
+    def token(self) -> str:
+        from urllib.parse import parse_qs, urlsplit
+
+        found = parse_qs(urlsplit(self.link()).query).get("token")
+        assert found, f"the delivered link carries no token: {self.link()}"
+        return found[0]
+
+
+@pytest.fixture
+def no_transport(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No mail transport configured — the state every deployment has actually been in."""
+    for name in TRANSPORT_ENVS:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_t361_the_production_wiring_no_longer_resolves_to_the_drop_transport(
+    clean_env: None, no_transport: None, fresh_process_state: Any
+) -> None:
+    """The finding verbatim: ``build_auth_service().deliver is magic_link._drop``.
+
+    ``_drop`` swallowing the token is the correct DEFAULT for a bare ``MagicLinkAuth()`` — a
+    unit test does not want a mail sent. It is not a wiring decision, and the deployment
+    builder making no wiring decision at all is how the whole feature ended up unreachable in
+    production while every test passed.
+    """
+    from buyer_svc.auth import magic_link as magic_link_mod
+    from buyer_svc.auth.delivery import MagicLinkUndeliverable
+
+    routes_mod = fresh_process_state
+    service = routes_mod.build_auth_service()
+
+    assert service.deliver is not magic_link_mod._drop, (
+        "the production login service still delivers to _drop: every magic link this "
+        "deployment issues is discarded in-process and no buyer can ever log in"
+    )
+    with pytest.raises(MagicLinkUndeliverable):
+        service.request_login(DANA["email"])
+
+
+def test_t361_a_deployment_with_no_transport_refuses_the_login_instead_of_accepting_it(
+    clean_env: None, no_transport: None, fresh_process_state: Any
+) -> None:
+    """Fail closed at the door. A 202 for a mail nobody will send is the defect, not the fix.
+
+    The buyer is told the link is on its way, waits, and re-requests — spending a real budget
+    against a service that structurally cannot answer. The refusal has to be loud enough for
+    an operator to act on and must still not put a token on the wire.
+    """
+    from buyer_svc.main import create_app
+    from fastapi.testclient import TestClient
+
+    routes_mod = fresh_process_state
+    routes_mod.set_auth_service(routes_mod.build_auth_service())
+    client = TestClient(create_app(), raise_server_exceptions=False)
+
+    answered = client.post("/buyer/auth/magic-link", json={"email": DANA["email"]})
+
+    assert answered.status_code == 503, (
+        f"a login with no mail transport configured was answered {answered.status_code}; the "
+        "buyer is waiting for a link this deployment threw away"
+    )
+    assert "transport" in answered.text.casefold(), (
+        f"the refusal says nothing an operator could act on: {answered.text!r}"
+    )
+    # Still not an oracle and still not a leak: no address, and nothing token-shaped.
+    for fragment in ("dana", "reyes"):
+        assert fragment not in answered.text.casefold(), answered.text
+
+
+def test_t361_a_configured_transport_mails_the_token_and_the_mailed_link_opens_a_session(
+    clean_env: None, no_transport: None, fresh_process_state: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole login gesture over the wiring a deployment really gets. This is the headline.
+
+    Nothing here overrides ``deliver``: the transport under test is the one
+    ``build_auth_service`` chose from the environment, and the token that opens the session is
+    the one that came out of the delivered mail rather than out of a test double's list. That
+    is the difference between "the feature is tested" and "the feature works in production" —
+    every existing magic-link test injects its own ``deliver`` and is blind to this by
+    construction.
+    """
+    import smtplib
+
+    from buyer_svc.main import create_app
+    from fastapi.testclient import TestClient
+
+    routes_mod = fresh_process_state
+    mailbox = _Mailbox()
+    monkeypatch.setattr(smtplib, "SMTP", mailbox.transport)
+    monkeypatch.setenv("PROXYSHOP_BUYER_MAGIC_LINK_SMTP_URL", "smtp://mail.example.net:2525")
+    monkeypatch.setenv("PROXYSHOP_BUYER_MAGIC_LINK_SENDER", "no-reply@proxyshop.example")
+    monkeypatch.setenv(
+        "PROXYSHOP_BUYER_MAGIC_LINK_BASE_URL", "https://buyer.proxyshop.example/auth/callback"
+    )
+
+    routes_mod.set_auth_service(routes_mod.build_auth_service())
+    client = TestClient(create_app(), raise_server_exceptions=False)
+
+    requested = client.post("/buyer/auth/magic-link", json={"email": DANA["email"]})
+    assert requested.status_code == 202, requested.text
+
+    assert mailbox.opened == [("mail.example.net", 2525)], (
+        f"the configured MTA was not the one contacted: {mailbox.opened!r}"
+    )
+    assert mailbox.timeouts and all(mailbox.timeouts), (
+        "the SMTP connection was opened with no timeout, so one unreachable MTA parks a "
+        "threadpool worker for as long as the OS lets it"
+    )
+    assert len(mailbox.sent) == 1, f"{len(mailbox.sent)} messages reached the MTA"
+    message = mailbox.sent[0]
+    assert message["To"] == DANA["email"]
+    assert message["From"] == "no-reply@proxyshop.example"
+    assert mailbox.link().startswith("https://buyer.proxyshop.example/auth/callback?"), (
+        f"the mailed link does not point at the configured front door: {mailbox.link()}"
+    )
+
+    token = mailbox.token()
+    assert token not in requested.text, (
+        "the token is on the HTTP response as well as in the mail; the mailbox is no longer "
+        "the credential"
+    )
+
+    session = client.post("/buyer/auth/session", json={"token": token})
+    assert session.status_code == 201, (
+        f"the token out of the delivered mail did not open a session ({session.status_code}): "
+        f"{session.text}"
+    )
+    assert session.json()["pseudonym"].startswith("psn-")
+
+    # Single use, exactly as every other path: the mailed link is not a reusable credential.
+    assert client.post("/buyer/auth/session", json={"token": token}).status_code == 401
+
+
+def test_t361_a_half_configured_transport_refuses_to_boot_rather_than_guessing(
+    clean_env: None, no_transport: None, fresh_process_state: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An operator who configured the MTA and forgot the rest gets an error, not a silence.
+
+    Every case here is a deployment that meant to send mail. Silently falling back to "no
+    transport" would put it in exactly the state T-361 is about while looking configured, so
+    a half-set transport is a boot failure — the same shape as
+    :class:`ProcessLocalStateUnsafe`, which already refuses a configuration this service's
+    state model cannot survive.
+    """
+    from buyer_svc.auth.delivery import MagicLinkTransportMisconfigured
+
+    routes_mod = fresh_process_state
+    smtp_env, sender_env, base_env = TRANSPORT_ENVS
+    complete = {
+        smtp_env: "smtp://mail.example.net:2525",
+        sender_env: "no-reply@proxyshop.example",
+        base_env: "https://buyer.proxyshop.example/auth/callback",
+    }
+    broken = [
+        ({sender_env: None}, sender_env),
+        ({base_env: None}, base_env),
+        ({sender_env: "not-an-address"}, sender_env),
+        ({base_env: "buyer.example/callback"}, base_env),
+        ({smtp_env: "http://mail.example.net"}, smtp_env),
+        ({smtp_env: "smtp://"}, smtp_env),
+    ]
+
+    for override, named in broken:
+        for name, value in {**complete, **override}.items():
+            if value is None:
+                monkeypatch.delenv(name, raising=False)
+            else:
+                monkeypatch.setenv(name, value)
+        with pytest.raises(MagicLinkTransportMisconfigured) as raised:
+            routes_mod.build_auth_service()
+        assert named in str(raised.value), (
+            f"the boot failure for {override!r} does not name {named}: {raised.value}"
+        )

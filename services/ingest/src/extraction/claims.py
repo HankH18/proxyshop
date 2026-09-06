@@ -39,6 +39,7 @@ __all__ = [
     "DEFAULT_AUTHORITY_RANK",
     "DEFAULT_CONFIDENCE_FLOOR",
     "EXTRACTOR_VERSION",
+    "MAX_OBSERVED_AT_CHARS",
     "QUARANTINE_BELOW_FLOOR",
     "QUARANTINE_SCHEMA",
     "QUARANTINE_UNTRUSTED",
@@ -46,6 +47,7 @@ __all__ = [
     "ExtractedClaim",
     "ExtractionResult",
     "RawClaim",
+    "is_timestamp",
     "normalise_provenance",
     "partition_by_confidence",
 ]
@@ -64,6 +66,21 @@ DEFAULT_CONFIDENCE_FLOOR = 0.6
 #: published statement — authoritative for what the store *says*, which is what a claim is.
 DEFAULT_AUTHORITY_RANK = 1
 
+#: Longest an ``observed_at`` stamp may be, in characters.
+#:
+#: Where the number comes from: the longest instant this service can legitimately be handed
+#: is an RFC-3339 timestamp with a numeric offset and fractional seconds —
+#: ``2026-01-01T00:00:00.000000+00:00`` is 32 characters — so 64 is double the longest real
+#: stamp and shorter than any prose. It is a ceiling on a *retained* string: this value is
+#: copied onto the page-level provenance AND onto every claim's, and an
+#: ``ExtractionResult`` holding both is what the differential ledger keeps between requests.
+#:
+#: The length is the cheap half of the check and it runs first, so a hostile stamp is
+#: refused before any parser is pointed at it. :func:`is_timestamp` is the other half: a
+#: 30,000-character "date" is not merely too long, it is not a date, and neither is a
+#: 40-character one that reads ``"not-a-timestamp"``.
+MAX_OBSERVED_AT_CHARS = 64
+
 QUARANTINE_BELOW_FLOOR = "below_confidence_floor"
 QUARANTINE_SCHEMA = "schema_violation"
 QUARANTINE_UNTRUSTED = "untrusted_instruction_in_source"
@@ -74,6 +91,40 @@ _SNAPSHOT_RE = re.compile(r"^snapshot://(?P<authority>[^/@]+)(?P<path>[^@]*)@(?P
 def _now() -> str:
     """UTC now, in the same second-resolution shape the fetch adapter stamps."""
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def is_timestamp(value: Any) -> bool:
+    """Whether ``value`` is an instant this service is willing to retain as an observation.
+
+    Two questions, in the order that costs least. Is it short enough that reading it is
+    cheap (:data:`MAX_OBSERVED_AT_CHARS`)? And is it actually an ISO-8601 instant — the
+    shape :func:`_now` writes (``2026-01-01T00:00:00Z``), the shape the graph fixtures use
+    (``2026-01-01T00:00:00+00:00``), or any other date/datetime ``datetime.fromisoformat``
+    accepts?
+
+    Why the format check exists at all, given the length cap: ``observed_at`` is the field
+    every freshness, staleness and ordering decision downstream reads, and it is written
+    into ``Source.observed_at`` in the graph. A 40-character string that is not a date
+    passes any length cap and then silently makes every temporal comparison meaningless.
+    A cap answers "how much of this will we keep"; only the parse answers "is this a time".
+
+    Args:
+        value: the candidate stamp, in whatever box a caller handed it over in.
+
+    Returns:
+        ``True`` when the value is a bounded, parseable instant.
+    """
+    text = _text(value)
+    if not text or len(text) > MAX_OBSERVED_AT_CHARS:
+        return False
+    # ``fromisoformat`` accepts a trailing ``Z`` from 3.11 on; normalising it keeps this
+    # honest on any interpreter and costs one comparison on a string already known short.
+    candidate = f"{text[:-1]}+00:00" if text[-1] in "Zz" else text
+    try:
+        datetime.fromisoformat(candidate)
+    except ValueError:
+        return False
+    return True
 
 
 def _stable_id(*parts: str) -> str:
@@ -137,7 +188,8 @@ class ClaimProvenance:
 
         Raises:
             ValueError: ``source`` is outside the DESIGN vocabulary, ``ref`` or
-                ``observed_at`` is blank, or ``confidence`` is outside ``[0, 1]``.
+                ``observed_at`` is blank, ``observed_at`` is not a bounded ISO-8601
+                instant (:func:`is_timestamp`), or ``confidence`` is outside ``[0, 1]``.
         """
         if self.source not in SOURCE_CLASSES:
             raise ValueError(
@@ -150,6 +202,18 @@ class ClaimProvenance:
                     f"ClaimProvenance.{name} must be non-empty: a claim whose provenance "
                     f"names no snapshot is indistinguishable from an unprovenanced claim"
                 )
+        if not is_timestamp(self.observed_at):
+            # The message names the length and never the value: this record is built from
+            # caller-supplied input on an unauthenticated path, and an exception string is
+            # a place input gets echoed — into a log, into a 500 body — by default.
+            raise ValueError(
+                f"ClaimProvenance.observed_at must be an ISO-8601 instant of at most "
+                f"{MAX_OBSERVED_AT_CHARS} characters; got {len(_text(self.observed_at))} "
+                f"characters that do not parse as one. This value is retained on the "
+                f"page-level provenance and on every claim's, so an unbounded or unparseable "
+                f"stamp is both retained state a caller chose and a timestamp nothing "
+                f"downstream can compare"
+            )
         if not 0.0 <= float(self.confidence) <= 1.0:
             raise ValueError(
                 f"ClaimProvenance.confidence must be in [0, 1], got {self.confidence!r}"

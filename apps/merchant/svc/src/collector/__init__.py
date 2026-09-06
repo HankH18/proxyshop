@@ -21,10 +21,19 @@ and kept verbatim. Every join key is therefore also **shape-checked** — a scal
 refused — and ``discountApplications`` (the one structured field) is validated entry by entry
 against :data:`DISCOUNT_APPLICATION_FIELDS` instead of being carried as an opaque blob.
 
-The refusal names **neither the value nor the key**, only how many fields were unknown. A key
+A name allowlist and a shape allowlist are still not enough, and T-365 proved that too: both
+check what a field *is* and neither checks how big it is. The request body is capped at 1 MiB
+by :mod:`merchant_svc.http_limits`, but the collector KEEPS what is inside the body, so the
+cap bounded the wrong thing — four join keys of 200,000 characters rode under it and a full
+ring of them held 391.10 MiB inside a 256 MiB container. Every published field is therefore
+also **length-checked** against :data:`MAX_PIXEL_FIELD_CHARS`, and an over-long one is
+refused whole rather than truncated; the reasoning is at the check itself in
+:func:`accept_pixel_event`.
+
+The refusal names **neither the value nor the key**, only how many fields were refused. A key
 is attacker-chosen text too: ``{"shopper@example.com": 1}`` put an address in the response
 body and the log of a service whose whole job is to hold no addresses. The published
-allowlist is in this module, so "3 unknown fields" plus :data:`ACCEPTED_FIELDS` is all an
+allowlist is in this module, so "3 field(s)" plus :data:`ACCEPTED_FIELDS` is all an
 integrator needs, and it is all anybody else gets.
 
 **A dropped beacon is a visible gap, not a default.** R4 makes the webhook authoritative
@@ -88,6 +97,40 @@ DISCOUNT_APPLICATION_FIELDS: frozenset[str] = frozenset(
 #: unauthenticated route; no real checkout carries anything close to this many.
 MAX_DISCOUNT_APPLICATIONS = 32
 
+#: Most characters any single field of a beacon may carry (T-365).
+#:
+#: :data:`merchant_svc.http_limits.MAX_REQUEST_BODY_BYTES` bounds the REQUEST; this bounds
+#: what one request can put in the STORE, and only the second of those is what the collector
+#: keeps. Without it :class:`PixelInbox`'s 512-entry ring bounded the entry COUNT while
+#: nothing bounded the entry SIZE, and the product was a ceiling outside the box: four join
+#: keys of 200,000 characters ride comfortably under the 1 MiB body cap (800,072 bytes
+#: encoded) and retain 800,970 bytes, so a full ring held **391.10 MiB** against
+#: ``apps/merchant/compose.yaml:66  mem_limit: 256m``. The process OOMs at roughly 330
+#: anonymous requests and never reaches its own limit. A bound whose ceiling is larger than
+#: the container is the appearance of a bound.
+#:
+#: **Where 512 comes from.** The longest join key a real beacon carries is a discount code,
+#: and Shopify's own maximum for one is 255 characters; a checkout token is 32 hex characters
+#: and an Order GID is under 40. 512 is double the longest legitimate value, and at 512 a
+#: full ring holds at most ``512 x 4 join keys x 512 slots`` = 1 MiB of text — inside the
+#: container with three orders of magnitude to spare, which is the property the old bound
+#: did not have.
+#:
+#: The same axis ``exchange.auction.routes.MAX_RECORDED_OFFER_VALUE_CHARS`` (4096) bounds for
+#: a recorded bid, reached through a different door. Deliberately not shared: the two are
+#: separate deployables, a cart permalink is not a join key, and importing across them would
+#: couple the merchant's ceiling to the exchange's traffic.
+MAX_PIXEL_FIELD_CHARS = 512
+
+#: An integer whose ``bit_length`` exceeds this cannot render inside
+#: :data:`MAX_PIXEL_FIELD_CHARS` characters: a decimal digit costs log2(10) = 3.33 bits, so
+#: four bits per character is a conservative over-estimate and anything past this bound is
+#: over the ceiling by construction. Checked INSTEAD of rendering, because ``str()`` on an
+#: integer past CPython's 4300-digit conversion limit raises ``ValueError`` — and
+#: :class:`PixelEventRejected` subclasses ``ValueError``, so letting that one escape would
+#: read to every caller as a refusal this module never made, and answer 500 at the route.
+_MAX_SCALAR_INT_BITS = 4 * MAX_PIXEL_FIELD_CHARS
+
 
 class PixelEventRejected(ValueError):
     """A beacon was refused.
@@ -96,11 +139,16 @@ class PixelEventRejected(ValueError):
     message. Both a field's value and its *name* are attacker-chosen text, so quoting either
     puts it in the response body and the log of a service whose entire purpose is to hold
     none of it. The message carries the count.
+
+    The count's noun is plain ``field(s)`` rather than ``unknown field(s)``: since T-365 a
+    field can be refused for its LENGTH as well as for its name, and those names come from
+    :data:`ACCEPTED_FIELDS` rather than from the sender. Which kind of refusal it is belongs
+    in ``reason``, which is this module's text, not the sender's.
     """
 
     def __init__(self, reason: str, fields: tuple[str, ...] = ()) -> None:
         self.fields = tuple(fields)
-        detail = f" ({len(self.fields)} unknown field(s))" if self.fields else ""
+        detail = f" ({len(self.fields)} field(s))" if self.fields else ""
         super().__init__(f"{reason}{detail}")
 
 
@@ -140,6 +188,43 @@ def _scalar(value: Any) -> str | None:
     return text or None
 
 
+def _over_the_field_ceiling(value: Any) -> bool:
+    """Whether ``value``, as this collector would keep it, is longer than the ceiling.
+
+    Answers ``False`` for anything that is not a scalar — a dict, a list, ``None``. Those are
+    the shape check's business, and a length is not a meaningful thing to say about them.
+
+    An integer is measured by its ``bit_length`` rather than rendered, for the reason
+    :data:`_MAX_SCALAR_INT_BITS` gives. Anything under that bound renders in at most 2048
+    characters, so the exact comparison below is safe and the boundary stays exact.
+    """
+    if isinstance(value, str):
+        return len(value.strip()) > MAX_PIXEL_FIELD_CHARS
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return False
+    if isinstance(value, int):
+        return value.bit_length() > _MAX_SCALAR_INT_BITS or len(str(value)) > MAX_PIXEL_FIELD_CHARS
+    return False  # a finite float renders in at most ~24 characters; `inf`/`nan` in three
+
+
+def _oversized_fields(payload: dict[str, Any]) -> tuple[str, ...]:
+    """Every published top-level field of ``payload`` that is over the ceiling, sorted.
+
+    Checked across the whole of :data:`ACCEPTED_FIELDS` rather than only the four keys that
+    are retained today. ``currency`` and ``timestamp`` are accepted and currently discarded,
+    but that is a property of this implementation and not of the contract: a field the
+    collector publishes as acceptable is a field a future reader may keep, and a bound that
+    only covers today's readers has to be re-derived every time one is added.
+    """
+    return tuple(
+        sorted(
+            str(name)
+            for name, value in payload.items()
+            if str(name) in ACCEPTED_FIELDS and _over_the_field_ceiling(value)
+        )
+    )
+
+
 def _read(payload: dict[str, Any], aliases: tuple[str, ...]) -> str | None:
     """The first alias present, as a scalar. A non-scalar reads as absent, never as text."""
     for name in aliases:
@@ -168,15 +253,27 @@ def _validate_discount_applications(payload: dict[str, Any]) -> list[dict[str, A
         )
     entries: list[dict[str, Any]] = []
     unknown: list[str] = []
+    oversized: list[str] = []
     for entry in raw:
         if not isinstance(entry, dict):
             raise PixelEventRejected("each discountApplications entry must be an object")
         unknown.extend(str(key) for key in entry if str(key) not in DISCOUNT_APPLICATION_FIELDS)
+        # The key allowlist above bounds which fields an entry may carry; this bounds how big
+        # they may be. `_discount_code` lifts `code` out of an entry and INTO the stored
+        # observation, so a ceiling applied only at the top level leaves the same unbounded
+        # string arriving one level down.
+        oversized.extend(str(key) for key, value in entry.items() if _over_the_field_ceiling(value))
         entries.append(entry)
     if unknown:
         raise PixelEventRejected(
             "a discountApplications entry carries fields outside the published set",
             tuple(sorted(set(unknown))),
+        )
+    if oversized:
+        raise PixelEventRejected(
+            "a discountApplications entry carries a field over the "
+            f"{MAX_PIXEL_FIELD_CHARS}-character ceiling",
+            tuple(sorted(set(oversized))),
         )
     return entries
 
@@ -201,7 +298,12 @@ def _total_price(payload: dict[str, Any]) -> float | None:
         return None
     try:
         value = float(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError, not ValueError: `float(10 ** 400)` raises "int too large to convert
+        # to float", which is an ArithmeticError and would otherwise escape this function as
+        # a 500. `_oversized_fields` refuses a number that long before it reaches here, so
+        # this is the belt to that braces — but a route-facing parser that promises `| None`
+        # must keep the promise on its own.
         return None
     # `inf`/`nan` survive `float("1e999")` and `float("nan")`, do not survive a JSON
     # round-trip, and would silently poison R4's "was the price honoured" comparison.
@@ -238,6 +340,27 @@ def accept_pixel_event(payload: Any, *, now: datetime | None = None) -> PixelObs
         # too, and an error body is as much a place data lives as a database is.
         raise PixelEventRejected(
             "the collector accepts published join keys only; refused unknown fields", unknown
+        )
+
+    # ORDER MATTERS, and this check has to come before the shape check below rather than
+    # after it: `_scalar` renders an integer with `str()`, and CPython raises ValueError past
+    # 4300 digits — so a shape check run first would turn a wall of digits into a 500 on an
+    # unauthenticated route. See `_MAX_SCALAR_INT_BITS`.
+    #
+    # REFUSED WHOLE, NOT TRUNCATED, and that is the decision rather than the default. This is
+    # a telemetry endpoint and refusing a beacon loses data, so the trade was weighed both
+    # ways: a truncated `checkout_token` is a *wrong* checkout token, and R4 joins the lossy
+    # pixel observation to the authoritative webhook on exactly that value. A prefix joins to
+    # nothing, or to the wrong order, while still reading as a complete observation — and R4
+    # is already built to survive a beacon that never arrives, but not one that arrives
+    # pointing at someone else's order. Silently emptying the field is worse again: an absent
+    # join key is published as a `gap`, and a fabricated gap makes the marker mean nothing.
+    # Nothing legitimate is lost, either: the longest real join key is a 255-character
+    # discount code, so a field over 512 characters is not data this endpoint exists for.
+    oversized = _oversized_fields(payload)
+    if oversized:
+        raise PixelEventRejected(
+            f"a beacon field may carry at most {MAX_PIXEL_FIELD_CHARS} characters", oversized
         )
 
     # A join key that is present but not a scalar is a REFUSAL, not a gap. Reading it as
@@ -320,6 +443,7 @@ __all__ = [
     "DISCOUNT_APPLICATION_FIELDS",
     "GAP_KEYS",
     "MAX_DISCOUNT_APPLICATIONS",
+    "MAX_PIXEL_FIELD_CHARS",
     "JOIN_KEY_ALIASES",
     "PIXEL_INBOX",
     "PixelEventRejected",

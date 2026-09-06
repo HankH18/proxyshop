@@ -889,3 +889,727 @@ def test_t254_the_claim_projection_is_produced_by_the_running_service() -> None:
         f"{sorted(str(p.relative_to(REPO_ROOT)) for p in sources if _method_calls(p, _ATTRIBUTE_PROJECTION))}"
         f", and {len(sources)} app-reachable ingest module(s) were scanned"
     )
+
+
+# ---------------------------------------------------------------------------------------
+# T-367 — the module-scope extraction ledger grows one permanent entry per request
+# ---------------------------------------------------------------------------------------
+#
+# WHAT THE DEFECT WAS. ``ingest.extraction.routes`` holds a module-scope
+# ``ExtractionLedger`` built from two plain dicts. ``POST /extraction/policy-pages`` is
+# unauthenticated, and every call that actually extracts ends in
+# ``ledger.record(payload.url, digest, result)``. The caller picks the key (``url``, which
+# carried ``min_length=1`` and no ceiling) and the retained value (whatever ``body``
+# extracts to, ``body`` being a bare ``str``). Nothing evicted: no capacity, no TTL, no
+# LRU, no sweep. ``forget()`` existed and no HTTP path called it. So entry count was
+# exactly ``n`` after ``n`` distinct pages, for every ``n``, for the life of the process —
+# growth on ORDINARY traffic, not merely under attack, against a 256 MiB container
+# (``compose.yaml`` ``mem_limit: 256m``).
+#
+# The gates below are ordered: an arming test first (the write path really does record, so
+# the growth probe is measuring something), then the bound itself, then the reason the
+# ledger exists at all — a cache that no longer answers is not a fixed cache, it is a
+# deleted one.
+
+#: How many requests past the published capacity the growth gate drives. Enough that an
+#: unbounded ledger is unmistakably unbounded and a bounded one has evicted many times.
+_T367_OVERSHOOT = 64
+
+#: The capacity the gate assumes when the module publishes none. Only ever used to size the
+#: request loop: with no named constant there is no bound to honour and the gate is red on
+#: that count alone.
+_T367_ASSUMED_CAPACITY = 512
+
+
+def _t367_reset_ledger() -> Any:
+    """The module-scope ledger, emptied. Returns it."""
+    import importlib
+
+    routes = importlib.import_module("ingest.extraction.routes")
+    routes.ledger.hashes.clear()
+    routes.ledger.results.clear()
+    return routes.ledger
+
+
+def _t367_capacity() -> int | None:
+    """The ledger's published entry ceiling, or ``None`` when it publishes none."""
+    import importlib
+
+    differential = importlib.import_module("ingest.extraction.differential")
+    capacity = getattr(differential, "MAX_LEDGER_PAGES", None)
+    return int(capacity) if isinstance(capacity, int) else None
+
+
+def test_t367_the_ledger_growth_probe_is_armed(policy_pages: dict[str, str]) -> None:
+    """The route really does write to the module-scope ledger.
+
+    Without this, a growth gate would pass just as happily against a handler that recorded
+    nothing at all — which is the failure mode where the bound looks enforced and is in
+    fact never exercised.
+    """
+    import importlib
+
+    from fastapi.testclient import TestClient
+
+    ledger = _t367_reset_ledger()
+    body = policy_pages["shipping.html"]
+
+    with TestClient(importlib.import_module("ingest.main").create_app()) as client:
+        for index in range(8):
+            response = client.post(
+                "/extraction/policy-pages",
+                json={"url": f"https://store.example.com/policies/armed-{index}", "body": body},
+            )
+            assert response.status_code == 200, response.text
+            assert response.json()["reused"] is False
+
+    try:
+        assert len(ledger.hashes) == 8, (
+            f"eight distinct pages were extracted and the ledger holds {len(ledger.hashes)} "
+            f"hashes; the growth gate below cannot measure a write path that does not write"
+        )
+        assert len(ledger.results) == 8, (
+            f"the ledger retained {len(ledger.results)} results for eight extractions; the "
+            f"byte-cost of an entry is what the retention budget is about"
+        )
+    finally:
+        _t367_reset_ledger()
+
+
+def test_t367_repeated_policy_page_posts_do_not_grow_the_ledger_without_bound(
+    policy_pages: dict[str, str],
+) -> None:
+    """N distinct pages must not become N permanent ledger entries.
+
+    This is the whole finding, measured through the running app rather than argued about:
+    every request is a legitimate one — a distinct, short, well-formed URL and a committed
+    fixture page as the body — and the question is only whether the process keeps all of
+    them. It must not. The ledger is a cache, and a cache without an eviction policy is a
+    memory leak with a docstring.
+
+    The bound has to be a *published* one. A ledger that happens to stay small because the
+    test drove few requests is not bounded; the gate therefore reads the module's own
+    named ceiling and drives past it.
+    """
+    import importlib
+
+    from fastapi.testclient import TestClient
+
+    capacity = _t367_capacity()
+    driven = (capacity or _T367_ASSUMED_CAPACITY) + _T367_OVERSHOOT
+    ledger = _t367_reset_ledger()
+    body = policy_pages["shipping.html"]
+
+    try:
+        with TestClient(importlib.import_module("ingest.main").create_app()) as client:
+            for index in range(driven):
+                response = client.post(
+                    "/extraction/policy-pages",
+                    json={
+                        "url": f"https://store.example.com/policies/page-{index}",
+                        "body": body,
+                    },
+                )
+                assert response.status_code == 200, (index, response.text)
+
+        held = len(ledger.hashes)
+        assert held < driven, (
+            f"{driven} legitimate requests left {held} ledger entries — one per request, "
+            f"retained for the life of the interpreter. Nothing about this needs an "
+            f"attacker: it is what ordinary traffic does to a dict with no eviction policy."
+        )
+        assert capacity is not None, (
+            "ingest.extraction.differential publishes no MAX_LEDGER_PAGES, so the ledger's "
+            "ceiling is not a named, documented number that a reader or a gate can check"
+        )
+        assert held <= capacity, (
+            f"the ledger holds {held} pages, past its own published capacity of {capacity}"
+        )
+        assert len(ledger.results) <= held, (
+            f"{len(ledger.results)} retained results against {held} retained hashes: an "
+            f"evicted page must take its result with it, or the expensive half of the "
+            f"entry outlives the cheap half that indexes it"
+        )
+        assert held >= capacity // 2, (
+            f"the ledger kept only {held} of {driven} pages against a capacity of "
+            f"{capacity}; that is not eviction, that is a cache that has stopped caching"
+        )
+    finally:
+        _t367_reset_ledger()
+
+
+def test_t367_the_ledger_still_answers_for_the_page_it_saw_most_recently(
+    policy_pages: dict[str, str],
+) -> None:
+    """Bounding the ledger must not delete the guarantee it exists for.
+
+    ``POST /extraction/policy-pages`` promises that replaying an unchanged page performs no
+    extraction — ``reused: true``, ``model_calls: 0`` — and that promise is about two
+    separate HTTP requests, which is the entire reason the ledger is module state. So the
+    fix has to evict the LEAST recently used entry and keep the freshest one, not empty the
+    structure on a timer or refuse to record.
+    """
+    import importlib
+
+    from fastapi.testclient import TestClient
+
+    capacity = _t367_capacity() or _T367_ASSUMED_CAPACITY
+    ledger = _t367_reset_ledger()
+    body = policy_pages["shipping.html"]
+    url = "https://store.example.com/policies/kept"
+
+    try:
+        with TestClient(importlib.import_module("ingest.main").create_app()) as client:
+            # Fill the ledger to well past capacity, then extract the page under test last.
+            for index in range(capacity + _T367_OVERSHOOT):
+                filler = client.post(
+                    "/extraction/policy-pages",
+                    json={"url": f"https://store.example.com/policies/f-{index}", "body": body},
+                )
+                assert filler.status_code == 200, (index, filler.text)
+
+            first = client.post("/extraction/policy-pages", json={"url": url, "body": body})
+            assert first.status_code == 200, first.text
+            digest = first.json()["content_hash"]
+            assert first.json()["claims"], "the page under test extracted nothing to cache"
+
+            replay = client.post(
+                "/extraction/policy-pages",
+                json={"url": url, "body": body, "known_hash": digest},
+            )
+
+        assert replay.status_code == 200, replay.text
+        again = replay.json()
+        assert again["reused"] is True, "the differential guarantee did not survive the bound"
+        assert again["model_calls"] == 0, again
+        assert again["claims"], (
+            "the replay was answered with an empty result: the hash survived eviction but "
+            "the cached claims did not, so the cache hit is cheap and useless"
+        )
+        assert ledger.cached(url, digest) is not None, (
+            "the most recently used page was evicted while older ones were kept; that is "
+            "not an LRU, and under steady traffic it evicts exactly what is about to be hit"
+        )
+    finally:
+        _t367_reset_ledger()
+
+
+def test_t367_an_oversized_policy_page_is_refused_cleanly_and_not_echoed_back() -> None:
+    """The caller chooses the key AND the retained value, so both need a ceiling.
+
+    An entry cap alone bounds the ledger's *length*, not its *size*: 30,000 characters of
+    URL and a megabytes-long body were measured at 61,479 bytes retained per request. The
+    refusal has to be a clean 4xx — never a 5xx, never an unbounded allocation — and it
+    must not hand the offending input back in the error body, which would turn a rejected
+    request into an amplifier.
+    """
+    import importlib
+
+    from fastapi.testclient import TestClient
+
+    ledger = _t367_reset_ledger()
+    marker = "PolicyPageOverflowMarker"
+    long_url = "https://store.example.com/policies/" + ("a" * 30_000)
+    long_body = f"<p>Orders ship within 2 business days. {marker} {'z' * 8_000_000}</p>"
+
+    try:
+        with TestClient(importlib.import_module("ingest.main").create_app()) as client:
+            for label, payload in (
+                ("url", {"url": long_url, "body": "<p>Orders ship within 2 business days.</p>"}),
+                ("body", {"url": "https://store.example.com/policies/big", "body": long_body}),
+            ):
+                response = client.post("/extraction/policy-pages", json=payload)
+                assert 400 <= response.status_code < 500, (
+                    f"an oversized {label} was answered {response.status_code}; an "
+                    f"unauthenticated surface must refuse it, and refuse it as a 4xx"
+                )
+                text = response.text
+                assert len(text) < 4096, (
+                    f"the refusal of an oversized {label} was {len(text)} bytes long — it is "
+                    f"echoing the offending input back to whoever sent it"
+                )
+                assert marker not in text and "a" * 200 not in text, (
+                    f"the refusal of an oversized {label} quotes the input back"
+                )
+
+        assert not ledger.hashes, (
+            f"a refused request was recorded anyway: {len(ledger.hashes)} ledger entries "
+            f"after two 4xx responses"
+        )
+    finally:
+        _t367_reset_ledger()
+
+
+def test_t367_the_anonymous_config_endpoint_publishes_no_ledger_occupancy(
+    policy_pages: dict[str, str],
+) -> None:
+    """``GET /extraction/config`` is unauthenticated and used to publish ``pages_known``.
+
+    That counter is a free progress oracle: it tells an anonymous caller exactly how much
+    of the ledger their own traffic has filled, request by request, which is the readout an
+    attacker needs to tune a memory-exhaustion attempt and which no legitimate caller of a
+    *policy* endpoint needs at all. The endpoint's job is to publish the extraction policy —
+    the confidence floor, the extractor version, the claim vocabulary — not the service's
+    internal occupancy.
+    """
+    import importlib
+
+    from fastapi.testclient import TestClient
+
+    _t367_reset_ledger()
+    body = policy_pages["shipping.html"]
+
+    try:
+        with TestClient(importlib.import_module("ingest.main").create_app()) as client:
+            before = client.get("/extraction/config")
+            assert before.status_code == 200, before.text
+            for index in range(4):
+                client.post(
+                    "/extraction/policy-pages",
+                    json={"url": f"https://store.example.com/policies/o-{index}", "body": body},
+                )
+            after = client.get("/extraction/config")
+            assert after.status_code == 200, after.text
+
+        assert "pages_known" not in after.json(), (
+            "GET /extraction/config still publishes pages_known to anonymous callers"
+        )
+        assert after.json() == before.json(), (
+            f"the anonymous config response moved when four pages were extracted: "
+            f"{before.json()} -> {after.json()}; whatever moved is an occupancy oracle"
+        )
+        assert {"confidence_floor", "extractor_version", "claim_types"} <= set(after.json()), (
+            "the published extraction policy lost fields it is actually for"
+        )
+    finally:
+        _t367_reset_ledger()
+
+
+def _t367_fat_result(evidence_chars: int) -> Any:
+    """One ``ExtractionResult`` whose retained evidence is ``evidence_chars`` long."""
+    from ingest.extraction.claims import ClaimProvenance, ExtractedClaim, ExtractionResult
+
+    provenance = ClaimProvenance(
+        source="scraped",
+        ref="snapshot://store.example.com/policies/x@sha256:" + "0" * 64,
+        observed_at="2026-01-01T00:00:00Z",
+    )
+    claim = ExtractedClaim(
+        key="shipping.dispatch_window_days",
+        value=2,
+        claim_type="dispatch_window",
+        confidence=0.9,
+        provenance=provenance,
+        evidence="s" * evidence_chars,
+    )
+    return ExtractionResult(claims=(claim,), content_hash="sha256:" + "0" * 64)
+
+
+def test_t367_the_ledger_bounds_what_it_retains_and_not_only_how_many() -> None:
+    """An entry cap bounds the ledger's length. Its *size* is a separate axis.
+
+    One ledger entry retains an ``ExtractionResult``, and a result holds the evidence
+    sentence behind every claim — text the caller supplied. So ``MAX_LEDGER_PAGES`` on its
+    own permits 512 entries of arbitrary size, which is the same unbounded allocation with a
+    smaller ``len()``. The measured hostile figure in the T-367 reproduction was 61,479 bytes
+    retained per request against a 256 MiB container; the gate below drives entries far
+    fatter than that and asserts the ledger's own retention budget terminates the arithmetic.
+
+    The eviction must still be LRU, not "stop accepting": a ledger that refuses to record
+    once it is full stops being a cache the moment it fills, and the newest page — the one a
+    replay is about to ask for — is exactly the one it would be refusing.
+    """
+    import importlib
+
+    differential = importlib.import_module("ingest.extraction.differential")
+    budget = getattr(differential, "MAX_LEDGER_BYTES", None)
+    assert isinstance(budget, int) and budget > 0, (
+        "ingest.extraction.differential publishes no MAX_LEDGER_BYTES, so nothing bounds "
+        "how much extracted text 512 ledger entries may hold between them"
+    )
+
+    ledger = differential.ExtractionLedger()
+    fat = budget // 8
+    for index in range(40):
+        ledger.record(
+            f"https://store.example.com/policies/fat-{index}", "sha256:aaa", _t367_fat_result(fat)
+        )
+
+    retained = ledger.retained_bytes()
+    assert retained <= budget, (
+        f"the ledger is charging itself {retained} bytes against a published budget of "
+        f"{budget}; 40 entries of {fat} characters each was enough to blow through it"
+    )
+    assert len(ledger.hashes) < 40, (
+        "no page was evicted, so the byte budget is published and not enforced"
+    )
+    assert ledger.hashes, "the byte budget evicted everything; that is not a cache"
+
+    newest = "https://store.example.com/policies/fat-39"
+    assert ledger.cached(newest, "sha256:aaa") is not None, (
+        "the most recently recorded page was the one evicted; eviction must take the "
+        "LEAST recently used, or a replay never hits"
+    )
+
+    # A single result too large to fit the whole budget is not retained at all — but the page
+    # is still recognised as unchanged, which is the cheap half of the guarantee.
+    huge = differential.ExtractionLedger()
+    huge.record(
+        "https://store.example.com/policies/huge", "sha256:bbb", _t367_fat_result(budget * 2)
+    )
+    assert huge.known_hash("https://store.example.com/policies/huge") == "sha256:bbb"
+    assert huge.retained_bytes() <= budget, (
+        f"one oversized result put {huge.retained_bytes()} bytes into a {budget}-byte budget"
+    )
+
+
+# ---------------------------------------------------------------------------------------
+# T-367 (defeat) — the bound named two fields; a third caller-chosen string was retained
+# ---------------------------------------------------------------------------------------
+#
+# WHAT DEFEATED THE FIRST FIX. T-367 named ``url`` and ``body``, and the fix bounded exactly
+# those two — by listing their names in a tuple inside ``_refuse_oversized``. But
+# ``ExtractRequest`` carried a third caller-chosen string, ``observed_at``, with no ceiling
+# at all, and that string is not merely accepted: ``normalise_provenance`` copies it onto
+# ``ClaimProvenance.observed_at``, which is held by the ``ExtractionResult`` AND by every
+# claim inside it — and the ledger retains that result between requests. Measured against
+# the running app before the fix, one request carrying a 30,024-character ``observed_at``:
+#
+#     retained result.provenance.observed_at len = 30024
+#     claims retaining it: 2, each observed_at len = 30024   -> 90,072 bytes per entry
+#     ledger.retained_bytes() = 981   <- the byte budget charged none of it
+#     response bytes: 121,877 from a 74-byte body, with the payload echoed back
+#
+# and at 256 entries (half the published 512-page capacity) that is 23,058,432 bytes
+# retained inside a 256 MiB container, against a ledger that believed it held 251,940.
+#
+# The lesson the gates below encode is NOT "cap observed_at". It is that a hand-written
+# tuple of field names is not a bound on a model: it is a bound on the names somebody
+# remembered, and the next field added is unbounded by default. So the first gate is the
+# structural one — every string field on a request model must declare its own ceiling, or
+# the model refuses to be defined — and the field-by-field gates that follow are its
+# consequences rather than its substance.
+
+
+def _t367b_reset_ledger() -> Any:
+    """The module-scope ledger, emptied. Returns it."""
+    return _t367_reset_ledger()
+
+
+def test_t367b_a_request_model_cannot_leave_a_caller_string_unbounded() -> None:
+    """The fix for "a third field was unbounded" is not "bound the third field".
+
+    ``BoundedTextRequest`` derives the checked list from ``model_fields``, and refuses at
+    class-definition time to define a subclass that leaves a string field without a ceiling.
+    That is what makes the *next* field safe: it is covered because it exists, not because
+    somebody remembered to add its name to a tuple. A model that only bounds the fields it
+    happens to name would pass every other gate in this file and still be one new field away
+    from the defect this ticket is about.
+    """
+    import importlib
+
+    from pydantic import Field
+
+    routes = importlib.import_module("ingest.extraction.routes")
+    base = getattr(routes, "BoundedTextRequest", None)
+    assert base is not None, (
+        "ingest.extraction.routes publishes no BoundedTextRequest: the request models' "
+        "ceilings are still a hand-written list, which is exactly what let observed_at "
+        "through"
+    )
+
+    with pytest.raises(TypeError) as unbounded:
+        type(
+            "UnboundedString",
+            (base,),
+            {"__annotations__": {"note": str}, "note": ""},
+        )
+    assert "note" in str(unbounded.value), str(unbounded.value)
+
+    with pytest.raises(TypeError) as unbounded_list:
+        type(
+            "UnboundedList",
+            (base,),
+            {
+                "__annotations__": {"tags": list[str]},
+                "tags": Field(default_factory=list, json_schema_extra={"max_chars": 16}),
+            },
+        )
+    assert "tags" in str(unbounded_list.value), (
+        "a list of bounded strings is still unbounded if the list itself has no ceiling"
+    )
+
+
+def test_t367b_every_caller_string_on_every_request_model_is_bounded() -> None:
+    """Enumerate the models' string fields and assert each one publishes a ceiling.
+
+    Written as an enumeration rather than as five named assertions on purpose: a test that
+    lists field names fails the same way the fix did. This one reads the model.
+    """
+    import importlib
+
+    routes = importlib.import_module("ingest.extraction.routes")
+
+    for model in (routes.ExtractRequest, routes.StoreCrawlRequest):
+        text_fields = {
+            name
+            for name, info in model.model_fields.items()
+            if routes._carries_text(info.annotation)
+        }
+        bounded = set(model.TEXT_CEILINGS)
+        assert text_fields == bounded, (
+            f"{model.__name__} accepts caller text on {sorted(text_fields - bounded)} with "
+            f"no declared ceiling"
+        )
+        assert text_fields, f"{model.__name__} was read as having no string fields at all"
+        for name, (max_chars, _) in model.TEXT_CEILINGS.items():
+            assert 0 < max_chars <= routes.MAX_PAGE_BODY_CHARS, (
+                f"{model.__name__}.{name} declares a ceiling of {max_chars}"
+            )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "payload"),
+    [
+        (
+            "url",
+            {
+                "url": "https://s.example.com/" + "a" * 30_000,
+                "body": "<p>Orders ship within 2 business days.</p>",
+            },
+        ),
+        (
+            "kind",
+            {
+                "url": "https://s.example.com/p",
+                "body": "<p>Orders ship within 2 business days.</p>",
+                "kind": "k" * 30_000,
+            },
+        ),
+        (
+            "known_hash",
+            {
+                "url": "https://s.example.com/p",
+                "body": "<p>Orders ship within 2 business days.</p>",
+                "known_hash": "h" * 30_000,
+            },
+        ),
+        (
+            "observed_at",
+            {
+                "url": "https://s.example.com/p",
+                "body": "<p>Orders ship within 2 business days.</p>",
+                "observed_at": "9" * 30_000,
+            },
+        ),
+    ],
+)
+def test_t367b_an_oversized_caller_string_is_refused_and_retained_nowhere(
+    field_name: str, payload: dict[str, str]
+) -> None:
+    """Every caller string, driven past its ceiling: clean 4xx, no echo, nothing retained.
+
+    ``observed_at`` is the one that defeated the first fix; the others are here because the
+    reason it was missed applies to all of them equally.
+    """
+    import importlib
+
+    from fastapi.testclient import TestClient
+
+    ledger = _t367b_reset_ledger()
+    try:
+        with TestClient(importlib.import_module("ingest.main").create_app()) as client:
+            response = client.post("/extraction/policy-pages", json=payload)
+
+        assert 400 <= response.status_code < 500, (
+            f"an oversized {field_name} was answered {response.status_code}; an "
+            f"unauthenticated surface must refuse it, and refuse it as a 4xx"
+        )
+        assert len(response.text) < 4096, (
+            f"the refusal of an oversized {field_name} was {len(response.text)} bytes: it is "
+            f"echoing the offending input back to whoever sent it"
+        )
+        assert "a" * 200 not in response.text and "9" * 200 not in response.text, (
+            f"the refusal of an oversized {field_name} quotes the input back"
+        )
+        assert not ledger.hashes and not ledger.results, (
+            f"a refused request left {len(ledger.hashes)} ledger entries"
+        )
+    finally:
+        _t367b_reset_ledger()
+
+
+def test_t367b_a_huge_observed_at_is_not_retained_on_the_result_or_on_any_claim() -> None:
+    """The defeat, measured where it actually lived: in retained state, not in the response.
+
+    A 4xx is not the assertion — the assertion is that no ledger entry, no result provenance
+    and no claim provenance holds the caller's string. Before the fix the same request was
+    answered 200 and left 90,072 bytes of it in the ledger, in three places per entry.
+    """
+    import importlib
+
+    from fastapi.testclient import TestClient
+
+    marker = "ObservedAtOverflowMarker"
+    stamp = marker + "9" * 30_000
+    ledger = _t367b_reset_ledger()
+    try:
+        with TestClient(importlib.import_module("ingest.main").create_app()) as client:
+            response = client.post(
+                "/extraction/policy-pages",
+                json={
+                    "url": "https://store.example.com/policies/observed",
+                    "body": "<p>Orders ship within 2 business days.</p>",
+                    "observed_at": stamp,
+                },
+            )
+
+        assert 400 <= response.status_code < 500, response.status_code
+        assert marker not in response.text, "the refusal echoed the stamp back"
+
+        held: list[str] = []
+        for result in ledger.results.values():
+            held.append(getattr(result.provenance, "observed_at", ""))
+            held.extend(claim.provenance.observed_at for claim in result.all_claims)
+        assert not any(marker in text for text in held), (
+            f"the caller's stamp survived into retained state in {sum(marker in t for t in held)} "
+            f"place(s); this is the retention the ticket exists to close, reached through a "
+            f"field the first fix never named"
+        )
+        assert not ledger.hashes, f"{len(ledger.hashes)} ledger entries after a 4xx"
+    finally:
+        _t367b_reset_ledger()
+
+
+def test_t367b_an_observed_at_that_fits_the_cap_but_is_not_a_date_is_refused() -> None:
+    """A cap alone is the wrong bound for a timestamp.
+
+    ``observed_at`` becomes ``Source.observed_at`` in the graph and is what every freshness
+    and ordering decision downstream reads. ``"not-a-timestamp"`` is fifteen characters — it
+    passes any length ceiling — and then makes those comparisons meaningless for the life of
+    the record. So the length check is the cheap half (it runs first, so no parser is ever
+    pointed at a hostile string) and the parse is the half that decides whether the value is
+    a time at all.
+    """
+    import importlib
+
+    from fastapi.testclient import TestClient
+
+    ledger = _t367b_reset_ledger()
+    url = "https://store.example.com/policies/stamped"
+    try:
+        with TestClient(importlib.import_module("ingest.main").create_app()) as client:
+            for junk in ("not-a-timestamp", "2026-13-45T99:99:99Z", "0", "N/A"):
+                response = client.post(
+                    "/extraction/policy-pages",
+                    json={
+                        "url": url,
+                        "body": "<p>Orders ship within 2 business days.</p>",
+                        "observed_at": junk,
+                    },
+                )
+                assert 400 <= response.status_code < 500, (
+                    f"{junk!r} was accepted as an observation timestamp "
+                    f"({response.status_code}); it is short enough for any length cap and it "
+                    f"is not a date"
+                )
+                assert not ledger.hashes, f"{junk!r} was refused and recorded anyway"
+
+            # And a real one still works, in both shapes this codebase writes.
+            for good in ("2026-01-01T00:00:00Z", "2026-01-01T00:00:00+00:00"):
+                ok = client.post(
+                    "/extraction/policy-pages",
+                    json={
+                        "url": url,
+                        "body": "<p>Orders ship within 2 business days.</p>",
+                        "observed_at": good,
+                    },
+                )
+                assert ok.status_code == 200, (good, ok.text)
+                assert ok.json()["claims"], good
+                assert ledger.results[url].provenance.observed_at == good
+                _t367b_reset_ledger()
+    finally:
+        _t367b_reset_ledger()
+
+
+def test_t367b_a_claim_provenance_refuses_to_hold_a_stamp_that_is_not_a_timestamp() -> None:
+    """The invariant lives with the record, not only with the route that feeds it.
+
+    ``ClaimProvenance`` already refused a blank ``observed_at`` because an unprovenanced
+    claim is indistinguishable from a provenanced one. An unbounded or unparseable stamp is
+    the same failure with a longer string: the record is retained, copied onto every claim,
+    and written into the graph. Enforcing it here is what makes the bound hold for the
+    scheduler and the crawl path too, not only for the one handler that was patched.
+    """
+    from ingest.extraction.claims import MAX_OBSERVED_AT_CHARS, ClaimProvenance, is_timestamp
+
+    ref = "snapshot://store.example.com/policies/x@sha256:" + "0" * 64
+
+    for junk in ("not-a-timestamp", "9" * 30_000, "9" * (MAX_OBSERVED_AT_CHARS + 1)):
+        with pytest.raises(ValueError, match="observed_at") as refused:
+            ClaimProvenance(source="scraped", ref=ref, observed_at=junk)
+        assert junk[:200] not in str(refused.value), (
+            "the ValueError quotes the offending stamp; an exception string is a place "
+            "caller input gets echoed into a log by default"
+        )
+
+    for good in ("2026-01-01T00:00:00Z", "2026-01-01T00:00:00+00:00", "2026-01-01"):
+        assert is_timestamp(good), good
+        assert ClaimProvenance(source="scraped", ref=ref, observed_at=good).observed_at == good
+
+
+def _t367b_result_with_provenance_url(url: str) -> Any:
+    """One result whose single claim's provenance carries ``url``, and nothing else varying."""
+    from ingest.extraction.claims import ClaimProvenance, ExtractedClaim, ExtractionResult
+
+    provenance = ClaimProvenance(
+        source="scraped",
+        ref="snapshot://store.example.com/policies/x@sha256:" + "0" * 64,
+        observed_at="2026-01-01T00:00:00Z",
+        url=url,
+        content_hash="sha256:" + "0" * 64,
+    )
+    claim = ExtractedClaim(
+        key="shipping.dispatch_window_days",
+        value=2,
+        claim_type="dispatch_window",
+        confidence=0.9,
+        provenance=provenance,
+        evidence="ships in two days",
+    )
+    return ExtractionResult(claims=(claim,), content_hash="sha256:" + "0" * 64)
+
+
+def test_t367b_the_ledger_charges_itself_for_the_provenance_it_retains() -> None:
+    """The byte budget has to see every retained string, or it is not a budget.
+
+    Measured before the fix: an entry holding 90,072 bytes of caller-supplied ``observed_at``
+    was charged 981 bytes, because the cost function listed six field names on a claim and
+    charged only ``ref`` on the result — a claim's whole ``provenance`` was in none of the
+    lists. The gate is a *delta*, not a floor: two results identical except for 4,000
+    characters living on a claim's provenance must differ in charge by at least those
+    characters. A cost function blind to provenance answers zero here.
+    """
+    import importlib
+
+    differential = importlib.import_module("ingest.extraction.differential")
+
+    padding = 4_000
+    lean = _t367b_result_with_provenance_url("https://store.example.com/p")
+    fat = _t367b_result_with_provenance_url("https://store.example.com/p" + "a" * padding)
+
+    delta = differential._result_cost(fat) - differential._result_cost(lean)
+    assert delta >= padding, (
+        f"{padding} extra characters retained on a claim's provenance moved the ledger's "
+        f"charge by {delta} bytes; the budget cannot bound text it does not count"
+    )
+
+    # And the same text, charged through the ledger the endpoint actually writes to.
+    ledger = differential.ExtractionLedger()
+    ledger.record("https://store.example.com/p", "sha256:aaa", lean)
+    lean_bytes = ledger.retained_bytes()
+    ledger.record("https://store.example.com/p", "sha256:aaa", fat)
+    assert ledger.retained_bytes() - lean_bytes >= padding, (
+        "the ledger's own retained_bytes() did not move when a retained provenance grew"
+    )

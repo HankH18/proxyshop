@@ -37,6 +37,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 from ..profile import BuyerProfile, IdentityLeak, publish_profile
 from ..vault import PostgresPseudonymStore, PseudonymVault, normalise_buyer_key
+from .delivery import MagicLinkUndeliverable, build_magic_link_delivery
 from .magic_link import (
     DEFAULT_LINK_TTL,
     DEFAULT_MAX_PENDING,
@@ -52,12 +53,19 @@ _log = logging.getLogger(__name__)
 
 __all__ = [
     "APP_DSN_ENV",
+    "BUYER_SVC_MEMORY_LIMIT_BYTES",
     "DEFAULT_MAGIC_LINK_RATE_LIMIT",
     "DEFAULT_MAGIC_LINK_RATE_SUBJECTS",
     "DEFAULT_MAGIC_LINK_RATE_WINDOW",
+    "DOT_INSENSITIVE_MAIL_DOMAINS",
     "MAGIC_LINK_RATE_LIMIT_ENV",
     "MAGIC_LINK_RATE_SUBJECTS_ENV",
+    "MAGIC_LINK_RATE_SUBJECT_BYTES",
     "MAGIC_LINK_RATE_WINDOW_ENV",
+    "MAX_ENV_INT_DIGITS",
+    "MAX_MAGIC_LINK_RATE_SUBJECTS",
+    "MAX_MAGIC_LINK_RATE_WINDOW",
+    "MIN_MAGIC_LINK_RATE_WINDOW",
     "VAULT_DSN_ENV",
     "WORKER_COUNT_ENVS",
     "MagicLinkRateLimited",
@@ -71,6 +79,7 @@ __all__ = [
     "build_rate_limiter",
     "get_auth_service",
     "get_rate_limiter",
+    "rate_limit_subject",
     "router",
     "set_account_directory",
     "set_auth_service",
@@ -145,6 +154,101 @@ MAGIC_LINK_RATE_WINDOW_ENV = "PROXYSHOP_BUYER_MAGIC_LINK_RATE_WINDOW_SECONDS"
 #: this an operator who needed it raised could only get it in a release.
 MAGIC_LINK_RATE_SUBJECTS_ENV = "PROXYSHOP_BUYER_MAGIC_LINK_RATE_SUBJECTS"
 
+#: The longest window :data:`MAGIC_LINK_RATE_WINDOW_ENV` may ask for (T-374). EQUAL to
+#: :data:`~buyer_svc.auth.magic_link.DEFAULT_LINK_TTL`, and that is the derivation rather than
+#: a coincidence.
+#:
+#: :class:`MagicLinkRateLimiter` explains that its eviction branch is safe not because of the
+#: eviction rule but because the branch is unreachable at the shipped ratio of ceilings. That
+#: argument has a hidden premise, and the premise is this constant: a tracked address is one
+#: this service mailed a link to *inside the window*, so while the window is no longer than
+#: the link TTL every tracked entry still has a live record in the pending table, and the
+#: tracked table therefore cannot outgrow
+#: :data:`~buyer_svc.auth.magic_link.DEFAULT_MAX_PENDING` — an order of magnitude below the
+#: subject ceiling. Stretch the window past the TTL and the two tables decouple: pending stays
+#: pinned at its ceiling while tracked climbs one flood per TTL, reaches the subject ceiling,
+#: and ``max_subjects`` fresh admissions then hand a chosen victim their budget back. MEASURED
+#: at scaled proportions (window 4x the TTL, pending ceiling 10): tracked climbed
+#: 10 -> 20 -> 30 -> 40 while pending stayed at 10.
+#:
+#: An operator who wants a *tighter* budget therefore lowers
+#: :data:`MAGIC_LINK_RATE_LIMIT_ENV` rather than lengthening the window; a longer window is
+#: not a tightening this service can hold safely.
+MAX_MAGIC_LINK_RATE_WINDOW = DEFAULT_LINK_TTL
+
+#: The shortest window that override may ask for (T-374), and the other way the same knob
+#: switches the limiter off. ``_positive_int_from_env`` refuses only values below 1, so a
+#: window of one second was accepted: at :data:`DEFAULT_MAGIC_LINK_RATE_LIMIT` that is five
+#: login links per second into one mailbox, which is the flood the limiter exists to stop
+#: rather than a budget. One minute is the shortest span over which the shipped budget is
+#: still a rate a mailbox survives — 300 links an hour at the default limit — and it is the
+#: value the existing override test uses, so the knob keeps the range an operator was already
+#: given.
+MIN_MAGIC_LINK_RATE_WINDOW = timedelta(seconds=60)
+
+#: Bytes one tracked address costs at a full budget. MEASURED with :mod:`tracemalloc` over
+#: 100,000 entries of the real shape — an ``OrderedDict`` keyed by an address string, valued
+#: by a list of :data:`DEFAULT_MAGIC_LINK_RATE_LIMIT` distinct ``datetime`` objects: 522.4
+#: bytes per entry on CPython 3.13, rounded up. It is the input to
+#: :data:`MAX_MAGIC_LINK_RATE_SUBJECTS` and exists so that bound is arithmetic rather than
+#: taste.
+MAGIC_LINK_RATE_SUBJECT_BYTES = 525
+
+#: The memory this service is given. ``apps/buyer/compose.yaml`` sets ``mem_limit: 256m`` on
+#: ``buyer-svc`` (D10), so this is not a guess about the host — it is the number the container
+#: is killed at.
+BUYER_SVC_MEMORY_LIMIT_BYTES = 256 * 1024 * 1024
+
+#: The largest tracked-address ceiling :data:`MAGIC_LINK_RATE_SUBJECTS_ENV` may ask for
+#: (T-376). The override had a floor and no roof, so
+#: ``PROXYSHOP_BUYER_MAGIC_LINK_RATE_SUBJECTS=99999999999999999999999`` was accepted verbatim
+#: and one typo'd extra digit removed the memory bound the ceiling exists to provide — "a
+#: limiter that fixes flooding by growing without limit has moved the denial of service rather
+#: than closed it", which is :data:`DEFAULT_MAGIC_LINK_RATE_SUBJECTS`'s own docstring
+#: describing what the constant is for.
+#:
+#: Derived, not chosen: a full table here is ``250,000 * 525 B`` = 125 MiB, just under half of
+#: :data:`BUYER_SVC_MEMORY_LIMIT_BYTES`, leaving the other half for the pending-link table,
+#: the session store and everything else the process holds. Raising the ceiling stays
+#: available — it is 2.5x the shipped default — and the direction that ends in an OOM kill
+#: does not.
+MAX_MAGIC_LINK_RATE_SUBJECTS = 250_000
+
+#: The longest a configuration integer may be, in characters, before it is refused WITHOUT
+#: being parsed (see :func:`_positive_int_from_env`).
+#:
+#: This is a bound on the DIGIT COUNT and not on the value, because a bound on the value is
+#: reached too late. Python integers are arbitrary precision, so ``int("9" * 400)`` succeeds
+#: and every range check downstream then happens on a number that arithmetic cannot survive:
+#: ``timedelta`` overflows at ~1e14 seconds and ``int / int`` at ~1.8e308, and both of those
+#: sat *inside* configuration paths reached from the unauthenticated magic-link route, so an
+#: over-long override produced an unhandled 500 rather than the refusal the check intended.
+#: Refusing on length converts the input's SIZE — the only thing that is unbounded — into a
+#: cheap comparison made before any conversion happens, which is the one form of the check
+#: that holds at every magnitude. "Use a bigger float" is not an alternative; there is no
+#: float big enough.
+#:
+#: Twenty admits every value that fits in an unsigned 64-bit integer, and the largest of these
+#: knobs can legitimately be asked for is :data:`MAX_MAGIC_LINK_RATE_SUBJECTS` at six digits,
+#: so nothing an operator could mean is refused here — only input that was already going to be
+#: refused on range, refused before it costs anything.
+MAX_ENV_INT_DIGITS = 20
+
+#: Mail domains whose provider documents dots in the local part as insignificant, so
+#: ``d.a.n.a@`` and ``dana@`` are ONE mailbox and therefore one budget (T-356).
+#:
+#: Deliberately a short allow-list rather than a rule applied everywhere. Stripping dots
+#: universally is the normalisation that is too aggressive: at most domains ``john.smith@``
+#: and ``johnsmith@`` are two different people, and folding them gives one stranger the power
+#: to spend the other's login budget. Plus-tagging is handled for every domain because
+#: sub-addressing is RFC 5233's convention and is what the measured attack used; dot-folding
+#: is handled only where the provider says it is true.
+DOT_INSENSITIVE_MAIL_DOMAINS = frozenset({"gmail.com", "googlemail.com"})
+
+#: Domains that are a second spelling of another provider's. Google delivers both to one
+#: mailbox, so keying them apart would leave the same escape open one substitution wider.
+_MAIL_DOMAIN_ALIASES = {"googlemail.com": "gmail.com"}
+
 _service: MagicLinkAuth | None = None
 _accounts: AccountDirectory | None = None
 _accounts_lock = threading.Lock()
@@ -171,6 +275,65 @@ class MagicLinkRateLimited(RuntimeError):
     def __init__(self, retry_after: int) -> None:
         super().__init__(f"this address has reached its login-link budget; retry in {retry_after}s")
         self.retry_after = retry_after
+
+
+def rate_limit_subject(email: str) -> str:
+    """The budget key for ``email``: one key per MAILBOX rather than one per spelling (T-356).
+
+    :func:`~buyer_svc.vault.normalise_buyer_key` strips and case-folds, which is the whole of
+    what it did, so ``dana+1@x``, ``dana+2@x`` … were separate keys with separate budgets all
+    landing in one physical mailbox. MEASURED against the served app: 40 of 40 requests for
+    ``dana.reyes+0@`` through ``dana.reyes+39@`` accepted under a configured budget of five.
+    Case and whitespace were already handled; the domain of the normalisation was simply too
+    narrow for what the limiter claims to protect.
+
+    The rule, stated so its risk is stateable:
+
+    * case-fold and strip, exactly as before — this function starts from the vault's own
+      normalisation rather than replacing it;
+    * drop a ``+`` tag from the local part, at every domain. Sub-addressing is RFC 5233's
+      convention and every large provider implements it;
+    * drop dots from the local part ONLY at :data:`DOT_INSENSITIVE_MAIL_DOMAINS`, where the
+      provider documents them as insignificant, and fold ``googlemail.com`` onto ``gmail.com``.
+
+    **The risk, and why it is bounded.** Normalisation that is too aggressive merges DISTINCT
+    mailboxes, and the cost of that is a real buyer locked out of logging in by a stranger's
+    traffic — worse than the abuse being closed. So the aggressive half (dots) is limited to
+    the providers where it is a documented fact, and the general half (plus tags) is limited
+    to a convention that providers implement rather than a guess. Where the rule is
+    nonetheless wrong — a domain that really does deliver ``a+b@`` to a different person than
+    ``a@`` — two mailboxes share five links per fifteen minutes. That is a delay measured in
+    minutes, never a lockout, it is confined to one domain, and it never merges two buyers'
+    identities: this key is used for **nothing but the budget**.
+
+    That last sentence is the load-bearing one. ``request_login``, the account directory and
+    the vault all keep the address the buyer actually typed, so the mail goes to the mailbox
+    they named and ``dana+work@`` and ``dana+home@`` remain two accounts with two pseudonym
+    histories. Widening :func:`~buyer_svc.vault.normalise_buyer_key` itself would merge those
+    records repo-wide, which is why T-356 records it as its own ticket rather than a lane edit.
+
+    Raises:
+        ValueError: ``email`` is not usable as a key — inherited from
+            :func:`~buyer_svc.vault.normalise_buyer_key`, and unreachable from the route,
+            whose ``EmailStr`` has already refused an empty body.
+    """
+    key = normalise_buyer_key(email)
+    local, at, domain = key.rpartition("@")
+    if not at or not local or not domain:
+        # Not an address this function can reason about (no ``@``, or nothing on one side of
+        # it). Key it exactly as given rather than inventing a mailbox for it.
+        return key
+    domain = _MAIL_DOMAIN_ALIASES.get(domain, domain)
+    tag = local.find("+")
+    if tag > 0:
+        # ``> 0`` and not ``>= 0``: a local part that BEGINS with a plus has no tag to strip,
+        # and stripping anyway would collapse every such address at a domain onto one key.
+        local = local[:tag]
+    if domain in DOT_INSENSITIVE_MAIL_DOMAINS:
+        local = local.replace(".", "")
+    if not local:
+        return key
+    return f"{local}@{domain}"
 
 
 class MagicLinkRateLimiter:
@@ -240,11 +403,15 @@ class MagicLinkRateLimiter:
     each address's newest admission, which is exactly the order they become forgettable in,
     so a request collects what has expired and stops.
 
-    The subject is the address, normalised through
-    :func:`~buyer_svc.vault.normalise_buyer_key`, because the mailbox is the thing being
-    protected and ``Dana@Example.com`` reaches the same one as ``dana@example.com``. It is
-    kept **only** as a key here and never logged; the limiter answers "how many" and holds
-    nothing else about the buyer.
+    The subject is the address normalised through :func:`rate_limit_subject`, because the
+    mailbox is the thing being protected and ``Dana@Example.com``,
+    ``dana+shopping@example.com`` and ``dana@example.com`` all reach the same one. This used to
+    be :func:`~buyer_svc.vault.normalise_buyer_key`, which case-folds and strips and stops
+    there, so the sentence above was a claim the code did not keep: it protected the STRING,
+    and forty plus-tags bought forty budgets into one mailbox (T-356, measured over the real
+    route). :func:`rate_limit_subject` states the rule and its risk. It is kept **only** as a
+    key here and never logged; the limiter answers "how many" and holds nothing else about the
+    buyer.
 
     What it is not
     --------------
@@ -346,7 +513,7 @@ class MagicLinkRateLimiter:
             ValueError: ``email`` is not usable as a key. Unreachable from the route, whose
                 ``EmailStr`` has already refused an empty body.
         """
-        subject = normalise_buyer_key(email)
+        subject = rate_limit_subject(email)
         now = self._clock()
         with self._lock:
             self._forget_stale(now)
@@ -389,8 +556,12 @@ class MagicLinkRateLimiter:
         admissions for one address the newest is removed rather than "this caller's" — they
         are the same value to a hundredth of a second and to every question this table
         answers. Silently does nothing when there is nothing to give back.
+
+        Keyed through :func:`rate_limit_subject`, the same function :meth:`check` charges
+        through — the two have to agree, or a refund lands on a key nothing was charged to and
+        the admission it was meant to return stays spent for a whole window.
         """
-        subject = normalise_buyer_key(email)
+        subject = rate_limit_subject(email)
         with self._lock:
             hits = self._hits.get(subject)
             if not hits:
@@ -415,8 +586,16 @@ def _configured_worker_count() -> tuple[str, int] | None:
         raw = os.environ.get(name)
         if not raw:
             continue
+        text = raw.strip()
+        if len(text) > MAX_ENV_INT_DIGITS:
+            # Same shape as `_positive_int_from_env`, gated the same way and for the same
+            # reason: `count` is interpolated into the `ProcessLocalStateUnsafe` message
+            # below, twice, and `int(<n digits>)` is quadratic in n. Neither the parse nor
+            # the message should be sized by an environment variable. A process manager
+            # would not read a 400-digit worker count as a worker count either.
+            continue
         try:
-            count = int(raw.strip())
+            count = int(text)
         except ValueError:
             continue  # not a worker count; a process manager would ignore it too
         if count > 1:
@@ -658,6 +837,17 @@ def build_auth_service() -> MagicLinkAuth:
       ``app``-role connection. ``apps/buyer/compose.yaml`` has been handing this service that
       DSN while no line of ``apps/buyer`` read it.
 
+    * **The delivery transport** (T-361), and it is the one that was missing entirely. The
+      builder decided everything above and never decided where the link goes, so
+      ``build_auth_service().deliver is magic_link._drop`` was True on every production path:
+      the route answered ``202 Accepted`` and the token was discarded in-process, which means
+      no deployment of this service could complete a login. It is now
+      :func:`~buyer_svc.auth.delivery.build_magic_link_delivery`'s output — a real SMTP
+      sender when the transport variables are set, and a callable that REFUSES when they are
+      not. Never ``_drop``: a ``deliver`` that returns normally having sent nothing is
+      indistinguishable from a working one to everything above it, which is exactly how this
+      went unnoticed long enough to be closed as refuted.
+
     * **The worker count**, below.
 
     Raises:
@@ -668,6 +858,10 @@ def build_auth_service() -> MagicLinkAuth:
             balancer roughly half of logins fail, with a ``401`` indistinguishable from a
             genuinely bad link. Refusing the configuration is louder and more honest than
             serving it at a coin-flip success rate.
+        MagicLinkTransportMisconfigured: a mail transport is half described — an MTA named
+            with no sender, a base URL that is not a URL. Refused here rather than demoted to
+            "no transport", because a deployment that meant to send mail and silently does
+            not is the state T-361 is about.
     """
     configured = _configured_worker_count()
     if configured is not None:
@@ -681,12 +875,15 @@ def build_auth_service() -> MagicLinkAuth:
     vault = _vault_from_env()
     accounts = account_directory()
     publish = build_profile_publisher()
+    # Built BEFORE the service, so a half-configured transport stops the boot rather than the
+    # first login: a service that exists and cannot mail is the shape of this defect.
+    deliver = build_magic_link_delivery()
     # Spelled out twice rather than assembled into a ``**kwargs`` dict: ``vault`` has a
     # default factory, so there is no value meaning "use the default", and a service built
     # from an unpacked mapping is one no reader — and no static check — can see the wiring of.
     if vault is None:
-        return MagicLinkAuth(accounts=accounts, publish=publish)
-    return MagicLinkAuth(vault=vault, accounts=accounts, publish=publish)
+        return MagicLinkAuth(accounts=accounts, publish=publish, deliver=deliver)
+    return MagicLinkAuth(vault=vault, accounts=accounts, publish=publish, deliver=deliver)
 
 
 def auth_service() -> MagicLinkAuth:
@@ -716,22 +913,116 @@ def get_auth_service() -> MagicLinkAuth:
 def _positive_int_from_env(name: str) -> int | None:
     """A deployment override, or ``None`` when it is unset or unusable.
 
-    An unparseable or non-positive value is ignored with a log line rather than crashing the
-    boot: the failure mode of a typo'd rate limit must not be a service that will not start,
-    and it must not silently be "no limit" either. The default stands.
+    An unparseable, non-positive or over-long value is ignored with a log line rather than
+    crashing the boot: the failure mode of a typo'd rate limit must not be a service that will
+    not start, and it must not silently be "no limit" either. The default stands.
+
+    The LENGTH check is the one that has to come first, and it is made *before* ``int()``
+    rather than after. This function used to hand every caller an integer of unbounded
+    magnitude, and each caller then did arithmetic on it: :func:`build_rate_limiter`
+    multiplied it by a per-address byte cost and divided the product into a float,
+    :func:`_bounded_window_from_env` passed it to ``timedelta``. Both raise ``OverflowError``
+    past a magnitude — ~1.8e308 for the float, ~1e14 seconds for ``timedelta`` — and both sit
+    on the boot path of an unauthenticated route, so a long enough number in one environment
+    variable turned each of those refusals into an unhandled 500. A guard whose refusal path
+    crashes is worse than the hole it closed.
+
+    Bounding :data:`MAX_ENV_INT_DIGITS` characters of INPUT, rather than any ceiling on the
+    parsed value, is what makes that hold at *every* magnitude including inputs of thousands
+    of digits: past the bound nothing is converted, so no arithmetic downstream is ever handed
+    a number it cannot survive, and the refusal costs one ``len()``. Every value inside the
+    bound is small enough that no arithmetic in this module can overflow on it.
+
+    The refused value is echoed back only in a truncated prefix, for the same reason it is
+    refused: it is the one thing here whose size the caller chose, and repeating megabytes of
+    it into the log turns a refusal into the amplifier.
     """
     raw = os.environ.get(name)
     if not raw:
         return None
+    text = raw.strip()
+    if len(text) > MAX_ENV_INT_DIGITS:
+        _log.warning(
+            "%s is %d characters, past the %d-digit ceiling on a configuration integer; "
+            "keeping the default (value begins %r)",
+            name,
+            len(text),
+            MAX_ENV_INT_DIGITS,
+            text[:MAX_ENV_INT_DIGITS],
+        )
+        return None
     try:
-        value = int(raw.strip())
+        value = int(text)
     except ValueError:
-        _log.warning("%s=%r is not an integer; keeping the default", name, raw)
+        _log.warning("%s=%r is not an integer; keeping the default", name, text)
         return None
     if value < 1:
-        _log.warning("%s=%r is not positive; keeping the default", name, raw)
+        _log.warning("%s=%r is not positive; keeping the default", name, text)
         return None
     return value
+
+
+def _bounded_window_from_env() -> int | None:
+    """The rate-limit window an operator asked for, in seconds, or ``None`` to keep the default.
+
+    ``None`` for unset, for unparseable, and — this is T-374 — for a value outside
+    ``MIN_MAGIC_LINK_RATE_WINDOW .. MAX_MAGIC_LINK_RATE_WINDOW``. That range is not
+    conservatism: both ends are a documented mechanism.
+
+    * **Above the roof** the tracked table stops draining with the pending table. A tracked
+      address is one this service mailed a link to inside the window, so while the window is
+      within the link TTL every tracked entry has a live pending record and the tracked table
+      is capped by the pending ceiling — an order of magnitude below ``max_subjects``, which
+      is exactly why :meth:`MagicLinkRateLimiter.check`'s eviction branch is unreachable.
+      Stretch the window and tracked climbs one flood per TTL while pending stays pinned, the
+      branch becomes reachable, and ``max_subjects`` fresh admissions reset a chosen victim's
+      budget — the attack the subject-ceiling floor was added to stop, re-armed through a
+      different variable.
+    * **Below the floor** the same knob switches the limiter off. Five links per second into
+      one mailbox is the flood, not the budget.
+
+    Refused values keep :data:`DEFAULT_MAGIC_LINK_RATE_WINDOW` and log at WARNING, matching
+    ``_positive_int_from_env``'s rule that a typo'd rate limit must not stop the service
+    booting and must not silently mean "no limit" either.
+    """
+    seconds = _positive_int_from_env(MAGIC_LINK_RATE_WINDOW_ENV)
+    if seconds is None:
+        return None
+    # Both bounds are compared in INTEGER SECONDS, and no ``timedelta`` is built from the
+    # override until it is known to be in range. `timedelta` keeps its day count in a C int
+    # and raises `OverflowError: Python int too large to convert to C int` past roughly 1e14
+    # seconds — a twenty-digit override reached it — so constructing one first meant the
+    # conversion blew up BEFORE either check below could refuse the value, on the boot path of
+    # a route that takes no credential: an unhandled 500 in place of a clean refusal. The
+    # comparison never needed a duration object; only the accepted value does, and that one is
+    # built by `build_rate_limiter` from the seconds returned here.
+    max_seconds = int(MAX_MAGIC_LINK_RATE_WINDOW.total_seconds())
+    min_seconds = int(MIN_MAGIC_LINK_RATE_WINDOW.total_seconds())
+    if seconds > max_seconds:
+        _log.warning(
+            "%s=%d is longer than the %ds link TTL, which decouples the limiter's tracked "
+            "table from the pending-link table and re-arms a targeted budget reset; keeping "
+            "the default of %ds. Tighten %s instead.",
+            MAGIC_LINK_RATE_WINDOW_ENV,
+            seconds,
+            max_seconds,
+            int(DEFAULT_MAGIC_LINK_RATE_WINDOW.total_seconds()),
+            MAGIC_LINK_RATE_LIMIT_ENV,
+        )
+        return None
+    if seconds < min_seconds:
+        _log.warning(
+            "%s=%d is shorter than the %ds floor, which admits %d links per %ds into one "
+            "mailbox and is the flood rather than the budget; keeping the default of %ds",
+            MAGIC_LINK_RATE_WINDOW_ENV,
+            seconds,
+            min_seconds,
+            DEFAULT_MAGIC_LINK_RATE_LIMIT,
+            seconds,
+            int(DEFAULT_MAGIC_LINK_RATE_WINDOW.total_seconds()),
+        )
+        return None
+    return seconds
 
 
 def build_rate_limiter() -> MagicLinkRateLimiter:
@@ -743,22 +1034,68 @@ def build_rate_limiter() -> MagicLinkRateLimiter:
     :data:`DEFAULT_MAGIC_LINK_RATE_WINDOW` over at most
     :data:`DEFAULT_MAGIC_LINK_RATE_SUBJECTS` addresses.
 
-    The subject ceiling is checked against something other than "is it a positive integer":
-    at or below :data:`~buyer_svc.auth.magic_link.DEFAULT_MAX_PENDING` it is refused with a
-    warning, because that setting arms the targeted budget reset described on
-    :class:`MagicLinkRateLimiter`.
+    Every one of the three is checked against something other than "is it a positive
+    integer", because all three have a range outside which they stop being the knob they look
+    like:
 
-    It is NOT the only override that can make this service less safe, and an earlier version
-    of this docstring said it was — which would point a reader away from the others rather
-    than at them. :data:`MAGIC_LINK_RATE_WINDOW_ENV` is unvalidated and the eviction branch's
-    safety rests on tracked entries and pending links draining together, which holds only
-    while the window matches the link TTL; and the subject ceiling itself is checked for a
-    floor and not a roof. Both are open findings against this module rather than something
-    this function currently handles.
+    * the **subject ceiling** is refused at or below
+      :data:`~buyer_svc.auth.magic_link.DEFAULT_MAX_PENDING`, which arms the targeted budget
+      reset described on :class:`MagicLinkRateLimiter`, and above
+      :data:`MAX_MAGIC_LINK_RATE_SUBJECTS`, past which the table it bounds no longer fits in
+      the memory this service is given (T-376);
+    * the **window** is refused outside
+      ``MIN_MAGIC_LINK_RATE_WINDOW .. MAX_MAGIC_LINK_RATE_WINDOW``. Longer than the link TTL
+      it decouples the tracked table from the pending table and re-arms that same reset from
+      the other direction; shorter than a minute the budget stops being a rate a mailbox
+      survives (T-374).
+
+    An earlier version of this docstring called the subject ceiling "the one override that
+    can make the service LESS safe", which was false in a way that pointed a reader away from
+    the window rather than at it: the window was unvalidated, and 86400 and 31536000 were both
+    accepted in silence.
+
+    Out of range is REFUSED and logged, never clamped: the safe default stands. Clamping to a
+    number nobody asked for is how an operator ends up believing a setting took effect when
+    something else did — and the default is the value this module's reasoning is written
+    about, so falling back to it is the one choice that keeps the code and its documentation
+    describing the same service.
     """
     limit = _positive_int_from_env(MAGIC_LINK_RATE_LIMIT_ENV)
-    seconds = _positive_int_from_env(MAGIC_LINK_RATE_WINDOW_ENV)
+    seconds = _bounded_window_from_env()
     subjects = _positive_int_from_env(MAGIC_LINK_RATE_SUBJECTS_ENV)
+    if subjects is not None and subjects > MAX_MAGIC_LINK_RATE_SUBJECTS:
+        # T-376. The floor below is about safety; this is about the process surviving its own
+        # ceiling. `_positive_int_from_env` used to accept any positive integer, so one extra
+        # digit — 99999999999999999999999 was the reproduction — removed the memory bound the
+        # constant exists to be. Python's ints do not overflow, so nothing complained until the
+        # table was large enough to be OOM-killed, and a limiter that dies of its own table has
+        # moved the denial of service rather than closed it.
+        #
+        # That input is now stopped one step earlier, by `MAX_ENV_INT_DIGITS`, and this branch
+        # is what refuses everything between `MAX_MAGIC_LINK_RATE_SUBJECTS` and twenty digits.
+        # Both are needed and neither replaces the other: the length gate is what makes the
+        # *arithmetic* below safe at every magnitude, and this comparison is what makes the
+        # *memory bound* mean 250,000 rather than 10^20.
+        #
+        # The MiB figures are integer arithmetic on purpose. A logging argument is evaluated
+        # EAGERLY — the expression runs before the logger is consulted, so it runs even under
+        # `logging.disable(CRITICAL)` and even at a level nothing is emitted at — and the
+        # float form of this line (`subjects * BYTES / 1024 / 1024`) raised
+        # "OverflowError: integer division result too large for a float" once the product
+        # passed the float ceiling. That made THIS refusal the crash: a 500 on an
+        # unauthenticated route, reached by making the refused number bigger. `//` on Python
+        # ints cannot overflow at any magnitude, `MAX_ENV_INT_DIGITS` keeps `subjects` short
+        # enough to format, and the two together are why this line is now safe at any input.
+        _log.warning(
+            "%s=%d would let the limiter hold %d MiB of tracked addresses against a %d "
+            "MiB container limit; keeping the default of %d",
+            MAGIC_LINK_RATE_SUBJECTS_ENV,
+            subjects,
+            subjects * MAGIC_LINK_RATE_SUBJECT_BYTES // (1024 * 1024),
+            BUYER_SVC_MEMORY_LIMIT_BYTES // (1024 * 1024),
+            DEFAULT_MAGIC_LINK_RATE_SUBJECTS,
+        )
+        subjects = None
     if subjects is not None and subjects <= DEFAULT_MAX_PENDING:
         # Refused, not honoured. A ceiling at or below the pending-link ceiling is the one
         # setting that arms a targeted budget reset: the tracked table can then be filled with
@@ -942,6 +1279,35 @@ def request_magic_link(
         limiter.refund(str(body.email))
         _log.warning("magic-link refused: the pending-link table is at its ceiling")
         raise _refuse_link(int(DEFAULT_LINK_TTL.total_seconds()), exc) from exc
+    except MagicLinkUndeliverable as exc:
+        # T-361. This deployment has no mail transport, so the link was minted and handed to a
+        # transport that refuses. Answer 503 — the buyer must not be told a mail is coming.
+        # Before this the answer was 202 and `_drop` swallowed the token, which is the whole
+        # ticket: the login gesture could not complete in any deployment and nothing said so.
+        #
+        # NOT collapsed into the 429 above, and not `_LINK_REFUSED_DETAIL`. Those two refusals
+        # are one message because telling them apart would let an unauthenticated caller read
+        # the service's STATE — how full its table is, whether this address has been asking.
+        # This one is not state: it is the same answer to every caller for every address until
+        # an operator changes the configuration, so it is no oracle, and saying it plainly is
+        # what turns a silent outage into a fixable one. `str(exc)` names the variables and
+        # nothing about the request; see `_undeliverable`.
+        #
+        # The admission is NOT refunded and the pending record is left to expire. Refunding
+        # here would be safe on its own terms — nothing was mailed — but it would put a second
+        # "refund on failure" path next to the one whose comment above explains why
+        # generalising it turns a flaky transport into a mailbomb, and it buys a caller
+        # nothing on a service where every login is refused anyway. The pending table stays
+        # bounded by `max_pending` either way.
+        _log.error("magic-link refused: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "no login link was sent: this deployment has no magic-link mail transport "
+                "configured"
+            ),
+            headers={"Retry-After": str(int(DEFAULT_LINK_TTL.total_seconds()))},
+        ) from exc
     return MagicLinkAccepted(expires_at=issued.expires_at)
 
 

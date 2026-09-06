@@ -15,6 +15,22 @@ and a database-backed sibling is a separate object that answers the same three m
 **Scoping is per signer, never global.** Two sellers picking the same nonce string is not
 a replay; one seller reusing theirs is. The key is therefore `(signer_id, nonce)`, which
 is also the uniqueness constraint the migration carries.
+
+**Eviction is a policy, and it has two rules (T-378).** `purge_expired` used to exist with
+no caller at all, which made the nonce COUNT grow with process lifetime even though each
+nonce's LENGTH was bounded: measured, 200 admitted bids retained 200 entries and 74,504
+bytes with `retain_until` populated and never consulted. Both rules are now here, and both
+lean the same way — a store that forgets too early is not a bounded replay memory, it is an
+absent one:
+
+1. **Expiry.** `purge_expired` is the only thing that drops an entry, and it drops one only
+   once its retention window has strictly closed. `door.py` runs it on every submission that
+   reaches the replay gate, at the same instant it judges the rest of the submission by.
+2. **A hard ceiling**, `MAX_TRACKED_NONCES`. Expiry alone bounds *rate x window*, which is
+   not a bound. At the ceiling this store **refuses the new nonce** rather than evicting one
+   that is still inside its window: an LRU or a random eviction here would drop precisely the
+   entry whose auction is still open, trading a memory bound for a replay hole. Refusing
+   costs an honest submitter one retry; evicting costs the property this class exists for.
 """
 
 from __future__ import annotations
@@ -24,18 +40,64 @@ from datetime import datetime
 
 from contracts.boundary import parse_timestamp
 
-__all__ = ["NonceStore"]
+__all__ = ["MAX_TRACKED_NONCES", "NonceStore", "NonceStoreFull"]
+
+#: The most `(signer_id, nonce)` pairs one process-local store will hold at once.
+#:
+#: Derived, not picked. T-378 measured this exact structure at **74,504 bytes for 200
+#: entries** — 373 bytes per pair, `sys.getsizeof` over the dict and both key strings —
+#: and `apps/exchange/compose.yaml` caps the exchange container at `mem_limit: 256m`, which
+#: is the process this store lives in. 32,768 pairs is therefore ~11.9 MiB, under 5% of the
+#: container's whole budget, and it is a power of two so the dict's growth stops on a
+#: resize boundary rather than mid-doubling.
+#:
+#: It is also far above any honest working set: entries survive only until their auction
+#: closes or their `issued_at` ages out of the door's freshness window (300s by default), so
+#: reaching 32,768 means one process took ~109 admitted bids per second sustained across
+#: that window — two orders of magnitude past what a single uvicorn worker holding a
+#: FastAPI app in 256 MiB serves. Hitting this ceiling is a signal, not a routine.
+MAX_TRACKED_NONCES = 32_768
+
+
+class NonceStoreFull(RuntimeError):
+    """The store is at `max_entries` and every entry it holds is still inside its window.
+
+    Raised by `consume`, and it is deliberately NOT a `False` return: `False` means "this
+    pair was already spent", which is a verdict about the *submitter*, and answering it here
+    would log an honest seller as a replayer for our own capacity problem. `door.py` catches
+    this by name and refuses `replay_memory_exhausted`.
+
+    A separate type rather than a flag because there is no safe fallback for the caller to
+    choose: admitting a submission whose nonce could not be recorded is admitting an
+    unlimited replay of it, so the only correct handling is a refusal.
+    """
 
 
 class NonceStore:
     """An in-memory, single-process record of which `(signer_id, nonce)` pairs are spent.
 
-    Retention is bounded by the auction the nonce was spent in, not by a global TTL. A
-    nonce only has to be remembered for as long as a replay of it could still win
-    something, and that is exactly until the auction's deadline has passed.
+    Retention is bounded by the submission itself, not by a global TTL. A nonce only has to
+    be remembered for as long as a replay of it could still win something, and the caller is
+    the one who knows when that is: `door.py::_nonce_retention` hands over the auction's
+    deadline when the auction has one, and the freshness horizon `issued_at + window` when it
+    does not, because a replay of the same signed bytes is refused `issued_at_stale` past
+    that instant. This class does not compute either; it stores what it is told and forgets
+    strictly after it.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_entries: int = MAX_TRACKED_NONCES) -> None:
+        """`max_entries` overrides `MAX_TRACKED_NONCES` for one store.
+
+        It exists so a test can drive the ceiling in a few calls instead of 32,768, and so a
+        deployment that knows its own memory budget can say so. A non-positive or non-integral
+        value is refused at construction rather than silently treated as "unbounded" — an
+        unbounded replay memory is the defect this ceiling closes (T-378).
+        """
+        if isinstance(max_entries, bool) or not isinstance(max_entries, int):
+            raise TypeError(f"max_entries must be an int, not {type(max_entries).__name__}")
+        if max_entries < 1:
+            raise ValueError(f"max_entries must be at least 1, not {max_entries}")
+        self._max_entries = max_entries
         #: `(signer_id, nonce) -> retain_until`. A `None` retention means "keep forever":
         #: an unparseable deadline is not a licence to forget a spent nonce early.
         self._consumed: dict[tuple[str, str], datetime | None] = {}
@@ -72,6 +134,19 @@ class NonceStore:
         durable, cross-worker implementation of this port is `app.bid_nonces`
         (`UNIQUE (signer_id, nonce)`), which nothing in this tree binds to yet — see the module
         docstring.
+
+        **Raises `NonceStoreFull` at `max_entries` (T-378)**, and does not store the pair. The
+        alternative — evicting some other entry to make room — is the one thing this class must
+        never do, because the entries it holds are exactly the ones whose replay windows are
+        still open; anything whose window had closed was already dropped by `purge_expired`. So
+        "full" means "full of live entries", and freeing one of those is freeing a replay.
+
+        This method has NO clock of its own and so cannot purge on its own behalf: `retain_until`
+        is a FUTURE instant, and sweeping against it would drop entries whose windows have not
+        closed. Keeping the store under its ceiling is therefore the caller's job, and
+        `door.py` does it by calling `purge_expired(now)` immediately before every consume. A
+        caller that never purges eventually wedges at the ceiling and refuses everything — which
+        is the fail-closed direction, and is why it is a wedge rather than a hole.
         """
         key = self._key(signer_id, nonce)
         # Parsed outside the critical section deliberately: `retain_until` is caller-supplied,
@@ -81,6 +156,15 @@ class NonceStore:
         with self._lock:
             if key in self._consumed:
                 return False
+            if len(self._consumed) >= self._max_entries:
+                # Counts only. The message reaches a log and, through `door.py`'s reason code,
+                # an unauthenticated submitter's error body; echoing the signer or the nonce
+                # that happened to arrive at the ceiling would put caller-controlled text into
+                # both.
+                raise NonceStoreFull(
+                    f"replay memory is at its ceiling of {self._max_entries} live entries; "
+                    f"refusing to forget one that can still be replayed"
+                )
             self._consumed[key] = retention
             return True
 
@@ -127,12 +211,17 @@ class NonceStore:
                 del self._consumed[key]
             return len(expired)
 
+    @property
+    def max_entries(self) -> int:
+        """The ceiling this store enforces. Read-only: it is a memory budget, not a dial."""
+        return self._max_entries
+
     def __len__(self) -> int:
         with self._lock:
             return len(self._consumed)
 
     def __repr__(self) -> str:  # pragma: no cover - diagnostics only
-        return f"NonceStore(consumed={len(self._consumed)})"
+        return f"NonceStore(consumed={len(self._consumed)}, max_entries={self._max_entries})"
 
     @staticmethod
     def _key(signer_id: object, nonce: object) -> tuple[str, str]:

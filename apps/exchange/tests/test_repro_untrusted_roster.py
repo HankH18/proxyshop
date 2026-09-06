@@ -19,6 +19,7 @@ in it cannot be switched off by anything a caller writes in a request body.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import pytest
@@ -408,7 +409,15 @@ def test_t224_an_unreadable_roster_value_cannot_raise_out_of_the_collector_eithe
     unpriced = _collect([dict(UNCAPPED_ROW, list_price="cheap")], [])[0]
     assert unpriced.fallback is True
     assert unpriced.fallback_reason == "no_response"
-    assert unpriced.unit_price == 0.0
+    # This read ``== 0.0`` until T-277's second spelling was closed, and 0.0 is what the
+    # ``float(entry.get("list_price", 0.0))`` above HAPPENED to produce — not a contract. It
+    # contradicted this docstring's own last sentence: "an unreadable claim establishes nothing:
+    # NO LIST PRICE" and "the list price is zero" cannot both be true, and zero is the cheapest
+    # number there is, so the entry the sentence calls unpriced won every ranking it reached.
+    # The purpose the assertion serves is unchanged and is what is asserted instead: the
+    # collector does not RAISE on an unreadable roster value, and the store is still there.
+    assert unpriced.unit_price == math.inf
+    assert "unit_price" not in unpriced.offer, unpriced.bid
 
     for junk in ("one", float("nan"), float("inf"), None, [1]):
         untiered = _collect([dict(UNCAPPED_ROW, tier=junk)], [_reply(_offer(80.0, 80.0))])[0]
@@ -466,10 +475,12 @@ def test_an_unreadable_roster_list_price_keeps_the_price_wall_on() -> None:
     admitted at its stated price rather than refused.
 
     PRESENT-BUT-UNREADABLE is now distinguished from ABSENT: the former is a caller asserting
-    something the exchange cannot read, and it keeps the wall on. The latter keeps its historical
-    behaviour, which the assertion at the end of this test pins so the distinction cannot quietly
-    collapse back into one case.
+    something the exchange cannot read, and it keeps the wall ON. The latter does not, and the
+    end of this test pins that distinction by the thing the two cases actually differ in — the
+    wall — so it cannot quietly collapse back into one case.
     """
+    absent_row = {k: v for k, v in UNCAPPED_ROW.items() if k != "list_price"}
+
     for hostile in (float("inf"), float("nan"), "cheap", True):
         entry = _collect(
             [dict(UNCAPPED_ROW, list_price=hostile)],
@@ -480,5 +491,89 @@ def test_an_unreadable_roster_list_price_keeps_the_price_wall_on() -> None:
             f"catalog price switched the price wall off on the row carrying it"
         )
 
-    absent = _collect([{k: v for k, v in UNCAPPED_ROW.items() if k != "list_price"}], [])[0]
-    assert absent.unit_price == 0.0
+    # The distinction, pinned where it lives. An ABSENT list price states nothing for the wall to
+    # judge against, so the honest bid the store actually made is admitted at its own price —
+    # which is also `test_repro_verifier_findings.py::test_t273_...`'s stated repair, and the
+    # control proving this file's gates are not satisfied by refusing everything.
+    honest = _collect([absent_row], [_reply(_offer(80.0, 80.0))])[0]
+    assert honest.fallback is False, honest.price_reasons
+    assert honest.unit_price == 80.0, honest.bid
+
+    # This read ``absent.unit_price == 0.0`` — "the latter keeps its historical behaviour" — and
+    # that historical behaviour WAS the free item: a row naming no price minted a live, rankable
+    # 0.00 offer with no bid involved at all, which is exactly what `RosterEntry.list_price`'s
+    # docstring measures through the door (`HTTP 201, entries=[{fallback: true, unit_price: 0.0}]`)
+    # and what T-273's gate refuses one caller down. The 0.0 also discriminated nothing: at the
+    # time it was written PRESENT-BUT-UNREADABLE minted the identical 0.0 (the assertion in
+    # `test_t224_an_unreadable_roster_value_cannot_raise_out_of_the_collector_either`), so the
+    # sentence above cannot have been resting on it. T-277's second spelling.
+    absent = _collect([absent_row], [])[0]
+    assert absent.fallback is True
+    assert absent.unit_price == math.inf, absent.bid
+    assert "unit_price" not in absent.offer, absent.bid
+
+
+def test_a_roster_row_the_exchange_cannot_price_mints_no_rankable_free_offer() -> None:
+    """T-277's second spelling: the free item reached by omitting ``list_price``, or garbling it.
+
+    T-277 closed the row that prices the product at nothing *legibly* — ``list_price: 0.0`` — and
+    the repair read ``if listed is not None and listed <= 0.0``. ``_number`` answers ``None`` for
+    an ABSENT key and for an UNREADABLE value alike, so both walked past that guard and
+    ``_list_price_bid`` minted them ``unit_price = total_price = 0.0`` with a live ``expires_at``:
+    the same rankable free offer, for a store that never bid, reached by writing nothing or by
+    writing junk instead of by writing the zero. Measured on the library path before this gate::
+
+        collect_bids([{store_id, tier: 1, product_ref}], [], deadline)
+          ->  fallback=True  no_response  unit_price=0.00  expires_at='2023-11-14T22:...Z'
+        the same row with list_price='cheap' / inf / nan / True / None / [100.0]  ->  identical
+
+    ``RosterEntry.list_price`` refuses all of these at the HTTP door (``Field(gt=0.0,
+    allow_inf_nan=False)``, and the field is required), and that door is precisely what
+    ``orchestration/solicitation.py``, ``services/sim/src/runner.py`` and the frozen
+    ``test_e3_exchange.py`` do not have when they call ``collect_bids`` themselves — a repair
+    living only in a request model is one a second caller does not get.
+
+    The question is not "did the caller write a zero" but "can the exchange name a price it could
+    charge", so every way of failing it gets one answer: no price for a ranking to prefer, and no
+    ``expires_at``, which ``ranking.filters.expiry_reason`` already fails closed on. R10 is not
+    negotiable and the store is still represented — the controls at the end are the proof this
+    gate is not satisfied by refusing everything.
+    """
+    rows: list[tuple[str, dict[str, Any]]] = [
+        ("absent", {k: v for k, v in UNCAPPED_ROW.items() if k != "list_price"})
+    ]
+    rows += [
+        (repr(junk), dict(UNCAPPED_ROW, list_price=junk))
+        for junk in ("cheap", float("inf"), float("nan"), True, None, [100.0])
+    ]
+
+    for label, row in rows:
+        entry = _collect([row], [])[0]
+
+        # R10 first: the store is represented exactly once whatever the roster says.
+        assert entry.store_id == "store-1", label
+        assert entry.fallback is True, label
+        assert entry.fallback_reason == "no_response", label
+
+        offer = entry.bid["offer"]
+        assert "unit_price" not in offer, (
+            f"list_price={label} minted a rankable {offer.get('unit_price')!r} offer for a store "
+            f"that never bid, from a roster row the exchange cannot price at all: {offer}"
+        )
+        assert "total_price" not in offer, (label, offer)
+        # The fail-CLOSED spelling of an absent price, and the direction the rest of the module
+        # already fails in: `inf` is a price nothing can pay, where 0.00 is one everything beats.
+        assert entry.unit_price == math.inf, (label, offer)
+        # And it cannot be shown to be live, so it reaches no shortlist to be cheapest in.
+        assert offer["expires_at"] is None, (label, offer)
+
+    # The controls, in the same test. A row the exchange CAN price still mints its offer, dated,
+    # and a store that answers such a row is still admitted at the price it actually bid.
+    silent = _collect([UNCAPPED_ROW], [])[0]
+    assert silent.fallback is True, silent.bid
+    assert silent.unit_price == 100.0, silent.bid
+    assert silent.bid["offer"]["expires_at"] is not None, silent.bid
+
+    bidding = _collect([UNCAPPED_ROW], [_reply(_offer(80.0, 80.0))])[0]
+    assert bidding.fallback is False, bidding.price_reasons
+    assert bidding.unit_price == 80.0, bidding.bid

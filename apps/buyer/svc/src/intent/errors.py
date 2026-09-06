@@ -22,6 +22,7 @@ __all__ = [
     "EmptyDialogue",
     "IntentAlreadyConfirmed",
     "IntentError",
+    "IntentTooLarge",
     "InvalidConstraint",
     "InvalidPreference",
     "UnstructuredIntent",
@@ -46,6 +47,22 @@ class InvalidPreference(IntentError):
 
 class UnstructuredIntent(IntentError):
     """An intent missing the structure R1 requires the buyer to have confirmed."""
+
+
+class IntentTooLarge(IntentError):
+    """The intent is larger than this service is willing to store (T-368).
+
+    A size refusal, and deliberately **not** an :class:`UnstructuredIntent`: the body is
+    perfectly well structured, it is simply bigger than a shopping need has any reason to
+    be. ``POST /buyer/intent/confirm`` takes no credential and what it accepts it KEEPS —
+    the ``intent_id`` becomes a key in a process-global ledger with no capacity, no TTL and
+    no sweep — so "how large may this be?" is a question with its own answer and its own
+    refusal, which the route can then answer as a 413 rather than as a 422 about structure.
+
+    Every message raised with this class names the FIELD and the CEILING and never the
+    value. Quoting a 30 000-character field back at the caller makes refusing cost what
+    accepting cost, which is half of the amplifier the ceiling exists to remove.
+    """
 
 
 class ConfirmationWithheld(IntentError):

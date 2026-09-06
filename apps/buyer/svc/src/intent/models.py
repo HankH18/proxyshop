@@ -38,12 +38,18 @@ band seen from two sides, and a vocabulary written down twice drifts.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from ..profile import BUDGET_BANDS, TOP_BUDGET_BAND
-from .errors import InvalidConstraint, InvalidPreference, UnstructuredIntent
+from .errors import (
+    IntentTooLarge,
+    InvalidConstraint,
+    InvalidPreference,
+    UnstructuredIntent,
+)
 
 __all__ = [
     "BUDGET_BAND_UNSPECIFIED",
@@ -52,6 +58,10 @@ __all__ = [
     "DEFAULT_CURRENCY",
     "INTENT_SCHEMA_VERSION",
     "MAX_CLARIFYING_QUESTIONS",
+    "MAX_FREE_TEXT_CHARS",
+    "MAX_IDENTIFIER_LENGTH",
+    "MAX_INTENT_BYTES",
+    "MAX_INTENT_TERMS",
     "PREFERENCE_DIRECTIONS",
     "AuctionCreated",
     "ClarifyOutcome",
@@ -59,8 +69,10 @@ __all__ = [
     "Intent",
     "Preference",
     "QuestionCapBroken",
+    "check_intent_bounds",
     "coerce_intent",
     "intent_from_payload",
+    "payload_weight",
 ]
 
 #: R1's cap. Three, not "about three": the loop counts and stops.
@@ -95,6 +107,75 @@ DEFAULT_CURRENCY = "USD"
 
 #: ``Intent.schema_version``. Bumped when the field set changes, never silently.
 INTENT_SCHEMA_VERSION = "1.0.0"
+
+
+# --- what an anonymous caller may spend of this service (T-368) -----------------------
+#
+# ``POST /buyer/intent/confirm`` takes no credential, and what it accepts it KEEPS: the
+# ``intent_id`` off the body becomes a key in the process-global
+# :class:`~buyer_svc.intent.confirmation.ConfirmationLedger`, which has no capacity, no TTL,
+# no LRU and no sweep, and whose ``release()`` frees only an UNSPENT claim. Measured before
+# these ceilings existed: one anonymous request carrying a 30 000-character ``intent_id``
+# answered **201** and left a permanent entry keyed by all 30 002 bytes of it; a burst grew
+# linearly at ~30 127 B/request. So an anonymous caller chose how much of this service's
+# storage to consume, permanently.
+#
+# The ceilings live HERE rather than on the route on purpose: :func:`confirm` is callable
+# without FastAPI in scope, and it — not the handler — is what mints the ledger key. A bound
+# that exists only on the handler is a bound with a door beside it.
+
+#: The most characters an identifier-shaped field may run to: ``intent_id``, ``cluster_id``,
+#: ``currency``, ``created_at``, ``schema_version``, ``budget_band``, ``category``, a
+#: constraint's ``field`` and ``unit``, and a preference's ``field``.
+#:
+#: **Not a new opinion.** 128 is the ceiling the exchange already enforces on the identifiers
+#: it is handed — ``exchange.auction.routes.MAX_IDENTIFIER_LENGTH`` — and the ``intent_id``
+#: this service stores travels to that same ``POST /auctions``, so one request used to leave a
+#: permanent entry in two processes. Restated rather than imported for the reason
+#: :data:`buyer_svc.composition.MAX_ROSTER_ENTRIES` restates its 500: the buyer service does
+#: not import the exchange's app package, and a cross-app import would make that true.
+#: ``tests/test_intent_models.py`` pins the two numbers equal, so the copy cannot drift in
+#: silence. An identifier is a name; a 20 KB one is a storage lever, not a name.
+MAX_IDENTIFIER_LENGTH = 128
+
+#: The most characters a free-text field may run to: ``query`` — the buyer's own words — and
+#: ``ship_to``, plus any string a hard constraint carries as its ``value``.
+#:
+#: A shopping need stated once. This package already treats an utterance-sized string as 240
+#: characters (:data:`~buyer_svc.intent.extraction.MAX_QUESTION_CHARS`), and the longest query
+#: the shipped dialogue fixtures produce is 23. 2 KiB is two orders of magnitude above that
+#: and still one order below the 30 000-character field T-368 measured this service storing.
+MAX_FREE_TEXT_CHARS = 2048
+
+#: The most elements any list on an intent may carry: ``hard_constraints``, ``preferences``,
+#: and the members of an ``in``/``contains`` constraint value.
+#:
+#: The exchange refuses an intent carrying more than 64 hard constraints
+#: (``exchange.auction.routes.MAX_HARD_CONSTRAINTS``) because its eligibility gate is
+#: O(roster x constraints) and interpolates one exclusion reason per failure. An intent this
+#: service would forward to that door has no reason to be built with more, and the same number
+#: covers ``preferences`` because the ranker scores each of those per candidate too.
+MAX_INTENT_TERMS = 64
+
+#: The most bytes one intent document may weigh, counting every key and every string in it.
+#:
+#: **A third bound, and it is not implied by the other two.** 60 hard constraints (under the
+#: count cap) each carrying a 2 000-character value (under the free-text cap) is a 120 KB
+#: document that every per-field check accepts. So the budget is on the document TOGETHER —
+#: the same shape, for the same reason, as ``exchange.auction.routes``'
+#: ``MAX_HARD_CONSTRAINT_BYTES``. 32 KiB is ~500 bytes per term at the count cap, a generous
+#: ``{"field": ..., "op": "eq", "value": ...}``, against a measured honest intent of 435
+#: bytes (hand-written, two constraints) and 523 bytes (minted by :func:`clarify` from a
+#: three-turn dialogue).
+MAX_INTENT_BYTES = 32 * 1024
+
+#: Punctuation one JSON element costs on the wire — a comma and a pair of quotes. Counted so
+#: that a list of a million empty strings is not free to this service.
+_ELEMENT_OVERHEAD_BYTES = 2
+
+#: What a JSON number, boolean or null is worth to :func:`payload_weight`. Their text is
+#: bounded by the parser, so they are charged a flat, deliberately generous eight bytes.
+_SCALAR_WEIGHT_BYTES = 8
 
 
 class QuestionCapBroken(AssertionError):
@@ -157,11 +238,14 @@ class HardConstraint:
 
     def __post_init__(self) -> None:
         if not _clean(self.field):
-            raise InvalidConstraint(f"a hard constraint needs a field, got {self.field!r}")
+            raise InvalidConstraint(
+                f"a hard constraint needs a field, got {_short_repr(self.field)}"
+            )
         if self.op not in CONSTRAINT_OPS:
             raise InvalidConstraint(
                 f"R19 hard constraints are eligibility filters: op must be one of "
-                f"{list(CONSTRAINT_OPS)}, got {self.op!r}. An op this vocabulary cannot "
+                f"{list(CONSTRAINT_OPS)}, got {_short_repr(self.op)}. An op this vocabulary "
+                f"cannot "
                 f"express is dropped rather than coerced into a neighbouring one — "
                 f"turning `lt` into `lte` silently widens what the buyer asked for."
             )
@@ -188,16 +272,24 @@ class Preference:
 
     def __post_init__(self) -> None:
         if not _clean(self.field):
-            raise InvalidPreference(f"a preference needs a field, got {self.field!r}")
+            raise InvalidPreference(f"a preference needs a field, got {_short_repr(self.field)}")
         if self.direction not in PREFERENCE_DIRECTIONS:
             raise InvalidPreference(
                 f"R19 preferences are scores: direction must be one of "
-                f"{list(PREFERENCE_DIRECTIONS)}, got {self.direction!r}"
+                f"{list(PREFERENCE_DIRECTIONS)}, got {_short_repr(self.direction)}"
             )
         if isinstance(self.weight, bool) or not isinstance(self.weight, (int, float)):
             raise InvalidPreference(
-                f"a preference carries a numeric weight, got {self.weight!r}. `True` is "
+                f"a preference carries a numeric weight, got {_short_repr(self.weight)}. "
+                f"`True` is "
                 f"not a weight even though Python will happily add it to one."
+            )
+        if not math.isfinite(self.weight):
+            raise InvalidPreference(
+                f"a preference weight must be a finite number, got "
+                f"{_short_repr(self.weight)}. `1e400` is legal JSON and Python parses it to "
+                f"`inf`; a score term weighted by infinity contributes no ordering, and NaN "
+                f"contributes an undefined one."
             )
         object.__setattr__(self, "weight", float(self.weight))
 
@@ -359,23 +451,233 @@ class AuctionCreated:
         return key in self._FIELDS
 
 
+#: How deeply a hard constraint's ``value`` may nest before this package refuses to walk it.
+#:
+#: A filter value is a scalar, a string, or a list of those — ``{"field": "colour", "op":
+#: "in", "value": ["navy", "black"]}``. Four levels is more than any of R19's ops can use.
+#: The bound exists because that walk is recursive and a body of nothing but nested brackets
+#: fits inside :data:`MAX_INTENT_BYTES` thousands of levels deep, which is how a size refusal
+#: would have become a ``RecursionError`` and an unauthenticated 500.
+MAX_VALUE_DEPTH = 4
+
+
+def payload_weight(value: Any, budget: int = MAX_INTENT_BYTES) -> int:
+    """How many bytes this document is worth, stopping as soon as it passes ``budget``.
+
+    Deliberately **not** ``len(json.dumps(value))``: serializing a document in order to
+    measure it allocates a second copy of exactly the thing that is too big. This walks the
+    object with an explicit stack — iteratively, so a deeply nested body cannot reach a
+    ``RecursionError`` and turn a refusal into a 500 — charging every string its UTF-8
+    length, every key its own, every element :data:`_ELEMENT_OVERHEAD_BYTES` of punctuation,
+    and every number, boolean and null a flat :data:`_SCALAR_WEIGHT_BYTES`.
+
+    Past ``budget`` the return value means "over", not "how far over": the walk stops there.
+    """
+    total = 0
+    stack: list[Any] = [value]
+    while stack:
+        if total > budget:
+            return total
+        item = stack.pop()
+        if isinstance(item, str):
+            if len(item) > budget:
+                # Characters are never more numerous than UTF-8 bytes, so this string is
+                # already over the budget, and encoding it to find out by how much would
+                # allocate the whole of it a second time.
+                return budget + 1
+            total += len(item.encode("utf-8", "replace")) + _ELEMENT_OVERHEAD_BYTES
+        elif isinstance(item, Mapping):
+            total += _ELEMENT_OVERHEAD_BYTES
+            for key, sub in item.items():
+                total += len(str(key)) + _ELEMENT_OVERHEAD_BYTES
+                stack.append(sub)
+        elif isinstance(item, (list, tuple)):
+            total += _ELEMENT_OVERHEAD_BYTES
+            stack.extend(item)
+        else:
+            total += _SCALAR_WEIGHT_BYTES
+    return total
+
+
+def _refuse_length(name: str, actual: int, limit: int, unit: str = "characters") -> None:
+    """The one refusal shape. It names the field and the ceiling, and never the value."""
+    raise IntentTooLarge(
+        f"intent field {name!r} is {actual} {unit}; this service stores at most {limit} "
+        f"{unit} there. The value is not quoted back: a refusal that costs what accepting "
+        f"cost is not a refusal."
+    )
+
+
+def _short_repr(value: Any, limit: int = 64) -> str:
+    """A ``repr`` for an error message that a hostile value cannot make expensive."""
+    text = repr(value)
+    return text if len(text) <= limit else f"{text[:limit]}... ({len(text)} chars, elided)"
+
+
+def _within_budget(payload: Any, *, what: str = "intent", budget: int = MAX_INTENT_BYTES) -> None:
+    if payload_weight(payload, budget) > budget:
+        raise IntentTooLarge(
+            f"this {what} weighs more than {budget} bytes, which is more than this service "
+            f"keeps for one shopping need. Nothing was read out of it, and none of it is "
+            f"quoted back."
+        )
+
+
+def _bounded_text(value: Any, *, name: str, limit: int) -> str:
+    """:func:`_clean`, with a ceiling."""
+    text = _clean(value) if value is not None else ""
+    if len(text) > limit:
+        _refuse_length(name, len(text), limit)
+    return text
+
+
+def _bounded_optional(value: Any, *, name: str, limit: int) -> str | None:
+    return _bounded_text(value, name=name, limit=limit) or None
+
+
+def _bounded_raw(value: Any, *, name: str, limit: int) -> str:
+    """``str(value)`` with a ceiling, for the fields a closed vocabulary judges verbatim.
+
+    ``op`` and ``direction`` are matched against :data:`CONSTRAINT_OPS` /
+    :data:`PREFERENCE_DIRECTIONS` exactly as they arrive — ``" eq "`` is not ``"eq"`` — so
+    this bounds them without normalising them. Whitespace-normalising here would widen a
+    closed vocabulary as a side effect of adding a length check.
+    """
+    text = value if isinstance(value, str) else str(value)
+    if len(text) > limit:
+        _refuse_length(name, len(text), limit)
+    return text
+
+
+def _bounded_elements(value: Any, *, name: str) -> Sequence[Any]:
+    items = _sequence(value)
+    if len(items) > MAX_INTENT_TERMS:
+        _refuse_length(name, len(items), MAX_INTENT_TERMS, unit="elements")
+    return items
+
+
+def _bounded_value(value: Any, *, name: str, depth: int = 0) -> Any:
+    """A hard constraint's ``value``: bounded in length, in element count, and in depth."""
+    if depth > MAX_VALUE_DEPTH:
+        _refuse_length(name, depth, MAX_VALUE_DEPTH, unit="levels of nesting")
+    if isinstance(value, str):
+        if len(value) > MAX_FREE_TEXT_CHARS:
+            _refuse_length(name, len(value), MAX_FREE_TEXT_CHARS)
+        return value
+    if isinstance(value, Mapping):
+        if len(value) > MAX_INTENT_TERMS:
+            _refuse_length(name, len(value), MAX_INTENT_TERMS, unit="keys")
+        return {
+            _bounded_text(key, name=name, limit=MAX_IDENTIFIER_LENGTH): _bounded_value(
+                item, name=name, depth=depth + 1
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        if len(value) > MAX_INTENT_TERMS:
+            _refuse_length(name, len(value), MAX_INTENT_TERMS, unit="elements")
+        return [_bounded_value(item, name=name, depth=depth + 1) for item in value]
+    return value
+
+
+def check_intent_bounds(intent: Intent) -> None:
+    """Refuse an intent this service will not store, whatever built it (T-368).
+
+    Called twice on the confirmation path, and both are load-bearing:
+    :func:`intent_from_payload` runs the ceilings against the WIRE document before it builds
+    anything, and :func:`~buyer_svc.intent.confirmation.confirm` runs them against the
+    resolved object before the ledger claim. The second is not a restatement of the first —
+    :func:`coerce_intent` hands an :class:`Intent` back untouched, so a caller holding an
+    object the wire never built would otherwise mint the permanent ledger key itself.
+    """
+    _within_budget(intent.to_dict())
+    for name, limit in (
+        ("intent_id", MAX_IDENTIFIER_LENGTH),
+        ("cluster_id", MAX_IDENTIFIER_LENGTH),
+        ("budget_band", MAX_IDENTIFIER_LENGTH),
+        ("currency", MAX_IDENTIFIER_LENGTH),
+        ("created_at", MAX_IDENTIFIER_LENGTH),
+        ("schema_version", MAX_IDENTIFIER_LENGTH),
+        ("category", MAX_IDENTIFIER_LENGTH),
+        ("query", MAX_FREE_TEXT_CHARS),
+        ("ship_to", MAX_FREE_TEXT_CHARS),
+    ):
+        text = getattr(intent, name, None)
+        if isinstance(text, str) and len(text) > limit:
+            _refuse_length(name, len(text), limit)
+
+    for name, items in (
+        ("hard_constraints", intent.hard_constraints),
+        ("preferences", intent.preferences),
+    ):
+        if len(items) > MAX_INTENT_TERMS:
+            _refuse_length(name, len(items), MAX_INTENT_TERMS, unit="elements")
+
+    for constraint in intent.hard_constraints:
+        _bounded_text(
+            constraint.field, name="hard_constraints[].field", limit=MAX_IDENTIFIER_LENGTH
+        )
+        _bounded_raw(constraint.op, name="hard_constraints[].op", limit=MAX_IDENTIFIER_LENGTH)
+        _bounded_optional(
+            constraint.unit, name="hard_constraints[].unit", limit=MAX_IDENTIFIER_LENGTH
+        )
+        _bounded_value(constraint.value, name="hard_constraints[].value")
+    for preference in intent.preferences:
+        _bounded_text(preference.field, name="preferences[].field", limit=MAX_IDENTIFIER_LENGTH)
+
+
 def intent_from_payload(payload: Mapping[str, Any]) -> Intent:
-    """Rebuild an :class:`Intent` from its serialized form, validating as it goes."""
-    constraints = [_constraint_from(item) for item in _sequence(payload.get("hard_constraints"))]
-    preferences = [_preference_from(item) for item in _sequence(payload.get("preferences"))]
-    return Intent(
-        query=_clean(payload.get("query", "")),
-        budget_band=_clean(payload.get("budget_band", "")),
-        intent_id=_clean(payload.get("intent_id", "")),
-        cluster_id=_clean(payload.get("cluster_id", "")),
-        created_at=_clean(payload.get("created_at", "")),
+    """Rebuild an :class:`Intent` from its serialized form, validating as it goes.
+
+    This is the wire path — the one an **unauthenticated** ``POST /buyer/intent/confirm``
+    body takes — so the size checks come FIRST, before a single field is cleaned, copied or
+    turned into an object. Work done on a document before deciding whether to keep it is
+    work an anonymous caller chose for this service (T-368).
+    """
+    _within_budget(payload)
+    constraints = [
+        _constraint_from(item)
+        for item in _bounded_elements(payload.get("hard_constraints"), name="hard_constraints")
+    ]
+    preferences = [
+        _preference_from(item)
+        for item in _bounded_elements(payload.get("preferences"), name="preferences")
+    ]
+    intent = Intent(
+        query=_bounded_text(payload.get("query", ""), name="query", limit=MAX_FREE_TEXT_CHARS),
+        budget_band=_bounded_text(
+            payload.get("budget_band", ""), name="budget_band", limit=MAX_IDENTIFIER_LENGTH
+        ),
+        intent_id=_bounded_text(
+            payload.get("intent_id", ""), name="intent_id", limit=MAX_IDENTIFIER_LENGTH
+        ),
+        cluster_id=_bounded_text(
+            payload.get("cluster_id", ""), name="cluster_id", limit=MAX_IDENTIFIER_LENGTH
+        ),
+        created_at=_bounded_text(
+            payload.get("created_at", ""), name="created_at", limit=MAX_IDENTIFIER_LENGTH
+        ),
         hard_constraints=tuple(constraints),
         preferences=tuple(preferences),
-        category=_optional(payload.get("category")),
-        ship_to=_optional(payload.get("ship_to")),
-        currency=_clean(payload.get("currency") or DEFAULT_CURRENCY),
-        schema_version=_clean(payload.get("schema_version") or INTENT_SCHEMA_VERSION),
+        category=_bounded_optional(
+            payload.get("category"), name="category", limit=MAX_IDENTIFIER_LENGTH
+        ),
+        ship_to=_bounded_optional(
+            payload.get("ship_to"), name="ship_to", limit=MAX_FREE_TEXT_CHARS
+        ),
+        currency=_bounded_text(
+            payload.get("currency") or DEFAULT_CURRENCY,
+            name="currency",
+            limit=MAX_IDENTIFIER_LENGTH,
+        ),
+        schema_version=_bounded_text(
+            payload.get("schema_version") or INTENT_SCHEMA_VERSION,
+            name="schema_version",
+            limit=MAX_IDENTIFIER_LENGTH,
+        ),
     )
+    check_intent_bounds(intent)
+    return intent
 
 
 def coerce_intent(value: Any) -> Intent:
@@ -402,12 +704,21 @@ def _constraint_from(item: Any) -> HardConstraint:
         return item
     payload = _mapping_of(item)
     if payload is None:
-        raise InvalidConstraint(f"a hard constraint must be an object, got {item!r}")
+        # `_short_repr`, not `{item!r}`: this refusal is rendered into an HTTP 4xx on an
+        # unauthenticated door, and a message that quotes a 30 KB "constraint" back is the
+        # same amplifier the size ceilings exist to remove.
+        raise InvalidConstraint(f"a hard constraint must be an object, got {_short_repr(item)}")
     return HardConstraint(
-        field=_clean(payload.get("field", "")),
-        op=str(payload.get("op", "")),
-        value=payload.get("value"),
-        unit=_optional(payload.get("unit")),
+        field=_bounded_text(
+            payload.get("field", ""), name="hard_constraints[].field", limit=MAX_IDENTIFIER_LENGTH
+        ),
+        op=_bounded_raw(
+            payload.get("op", ""), name="hard_constraints[].op", limit=MAX_IDENTIFIER_LENGTH
+        ),
+        value=_bounded_value(payload.get("value"), name="hard_constraints[].value"),
+        unit=_bounded_optional(
+            payload.get("unit"), name="hard_constraints[].unit", limit=MAX_IDENTIFIER_LENGTH
+        ),
     )
 
 
@@ -416,13 +727,23 @@ def _preference_from(item: Any) -> Preference:
         return item
     payload = _mapping_of(item)
     if payload is None:
-        raise InvalidPreference(f"a preference must be an object, got {item!r}")
+        raise InvalidPreference(f"a preference must be an object, got {_short_repr(item)}")
     return Preference(
-        field=_clean(payload.get("field", "")),
-        direction=str(payload.get("direction", "")),
-        # Deliberately unchecked here: `Preference.__post_init__` is the one place that
+        field=_bounded_text(
+            payload.get("field", ""), name="preferences[].field", limit=MAX_IDENTIFIER_LENGTH
+        ),
+        direction=_bounded_raw(
+            payload.get("direction", ""),
+            name="preferences[].direction",
+            limit=MAX_IDENTIFIER_LENGTH,
+        ),
+        # Still deliberately unjudged here: `Preference.__post_init__` is the one place that
         # decides what counts as a weight, and it rejects `True`, `None` and "1.0" with a
         # message naming the field. Narrowing the type here instead would move that
-        # judgement into a second place that could disagree with it.
-        weight=payload.get("weight"),  # type: ignore[arg-type]
+        # judgement into a second place that could disagree with it. What IS done here is
+        # bounding it — the value is interpolated into that refusal, so an unbounded string
+        # in `weight` was an unbounded 4xx body.
+        weight=_bounded_value(  # type: ignore[arg-type]
+            payload.get("weight"), name="preferences[].weight"
+        ),
     )

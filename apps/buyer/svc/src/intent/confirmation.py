@@ -44,7 +44,7 @@ from .errors import (
     IntentAlreadyConfirmed,
     UnstructuredIntent,
 )
-from .models import AuctionCreated, Intent, coerce_intent
+from .models import AuctionCreated, Intent, check_intent_bounds, coerce_intent
 
 _log = logging.getLogger(__name__)
 
@@ -159,6 +159,9 @@ def confirm(
         ConfirmationWithheld: ``confirmed`` was not exactly ``True``. **Nothing was
             called.**
         UnstructuredIntent: there is no structured intent here to confirm.
+        IntentTooLarge: the intent is bigger than this service stores for one shopping
+            need — see :func:`~buyer_svc.intent.models.check_intent_bounds`. Raised before
+            the ledger claim, so an oversized intent leaves nothing behind.
         IntentAlreadyConfirmed: this intent already opened an auction.
         AuctionClientUnusable: the client exposes no way to create an auction.
     """
@@ -173,6 +176,11 @@ def confirm(
 
     resolved = coerce_intent(intent)
     _require_structure(resolved)
+    # BEFORE the claim, and that ordering is the whole of T-368. `intent_id` becomes a key
+    # in a ledger with no capacity, no TTL, no LRU and no sweep, whose `release()` frees only
+    # an UNSPENT claim — so a key written here is written for the life of the process. This
+    # door is unauthenticated, so the size of what it stores cannot be the caller's choice.
+    check_intent_bounds(resolved)
 
     # Through the accessor, not the module global: one place decides what "the default
     # ledger" is, so a deployment that swaps it in has one thing to swap rather than

@@ -1008,3 +1008,534 @@ def test_the_budget_window_is_not_longer_than_the_link_ttl() -> None:
     spread.check(VICTIM)
     with pytest.raises(MagicLinkRateLimited):
         spread.check(VICTIM)
+
+
+# =======================================================================================
+# T-356 / T-374 / T-376 — three holes in the limiter built above.
+#
+# The budget, the window and the tracked-address ceiling each turned out to be escapable or
+# unbounded from OUTSIDE the code that was reviewed: a plus sign in the address, an
+# environment variable, and one extra digit. All three are reachable by whoever can reach the
+# unauthenticated door, or by an operator with a keyboard and good intentions.
+# =======================================================================================
+
+
+def test_t356_sub_addressing_does_not_buy_a_fresh_budget() -> None:
+    """The ticket's own reproduction: forty plus-tags, one mailbox, one budget.
+
+    ``normalise_buyer_key`` strips and case-folds, which is why
+    ``test_case_and_whitespace_do_not_buy_a_fresh_budget`` passes — and it is the whole of
+    the normalisation, so ``dana.reyes+0@`` through ``dana.reyes+39@`` are forty keys with
+    forty budgets landing in ONE physical mailbox. MEASURED against the served app on
+    task/buyer-auth: 40 of 40 accepted under a configured budget of 5.
+
+    The class docstring says "the mailbox is the thing being protected". Until this gate it
+    protected the string.
+    """
+    from buyer_svc.auth.routes import DEFAULT_MAGIC_LINK_RATE_LIMIT
+
+    client, _service, delivered, _app = _client()
+
+    codes = [
+        client.post(
+            "/buyer/auth/magic-link", json={"email": f"dana.reyes+{tag}@example.com"}
+        ).status_code
+        for tag in range(40)
+    ]
+    assert 429 in codes, (
+        f"forty plus-tagged spellings of one mailbox were all accepted: {sorted(set(codes))}; "
+        "anyone who can type a plus sign has the limiter switched off"
+    )
+    assert len(delivered) <= DEFAULT_MAGIC_LINK_RATE_LIMIT, (
+        f"{len(delivered)} login links were mailed into ONE mailbox under a budget of "
+        f"{DEFAULT_MAGIC_LINK_RATE_LIMIT}"
+    )
+
+
+def test_t356_dot_insertion_does_not_buy_a_budget_where_the_provider_ignores_dots() -> None:
+    """Gmail documents dots in the local part as insignificant, so they are one mailbox."""
+    from buyer_svc.auth.routes import DEFAULT_MAGIC_LINK_RATE_LIMIT
+
+    client, _service, delivered, _app = _client()
+
+    spellings = [
+        "danareyes@gmail.com",
+        "dana.reyes@gmail.com",
+        "d.a.n.a.r.e.y.e.s@gmail.com",
+        "dana.reyes+shopping@gmail.com",
+        "DanaReyes@GoogleMail.com",
+    ]
+    codes = [
+        client.post(
+            "/buyer/auth/magic-link", json={"email": spellings[i % len(spellings)]}
+        ).status_code
+        for i in range(DEFAULT_MAGIC_LINK_RATE_LIMIT + 5)
+    ]
+    assert 429 in codes, f"dot and tag spellings of one Gmail mailbox were all accepted: {codes}"
+    assert len(delivered) <= DEFAULT_MAGIC_LINK_RATE_LIMIT, (
+        f"{len(delivered)} links were mailed to one Gmail mailbox spelled five ways"
+    )
+
+
+def test_t356_normalisation_does_not_merge_distinct_mailboxes() -> None:
+    """The other direction, and the one that costs a real buyer their login if it is wrong.
+
+    A rule aggressive enough to collapse every spelling also collapses strangers. Each pair
+    below is TWO mailboxes and must keep two budgets:
+
+    * dots outside the providers that document them as insignificant — ``john.smith@`` and
+      ``johnsmith@`` at a company domain are two people;
+    * the same local part at two domains;
+    * a local part that BEGINS with a plus, which has no tag to strip and whose whole local
+      part would otherwise vanish.
+    """
+    from buyer_svc.auth.routes import DEFAULT_MAGIC_LINK_RATE_LIMIT, MagicLinkRateLimiter
+
+    distinct = [
+        ("john.smith@corp.example", "johnsmith@corp.example"),
+        ("dana@example.com", "dana@example.net"),
+        ("+dana@example.com", "dana@example.com"),
+        ("dana.reyes@example.com", "dana@example.com"),
+    ]
+    for left, right in distinct:
+        limiter = MagicLinkRateLimiter()
+        for _ in range(DEFAULT_MAGIC_LINK_RATE_LIMIT):
+            limiter.check(left)
+        limiter.check(right)  # must not raise: a different mailbox has its own budget
+        assert limiter.tracked == 2, (
+            f"{left!r} and {right!r} were folded into one rate-limit key, so one of two real "
+            "buyers is locked out of logging in by the other's traffic"
+        )
+
+
+def test_t356_the_stored_address_stays_exact_and_only_the_rate_limit_key_is_normalised() -> None:
+    """Normalise the KEY, never the record. The vault's identity is not this ticket's to move.
+
+    ``dana.reyes+work@example.com`` and ``dana.reyes+home@example.com`` share a budget because
+    they share a mailbox, and they must still be two distinct accounts with two distinct
+    pseudonym histories: the account directory, the vault key and the delivery address all
+    keep the address the buyer actually typed. Merging those is a data change reaching far
+    beyond the auth package, which is why T-356 says the vault's ``normalise_buyer_key`` needs
+    its own ticket rather than a lane edit.
+    """
+    from buyer_svc.auth import InMemoryAccountDirectory, MagicLinkAuth
+    from buyer_svc.auth.routes import MagicLinkRateLimiter, get_auth_service
+    from buyer_svc.main import create_app
+    from fastapi.testclient import TestClient
+
+    mailed: list[tuple[str, str]] = []
+    service = MagicLinkAuth(
+        accounts=InMemoryAccountDirectory(),
+        deliver=lambda email, token, expires_at: mailed.append((email, token)),
+    )
+    app = create_app()
+    app.dependency_overrides[get_auth_service] = lambda: service
+    client = TestClient(app, raise_server_exceptions=False)
+
+    tagged = "dana.reyes+work@example.com"
+    other = "dana.reyes+home@example.com"
+    assert client.post("/buyer/auth/magic-link", json={"email": tagged}).status_code == 202
+    assert client.post("/buyer/auth/magic-link", json={"email": other}).status_code == 202
+
+    assert [address for address, _ in mailed] == [tagged, other], (
+        f"the links were addressed to {[a for a, _ in mailed]!r}; a normalised RATE-LIMIT key "
+        "reached the mail transport, so the buyer's link goes to a mailbox they did not name"
+    )
+
+    # Redeeming is what writes the record and the vault history, so drive it: two logins, two
+    # accounts, two pseudonyms, and no record under the stripped spelling.
+    pseudonyms = []
+    for _, token in mailed:
+        opened = client.post("/buyer/auth/session", json={"token": token})
+        assert opened.status_code == 201, opened.text
+        pseudonyms.append(opened.json()["pseudonym"])
+
+    assert service.accounts.get(tagged) is not None
+    assert service.accounts.get(other) is not None
+    assert service.accounts.get("dana.reyes@example.com") is None, (
+        "the plus tag was stripped from the STORED address; two buyers now share one account "
+        "record and one pseudonym history"
+    )
+    assert [service.vault.resolve(pseudonym) for pseudonym in pseudonyms] == [tagged, other], (
+        "the vault resolved a pseudonym to a normalised address; the rate-limit key has "
+        "reached the identity store, which is a data change T-356 explicitly keeps out of "
+        "this lane"
+    )
+
+    # And the two tagged addresses really did share one budget on the way in.
+    limiter = MagicLinkRateLimiter()
+    limiter.check(tagged)
+    limiter.check(other)
+    assert limiter.tracked == 1
+
+
+def test_t374_the_rate_window_override_cannot_outrun_the_link_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The window was the one override with NO validation at all, and it re-arms the eviction.
+
+    The eviction branch is safe only because tracked entries and pending links drain together,
+    and they drain together only while the window is no longer than
+    :data:`~buyer_svc.auth.magic_link.DEFAULT_LINK_TTL`: every tracked address is one this
+    service mailed a link to, so with a window inside the TTL each tracked entry still has a
+    live pending record and the tracked table cannot outgrow the pending ceiling. Stretch the
+    window alone and the coupling breaks — tracked climbs epoch after epoch while pending
+    stays pinned at its ceiling, reaches the subject ceiling, and ``max_subjects`` fresh
+    admissions then hand a chosen victim their budget back.
+
+    ``86400`` and ``31536000`` were both accepted silently, with the subject ceiling set or
+    unset. A budget measured over a year is also not a budget: nothing ever ages out of it.
+    """
+    from buyer_svc.auth.magic_link import DEFAULT_LINK_TTL
+    from buyer_svc.auth.routes import (
+        DEFAULT_MAGIC_LINK_RATE_WINDOW,
+        MAGIC_LINK_RATE_WINDOW_ENV,
+        MAX_MAGIC_LINK_RATE_WINDOW,
+        MIN_MAGIC_LINK_RATE_WINDOW,
+        build_rate_limiter,
+    )
+
+    assert MAX_MAGIC_LINK_RATE_WINDOW == DEFAULT_LINK_TTL, (
+        "the roof on the window is the link TTL because that is what makes a tracked address "
+        "imply a live pending link; if the two constants have come apart, the reasoning at "
+        "MAX_MAGIC_LINK_RATE_WINDOW needs rereading rather than this assertion relaxing"
+    )
+
+    for refused in ("86400", "31536000", str(int(MAX_MAGIC_LINK_RATE_WINDOW.total_seconds()) + 1)):
+        monkeypatch.setenv(MAGIC_LINK_RATE_WINDOW_ENV, refused)
+        assert build_rate_limiter().window == DEFAULT_MAGIC_LINK_RATE_WINDOW, (
+            f"{MAGIC_LINK_RATE_WINDOW_ENV}={refused} was honoured; the tracked table now "
+            "outlives the pending links that bound it and the eviction branch is reachable"
+        )
+
+    # A window too SHORT is the same defect wearing the other hat: at the shipped budget a
+    # one-second window admits five links a second into one mailbox.
+    for refused in ("1", "30", str(int(MIN_MAGIC_LINK_RATE_WINDOW.total_seconds()) - 1)):
+        monkeypatch.setenv(MAGIC_LINK_RATE_WINDOW_ENV, refused)
+        assert build_rate_limiter().window == DEFAULT_MAGIC_LINK_RATE_WINDOW, (
+            f"{MAGIC_LINK_RATE_WINDOW_ENV}={refused} was honoured; the budget is no longer a "
+            "rate a mailbox can survive"
+        )
+
+    # The knob is validated, not taken away: everything between the two bounds still works.
+    for allowed in (
+        int(MIN_MAGIC_LINK_RATE_WINDOW.total_seconds()),
+        300,
+        int(MAX_MAGIC_LINK_RATE_WINDOW.total_seconds()),
+    ):
+        monkeypatch.setenv(MAGIC_LINK_RATE_WINDOW_ENV, str(allowed))
+        assert build_rate_limiter().window == timedelta(seconds=allowed), allowed
+
+
+def test_t374_a_window_longer_than_the_link_ttl_really_does_unpin_the_tracked_table() -> None:
+    """The mechanism the bound above exists for, demonstrated at scaled proportions.
+
+    Not a restatement of the configuration check: this drives the limiter and the link table
+    together and watches the invariant the eviction branch's safety rests on — *tracked never
+    outgrows the pending table* — hold with a window inside the TTL and break with one outside
+    it. Scaled down (pending ceiling 10, window 4x the TTL) so it runs in milliseconds; the
+    production proportions are 10,000 pending against a 24h window.
+    """
+    from buyer_svc.auth.magic_link import MagicLinkAuth
+    from buyer_svc.auth.routes import MagicLinkRateLimiter
+
+    ttl = timedelta(minutes=15)
+    start = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
+
+    def _run(window: timedelta) -> tuple[int, int]:
+        now = {"t": start}
+        links = MagicLinkAuth(link_ttl=ttl, max_pending=10, clock=lambda: now["t"])
+        limiter = MagicLinkRateLimiter(
+            limit=1, window=window, max_subjects=10_000, clock=lambda: now["t"]
+        )
+        address = 0
+        for epoch in range(4):
+            now["t"] = start + epoch * ttl
+            for _ in range(10):
+                address += 1
+                email = f"flood{address}@example.com"
+                limiter.check(email)
+                links.request_login(email)
+        return limiter.tracked, links.pending_links
+
+    inside_tracked, inside_pending = _run(ttl)
+    assert inside_tracked <= inside_pending, (
+        f"with the window at the link TTL the tracked table ({inside_tracked}) already "
+        f"outgrew the pending table ({inside_pending}); the coupling this bound relies on is "
+        "not the one described"
+    )
+    assert inside_tracked <= 10
+
+    outside_tracked, outside_pending = _run(ttl * 4)
+    assert outside_tracked > outside_pending, (
+        "the scaled attack did not separate the two tables, so this test is not measuring "
+        "the mechanism it claims to"
+    )
+    assert (outside_tracked, outside_pending) == (40, 10)
+
+
+def test_t376_the_subject_ceiling_override_has_a_roof_as_well_as_a_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One typo'd extra digit removed the memory bound the constant exists to provide.
+
+    ``PROXYSHOP_BUYER_MAGIC_LINK_RATE_SUBJECTS=99999999999999999999999`` was accepted verbatim
+    with no warning: the tracked table is then unbounded in every sense that matters, which is
+    the failure the constant's own docstring names — "a limiter that fixes flooding by growing
+    without limit has moved the denial of service rather than closed it". The floor added last
+    cycle refuses 9999 and 10000 correctly and says nothing about the other end.
+    """
+    from buyer_svc.auth.routes import (
+        DEFAULT_MAGIC_LINK_RATE_SUBJECTS,
+        MAGIC_LINK_RATE_SUBJECTS_ENV,
+        MAX_MAGIC_LINK_RATE_SUBJECTS,
+        build_rate_limiter,
+    )
+
+    for refused in ("99999999999999999999999", str(MAX_MAGIC_LINK_RATE_SUBJECTS + 1), "10" * 40):
+        monkeypatch.setenv(MAGIC_LINK_RATE_SUBJECTS_ENV, refused)
+        assert build_rate_limiter().max_subjects == DEFAULT_MAGIC_LINK_RATE_SUBJECTS, (
+            f"{MAGIC_LINK_RATE_SUBJECTS_ENV}={refused[:24]}... was honoured; the limiter's "
+            "table has no memory bound at all"
+        )
+
+    # Still a knob. The roof is the largest table that fits, not a refusal of every raise.
+    for allowed in (250_000, MAX_MAGIC_LINK_RATE_SUBJECTS):
+        monkeypatch.setenv(MAGIC_LINK_RATE_SUBJECTS_ENV, str(allowed))
+        assert build_rate_limiter().max_subjects == allowed, allowed
+
+
+def test_t376_the_subject_roof_is_a_memory_bound_and_not_a_round_number() -> None:
+    """Pin the arithmetic the roof comes from, because nothing else would notice it drifting.
+
+    The tracked table is the largest thing this service holds at its ceiling, and the service
+    runs under ``mem_limit: 256m`` (``apps/buyer/compose.yaml``). A roof chosen for looking
+    tidy would be a bound in name only.
+    """
+    from buyer_svc.auth.routes import (
+        BUYER_SVC_MEMORY_LIMIT_BYTES,
+        DEFAULT_MAGIC_LINK_RATE_SUBJECTS,
+        MAGIC_LINK_RATE_SUBJECT_BYTES,
+        MAX_MAGIC_LINK_RATE_SUBJECTS,
+    )
+
+    assert MAX_MAGIC_LINK_RATE_SUBJECTS >= DEFAULT_MAGIC_LINK_RATE_SUBJECTS, (
+        "the roof is below the shipped default, so the default itself would be refused"
+    )
+    held = MAX_MAGIC_LINK_RATE_SUBJECTS * MAGIC_LINK_RATE_SUBJECT_BYTES
+    assert held <= BUYER_SVC_MEMORY_LIMIT_BYTES // 2, (
+        f"a full table at the roof is {held / 1024 / 1024:.0f} MiB against a container limit "
+        f"of {BUYER_SVC_MEMORY_LIMIT_BYTES / 1024 / 1024:.0f} MiB; the roof is not a bound "
+        "the process can survive meeting"
+    )
+
+
+# --------------------------------------------------------------------------------------
+# The T-376 ceiling's own refusal path. Added after the ceiling landed, because closing a
+# hole with a guard that crashes at a bigger input does not close it — it converts a bounded
+# configuration mistake into a 500 on a route that takes no credential, which is strictly
+# worse than the unbounded table it was replacing.
+# --------------------------------------------------------------------------------------
+
+#: Magnitudes the refusal has to survive, named by what each one used to break.
+#:
+#: ``400`` is past the point where ``subjects * MAGIC_LINK_RATE_SUBJECT_BYTES / 1024 / 1024``
+#: — an *eagerly evaluated logging argument*, so it ran whether or not anything was logged —
+#: exceeded the largest float and raised ``OverflowError: integer division result too large
+#: for a float``. ``20`` is past the point where ``timedelta(seconds=...)`` raised
+#: ``OverflowError: Python int too large to convert to C int``. ``5000`` is past CPython's
+#: own 4300-digit int-parsing limit, which is a different exception again and is only a
+#: backstop anyway — it moves with ``PYTHONINTMAXSTRDIGITS``. A bound that depends on which
+#: of those three fires first is not a bound; the point of testing all of them is that the
+#: answer must be the same refusal every time.
+_ABSURD_DIGIT_COUNTS = (20, 21, 306, 400, 4301, 5000, 20000)
+
+
+def test_an_over_long_configuration_integer_is_refused_and_never_crashes_the_boot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every knob, at every magnitude, answers with the shipped default and no exception.
+
+    The defect this pins: ``PROXYSHOP_BUYER_MAGIC_LINK_RATE_SUBJECTS`` with 400 digits raised
+    ``OverflowError`` from inside ``_log.warning``'s argument list, and
+    ``PROXYSHOP_BUYER_MAGIC_LINK_RATE_WINDOW_SECONDS`` with 20 raised it from
+    ``timedelta(seconds=...)`` *before* the T-374 bound could refuse the value. Both are on
+    ``build_rate_limiter``'s path, which runs on the first request to an unauthenticated
+    route.
+
+    Asserting on all three variables together is deliberate. The two failures were the same
+    shape — an integer of unbounded magnitude handed to arithmetic — reached through two
+    different knobs, so a fix that only repaired the two known call sites would leave the
+    third knob one arithmetic operation away from the same 500.
+    """
+    from buyer_svc.auth.routes import (
+        DEFAULT_MAGIC_LINK_RATE_LIMIT,
+        DEFAULT_MAGIC_LINK_RATE_SUBJECTS,
+        DEFAULT_MAGIC_LINK_RATE_WINDOW,
+        MAGIC_LINK_RATE_LIMIT_ENV,
+        MAGIC_LINK_RATE_SUBJECTS_ENV,
+        MAGIC_LINK_RATE_WINDOW_ENV,
+        MAX_ENV_INT_DIGITS,
+        build_rate_limiter,
+    )
+
+    for env in (
+        MAGIC_LINK_RATE_SUBJECTS_ENV,
+        MAGIC_LINK_RATE_WINDOW_ENV,
+        MAGIC_LINK_RATE_LIMIT_ENV,
+    ):
+        for digits in _ABSURD_DIGIT_COUNTS:
+            monkeypatch.setenv(env, "9" * digits)
+            # Building at all is the assertion. Every failure this test was written for was an
+            # exception raised out of this call, not a wrong number returned from it.
+            built = build_rate_limiter()
+            if env is MAGIC_LINK_RATE_SUBJECTS_ENV:
+                assert built.max_subjects == DEFAULT_MAGIC_LINK_RATE_SUBJECTS, (env, digits)
+            if env is MAGIC_LINK_RATE_WINDOW_ENV:
+                assert built.window == DEFAULT_MAGIC_LINK_RATE_WINDOW, (env, digits)
+            if env is MAGIC_LINK_RATE_LIMIT_ENV and digits > MAX_ENV_INT_DIGITS:
+                assert built.limit == DEFAULT_MAGIC_LINK_RATE_LIMIT, (env, digits)
+        monkeypatch.delenv(env)
+
+    # NOT asserted above, and stated here rather than left as a silent gap in the loop: at
+    # exactly `MAX_ENV_INT_DIGITS` the LIMIT knob is HONOURED — a budget of 10^20 links per
+    # window is accepted, which is the limiter switched off by a knob that reads like a
+    # tightening. That is a missing roof on a third knob, in the same family as T-376's, and
+    # it is NOT what this test or its fix is about: it predates both, it is not an exception,
+    # and choosing the roof is a design decision with its own memory arithmetic to do (one
+    # address's history is `limit` timestamps). Pinning the current behaviour here would
+    # enshrine it, so this test pins only crash-freedom for that knob and the gap is left
+    # named for a ticket.
+
+
+def test_the_refusal_runs_with_logging_switched_off_because_the_crash_was_a_log_argument(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``logging.disable(CRITICAL)`` must not change the answer — and used not to.
+
+    This is the whole point of the original bug and the reason it is worth its own test.
+    Python evaluates a logging call's arguments before the logger decides whether to emit
+    anything, so ``subjects * MAGIC_LINK_RATE_SUBJECT_BYTES / 1024 / 1024`` ran on a
+    production box with WARNING suppressed exactly as it ran here. A reader who assumes "it
+    is only a log line" is assuming the thing that was false.
+    """
+    import logging
+
+    from buyer_svc.auth.routes import (
+        DEFAULT_MAGIC_LINK_RATE_SUBJECTS,
+        MAGIC_LINK_RATE_SUBJECTS_ENV,
+        build_rate_limiter,
+    )
+
+    monkeypatch.setenv(MAGIC_LINK_RATE_SUBJECTS_ENV, "9" * 400)
+    logging.disable(logging.CRITICAL)
+    try:
+        assert build_rate_limiter().max_subjects == DEFAULT_MAGIC_LINK_RATE_SUBJECTS
+    finally:
+        logging.disable(logging.NOTSET)
+
+
+def test_an_absurd_ceiling_is_a_clean_answer_on_the_wire_and_not_a_500() -> None:
+    """The measurement that says why this matters: the route, not the helper.
+
+    ``POST /buyer/auth/magic-link`` takes no credential. Before the fix this returned 500
+    with the limiter's own ``OverflowError`` behind it; the misconfiguration is the
+    operator's, but the crash was reachable by anyone who could reach the door.
+    """
+    import os
+
+    from buyer_svc.auth.routes import MAGIC_LINK_RATE_SUBJECTS_ENV, MAGIC_LINK_RATE_WINDOW_ENV
+
+    for env, value in (
+        (MAGIC_LINK_RATE_SUBJECTS_ENV, "9" * 400),
+        (MAGIC_LINK_RATE_WINDOW_ENV, "9" * 20),
+    ):
+        previous = os.environ.get(env)
+        os.environ[env] = value
+        try:
+            client, _service, _delivered, _app = _client()
+            response = client.post("/buyer/auth/magic-link", json={"email": VICTIM})
+        finally:
+            if previous is None:
+                os.environ.pop(env, None)
+            else:
+                os.environ[env] = previous
+        assert response.status_code < 500, (
+            f"{env} with {len(value)} digits answered {response.status_code}; a refused "
+            "configuration value must never reach an unauthenticated caller as a server error"
+        )
+        assert response.status_code == 202, (env, response.status_code)
+
+
+def test_the_refusal_does_not_echo_the_whole_over_long_value_into_the_log(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A refusal must not be sized by the input it refuses.
+
+    ``_positive_int_from_env`` logged ``%r`` of the raw environment value, so refusing a
+    400-character number wrote 400 characters, and refusing a megabyte wrote a megabyte. The
+    value is the one quantity here the caller chose, so it is the one quantity that must not
+    be repeated back whole.
+    """
+    import logging
+
+    from buyer_svc.auth.routes import (
+        MAGIC_LINK_RATE_SUBJECTS_ENV,
+        MAX_ENV_INT_DIGITS,
+        build_rate_limiter,
+    )
+
+    absurd = "9" * 4000
+    monkeypatch.setenv(MAGIC_LINK_RATE_SUBJECTS_ENV, absurd)
+    with caplog.at_level(logging.WARNING, logger="buyer_svc.auth.routes"):
+        build_rate_limiter()
+
+    assert caplog.records, "the refusal was silent; an operator would never learn of it"
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert absurd not in logged, "the refusal echoed the whole over-long value back"
+    assert len(logged) < 4 * MAX_ENV_INT_DIGITS + 400, (
+        f"the refusal log is {len(logged)} characters for a {len(absurd)}-character input; "
+        "it is still sized by the value it refuses"
+    )
+    assert MAGIC_LINK_RATE_SUBJECTS_ENV in logged, "the refusal does not name the knob"
+
+
+def test_the_length_gate_refuses_nothing_an_operator_could_have_meant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bound is on absurdity, not on the knob — and the T-376 roof still does its job.
+
+    Two properties in one test because they are the same trade. ``MAX_ENV_INT_DIGITS`` sits
+    far above every value these knobs can legitimately take, so it cannot be the thing that
+    refuses a real setting; and the value-range checks it protects — the T-376 memory roof,
+    its pending-link floor, and the T-374 window bounds — still refuse exactly what they
+    refused before, which is what stops "make the refusal cheap" from quietly becoming "make
+    the refusal absent".
+    """
+    from buyer_svc.auth.routes import (
+        DEFAULT_MAGIC_LINK_RATE_SUBJECTS,
+        MAGIC_LINK_RATE_SUBJECTS_ENV,
+        MAX_ENV_INT_DIGITS,
+        MAX_MAGIC_LINK_RATE_SUBJECTS,
+        build_rate_limiter,
+    )
+
+    assert len(str(MAX_MAGIC_LINK_RATE_SUBJECTS)) < MAX_ENV_INT_DIGITS, (
+        "the digit ceiling is at or below the largest ceiling an operator may ask for, so it "
+        "would refuse a legitimate setting rather than only an absurd one"
+    )
+
+    # Inside the length gate and inside the range: honoured, exactly as before.
+    for allowed in (250_000, MAX_MAGIC_LINK_RATE_SUBJECTS):
+        monkeypatch.setenv(MAGIC_LINK_RATE_SUBJECTS_ENV, str(allowed))
+        assert build_rate_limiter().max_subjects == allowed, allowed
+
+    # Inside the length gate, outside the range: still refused by T-376's roof, which is the
+    # check that must not have been lost to the cheaper one in front of it.
+    for refused in (MAX_MAGIC_LINK_RATE_SUBJECTS + 1, 10**18, 10**19):
+        monkeypatch.setenv(MAGIC_LINK_RATE_SUBJECTS_ENV, str(refused))
+        assert len(str(refused)) <= MAX_ENV_INT_DIGITS, (
+            f"{refused} is long enough to be refused on length, so it does not exercise the "
+            "memory roof this assertion is about"
+        )
+        assert build_rate_limiter().max_subjects == DEFAULT_MAGIC_LINK_RATE_SUBJECTS, refused

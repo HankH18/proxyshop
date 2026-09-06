@@ -39,12 +39,21 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Awaitable, Callable
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Request, Response, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field, StrictBool
 
-from ..composition import DeploymentConfigurationError, ExchangeCallFailed, ensure_configured
+from ..composition import (
+    MAX_ROSTER_ENTRIES,
+    DeploymentConfigurationError,
+    ExchangeCallFailed,
+    ensure_configured,
+)
 from ._spellings import bind_spellings
 from .clarifier import clarify
 from .confirmation import confirm
@@ -53,7 +62,15 @@ from .errors import (
     ConfirmationWithheld,
     IntentAlreadyConfirmed,
     IntentError,
+    IntentTooLarge,
     UnstructuredIntent,
+)
+from .models import (
+    MAX_CLARIFYING_QUESTIONS,
+    MAX_FREE_TEXT_CHARS,
+    MAX_IDENTIFIER_LENGTH,
+    MAX_INTENT_BYTES,
+    payload_weight,
 )
 
 _log = logging.getLogger(__name__)
@@ -63,9 +80,18 @@ _log = logging.getLogger(__name__)
 #: spelling twice and works on both.
 _HTTP_422 = getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422)
 
+#: Starlette renamed ``HTTP_413_REQUEST_ENTITY_TOO_LARGE`` to ``HTTP_413_CONTENT_TOO_LARGE``
+#: in the same sweep. Resolved once, here, for the same reason.
+_HTTP_413 = getattr(status, "HTTP_413_CONTENT_TOO_LARGE", 413)
+
 __all__ = [
     "AUCTION_CLIENT_ATTR",
     "LLM_ROLE",
+    "MAX_CLARIFY_TURNS",
+    "MAX_CONFIRM_BODY_BYTES",
+    "MAX_PROFILE_BYTES",
+    "MAX_VALIDATION_ERRORS",
+    "MAX_VALIDATION_MESSAGE_CHARS",
     "ClarifyBody",
     "ClarifyResponse",
     "ConfirmBody",
@@ -75,7 +101,91 @@ __all__ = [
     "set_buyer_llm",
 ]
 
-router = APIRouter(prefix="/buyer/intent", tags=["buyer-intent"])
+#: The most of FastAPI's own field errors one refusal will carry.
+#:
+#: A body with 5 000 bad fields is 5 000 error objects, each with a location and a message,
+#: and the caller only ever needed to be told the request was unprocessable. Twenty is more
+#: than a human debugging a client ever reads at once.
+MAX_VALIDATION_ERRORS = 20
+
+#: The most characters of one of those messages this router passes on. Pydantic's messages
+#: are short sentences ("Input should be a valid list"); this is a ceiling on a string this
+#: service did not write, not a budget it expects to spend.
+MAX_VALIDATION_MESSAGE_CHARS = 200
+
+
+def _validation_detail(exc: RequestValidationError) -> list[dict[str, Any]]:
+    """FastAPI's 422 body, minus the ``input`` it normally quotes back.
+
+    Two reasons, and BOTH were measured on this unauthenticated door.
+
+    1. The default body embeds the offending value under ``input``, so a hostile field comes
+       straight back at full length — which makes refusing cost this service exactly what
+       accepting it would have, and hands an amplifier to anyone who wants one.
+    2. That echo is not always encodable. ``jsonable_encoder`` walks the value recursively,
+       so ``{"intent": [[[[...]]]]}`` nested 2 000 deep — a 4 KB body — raised
+       ``RecursionError`` **inside the 422 handler** and answered HTTP 500; and ``1e400``,
+       legal RFC-8259 JSON that parses to ``inf``, raised ``ValueError: Out of range float
+       values are not JSON compliant`` for the same reason. A validation refusal that the
+       body can turn into a server fault is not a refusal.
+
+    What survives is what a caller can act on: where the problem is and what it is.
+    """
+    detail: list[dict[str, Any]] = []
+    for error in exc.errors()[:MAX_VALIDATION_ERRORS]:
+        detail.append(
+            {
+                "loc": [str(part)[:MAX_IDENTIFIER_LENGTH] for part in error.get("loc", ())],
+                "msg": str(error.get("msg", ""))[:MAX_VALIDATION_MESSAGE_CHARS],
+                "type": str(error.get("type", ""))[:MAX_IDENTIFIER_LENGTH],
+            }
+        )
+    return detail
+
+
+class _BoundedBodyRoute(APIRoute):
+    """Answer a body this service cannot even PARSE as the caller's 4xx, never as a 500.
+
+    Starlette reads and decodes the JSON body **inside** the route handler, before any
+    dependency, any validator and any line of this module runs — so nothing declared here can
+    be reached in time to refuse it. Measured on this branch: a 4 KB body of 2 000 nested
+    arrays raised ``RecursionError`` out of ``await request.json()`` and answered **HTTP 500**
+    on this unauthenticated door. Depth is not size, so no byte ceiling closes it; catching
+    the parser's own refusal here does.
+
+    A pre-parse ceiling on the raw body belongs further out still — in the ASGI stack or in
+    ``buyer_svc.main``, which is orchestrator-frozen (B6(iii)) — so this closes the answer,
+    not the allocation.
+    """
+
+    def get_route_handler(self) -> Callable[[Request], Awaitable[Response]]:
+        handler = super().get_route_handler()
+
+        async def bounded(request: Request) -> Response:
+            try:
+                return await handler(request)
+            except RequestValidationError as exc:
+                # Answered HERE rather than by the app-level handler, which is where the
+                # echo — and the two 500s it caused — live. `buyer_svc.main` is
+                # orchestrator-frozen (B6(iii)), so this router carries its own.
+                return JSONResponse(
+                    status_code=_HTTP_422, content={"detail": _validation_detail(exc)}
+                )
+            except RecursionError:
+                # `from None`: the context is thousands of identical parser frames and is
+                # not information about this request.
+                raise HTTPException(
+                    status_code=_HTTP_413,
+                    detail=(
+                        "this body is nested more deeply than this service will parse. "
+                        "None of it is quoted back."
+                    ),
+                ) from None
+
+        return bounded
+
+
+router = APIRouter(prefix="/buyer/intent", tags=["buyer-intent"], route_class=_BoundedBodyRoute)
 
 #: ``llm.config.ROLE_BUYER``. Spelled rather than imported so this module stays importable
 #: with only FastAPI available; :func:`buyer_llm` validates it against the real roster the
@@ -85,6 +195,105 @@ LLM_ROLE = "buyer"
 
 #: Where the exchange client lives on the app. Set it in your composition root.
 AUCTION_CLIENT_ATTR = "auction_client"
+
+#: The most bytes one ``POST /confirm`` body may weigh, over all three of its halves.
+#:
+#: Neither of these doors takes a credential, so the size of what an anonymous caller can
+#: make this service hold is a number somebody has to choose (T-368). The intent has its own
+#: 32 KiB budget (:data:`~buyer_svc.intent.models.MAX_INTENT_BYTES`); a roster is at most
+#: :data:`~buyer_svc.composition.MAX_ROSTER_ENTRIES` rows of identifiers and prices, which
+#: the deployment normally supplies rather than the browser; a profile is a pseudonym and a
+#: handful of coarse buckets. 256 KiB covers all three several times over and is the same
+#: ceiling the exchange puts on one store's whole bid reply
+#: (``exchange.composition.MAX_BID_RESPONSE_BYTES``), so the two services agree about what
+#: "one document" is worth.
+#:
+#: **What this bound is not.** The body is already parsed into Python objects by the time a
+#: handler runs, so this refuses what is KEPT and forwarded, not what is allocated by the
+#: JSON parse. A pre-parse ceiling belongs in the ASGI stack — ``buyer_svc.main`` is
+#: orchestrator-frozen (B6(iii)), so it is not written here.
+MAX_CONFIRM_BODY_BYTES = 256 * 1024
+
+#: The most utterances one ``POST /clarify`` dialogue may carry.
+#:
+#: R1 caps the loop at three questions, so a dialogue is a handful of turns; the shipped
+#: golden dialogues run to four. 64 is far more than any buyer types and far fewer than any
+#: attack needs. The dialogue is also bounded in TOTAL length, at
+#: :data:`~buyer_svc.intent.models.MAX_FREE_TEXT_CHARS`, because the clarifier joins the
+#: buyer's need utterances into ``Intent.query`` verbatim: without that, ``/clarify`` would
+#: happily mint an intent whose query is over the ceiling ``/confirm`` enforces, and hand the
+#: buyer a confirmation screen this service refuses.
+MAX_CLARIFY_TURNS = 64
+
+#: The most bytes the ``profile`` half of a confirmation may weigh.
+#:
+#: Its own ceiling rather than a share of :data:`MAX_CONFIRM_BODY_BYTES`, because a profile is
+#: not a document the buyer writes: T-070 mints it, and a ``BuyerProfile`` is two fields — a
+#: pseudonym and the five coarse labels in ``buyer_svc.profile.BUCKET_KEYS``, whose category
+#: slugs are themselves capped at ``CATEGORY_SLUG_MAX_CHARS`` (32) and ``CATEGORY_LIMIT`` (3).
+#: A realistic one measures 197 bytes. 4 KiB is twenty times that and still refuses the shape
+#: this bound exists for: an anonymous caller posting 30 KB of free text inside ``buckets`` and
+#: having this service carry it to the exchange, which is neither a pseudonym nor a bucket.
+MAX_PROFILE_BYTES = 4 * 1024
+
+
+def _refuse_oversized_dialogue(turns: list[str]) -> None:
+    """Bound what one anonymous clarification may cost, before any of it is read."""
+    if len(turns) > MAX_CLARIFY_TURNS:
+        raise HTTPException(
+            status_code=_HTTP_413,
+            detail=(
+                f"this dialogue carries {len(turns)} turns; R1's loop asks at most "
+                f"{MAX_CLARIFYING_QUESTIONS} questions and this service reads at most "
+                f"{MAX_CLARIFY_TURNS} turns."
+            ),
+        )
+    if payload_weight(turns, MAX_FREE_TEXT_CHARS) > MAX_FREE_TEXT_CHARS:
+        raise HTTPException(
+            status_code=_HTTP_413,
+            detail=(
+                f"this dialogue is longer than the {MAX_FREE_TEXT_CHARS} characters this "
+                f"service will carry into an intent's query. None of it is quoted back."
+            ),
+        )
+
+
+def _refuse_oversized_confirmation(body: ConfirmBody) -> None:
+    """Bound the whole body before the deployment is read or the ledger is touched.
+
+    The detail names the ceiling and the measurement and never the body: a 4xx that quotes a
+    hostile document back costs this service what accepting it would have cost.
+    """
+    if body.roster is not None and len(body.roster) > MAX_ROSTER_ENTRIES:
+        raise HTTPException(
+            status_code=_HTTP_413,
+            detail=(
+                f"this confirmation carries {len(body.roster)} roster rows; the exchange "
+                f"auctions at most {MAX_ROSTER_ENTRIES} and so does this service."
+            ),
+        )
+    if (
+        body.profile is not None
+        and payload_weight(body.profile, MAX_PROFILE_BYTES) > MAX_PROFILE_BYTES
+    ):
+        raise HTTPException(
+            status_code=_HTTP_413,
+            detail=(
+                f"this buyer profile weighs more than {MAX_PROFILE_BYTES} bytes; a "
+                f"pseudonym and a handful of coarse buckets do not."
+            ),
+        )
+    parts = [body.intent, body.profile, body.roster]
+    if payload_weight(parts, MAX_CONFIRM_BODY_BYTES) > MAX_CONFIRM_BODY_BYTES:
+        raise HTTPException(
+            status_code=_HTTP_413,
+            detail=(
+                f"this confirmation weighs more than {MAX_CONFIRM_BODY_BYTES} bytes; one "
+                f"shopping need, its buyer profile and its roster do not. The intent itself "
+                f"is bounded separately at {MAX_INTENT_BYTES} bytes."
+            ),
+        )
+
 
 _llm_override: Any = None
 
@@ -149,7 +358,15 @@ class ConfirmBody(BaseModel):
     confirmed: StrictBool = False
     profile: dict[str, Any] | None = None
     roster: list[dict[str, Any]] | None = None
-    bid_timeout_seconds: float | None = None
+    #: Bounded AND finite, and the ``allow_inf_nan`` half was MEASURED rather than reasoned
+    #: about. ``1e400`` is legal RFC-8259 JSON that Python parses to ``inf``, so a plain
+    #: ``float`` field accepted an INFINITE bid window on this unauthenticated door and
+    #: forwarded it to the exchange — which holds the request open for R10's whole window:
+    #: measured, HTTP 201 with ``bid_timeout_seconds: inf`` in the payload it sent. ``gt=0.0``
+    #: does not catch that on its own, because ``inf > 0.0`` is ``True``; it is the same
+    #: lesson ``exchange.auction.routes.RosterEntry`` records on ``list_price``. Zero or less
+    #: is not a window either, so the floor is strict.
+    bid_timeout_seconds: float | None = Field(default=None, gt=0.0, allow_inf_nan=False)
 
 
 class ConfirmResponse(BaseModel):
@@ -164,6 +381,7 @@ async def clarify_route(body: ClarifyBody) -> ClarifyResponse:
 
     Creates nothing. There is no auction client in this function's scope.
     """
+    _refuse_oversized_dialogue(body.turns)
     try:
         outcome = clarify(body.turns, buyer_llm())
     except IntentError as exc:
@@ -202,6 +420,10 @@ def _bind_the_deployment(request: Request) -> None:
 @router.post("/confirm", response_model=ConfirmResponse, status_code=status.HTTP_201_CREATED)
 async def confirm_route(body: ConfirmBody, request: Request) -> ConfirmResponse:
     """Create the one auction a confirmed intent is entitled to (R1)."""
+    # FIRST, and before the deployment document is even read: a body this service will not
+    # keep should cost it as little as possible, and every line below this one is work an
+    # anonymous caller would otherwise have chosen for it (T-368).
+    _refuse_oversized_confirmation(body)
     # Before the client is read. R1 is untouched by this: binding a client is not creating an
     # auction — `HttpExchangeClient` opens no socket until something calls it — and
     # `confirm()`'s FIRST statement is still `confirmed is not True`.
@@ -223,6 +445,10 @@ async def confirm_route(body: ConfirmBody, request: Request) -> ConfirmResponse:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except UnstructuredIntent as exc:
         raise HTTPException(status_code=_HTTP_422, detail=str(exc)) from exc
+    except IntentTooLarge as exc:
+        # 413, not 422: the body is well-formed and simply bigger than this service stores
+        # for one shopping need. Raised before the ledger claim, so nothing was kept.
+        raise HTTPException(status_code=_HTTP_413, detail=str(exc)) from exc
     except AuctionClientUnusable as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
@@ -234,6 +460,14 @@ async def confirm_route(body: ConfirmBody, request: Request) -> ConfirmResponse:
         # double; with one wired, an exchange that is down or answers 422 would otherwise
         # escape as a **500**, which blames this service for the exchange's state.
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+    except IntentError as exc:
+        # LAST, and fail-CLOSED. `InvalidConstraint` and `InvalidPreference` are refusals
+        # about the caller's own body that this ladder never named, so they escaped as an
+        # unauthenticated **500**: measured on this branch, `{"op": "lt"}` and
+        # `{"weight": null}` each answered HTTP 500. A refusal this package can express is a
+        # 4xx by definition — every one of them says the request was unprocessable — and
+        # naming the base class means a refusal added later cannot reopen that hole.
+        raise HTTPException(status_code=_HTTP_422, detail=str(exc)) from exc
     return ConfirmResponse(
         auction_id=created.auction_id,
         intent_id=created.intent_id,

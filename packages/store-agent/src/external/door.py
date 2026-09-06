@@ -28,7 +28,10 @@ Six gates, in this order, and the order is the design:
 6. **Replay.** The nonce is checked before, and consumed after, everything above. A submission
    that fails any gate must not burn its own nonce: an attacker who could spend a victim's
    nonce with a deliberately malformed copy would have a denial-of-service against the honest
-   submission that follows.
+   submission that follows. This gate is also where the replay memory is SWEPT — the door is
+   `NonceStore.purge_expired`'s production caller (T-378) — and where a store at its ceiling
+   refuses `replay_memory_exhausted` rather than forgetting a nonce that can still be replayed.
+   See `_nonce_retention` for why the eviction cannot open a replay hole.
 
 Only then is the work item enqueued, and it is enqueued **exactly once**, marked
 `verified=False`. Admitted is not trusted: R18's whole point is that an external bid enters as
@@ -40,13 +43,13 @@ from __future__ import annotations
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from contracts.boundary import parse_timestamp, validate_external_submission
 from contracts.signing import canonical_signing_bytes, keyring_secret, payload_hash
 
-from .nonces import NonceStore
+from .nonces import NonceStore, NonceStoreFull
 from .signatures import verify_signature
 
 __all__ = ["DEFAULT_FRESHNESS_WINDOW_SECONDS", "ExternalBidReceipt", "receive_bid"]
@@ -88,6 +91,13 @@ REASON_QUEUE_UNAVAILABLE = "verification_queue_unavailable"
 #: store that dies with the call remembers nothing, so the door would have no replay defence
 #: and the receipt of a replay would be byte-identical to a real admission.
 REASON_REPLAY_MEMORY_UNAVAILABLE = "replay_memory_unavailable"
+#: The replay memory is at its ceiling and every entry it holds is still inside its own replay
+#: window, so there is no room to record this nonce (T-378). Distinct from
+#: `replayed_nonce` on purpose: that reason is a verdict about the SUBMITTER, and logging an
+#: honest seller as a replayer because the exchange ran out of room would be a false accusation
+#: in the one log a dispute is settled from. Distinct from `door_failed_closed` too — this is a
+#: capacity limit the door knows about by name, not an unhandled fault.
+REASON_REPLAY_MEMORY_EXHAUSTED = "replay_memory_exhausted"
 #: `freshness_window_seconds` is not a finite, non-negative number, so it is not a window
 #: (T-231/T-230). NaN passes `float()` and loses every comparison, `inf` and `10**400` say
 #: "never stale", and a negative window says "always stale" — none of them is a policy this
@@ -279,6 +289,54 @@ def _snapshot(payload: Mapping[str, Any]) -> dict[str, Any]:
     it into `malformed_submission`.
     """
     return _plain(payload, 0)
+
+
+def _nonce_retention(
+    auction_deadline: Any, deadline: datetime | None, issued_at: datetime, window: float
+) -> Any:
+    """The instant after which this nonce can be forgotten, for `NonceStore.consume` (T-378).
+
+    Answering this correctly is what makes eviction safe. The rule the store relies on is:
+
+        forget `(signer, nonce)` only at instants when an EARLIER gate already refuses every
+        replay of this submission.
+
+    So the retention is whichever gate outlives the other, and there are exactly two cases:
+
+    * **A deadline was supplied.** Hand back the caller's own `auction_deadline` value,
+      untouched. Gate 4b refuses `after_auction_deadline` once `now > deadline`, and
+      `purge_expired` drops the pair once `retain_until < now` — the same instant. A replay
+      cannot dodge that by aiming at a different, still-open auction either:
+      `apps/exchange/src/external_bids/routes.py::_reconciled` refuses any submission whose
+      signed `auction_id` is not the one in the URL, so a replay of these bytes is always
+      judged against the deadline its nonce was retained under. The raw value is passed rather
+      than the parsed `deadline` so this path stays byte-identical to what it did before this
+      ticket: the frozen C10 criterion pins "remembered at the deadline, forgotten after it".
+    * **No deadline** — the default deployment, where `_auction_terms` answers `(None, None)`
+      for an auction the exchange cannot look up. This used to retain the pair FOREVER, and
+      that is the measured leak: 200 admitted bids, 200 entries, 74,504 bytes, nothing ever
+      dropped. The honest bound is the freshness horizon `issued_at + window`. `issued_at` is
+      inside `canonical_signing_bytes`, so a replay cannot move it without invalidating the
+      signature, and gate 4a refuses `issued_at_stale` once `now - issued_at > window` — again
+      the same instant `purge_expired` drops it.
+
+    **Never the shorter of the two.** `min(deadline, issued_at + window)` is also provably
+    safe and would evict sooner, and it is deliberately not used: it turns the frozen
+    criterion's retention into an equality that holds only while `issued_at + window` happens
+    to land exactly on the deadline, and a bound that is correct by arithmetic coincidence is
+    the kind that quietly stops being correct.
+
+    An `issued_at + window` that overflows `datetime` falls back to `None` — retain forever.
+    A window that large is `freshness_window_seconds` set to something absurd, which gate 4a
+    has already been told to treat as "never stale"; forgetting early is the failure mode that
+    reopens replay, so the overflow leans the other way.
+    """
+    if deadline is not None:
+        return auction_deadline
+    try:
+        return issued_at + timedelta(seconds=window)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _freshness_window(value: Any) -> float | None:
@@ -719,7 +777,34 @@ def _receive_bid(
     #    up as something wrong getting in, and this one shows up as nothing at all.
     if nonce_store is None:
         return _refuse(REASON_REPLAY_MEMORY_UNAVAILABLE, payload=submitted)
-    if not nonce_store.consume(signer_id, nonce, auction_deadline):
+
+    #    The sweep, and it is the PRODUCTION CALLER `purge_expired` never had (T-378). Measured
+    #    on this tree: 200 admitted bids with no auction deadline left 200 entries / 74,504
+    #    bytes before, and 30 entries / 6,851 bytes after — 30 being exactly the bids still
+    #    inside the 300s freshness window. With deadlines supplied it is 2.
+    #
+    #    It runs HERE, at gate 6, rather than at the top of the door, for two reasons. It is
+    #    O(entries) — 0.76 ms measured over a store at its 32,768 ceiling — so sweeping before
+    #    the cheap gates would let anyone with a malformed body make the exchange do that work
+    #    for free; and `evaluated_at` is the door's own clock, so a caller judging a submission
+    #    at an injected `now` sweeps against THAT instant rather than against wall time, which a
+    #    store sweeping on its own behalf could not do.
+    #
+    #    A `nonce_store` with no `purge_expired` raises here and the wrapper refuses
+    #    `door_failed_closed`. That is deliberate rather than an oversight: the alternative — a
+    #    `getattr` guard that skips the sweep — is a silent return to unbounded growth, which is
+    #    the defect. `purge_expired` is part of this port, and the module docstring says so.
+    nonce_store.purge_expired(evaluated_at)
+    try:
+        spendable = nonce_store.consume(
+            signer_id, nonce, _nonce_retention(auction_deadline, deadline, issued_at, window)
+        )
+    except NonceStoreFull:
+        # Full of entries that can all still be replayed. Refusing an honest submission is the
+        # only fail-closed answer: admitting one whose nonce could not be recorded is admitting
+        # an unlimited replay of it.
+        return _refuse(REASON_REPLAY_MEMORY_EXHAUSTED, payload=submitted)
+    if not spendable:
         return _refuse(REASON_REPLAYED_NONCE, payload=submitted)
 
     item = _work_item(

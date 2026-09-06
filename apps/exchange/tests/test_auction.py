@@ -30,7 +30,7 @@ from exchange.auction import (
     parallel_fan_out,
     sequential_fan_out,
 )
-from exchange.auction.routes import configure_auctions
+from exchange.auction.routes import MAX_IDENTIFIER_LENGTH, configure_auctions
 from exchange.eligibility import (
     BLACKLISTED,
     ELIGIBLE,
@@ -812,3 +812,216 @@ def test_the_arrival_clock_reports_elapsed_time_in_the_deadlines_own_frame() -> 
     assert clock() == T_NOW - 0.5, "still inside the window"
     tick.advance(1.0)
     assert clock() == T_NOW + 0.5, "past it, and detectably so"
+
+
+# =====================================================================================
+# T-352 — a caller-chosen identifier is a NAME, and this door bounds its length
+#
+# `CreateAuctionRequest.intent` is `dict[str, Any]`, so pydantic validates NOTHING inside it
+# and `_refuse_an_oversized_intent` weighs only `hard_constraints`. `create_auction` then
+# writes `intent["intent_id"]` and `intent["cluster_id"]` into the `AuctionRecord`, which is
+# saved into a store whose in-memory default is a plain dict its own comment calls
+# "Unbounded" — no capacity, no TTL, no eviction — and copied a second time into the
+# `auction_opened` and `auction_closed` ledger payloads. `GET /auctions/{auction_id}` hands
+# both strings straight back to an anonymous reader.
+#
+# Measured on this tree before the bound, against the served app with no credential of any
+# kind (`create_app()` + `TestClient`, one rostered store, 64 requests):
+#
+#     honest ids                          -> 201 x64, 64 records,   0.029 MiB retained
+#     30,000-char intent_id + cluster_id  -> 201 x64, 64 records,   3.690 MiB retained
+#     GET /auctions/{id}                  -> 200, 30,003-char intent_id, 60,233-byte body
+#     intent_id as ["A"*128] * 20,000     -> 201 x1,  1 record,  2,640,454 chars retained
+#
+# The last line is the same hole through a value that is not a string at all: the route
+# manufactured the identifier with `str()`, so ONE request retained 2.5 MiB. So the gate
+# below grades the type as well as the length — a bound that only looks at `str` values is a
+# bound a caller steps around by sending a list.
+#
+# The ceiling is the package's own `MAX_IDENTIFIER_LENGTH`, the number `RosterEntry.store_id`
+# on this very request already holds the same anonymous caller to, and the number the
+# external bid door's `_oversized_identifier` imports rather than restates.
+# =====================================================================================
+HOSTILE_IDENTIFIER_CHARS = 30_000
+
+#: A value that is not a string, whose `str()` spelling is far past the ceiling. This is the
+#: shape that made ONE request retain 2.5 MiB, and it is built from the ceiling rather than
+#: from a magic number so it cannot drift away from the bound it is probing.
+NON_STRING_IDENTIFIER = ["A" * MAX_IDENTIFIER_LENGTH] * 20_000
+
+
+def _identifier_auction_body(**intent_fields: Any) -> dict[str, Any]:
+    """A well-formed `POST /auctions` body whose intent carries `intent_fields`."""
+    return {
+        "intent": {"intent_id": "intent-1", "cluster_id": "cluster-1", **intent_fields},
+        "roster": [rostered("store-a", 120.0)],
+        "bid_timeout_seconds": 0.01,
+    }
+
+
+def _retained_records(app: Any) -> dict[str, str]:
+    """The JSON blobs the auction store is holding — the thing the caller was sizing."""
+    return dict(app.state.auction_machine.store._records)
+
+
+@pytest.mark.parametrize("field", ["intent_id", "cluster_id"])
+def test_an_over_long_caller_chosen_identifier_is_refused_and_retains_nothing(
+    field: str,
+) -> None:
+    """The defect itself: an anonymous caller choosing how much of this process to keep."""
+    app = create_app()
+    client = TestClient(app)
+    hostile = "A" * HOSTILE_IDENTIFIER_CHARS
+
+    posted = client.post("/auctions", json=_identifier_auction_body(**{field: hostile}))
+
+    assert posted.status_code == 422, (
+        f"an {HOSTILE_IDENTIFIER_CHARS}-character {field} was accepted with "
+        f"{posted.status_code}; a caller-chosen identifier is a name, not a document"
+    )
+    assert _retained_records(app) == {}, (
+        f"the auction record was written anyway, so the oversized {field} is retained for "
+        f"the store's whole lifetime in a dict with no eviction"
+    )
+    assert app.state.auction_machine.ledger.sink.kinds == [], (
+        "the refusal happened after the ledger had already copied the identifier into an "
+        "auction_opened payload"
+    )
+
+
+@pytest.mark.parametrize("field", ["intent_id", "cluster_id"])
+def test_the_refusal_does_not_echo_the_oversized_identifier_back(field: str) -> None:
+    """A refusal that quotes the offending input is the amplifier it was meant to close."""
+    client = TestClient(create_app())
+    hostile = "A" * HOSTILE_IDENTIFIER_CHARS
+
+    posted = client.post("/auctions", json=_identifier_auction_body(**{field: hostile}))
+
+    assert 400 <= posted.status_code < 500, (
+        f"refusing an oversized {field} answered {posted.status_code}; a hostile body must "
+        f"never reach a 5xx on an unauthenticated door"
+    )
+    assert "A" * (MAX_IDENTIFIER_LENGTH + 1) not in posted.text, (
+        f"the 422 for an oversized {field} echoed the identifier back"
+    )
+    assert len(posted.content) < 4096, (
+        f"the refusal body is {len(posted.content)} bytes; it must not grow with the size of "
+        f"what it refused"
+    )
+
+
+@pytest.mark.parametrize("field", ["intent_id", "cluster_id"])
+def test_a_caller_chosen_identifier_at_the_ceiling_is_still_accepted(field: str) -> None:
+    """The positive control: the bound refuses over-long names, not every name."""
+    app = create_app()
+    client = TestClient(app)
+    at_the_ceiling = "n" * MAX_IDENTIFIER_LENGTH
+
+    posted = client.post("/auctions", json=_identifier_auction_body(**{field: at_the_ceiling}))
+
+    assert posted.status_code == 201, (
+        f"a {field} of exactly MAX_IDENTIFIER_LENGTH ({MAX_IDENTIFIER_LENGTH}) was refused "
+        f"{posted.status_code}; the bound is a ceiling, not a smaller one"
+    )
+    read_back = client.get(f"/auctions/{posted.json()['auction_id']}")
+    assert read_back.json()[field] == at_the_ceiling
+
+
+def test_an_identifier_that_is_not_a_string_is_refused_rather_than_manufactured() -> None:
+    """`str()` on a caller's structure is the same lever reached through a different type.
+
+    The published ``Intent`` declares ``intent_id`` as a ``string`` and ``cluster_id`` as
+    ``string``/``null``, so nothing on contract is lost by refusing a list — and everything
+    is lost by spelling one out: measured, ONE request retained 2,640,454 characters.
+    """
+    app = create_app()
+    client = TestClient(app)
+
+    posted = client.post(
+        "/auctions", json=_identifier_auction_body(intent_id=NON_STRING_IDENTIFIER)
+    )
+
+    assert posted.status_code == 422, (
+        f"a list-valued intent_id was accepted with {posted.status_code} and spelled into an "
+        f"identifier by str()"
+    )
+    assert _retained_records(app) == {}
+    assert len(posted.content) < 4096, "the refusal echoed the manufactured identifier back"
+
+
+def test_hostile_identifiers_retain_no_more_of_the_process_than_honest_ones() -> None:
+    """The ticket's own reproduction, as a bound rather than as an anecdote.
+
+    64 requests each way. Before the bound the hostile run retained 3.690 MiB against the
+    honest run's 0.029 MiB — 127x, linear in the request count with no plateau, in a
+    container ``apps/exchange/compose.yaml`` limits to 256 MiB.
+    """
+    requests = 64
+    honest_app = create_app()
+    honest_client = TestClient(honest_app)
+    for index in range(requests):
+        honest_client.post(
+            "/auctions",
+            json=_identifier_auction_body(
+                intent_id=f"intent-{index}", cluster_id=f"cluster-{index}"
+            ),
+        )
+    honest = sum(len(blob) for blob in _retained_records(honest_app).values())
+
+    hostile_app = create_app()
+    hostile_client = TestClient(hostile_app)
+    for index in range(requests):
+        hostile_client.post(
+            "/auctions",
+            json=_identifier_auction_body(
+                intent_id="A" * HOSTILE_IDENTIFIER_CHARS + f"-{index}",
+                cluster_id="B" * HOSTILE_IDENTIFIER_CHARS + f"-{index}",
+            ),
+        )
+    hostile = sum(len(blob) for blob in _retained_records(hostile_app).values())
+
+    assert honest > 0, "the honest control retained nothing, so the comparison grades nothing"
+    assert hostile <= honest, (
+        f"{requests} hostile requests retained {hostile} characters against the honest "
+        f"run's {honest}: the caller still chooses how much of this process to keep"
+    )
+
+
+def test_an_identifier_no_response_encoder_can_emit_is_refused_at_the_door() -> None:
+    r"""A SECOND defect on the same two fields, found while bounding their length.
+
+    A LONE SURROGATE — ``"\ud800"``, which a caller writes as a plain ``\uXXXX`` escape and
+    which ``json.loads`` accepts into a perfectly ordinary ``str`` — is far inside the length
+    ceiling and survives ``AuctionRecord.to_json`` (``json.dumps`` defaults to
+    ``ensure_ascii=True``, so it is stored as the escape). Starlette renders with
+    ``ensure_ascii=False`` and then ``.encode("utf-8")``, which raises ``UnicodeEncodeError``
+    on it. Measured on this tree, over the served app with no credential::
+
+        POST /auctions  {"intent": {"intent_id": "x\ud800y", ...}}  -> 201
+        GET  /auctions/{auction_id}                                 -> 500
+
+    So an anonymous caller could plant an auction that answers 500 to every subsequent read of
+    it, for the record's whole lifetime. It is the same SHAPE as T-270 and as the defect
+    ``external_bids/routes.py::_renderable`` closes, reached through the field T-352 is about.
+
+    Refused at the DOOR rather than replaced on the way out, which is the opposite of what
+    that sibling does and is the right way round here: the external door must still answer a
+    refusal, so it has to render something, whereas an identifier the exchange can never serve
+    back is not a name it should have accepted. Nothing on contract is lost — the published
+    ``Intent`` declares a JSON string, and no encodable string is affected.
+    """
+    app = create_app()
+    client = TestClient(app, raise_server_exceptions=False)
+    raw = (
+        b'{"intent": {"intent_id": "x\\ud800y", "cluster_id": "c"}, '
+        b'"roster": [{"store_id": "store-a", "tier": 1, "product_ref": "product-1", '
+        b'"list_price": 120.0}], "bid_timeout_seconds": 0.01}'
+    )
+
+    posted = client.post("/auctions", content=raw, headers={"content-type": "application/json"})
+
+    assert posted.status_code == 422, (
+        f"an identifier carrying a lone surrogate was accepted with {posted.status_code}; "
+        f"the auction it opened answers 500 to every reader of GET /auctions/{{auction_id}}"
+    )
+    assert _retained_records(app) == {}

@@ -75,6 +75,7 @@ from .fanout import parallel_fan_out
 from .state import AuctionStateMachine, UnknownAuction
 
 __all__ = [
+    "BOUNDED_INTENT_IDENTIFIERS",
     "DEFAULT_BID_TIMEOUT_SECONDS",
     "MAX_BID_TIMEOUT_SECONDS",
     "MAX_EXCLUSION_REASONS_PER_BID",
@@ -302,6 +303,38 @@ class NullSolicitor:
 #: ``{"field": ..., "op": "gte", "value": ...}``. An identifier is a name, not a document.
 MAX_HARD_CONSTRAINT_BYTES = 16 * 1024
 MAX_IDENTIFIER_LENGTH = 128
+
+#: The identifiers the INTENT lets a caller choose, and which this door therefore bounds
+#: (T-352). Named as a tuple rather than spelled twice in the guard for the reason
+#: ``external_bids/routes.py``'s ``BOUNDED_IDENTIFIERS`` is — the set is the property, and a
+#: set that lives in one place cannot half-drift.
+#:
+#: **These two are RETAINED, which is what separates them from the rest of the intent.**
+#: ``CreateAuctionRequest.intent`` is ``dict[str, Any]``, so pydantic validates nothing inside
+#: it and :func:`_refuse_an_oversized_intent` weighs only ``hard_constraints``;
+#: :func:`create_auction` then writes these two into the :class:`~.state.AuctionRecord`, whose
+#: in-memory default store is a plain dict its own comment calls "Unbounded" — no capacity, no
+#: TTL, no eviction — and copies them a second time into the ``auction_opened`` and
+#: ``auction_closed`` ledger payloads, whose key vocabulary
+#: (``contracts.ledger``) is frozen at ``(intent_id, cluster_id, roster_size)``.
+#: ``GET /auctions/{auction_id}`` then hands both back to an anonymous reader. Measured over
+#: the served app with no credential of any kind, one rostered store, 64 requests::
+#:
+#:     honest ids                          -> 201 x64,  0.029 MiB retained
+#:     30,000-char intent_id + cluster_id  -> 201 x64,  3.690 MiB retained
+#:     GET /auctions/{id}                  -> 200, 30,003-char intent_id, 60,233-byte body
+#:     intent_id as ["A"*128] * 20,000     -> 201 x1,   2,640,454 chars retained
+#:
+#: growing linearly with the request count and with no plateau, against
+#: ``apps/exchange/compose.yaml``'s ``mem_limit: 256m``.
+#:
+#: **The last line is why the guard grades the TYPE as well as the length.** ``machine.create``
+#: is handed ``str(intent.get("intent_id", ""))``, so a caller who sends a list instead of a
+#: name has the route SPELL an identifier for it out of a structure — the same lever, reached
+#: around a check that only looks at ``str`` values, and cheaper for the attacker because one
+#: request did 2.5 MiB. Nothing on contract is lost by refusing it: the published ``Intent``
+#: declares ``intent_id`` as a ``string`` and ``cluster_id`` as ``string``/``null``.
+BOUNDED_INTENT_IDENTIFIERS: Final[tuple[str, ...]] = ("intent_id", "cluster_id")
 
 #: The offer keys a recorded bid carries into the book, and the ONLY ones.
 #:
@@ -1218,6 +1251,100 @@ def _refuse_an_oversized_intent(intent: Any) -> None:
         )
 
 
+def _refuse_an_oversized_identifier(intent: Any) -> None:
+    """422 an intent whose caller-chosen identifiers are not names this door can keep (T-352).
+
+    Three refusals, in this order and for the same reason — both fields are RETAINED for the
+    auction's lifetime and served back to any reader: a value that is not a string (the route
+    would spell one out of it with ``str()``), a string past the ceiling, and a string no UTF-8
+    response can emit. Each has its own comment below with what it measured.
+
+    The two fields are named by :data:`BOUNDED_INTENT_IDENTIFIERS`, which carries the
+    measurement; the ceiling is :data:`MAX_IDENTIFIER_LENGTH`, which is the number this same
+    request body already holds the same anonymous caller to on ``RosterEntry.store_id`` and
+    ``RosterEntry.product_ref``, which ``collected_bid_records`` holds a bidding store's own
+    reference to, and which ``external_bids/routes.py`` and ``policy/routes.py`` both IMPORT
+    from here rather than restate. A door that admitted an ``intent_id`` longer than the
+    ``store_id`` sitting beside it in the same body would be two ceilings on one request.
+
+    **Checked HERE rather than on ``CreateAuctionRequest``**, for the reason
+    :func:`_refuse_an_oversized_intent` gives: ``intent`` is a free ``dict[str, Any]`` on that
+    model, and a pydantic constraint would need the model to know the intent's shape, which is
+    precisely what it declines to know.
+
+    **Checked BEFORE :func:`~..retrieval.clusters.assign_cluster`**, so what is bounded is the
+    string the CALLER chose. A ``cluster_id`` the catalogue assigns replaces it and is the
+    operator's own configured name, not an anonymous body's — bounding that one would turn a
+    misconfiguration into a refused request, which is a different subject.
+
+    **The refusal shape**: a 422 whose detail is built from a field name off the module-level
+    tuple above, an integer length, and an integer ceiling — the oversized value is never
+    interpolated, so the answer cannot grow with what it refused, and cannot carry the caller's
+    bytes into a response encoder (the T-270 shape). The external bid door refuses the same
+    ceiling as a 400 ``BidValidationResult`` because that is the contract IT publishes; this
+    door's published answer for a body it will not accept is the 422 every other guard on it
+    already gives. The bound and its properties agree; only the two doors' own vocabularies
+    differ.
+    """
+    if not isinstance(intent, Mapping):
+        return
+    for field in BOUNDED_INTENT_IDENTIFIERS:
+        value = intent.get(field)
+        # Absent, or an explicit `null` the published `Intent` allows for `cluster_id`. Neither
+        # is a string whose length the caller chose, and both keep whatever this route already
+        # made of them.
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"intent.{field} is a {type(value).__name__}; this exchange requires the "
+                    f"string the published Intent declares. An identifier spelled out of a "
+                    f"structure carries that structure's size into the auction record and "
+                    f"into the ledger, which is the thing the length ceiling exists to stop"
+                ),
+            )
+        if len(value) > MAX_IDENTIFIER_LENGTH:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"intent.{field} is {len(value)} characters; this exchange accepts at most "
+                    f"{MAX_IDENTIFIER_LENGTH}. It is retained for the auction's whole lifetime, "
+                    f"written into every ledger event this auction emits, and served to any "
+                    f"reader of GET /auctions/{{auction_id}} — an identifier is a name, not a "
+                    f"document"
+                ),
+            )
+        # A SECOND defect on the same two fields, and the length check above does not touch
+        # it: a LONE SURROGATE (`"\ud800"`, written as a plain `\uXXXX` escape, which
+        # `json.loads` accepts into an ordinary `str`) is three characters long and survives
+        # `AuctionRecord.to_json`, because `json.dumps` defaults to `ensure_ascii=True` and
+        # stores the escape. Starlette renders with `ensure_ascii=False` and then
+        # `.encode("utf-8")`, which raises `UnicodeEncodeError` on it. Measured over the served
+        # app with no credential: `POST /auctions` with `intent_id: "x\ud800y"` answered 201
+        # and `GET /auctions/{auction_id}` then answered **500**, for that record's whole
+        # lifetime. The same SHAPE as T-270 and as the defect `external_bids/routes.py`'s
+        # `_renderable` closes, reached through the field T-352 is about.
+        #
+        # REFUSED HERE rather than replaced on the way out, which is deliberately the opposite
+        # of what that sibling does: the external door has to render a refusal, so it must
+        # substitute; an identifier this exchange could never serve back is one it should not
+        # have taken. The encode runs only after the length check, so it is bounded by
+        # `MAX_IDENTIFIER_LENGTH` and cannot itself be an amplifier.
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"intent.{field} carries a character no UTF-8 response can spell. It is "
+                    f"served back by GET /auctions/{{auction_id}}, so accepting it would open "
+                    f"an auction whose every reader is answered 500"
+                ),
+            ) from exc
+
+
 @router.post("/auctions", response_model=CreateAuctionResponse, status_code=201)
 async def create_auction(body: CreateAuctionRequest, request: Request) -> CreateAuctionResponse:
     """Open an auction, gate the roster, fan out with a hard timeout, close, and answer."""
@@ -1225,6 +1352,11 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
     machine = _machine(request)
     intent = body.intent
     _refuse_an_oversized_intent(intent)
+    # Both retained identifiers are bounded BEFORE `assign_cluster`, so everything below this
+    # line — the `machine.create` call, the two ledger payloads it writes, and what
+    # `GET /auctions/{auction_id}` serves back — is holding a name whose size the caller could
+    # not choose. See `BOUNDED_INTENT_IDENTIFIERS` for what each unbounded one cost (T-352).
+    _refuse_an_oversized_identifier(intent)
 
     # DESIGN.md:34's first exchange job, and the one nothing performed: address this intent to
     # a NAMED catalogue cluster. The buyer's clarifier mints `cluster_id` by hashing the query
