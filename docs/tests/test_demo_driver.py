@@ -29,6 +29,7 @@ partition (every gap recorded is a gap printed) and not the number.
 from __future__ import annotations
 
 import io
+import logging
 import os
 import re
 import subprocess
@@ -56,6 +57,55 @@ DRIVER_ENV_KEYS = (
 #: (``I``, ``L``, ``O`` and ``U`` are excluded from that alphabet so a human reading one aloud
 #: cannot turn it into a different code).
 CODE_PATTERN = re.compile(r"^PSX-[0-9A-HJKMNP-TV-Z]{8}$")
+
+#: One record as ``proxyshop_support.logging_config``'s text formatter writes it:
+#: ``%(asctime)s %(levelname)-8s %(name)s [%(request_id)s] %(message)s`` with
+#: ``datefmt="%Y-%m-%dT%H:%M:%S%z"``. Anchored at the start of a line on purpose — the anchor
+#: is what separates "a new record" from "the second line of the record above", and a
+#: traceback is entirely lines of the second kind.
+STDERR_RECORD = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{4} (?P<level>[A-Z]+) +\S+ \[[^\]]*\] "
+)
+
+#: Text that means something failed, whatever the exit status said. ``was never retrieved`` is
+#: asyncio's, for a task whose exception nobody awaited — the canonical shape of a failure that
+#: leaves the process code at zero.
+STDERR_FAILURE_SIGNATURES = (
+    "Traceback (most recent call last)",
+    "DEMO FAILED",
+    "Exception in thread",
+    "Exception ignored",
+    "--- Logging error ---",
+    "was never retrieved",
+)
+
+
+def stderr_faults(stderr: str) -> tuple[list[str], list[str]]:
+    """The two kinds of line ``python -m proxyshop_demo`` must never write to stderr.
+
+    Returns ``(unattributed, loud)``:
+
+    * **unattributed** — a line that is neither a log record nor an indented continuation of
+      one. Everything ``logging`` emits carries the header above; everything that does not is
+      something writing to the stream directly, which is a traceback, a stray ``print``, a
+      thread dying, or the driver's own ``DEMO FAILED:``.
+    * **loud** — a record at ``ERROR`` or ``CRITICAL``. A level name the stdlib does not know
+      counts as loud too, rather than being waved through as "probably fine".
+    """
+    unattributed: list[str] = []
+    loud: list[str] = []
+    started = False
+    for line in stderr.splitlines():
+        match = STDERR_RECORD.match(line)
+        if match:
+            started = True
+            level = logging.getLevelName(match.group("level"))
+            if not isinstance(level, int) or level >= logging.ERROR:
+                loud.append(line)
+        elif line.strip() and not (started and line[:1].isspace()):
+            unattributed.append(line)
+    return unattributed, loud
+
 
 #: The four sellers the S1 run fixture puts on the roster, and what each is here to prove.
 BLACKLISTED_STORE = "store-blocked"
@@ -313,9 +363,45 @@ def test_the_command_the_runbook_names_runs_and_exits_zero() -> None:
     perfectly good journey. This is the one test that grades the artifact the runbook hands an
     operator.
 
-    ``stderr`` is asserted empty rather than ignored: the driver's own failure path writes
-    there, and a demo that printed a traceback under a green exit status is the shape of
-    problem this whole file exists to catch.
+    ``stderr`` is graded rather than ignored, and what is graded is the SHAPE of what lands
+    there. The purpose is the one this test was written around and is unchanged: *the driver's
+    own failure path writes there, and a demo that printed a traceback under a green exit
+    status is the shape of problem this whole file exists to catch.*
+
+    **What changed is the proxy, and only because the premise under it was deliberately
+    removed.** Until T-308 this could be spelled ``stderr == ""``, because nothing in the
+    repository configured logging at all: ``proxyshop_support/logging_config.py``'s header
+    records the measurement — a repo-wide grep for
+    ``basicConfig|dictConfig|FileHandler|structlog|logging.config`` returned zero hits, so a
+    started service had ``root.handlers == []`` at level ``WARNING`` and every ``_log.info``
+    was dropped before a record was constructed. T-308 ended that on purpose: every
+    ``create_app()`` now calls ``configure_logging()``, which delivers to stderr, and this
+    driver starts five of them inside one process. "Nothing legitimate writes to stderr" is
+    now false BY DESIGN, so an empty-stderr assertion no longer grades tracebacks — it grades
+    whether T-308 happened, which is a different (and already tested) thing.
+
+    So the three assertions below say what that sentence actually means. Each is narrower than
+    "no output", not looser than it:
+
+    * **nothing unattributed** — every line is a log record or an indented continuation of
+      one. ``Traceback (most recent call last):``, a bare ``print(..., file=sys.stderr)``,
+      threading's ``Exception in thread ...`` and the driver's own ``DEMO FAILED:`` are all
+      unindented and match no record header, so all four still fail here. This is the
+      assertion that keeps the original's reach: a "contains no traceback" check would have
+      let the last three through.
+    * **nothing loud** — no record at ``ERROR`` or ``CRITICAL``. asyncio's "Task exception was
+      never retrieved", which is precisely an exception swallowed under a green exit, is an
+      ``ERROR`` record and lands here.
+    * **no failure signature in the raw text**, so a failure is named by shape in the message
+      rather than only by the line that carried it.
+
+    A ``WARNING`` is deliberately allowed, and that is not a loophole. This driver's whole
+    contract is that it REPORTS what is degraded instead of hiding it — see
+    :func:`test_every_beat_that_does_not_run_is_reported_rather_than_skipped` — and a run
+    today emits exactly one: T-150's ledger sink saying the trust service is unreachable, the
+    honest truth about a demo running with an unchained ledger. Asserting that the demo never
+    warns would be asserting that the demo is never degraded, which is the opposite of what
+    every other test in this file grades.
     """
     environ = {key: value for key, value in os.environ.items() if key not in DRIVER_ENV_KEYS}
     completed = subprocess.run(
@@ -331,7 +417,23 @@ def test_the_command_the_runbook_names_runs_and_exits_zero() -> None:
         f"`python -m proxyshop_demo` exited {completed.returncode}\n"
         f"--- stderr ---\n{completed.stderr}\n--- last of stdout ---\n{completed.stdout[-3000:]}"
     )
-    assert completed.stderr == "", f"the demo wrote to stderr:\n{completed.stderr}"
+    unattributed, loud = stderr_faults(completed.stderr)
+    assert not unattributed, (
+        f"{len(unattributed)} line(s) on the demo's stderr belong to no log record. A "
+        f"traceback, a stray print, a dead thread or the driver's own failure path is what "
+        f"that looks like, and a green exit status did not notice any of them:\n"
+        + "\n".join(unattributed[:20])
+        + f"\n--- all of stderr ---\n{completed.stderr}"
+    )
+    assert not loud, (
+        f"the demo logged {len(loud)} record(s) at ERROR or worse and still exited 0:\n"
+        + "\n".join(loud[:20])
+    )
+    signatures = [text for text in STDERR_FAILURE_SIGNATURES if text in completed.stderr]
+    assert not signatures, (
+        f"the demo's stderr carries {signatures}, which is a failure wearing a zero exit "
+        f"status:\n{completed.stderr}"
+    )
 
     codes = re.findall(r"PSX-[0-9A-HJKMNP-TV-Z]{8}", completed.stdout)
     assert codes, (
