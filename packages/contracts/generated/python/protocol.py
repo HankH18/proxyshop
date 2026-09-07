@@ -195,6 +195,28 @@ class BidPath(StrEnum):
     external = "external"
 
 
+class DenialCode(StrEnum):
+    """
+    The closed vocabulary a checkout refusal is drawn from: the token before the first colon of the 409 `denial_reason` on `POST /auctions/{auction_id}/accept` (T-204). `exchange.accept.DENIAL_REASONS` is the producer and this enum is the publication of it; `packages/contracts/tests/test_denial_vocabulary.py` fails if the two ever differ.
+
+    **The served field is not one of these values.** It is `<code>` or `<code>: <free diagnostic prose>` — measured live off a booted exchange, `"checkout_refused: RuntimeError: merchant declined to mint"` and `"blacklisted: chargeback fraud"` — so the enumeration is published on the CODE and the 409 keeps a `pattern` over the composite string. Enumerating the bare codes on `denial_reason` itself would be a constraint essentially every real 409 violates.
+
+    Parse the token before the first colon and match it here; everything behind that colon names the auction, the bid, the refused host or the exception class, and is for a human. The exchange writes `": "` itself but forwards a seller-eligibility source's reason verbatim when it already starts with a declared code, and it splits on a BARE colon after stripping blanks — so `blacklisted:no space` and a bare `blacklisted:` are values this field really carries. `contracts/ts/vocabulary.ts::denialCode` is the published parser; a hand-rolled `split(':')[0].trim()` disagrees with it on U+001C-U+001F.
+
+    `unspecified` is the fail-safe that makes this vocabulary closed rather than advisory: a refusal reaching the published boundary with a code the exchange does not declare is re-published under it with its prose intact, so a client never sees a tenth token.
+    """
+
+    already_accepted = "already_accepted"
+    auction_not_acceptable = "auction_not_acceptable"
+    blacklisted = "blacklisted"
+    checkout_refused = "checkout_refused"
+    unavailable = "unavailable"
+    unknown_bid = "unknown_bid"
+    unrecordable_acceptance = "unrecordable_acceptance"
+    unroutable_fallback = "unroutable_fallback"
+    unspecified = "unspecified"
+
+
 class Provenance(BaseModel):
     """
     DESIGN §Interfaces. Source ≡ Provenance: the Neo4j `Source` node carries the same enum in
@@ -319,7 +341,11 @@ class Bid(BaseModel):
     claims: list[Claim]
     message: str | None = None
     """
-    Free text. External (Tier-2) agents may send it; it is never a source of claims.
+    Prose the seller sends in its own voice — the SPONSORED half of D55, and the one part of a bid that carries the seller's own motive. Hosted advocates and external (Tier-2) agents both send it.
+
+    It is neither ignored nor trusted. `claim_verification.pitch.decompose_pitch` decomposes it into atomic `seller_asserted` claims, each carrying a `source_span` back into these bytes, and `claim_verification.verify` grades every one of them against the exchange's own catalog snapshot with the same text-blind comparators any other claim meets (R8, R18). That is why two bids differing by one word rank apart and why a claim the snapshot refutes comes back `contradicted`. The sentence that stood here until now declared this field inert and no source of claims at all; it described the state before that path existed. A `description` constrains nothing, so nothing broke when it went stale — which is exactly why it survived, and why `tests/test_schema_bundle.py` now holds this text to what the running extractor does.
+
+    The grading is what makes the prose safe to read at all. The extractor's own quality check is that a value appears in the document it was read from; run over the seller's own sentence that check degrades to "this store really did say this", which is authorship and not evidence. Comparison against a snapshot the seller did not supply is the missing half, so a claim minted from `message` is an ASSERTION until the verifier decides it, and `unsupported`/`ambiguous` are never read as true (R19). Untrusted text reaches a regular expression and a comparator here — never an instruction and never a model (C10).
     """
     agent_version: str = Field(..., min_length=1)
     signature: str | None = None

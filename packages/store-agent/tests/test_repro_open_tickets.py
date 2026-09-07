@@ -27,7 +27,31 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from fastapi import FastAPI
+
+from proxyshop_support.contract_sweep import (
+    contract_probe_app as probe_app_for,
+)
+from proxyshop_support.contract_sweep import (
+    normalise_route as normalise,  # noqa: F401 - re-exported for T-321's sweep, see below
+)
+from proxyshop_support.contract_sweep import (
+    operation_divergence as divergence,
+)
+from proxyshop_support.contract_sweep import (
+    operations as _operations,  # noqa: F401 - re-exported for T-321's sweep, see below
+)
+from proxyshop_support.contract_sweep import (
+    published_operations,
+    served_operations,
+)
+
+# ``_operations`` is not called by name in this file — it is reached through
+# ``published_operations``/``served_operations`` — and the ``noqa`` above is what keeps it
+# bound anyway. That is deliberate: T-321's gate at the bottom of this file counts how many
+# distinct implementations stand behind each helper ROLE across the repo's gate modules, and
+# its arming test requires every role to resolve through at least two of them. Dropping the
+# unused re-export would empty the "operation extractor" role down to two modules elsewhere
+# and start the slide back towards a verdict nothing could falsify.
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -35,105 +59,24 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 #: is what makes a path it declares and the app does not serve a defect rather than a taste.
 STORE_AGENT_OPENAPI = REPO_ROOT / "packages/contracts/openapi/store-agent.openapi.json"
 
-#: The methods an OpenAPI path item may carry. Everything else under a path item
-#: (``parameters``, ``summary``, ``$ref``, ``servers``) is not an operation and must not be
-#: counted as one — a sweep that counted them would inflate its own non-zero check.
-HTTP_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch", "trace"})
-
-
-def normalise(path: str) -> str:
-    """``/stores/{store_id}/trust`` -> ``/stores/{}/trust``.
-
-    The comparison is about the *wire shape* of the route, not about what the service happens
-    to name its path parameter. A service that serves ``/stores/{sid}/trust`` genuinely answers
-    the contract's ``/stores/{store_id}/trust``; grading the parameter's spelling would make
-    this gate fail for a reason the ticket is not about. Both raw spellings are still printed
-    in every failure message, so a genuine naming divergence is visible without being fatal.
-
-    Byte-for-byte the same implementation as the sibling gates in ``apps/exchange/tests`` and
-    ``services/ingest/tests``. It was a regex here first, and the two spellings DISAGREED on
-    malformed input (``/a/{b/{c}`` gave ``/a/{b/{}`` under the regex and ``/a/{}`` here), which
-    is exactly the kind of quiet divergence that makes three copies of a helper worse than one.
-    They are copies rather than a shared import because this lane owns three files in three
-    packages and no place to put a shared one; see the lane report.
-
-    Behaviour on malformed input, stated exactly: a ``{`` with no ``}`` anywhere after it is
-    passed through unchanged, but ``/a/{b/{c}`` collapses ``b/{c`` into a single ``{}`` — the
-    first ``{`` pairs with the only ``}``. The injectivity check in the arming test is what
-    keeps a future contract from collapsing two distinct paths onto one string unnoticed.
-    """
-    out: list[str] = []
-    rest = path
-    while "{" in rest:
-        head, _, tail = rest.partition("{")
-        _param, closed, rest = tail.partition("}")
-        if not closed:
-            return "".join(out) + head + "{" + tail
-        out.append(head + "{}")
-    return "".join(out) + rest
-
-
-def published_operations(contract: Path) -> set[tuple[str, str]]:
-    """``{(METHOD, normalised path)}`` declared by an OpenAPI document on disk."""
-    document = json.loads(contract.read_text(encoding="utf-8"))
-    return {
-        (method.upper(), normalise(path))
-        for path, item in document.get("paths", {}).items()
-        for method in item
-        if method.lower() in HTTP_METHODS
-    }
-
-
-def published_raw(contract: Path) -> set[tuple[str, str]]:
-    """The same set with paths left exactly as the contract spells them."""
-    document = json.loads(contract.read_text(encoding="utf-8"))
-    return {
-        (method.upper(), path)
-        for path, item in document.get("paths", {}).items()
-        for method in item
-        if method.lower() in HTTP_METHODS
-    }
-
-
-def served_operations(app: FastAPI) -> set[tuple[str, str]]:
-    """``{(METHOD, normalised path)}`` the built application actually answers."""
-    return {
-        (method.upper(), normalise(path))
-        for path, item in app.openapi().get("paths", {}).items()
-        for method in item
-        if method.lower() in HTTP_METHODS
-    }
-
-
-def divergence(served: set[tuple[str, str]], published: set[tuple[str, str]]) -> str:
-    """A message naming BOTH differences, with the counts each side actually iterated."""
-    unserved = sorted(f"{method} {path}" for method, path in published - served)
-    unpublished = sorted(f"{method} {path}" for method, path in served - published)
-    return (
-        f"served {len(served)} operation(s), contract publishes {len(published)}; "
-        f"published but NOT served: {unserved or 'none'}; "
-        f"served but NOT published: {unpublished or 'none'}"
-    )
-
-
-def _probe_endpoint() -> dict[str, Any]:  # pragma: no cover - never called, only mounted
-    return {}
-
-
-def probe_app_for(contract: Path) -> FastAPI:
-    """A synthetic app that serves exactly what ``contract`` publishes.
-
-    This is the sweep's arming device and it is not optional. Three sweeps in this repo were
-    found going QUIET rather than red — a loop that iterates zero cases and passes — so the
-    extractor is pointed at an app whose served set is *known*, built out of the very paths
-    under test. If :func:`served_operations` ever stops seeing routes, or the two sides ever
-    normalise differently, the control below fails instead of the real gate silently agreeing
-    that ``set() == set()``.
-    """
-    app = FastAPI(title="probe")
-    for method, path in sorted(published_raw(contract)):
-        app.add_api_route(path, _probe_endpoint, methods=[method])
-    return app
+#: The six contract-sweep helpers used below are NOT defined here any more, and T-321 — gated
+#: at the bottom of this file — is exactly that change. They were written out once here, once
+#: in ``apps/exchange/tests/test_repro_open_tickets.py`` and once in
+#: ``services/ingest/tests/test_repro_open_tickets.py``, under two different spellings, with
+#: nothing comparing the copies. They had already drifted once: ``normalise`` was a regex here
+#: and a ``str.partition`` loop in the other two, and the two disagreed on ``/a/{b/{c}``
+#: (``/a/{b/{}`` against ``/a/{}``). One rule now lives in
+#: :mod:`proxyshop_support.contract_sweep` and all three gates import it; the local spellings
+#: are kept (see this file's import head) so every call site below reads as it did.
+#:
+#: Two differences existed when the three were folded together, both resolved towards the
+#: stricter or more informative reading and both recorded in that module's docstring:
+#: ``published_raw(c)`` here is the other two files' ``published_operations(c, raw=True)`` and
+#: is now spelled that way at its one call site, and the probe app's title is the other two
+#: files' ``probe:<contract file name>`` rather than this file's bare ``probe``. Nothing
+#: asserts the title; a failure message naming the contract is worth more than one that does
+#: not. Every other answer was already identical, measured over all five contracts in
+#: ``packages/contracts/openapi`` and over the malformed corpus in :data:`T321_MALFORMED`.
 
 
 # =============================================================================================
@@ -156,7 +99,7 @@ def test_the_served_versus_published_sweep_is_armed() -> None:
     The probe is built from the contract's own raw paths, so it also proves the two sides
     normalise identically — the one way a set comparison can be wrong without being empty.
     """
-    raw = published_raw(STORE_AGENT_OPENAPI)
+    raw = published_operations(STORE_AGENT_OPENAPI, raw=True)
     published = published_operations(STORE_AGENT_OPENAPI)
     assert published, f"{STORE_AGENT_OPENAPI} declares no operations; the sweep would be blind"
 
@@ -2445,14 +2388,21 @@ def test_t220_the_suite_grades_depths_a_reintroduced_bound_could_hide_behind() -
 
 
 # =============================================================================================
-# T-321 — six contract/served sweep helpers, one implementation per package, nothing enforcing
-# that they agree
+# T-321 — six contract/served sweep helpers, ONE implementation between them, and this is what
+# keeps it that way
 #
-# They agree TODAY — the arming test measures that rather than assuming it. The defect is that
-# nothing makes them: three implementations of one rule, each free to drift, and they HAVE
+# The defect, as filed: three implementations of one rule, each free to drift, and they HAD
 # drifted once already (a regex path-normaliser here disagreed with the other two on malformed
-# input). So the gate is about the number of implementations, which is the thing that can be
-# fixed; a gate asserting they currently agree would be green and would grade nothing.
+# input). Nothing compared them, so the failure mode was silent — two services agreeing a
+# surface is fine while the third measures something slightly different.
+#
+# CLOSED by folding all six into `proxyshop_support/contract_sweep.py`, which
+# `apps/exchange/tests`, `services/ingest/tests` and this file now import. The gate below counts
+# implementations rather than asserting agreement, because agreement was already true and would
+# have graded nothing; what it refuses is the arrangement where the same rule is written down N
+# times and nothing compares them. The arming test above it carries the other half — that the
+# fold did not quietly change what the rule ANSWERS, pinned against what all three copies
+# returned before they were merged.
 # =============================================================================================
 
 #: Every gate file that could hold a copy. Eleven files share this name across the repo, not the
@@ -2487,13 +2437,66 @@ T321_ROOTS = (
 #: while the other two express it as the `raw=True` branch of one, so a separate role for it
 #: reported ONE definition of a rule that genuinely exists in three places — the exact near-miss
 #: this table's own comment warns about, committed inside the table. One rule, one role.
+#: The shared module's own spellings were ADDED to every tuple when the consolidation landed,
+#: and they are not decoration. The folded helper is called `normalise_route`; if a future gate
+#: file pastes that definition back in under the name it now has upstream, a table listing only
+#: the two historical spellings would not see it. Every name a copy could plausibly wear belongs
+#: here — the table only ever gets longer.
 T321_ROLES: dict[str, tuple[str, ...]] = {
-    "path normaliser": ("normalise", "_normalise_route"),
+    "path normaliser": ("normalise", "_normalise_route", "normalise_route"),
     "published operations": ("published_operations", "_published_operations", "published_raw"),
     "served operations": ("served_operations", "_served_operations"),
-    "divergence message": ("divergence", "_operation_divergence"),
-    "contract probe app": ("probe_app_for", "_contract_probe_app"),
-    "operation extractor": ("_operations",),
+    "divergence message": ("divergence", "_operation_divergence", "operation_divergence"),
+    "contract probe app": ("probe_app_for", "_contract_probe_app", "contract_probe_app"),
+    "operation extractor": ("_operations", "operations"),
+}
+
+#: The ONE home all six folded helpers now live in. Named here rather than implied so that a
+#: moved or renamed module breaks the arming test loudly instead of quietly leaving the scanner
+#: pointed at nothing.
+T321_SHARED_MODULE = REPO_ROOT / "proxyshop_support" / "contract_sweep.py"
+
+#: Helpers that WEAR a role's name while implementing a DIFFERENT rule, with the reason each is
+#: not a copy. This is the one way the gate below can be told to ignore something, so it is
+#: built to be unusable as an escape hatch: `test_t321_the_different_rule_exemptions_are_real`
+#: runs every exempted helper and the shared one over the same subject and requires the two
+#: answers to DIFFER. A genuine copy pasted back in under one of these names would answer
+#: identically and that test would go red, so an entry here cannot hide the duplication the gate
+#: exists to find. A stale entry — one naming a helper that no longer resolves — is also a
+#: failure there, not dead weight.
+#:
+#: MEASURED, and it corrects the ticket's own count: T-321 says these helpers exist in THREE
+#: copies each. Two of the roles had a FOURTH definition, in `apps/merchant/svc/tests`, which
+#: the ticket does not mention and which is not a copy of anything. The merchant pair grades
+#: `merchant_svc` in a different vocabulary on purpose:
+#:
+#:   * its `_served_operations` walks `app.routes` rather than reading `app.openapi()`, because
+#:     the T-317 defect it grades is undeclared surface — a route carrying
+#:     `include_in_schema=False` is invisible to the schema, so reading the schema would have
+#:     made one keyword argument a green button for that ticket. It also takes NO argument and
+#:     builds the app itself.
+#:   * its `_published_operations` reads through `contracts.openapi.documents()`, the repo's own
+#:     loader, rather than opening a JSON path — deliberately, so the document it grades against
+#:     is not one the merchant's own lane can hand it.
+#:   * both answer in lower-case method names and keep path-parameter names intact
+#:     (`('get', '/stores/{store_id}/dashboard')`), where the shared reading upper-cases and
+#:     normalises (`('GET', '/stores/{}/dashboard')`).
+#:
+#: Folding those into the shared helper would have had to weaken one gate or the other — the
+#: merchant's route-walk would lose the undeclared routes it exists to find, or the other three
+#: would start grading parameter spellings they deliberately ignore. The union of what the
+#: implementations catch is the floor, so they stay separate and stay measured.
+T321_DIFFERENT_RULE: dict[str, str] = {
+    "apps.merchant.svc.tests.test_repro_open_tickets._served_operations": (
+        "walks app.routes instead of reading app.openapi(), takes no argument, and answers in "
+        "lower-case with path-parameter names intact — T-317 is about routes the schema does "
+        "not declare, which a schema reading cannot see"
+    ),
+    "apps.merchant.svc.tests.test_repro_open_tickets._published_operations": (
+        "reads through contracts.openapi.documents() rather than a JSON path, takes no "
+        "argument, and answers in lower-case with path-parameter names intact so it matches "
+        "the route walk above"
+    ),
 }
 
 #: Malformed paths the three copies must agree about. Every one of them is a shape the ORIGINAL
@@ -2521,7 +2524,10 @@ def _t321_gate_files() -> list[Any]:
     return [path for path in found if ".venv" not in path.parts and ".pkgroot" not in path.parts]
 
 
-def _t321_definitions(roles: dict[str, tuple[str, ...]] | None = None) -> dict[str, list[str]]:
+def _t321_definitions(
+    roles: dict[str, tuple[str, ...]] | None = None,
+    files: list[Any] | None = None,
+) -> dict[str, list[str]]:
     """`{role: [<repo-relative file>::<name>, ...]}` — where each role is DEFINED.
 
     AST rather than a text search: a name inside a docstring, a comment or a triple-quoted
@@ -2532,13 +2538,19 @@ def _t321_definitions(roles: dict[str, tuple[str, ...]] | None = None) -> dict[s
     exists nowhere and require it to come back empty. Every key is pre-seeded with `[]`, so
     "the role is present in the result" is true whatever the scan found — asserting THAT would
     be an assertion that cannot fail, which is the shape this parameter exists to avoid.
+
+    `files` exists for the same reason and was added when the consolidation landed: with the
+    six folded helpers now living in :mod:`proxyshop_support.contract_sweep`, a scan restricted
+    to gate files finds almost nothing, and "found almost nothing" is indistinguishable from
+    "the scanner broke". The arming test therefore points this at the SHARED module and requires
+    it to see the definition sitting there, which is a live anchor rather than a historical one.
     """
     import ast  # noqa: PLC0415
 
     roles = T321_ROLES if roles is None else roles
     aliases = {name: role for role, names in roles.items() for name in names}
     found: dict[str, list[str]] = {role: [] for role in roles}
-    for path in _t321_gate_files():
+    for path in _t321_gate_files() if files is None else files:
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in aliases:
@@ -2586,25 +2598,132 @@ def _t321_distinct(functions: dict[str, Any]) -> set[Any]:
     return {getattr(fn, "__code__", fn) for fn in functions.values()}
 
 
-def test_t321_the_duplicated_helper_scan_is_armed() -> None:
-    """The scanner finds definitions it is pointed at, the copies really exist, and they agree
-    TODAY. NOT xfail.
+def _t321_swept(functions: dict[str, Any]) -> dict[str, Any]:
+    """`functions` minus the entries :data:`T321_DIFFERENT_RULE` records as a different rule.
 
-    Four ways the gate below could report green while the duplication lived:
+    Applied by the gate and by nothing else: `_t321_implementations` keeps returning everything,
+    so the arming test still sees the exempted helpers, still counts them towards "this role
+    resolves through more than one module", and still runs them in the exemption proof.
+    """
+    return {name: fn for name, fn in functions.items() if name not in T321_DIFFERENT_RULE}
+
+
+def test_t321_the_different_rule_exemptions_are_real() -> None:
+    """Every exemption is PROVEN by running it, not granted by asserting it. NOT xfail.
+
+    :data:`T321_DIFFERENT_RULE` is the only thing that can tell the gate below to ignore a
+    helper wearing a swept name, so it is the only place a genuine duplicate could be hidden.
+    This closes that: each exempted helper and the shared implementation are run over the same
+    subject and required to answer DIFFERENTLY. Paste a real copy of the shared helper back in
+    under one of these names and the two answers coincide, and this test — not the gate — is
+    what goes red.
+
+    Two ways the proof itself could be vacuous, both closed:
+
+    * "they differ" because one of them returned nothing. Both answers are required to be
+      non-empty first, so an exemption cannot rest on a helper that has stopped working.
+    * the exemption names a helper that no longer exists, in which case it is exempting nothing
+      and quietly shrinking the sweep. Every key must still resolve to a callable.
+    """
+    import importlib  # noqa: PLC0415
+
+    merchant = importlib.import_module("apps.merchant.svc.tests.test_repro_open_tickets")
+    merchant_contract = REPO_ROOT / "packages/contracts/openapi/merchant.openapi.json"
+    merchant_app = importlib.import_module("merchant_svc.main").create_app()
+
+    #: `{exempted attribute: (its answer, the shared implementation's answer on the same thing)}`
+    subjects: dict[str, tuple[set[tuple[str, str]], set[tuple[str, str]]]] = {
+        "apps.merchant.svc.tests.test_repro_open_tickets._served_operations": (
+            merchant._served_operations(),
+            served_operations(merchant_app),
+        ),
+        "apps.merchant.svc.tests.test_repro_open_tickets._published_operations": (
+            merchant._published_operations(),
+            published_operations(merchant_contract),
+        ),
+    }
+    assert set(subjects) == set(T321_DIFFERENT_RULE), (
+        f"the exemption table lists {sorted(T321_DIFFERENT_RULE)} but this proof runs "
+        f"{sorted(subjects)}; an exemption nothing measures is an exemption nothing bounds"
+    )
+
+    resolved = {
+        name: fn for functions in _t321_implementations().values() for name, fn in functions.items()
+    }
+    for name, reason in T321_DIFFERENT_RULE.items():
+        assert callable(resolved.get(name)), (
+            f"{name} is exempted from the T-321 gate as a different rule ({reason}) but no "
+            "longer resolves to a callable. A stale exemption silently shrinks the sweep: "
+            "delete the entry, or point it at wherever that helper went"
+        )
+        theirs, shared = subjects[name]
+        assert theirs and shared, (
+            f"the exemption proof for {name} compared {len(theirs)} answer(s) against "
+            f"{len(shared)} from the shared helper; 'they differ' must not be able to mean "
+            "'one of them returned nothing'"
+        )
+        assert theirs != shared, (
+            f"{name} is exempted from the T-321 gate on the grounds that it implements a "
+            f"different rule ({reason}) — but run over the same subject it answers EXACTLY "
+            f"what proxyshop_support.contract_sweep answers: {sorted(theirs)}. It is a copy, "
+            "the exemption is false, and it must be folded into the shared helper instead"
+        )
+
+
+#: What the three copies of the path normaliser ALL returned for :data:`T321_MALFORMED` at the
+#: commit before they were folded together, captured by running the three of them side by side.
+#: This is what stops the consolidation from having quietly changed the rule: after the fold
+#: there is only one implementation, so "the copies agree" costs nothing to satisfy and proves
+#: nothing on its own. Pinning the answers is what carries the old behaviour forward — the
+#: shared helper must still give the shape each copy gave, including the two nobody would guess
+#: (`/a/{b/{c}` -> `/a/{}`, because the first `{` pairs with the only `}`; `/a/{b` unchanged,
+#: because an unclosed brace is passed through).
+T321_NORMALISED_BEFORE_THE_FOLD: dict[str, str] = {
+    "/a/{b/{c}": "/a/{}",
+    "/a/{b": "/a/{b",
+    "/a/{}": "/a/{}",
+    "/{}/{}": "/{}/{}",
+    "/a/{b}/{c}": "/a/{}/{}",
+    "/stores/{store_id}/trust": "/stores/{}/trust",
+    "/": "/",
+    "": "",
+    "/a/}b{/c": "/a/}b{/c",
+    "/{a{b}c}": "/{}c}",
+}
+
+
+def test_t321_the_duplicated_helper_scan_is_armed() -> None:
+    """The scanner finds definitions it is pointed at, every role really resolves, and the
+    folded helper still answers what the copies answered. NOT xfail.
+
+    Six ways the gate below could report green while the duplication lived, or while the
+    consolidation had quietly changed what the sweeps measure:
 
     1. **The scan finds nothing.** A path root that moved, a file renamed, an AST walk that
-       silently returned `[]` — every one of them makes a "no duplicates" verdict vacuous. The
-       file count and the definition count are asserted first, and this very module is required
-       to be among the files found, defining the normaliser it is pointed straight at.
+       silently returned `[]` — every one of them makes a "no duplicates" verdict vacuous. So
+       the scanner is pointed straight at the ONE module that now holds the folded rule and
+       required to see the definition sitting in it. Before the fold that anchor was this file's
+       own `def normalise`; it is the shared module now because that is where the definition
+       went, and an anchor naming a `def` that no longer exists would be a scanner that always
+       reports nothing, dressed as a passing test.
     2. **The scan matches everything.** A role whose names appear nowhere is required to resolve
        to zero definitions, so the scanner is selecting rather than sweeping.
     3. **A mention is counted as a definition.** The names occur in docstrings and inside a
-       triple-quoted subprocess script elsewhere in the repo. The scan is AST-based and the count
-       it reports is asserted against the module-level `def`s, not against `grep`.
-    4. **The copies have already diverged**, in which case this ticket would be a live bug rather
-       than a missing constraint. Every normaliser found is run over the same corpus of malformed
-       paths and required to AGREE today — which is exactly why nothing has noticed there are
-       three of them.
+       triple-quoted subprocess script elsewhere in the repo. The scan is AST-based and what it
+       reports is module-level `def`s, not `grep` hits.
+    4. **A gate file quietly grows its own copy again.** The AST scan over all eleven gate files
+       is required to find EXACTLY the two `apps/merchant/svc/tests` definitions the exemption
+       table accounts for, and nothing else. That is stricter than the count it replaced: any
+       twelfth file, or any of the three sweeping files reintroducing a private helper, shows up
+       here as a set difference naming the file.
+    5. **The resolver finds nothing to compare.** Every role must still resolve through at least
+       two gate modules, or "one implementation" could just mean "one module bothered to expose
+       it" — and deleting a sibling's sweep instead of sharing one is refused from this side.
+    6. **The fold changed the rule.** The surviving normaliser is run over the malformed corpus
+       and required to reproduce, exactly, what all three copies returned before they were
+       merged — including the two answers a regex spelling got wrong the first time. An
+       agreement check alone cannot see this any more: with one implementation left, every copy
+       agrees with itself by construction.
     """
     files = _t321_gate_files()
     assert len(files) >= 3, (
@@ -2615,10 +2734,20 @@ def test_t321_the_duplicated_helper_scan_is_armed() -> None:
         f"the scan did not find this very file among {[str(p) for p in files]}"
     )
 
-    definitions = _t321_definitions()
-    mine = [entry for entry in definitions["path normaliser"] if "store-agent" in entry]
-    assert mine == ["packages/store-agent/tests/test_repro_open_tickets.py::normalise"], (
-        f"the scanner cannot see the definition it is pointed straight at: {mine}"
+    # 1. The scanner sees a definition it is pointed straight at — the folded one, in the module
+    #    that now holds it.
+    assert T321_SHARED_MODULE.is_file(), (
+        f"{T321_SHARED_MODULE} does not exist; the six folded helpers have no home and every "
+        "check below is measuring an arrangement that is not there"
+    )
+    shared = _t321_definitions(files=[T321_SHARED_MODULE])
+    assert shared["path normaliser"] == ["proxyshop_support/contract_sweep.py::normalise_route"], (
+        f"the scanner cannot see the definition it is pointed straight at: {shared}"
+    )
+    assert sum(len(entries) for entries in shared.values()) == len(T321_ROLES), (
+        f"the shared module defines {sum(len(e) for e in shared.values())} of the swept helpers, "
+        f"not all {len(T321_ROLES)}: {shared}. Either a role moved out of it, or two roles now "
+        "share one definition there, or the scanner stopped seeing them"
     )
 
     # 2. The scan SELECTS rather than matches. A role whose name exists nowhere in the repo must
@@ -2630,17 +2759,28 @@ def test_t321_the_duplicated_helper_scan_is_armed() -> None:
         f"the scanner reported definitions for a name that exists nowhere in the repo: {decoy}. "
         "It is matching rather than selecting, so the counts the gate below reads are noise"
     )
-    assert sum(len(entries) for entries in definitions.values()) >= 6, (
-        f"the scan found only {sum(len(e) for e in definitions.values())} helper definitions in "
-        f"{len(files)} gate file(s); it has stopped seeing the copies it exists to count"
+
+    # 4. No gate file holds a private copy any more, and the only definitions left across all
+    #    eleven are the two the exemption table accounts for.
+    definitions = _t321_definitions()
+    remaining = {entry for entries in definitions.values() for entry in entries}
+    accounted = {
+        "apps/merchant/svc/tests/test_repro_open_tickets.py::_published_operations",
+        "apps/merchant/svc/tests/test_repro_open_tickets.py::_served_operations",
+    }
+    assert remaining == accounted, (
+        f"the AST scan over {len(files)} gate file(s) found {sorted(remaining)}; expected "
+        f"exactly {sorted(accounted)}. Unexpected: {sorted(remaining - accounted)} — a gate "
+        f"file has grown its own copy of a shared helper again. Missing: "
+        f"{sorted(accounted - remaining)} — an exempted helper moved, so the exemption table "
+        "is now describing something that is not there"
     )
 
-    # 4. The copies AGREE today — which is the whole reason nothing has noticed.
     implementations = _t321_implementations()
     normalisers = implementations["path normaliser"]
     assert len(normalisers) >= 3, (
         f"only {len(normalisers)} path normaliser(s) could be imported and compared "
-        f"({sorted(normalisers)}); the agreement check below is not covering the copies"
+        f"({sorted(normalisers)}); the checks below are not covering the sweeping packages"
     )
     # 5. The gate below counts IMPLEMENTATIONS, so the resolver has to actually resolve. Every
     #    role must be reachable through an import from at least two of the sweeping packages, or
@@ -2654,24 +2794,68 @@ def test_t321_the_duplicated_helper_scan_is_armed() -> None:
     for path in T321_MALFORMED:
         answers = {name: helper(path) for name, helper in normalisers.items()}
         assert len(set(answers.values())) == 1, (
-            f"the copies of the path normaliser already DISAGREE on {path!r}: {answers}. That "
-            "makes T-321 a live divergence rather than a missing constraint, and this arming "
-            "test is the thing that noticed — which is the ticket's point exactly"
+            f"the copies of the path normaliser DISAGREE on {path!r}: {answers}. That makes "
+            "T-321 a live divergence rather than a missing constraint, and this arming test is "
+            "the thing that noticed — which is the ticket's point exactly"
         )
+        # 6. And they agree on what they agreed on BEFORE the fold, which is the half a
+        #    one-implementation agreement check can no longer see.
+        assert set(answers.values()) == {T321_NORMALISED_BEFORE_THE_FOLD[path]}, (
+            f"the folded path normaliser answers {sorted(set(answers.values()))} for {path!r} "
+            f"where all three copies answered {T321_NORMALISED_BEFORE_THE_FOLD[path]!r} before "
+            "they were merged. Consolidating was allowed to remove copies, not to change the "
+            "rule the three sweeps grade their services with"
+        )
+    assert set(T321_MALFORMED) == set(T321_NORMALISED_BEFORE_THE_FOLD), (
+        "the malformed corpus and the pre-fold answers have drifted apart: "
+        f"{sorted(set(T321_MALFORMED) ^ set(T321_NORMALISED_BEFORE_THE_FOLD))} appears in one "
+        "and not the other, so some shapes are swept with nothing to compare against"
+    )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-321: the contract/served sweep helpers exist once per package with nothing enforcing "
-        "that they agree. They agree today — the arming test measures it — but they have drifted "
-        "once already (a regex path-normaliser in this package disagreed with the other two on "
-        "`/a/{b/{c}`), and three implementations of one rule is three things to keep in step. "
-        "MEASURED: the path normaliser, the published-operations extractor, the served-operations "
-        "extractor, the divergence message and the contract probe app are each defined in three "
-        "separate gate files, under two different spellings; remove this marker with the fix"
-    ),
-)
+# ---------------------------------------------------------------------------------------------
+# TEST EDIT, JUSTIFIED — the `xfail(strict=True)` marker that stood here was REMOVED. The
+# assertion below is unchanged; the arming test above gained checks rather than losing any.
+#
+# MARKER REMOVED, verbatim: `@pytest.mark.xfail(strict=True, reason="T-321: the contract/served
+# sweep helpers exist once per package with nothing enforcing that they agree. They agree today —
+# the arming test measures it — but they have drifted once already (a regex path-normaliser in
+# this package disagreed with the other two on `/a/{b/{c}`), and three implementations of one
+# rule is three things to keep in step. MEASURED: the path normaliser, the published-operations
+# extractor, the served-operations extractor, the divergence message and the contract probe app
+# are each defined in three separate gate files, under two different spellings; remove this
+# marker with the fix")`
+#
+# WHAT IT CLAIMED: that the assertion below MUST fail — every swept role had more than one
+# implementation standing behind it. Under `strict=True` the marker is itself an assertion, so
+# leaving it once the duplication is gone turns the repair into an XPASS *failure* that reds
+# `make verify`.
+#
+# REQUIREMENT IT ENCODES: T-321, tickets.json. This node is the ticket's recorded `verify`.
+#
+# REVERT CHECK — would the assertion below still pass if I reverted my change? **NO**. MEASURED
+# in this lane, with `proxyshop_support/contract_sweep.py` moved aside and the three gate files
+# restored from `git show HEAD:<file>` and nothing else touched:
+#   * at HEAD, `--runxfail -k t321`: `1 failed` — "6 of 6 contract-sweep helper roles have more
+#     than one implementation behind them", naming `_normalise_route`/`normalise`,
+#     `_published_operations`/`published_operations`/`published_raw`,
+#     `_served_operations`/`served_operations`, `_operation_divergence`/`divergence`,
+#     `_contract_probe_app`/`probe_app_for` and `_operations`.
+#   * at HEAD, plain run: `1 passed, 1 xfailed`, with this marker's reason printed.
+#   * with the fold in place, plain run: `3 passed`.
+# So the XPASS is caused by THIS lane's change and not by unrelated drift.
+#
+# WHAT THE MARKER'S OWN TEXT GOT WRONG, corrected rather than carried forward: it said the
+# helpers are "each defined in three separate gate files". Measured across all eleven gate
+# files, two of the roles had a FOURTH definition — `apps/merchant/svc/tests` defines
+# `_published_operations` and `_served_operations` too. Those are not copies (see
+# `T321_DIFFERENT_RULE` above, and the test that PROVES they answer differently), but the
+# ticket's count was wrong and the gate was always stricter than its own reason.
+#
+# VERDICT: the duplication is gone — one implementation per role, in
+# `proxyshop_support/contract_sweep.py`, imported by all three sweeping packages. The marker,
+# not the code, had become false. Removed.
+# ---------------------------------------------------------------------------------------------
 def test_t321_each_contract_sweep_helper_has_exactly_one_implementation() -> None:
     """One rule, one implementation. Three copies is three chances to drift.
 
@@ -2701,11 +2885,23 @@ def test_t321_each_contract_sweep_helper_has_exactly_one_implementation() -> Non
     Deleting a sibling's sweep rather than sharing one is refused from the other side: the arming
     test requires every role to resolve through at least two modules.
 
-    MEASURED at HEAD across every `test_repro_open_tickets.py` under pytest's own `testpaths`
-    rather than the three files the ticket names — there are eleven, and a twelfth appearing
-    tomorrow is the same defect.
+    MEASURED across every `test_repro_open_tickets.py` under pytest's own `testpaths` rather than
+    the three files the ticket names — there are eleven, and a twelfth appearing tomorrow is the
+    same defect.
+
+    **Where it stands now.** The five sweeping helpers plus the operation extractor live once, in
+    `proxyshop_support/contract_sweep.py`, and `apps/exchange/tests`, `services/ingest/tests` and
+    this file import them under their old local spellings. What remains swept and NOT folded is
+    the `apps/merchant/svc/tests` pair, which wears two of these names while grading routes
+    instead of schema and answering in a different vocabulary; it is exempted by name in
+    :data:`T321_DIFFERENT_RULE` and that exemption is not taken on trust —
+    :func:`test_t321_the_different_rule_exemptions_are_real` runs both helpers against the shared
+    ones and requires the answers to differ, so an exemption cannot be used to smuggle a copy
+    past this gate.
     """
-    implementations = _t321_implementations()
+    implementations = {
+        role: _t321_swept(functions) for role, functions in _t321_implementations().items()
+    }
     duplicated = {
         role: functions
         for role, functions in implementations.items()

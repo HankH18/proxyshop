@@ -1,0 +1,264 @@
+{
+  "_readme": [
+    "T-204 - the 409 `denial_reason` parser, ONE table read by both languages.",
+    "",
+    "GENERATED, never hand-written: every `code` here is the answer",
+    "`exchange.accept.reasons.denial_code` gives for that `reason`, and",
+    "`test_denial_vocabulary.py::test_every_corpus_row_is_what_the_exchanges_own_parser_answers`",
+    "re-derives all of them, so a row cannot be edited to match a broken consumer.",
+    "`denial_vocabulary.test.ts` drives `contracts/ts/vocabulary.ts::denialCode` with the",
+    "same file.",
+    "",
+    "The rows that matter are the blank ones. The exchange strips the token with Python's",
+    "`str.strip()`; a TypeScript client reaching for `trim()` disagrees in both directions -",
+    "`trim()` keeps U+001C-U+001F and U+0085, which Python removes, and removes U+FEFF,",
+    "which Python keeps. Each of those is a row here, so a hand-rolled parser fails the",
+    "suite instead of failing a buyer."
+  ],
+  "rows": [
+    {
+      "reason": "already_accepted",
+      "code": "already_accepted"
+    },
+    {
+      "reason": "already_accepted: prose a human reads",
+      "code": "already_accepted"
+    },
+    {
+      "reason": "auction_not_acceptable",
+      "code": "auction_not_acceptable"
+    },
+    {
+      "reason": "auction_not_acceptable: prose a human reads",
+      "code": "auction_not_acceptable"
+    },
+    {
+      "reason": "blacklisted",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "blacklisted: prose a human reads",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "checkout_refused",
+      "code": "checkout_refused"
+    },
+    {
+      "reason": "checkout_refused: prose a human reads",
+      "code": "checkout_refused"
+    },
+    {
+      "reason": "unavailable",
+      "code": "unavailable"
+    },
+    {
+      "reason": "unavailable: prose a human reads",
+      "code": "unavailable"
+    },
+    {
+      "reason": "unknown_bid",
+      "code": "unknown_bid"
+    },
+    {
+      "reason": "unknown_bid: prose a human reads",
+      "code": "unknown_bid"
+    },
+    {
+      "reason": "unrecordable_acceptance",
+      "code": "unrecordable_acceptance"
+    },
+    {
+      "reason": "unrecordable_acceptance: prose a human reads",
+      "code": "unrecordable_acceptance"
+    },
+    {
+      "reason": "unroutable_fallback",
+      "code": "unroutable_fallback"
+    },
+    {
+      "reason": "unroutable_fallback: prose a human reads",
+      "code": "unroutable_fallback"
+    },
+    {
+      "reason": "unspecified",
+      "code": "unspecified"
+    },
+    {
+      "reason": "unspecified: prose a human reads",
+      "code": "unspecified"
+    },
+    {
+      "reason": "blacklisted:no space",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "blacklisted : chargeback fraud",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "blacklisted:",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "checkout_refused: RuntimeError: merchant declined to mint",
+      "code": "checkout_refused"
+    },
+    {
+      "reason": "unknown_bid: auction 'auction-34f7' carries no bid 'bid-does-not-exist'",
+      "code": "unknown_bid"
+    },
+    {
+      "reason": "\tblacklisted\t: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\nblacklisted\n: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u000bblacklisted\u000b: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\fblacklisted\f: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\rblacklisted\r: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u001cblacklisted\u001c: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u001dblacklisted\u001d: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u001eblacklisted\u001e: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u001fblacklisted\u001f: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": " blacklisted : x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u0085blacklisted\u0085: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u00a0blacklisted\u00a0: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u1680blacklisted\u1680: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u2000blacklisted\u2000: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u2001blacklisted\u2001: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u2002blacklisted\u2002: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u2003blacklisted\u2003: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u2004blacklisted\u2004: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u2005blacklisted\u2005: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u2006blacklisted\u2006: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u2007blacklisted\u2007: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u2008blacklisted\u2008: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u2009blacklisted\u2009: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u200ablacklisted\u200a: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u2028blacklisted\u2028: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u2029blacklisted\u2029: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u202fblacklisted\u202f: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u205fblacklisted\u205f: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\u3000blacklisted\u3000: x",
+      "code": "blacklisted"
+    },
+    {
+      "reason": "\ufeffblacklisted: x",
+      "code": null
+    },
+    {
+      "reason": "blacklisted\ufeff: x",
+      "code": null
+    },
+    {
+      "reason": "",
+      "code": null
+    },
+    {
+      "reason": "blacklist",
+      "code": null
+    },
+    {
+      "reason": "denied",
+      "code": null
+    },
+    {
+      "reason": "OrphanedOffDomainCheckout: off-domain host",
+      "code": null
+    },
+    {
+      "reason": "unknown_bidx: close but not declared",
+      "code": null
+    },
+    {
+      "reason": "UNKNOWN_BID: shouting is a different token",
+      "code": null
+    },
+    {
+      "reason": ": prose with no code at all",
+      "code": null
+    }
+  ]
+}

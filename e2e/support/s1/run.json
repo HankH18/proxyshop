@@ -117,7 +117,7 @@
     "hosted_stores": ["store-northroast", "store-brightbean"],
     "shortlist_slots": 3,
     "winning_store": "store-northroast",
-    "asserted_claims": 6,
+    "asserted_claims": 8,
     "telemetry_claim_keys": ["policy_action"]
   }
 }

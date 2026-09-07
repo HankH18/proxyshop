@@ -371,22 +371,30 @@ def test_the_python_door_enforces_the_date_time_format_the_typescript_door_enfor
 # =============================================================================================
 
 
-# The marker below is KEPT, and its text was corrected rather than removed. The assertion is
-# untouched; only the `reason` prose changed, because it named bytes that have since moved
-# (T-267 replaced the `"blacklist"` example, and the schema is no longer bare). Keeping a
-# strict-xfail whose stated reason is false is how a gate stops being readable evidence.
+# The marker below is KEPT, and its text was corrected rather than removed — twice now. The
+# assertion is untouched both times; only the `reason` prose changed, because it named bytes
+# that have since moved (T-267 replaced the `"blacklist"` example and the schema stopped being
+# bare; this lane published the code vocabulary as an enum of its own). Keeping a strict-xfail
+# whose stated reason is false is how a gate stops being readable evidence.
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "T-204: exchange.openapi.json still declares NO `enum` on the 409 denial_reason. It "
-        "now carries a `description`, a `pattern` pinning the nine declared codes and an "
-        "`x-vocabulary` listing them (T-267's lane), but this gate asks for `enum` "
-        "specifically and an `enum` cannot be published truthfully while the served field "
-        "carries the `'<code>: <prose>'` shape apps/exchange/src/accept/reasons.py builds — "
-        "enumerating the bare codes would publish a constraint every real 409 violates. "
-        "Closing this needs the SERVICE to publish a bare code (or a second field), which is "
-        "outside packages/contracts; see the contracts-api lane's NEEDS. Remove this marker "
-        "with that fix, not before"
+        "T-204: exchange.openapi.json still declares NO `enum` on the 409 denial_reason ITSELF, "
+        "and this gate asks for one on that property specifically. Everything that CAN be "
+        "published truthfully now is: a `description`, a `pattern` pinning the nine declared "
+        "codes, an `x-vocabulary` (T-267's lane), and — new — the enumeration itself as "
+        "`protocol.schema.json#/$defs/DenialCode`, generated into both languages, with "
+        "`x-denial-code-schema` on the 409 pointing at it and `contracts/ts/vocabulary.ts` "
+        "publishing the runtime list and the parser. What is left is the composite shape: "
+        "booted and driven over HTTP the field really answers `blacklisted: chargeback fraud` "
+        "and `checkout_refused: RuntimeError: merchant declined to mint`, so an `enum` of the "
+        "bare codes here would be a constraint essentially every real 409 violates. Closing "
+        "this needs the SERVICE to publish a bare code (a `denial_code` field beside this one, "
+        "or `routes._denied` splitting code from prose), which is outside packages/contracts; "
+        "see the contracts lane's NEEDS. Remove this marker with that fix, not before. "
+        "`test_denial_vocabulary.py::"
+        "test_a_real_served_denial_reason_is_not_a_member_of_the_published_enum` is the "
+        "executable form of this paragraph and goes red the day the service changes"
     ),
 )
 def test_the_published_denial_reason_has_an_enumerated_vocabulary() -> None:
@@ -421,6 +429,13 @@ def test_the_published_denial_reason_has_an_enumerated_vocabulary() -> None:
     real 409 violates, and nothing in this repo validates a live response against this schema,
     so it would go green while being false. Publishing a false contract to close a gate about
     contract/implementation divergence is the defect wearing the fix's clothes.
+
+    What *this* package could still do honestly has since been done, and it is not this
+    assertion: the nine codes are now published as the enum ``protocol.schema.json#/$defs/
+    DenialCode``, generated into Python and TypeScript like every other closed vocabulary, with
+    ``x-denial-code-schema`` on this 409 pointing at it and ``contracts/ts/vocabulary.ts``
+    carrying the runtime list plus ``denialCode``, the parser. See ``test_denial_vocabulary.py``.
+    The enumeration is published; what is not enumerated is this composite FIELD.
 
     Two honest closures, both outside ``packages/contracts``: have the service publish the
     bare declared code on the wire (``routes._denied`` splitting code from prose — the repair

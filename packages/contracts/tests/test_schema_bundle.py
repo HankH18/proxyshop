@@ -239,3 +239,98 @@ def test_the_json2ts_invocation_is_defined_in_exactly_one_place() -> None:
     argv = _json2ts_argv(TS_OUT)
     assert "json2ts" in argv
     assert "--unreachableDefinitions" in argv
+
+
+# --- R8/R18/D55: `Bid.message` is graded prose, and the bundle has to say so -----------------
+#
+# The description this replaces read, verbatim:
+#
+#     "Free text. External (Tier-2) agents may send it; it is never a source of claims."
+#
+# That was true when it was written and is false now. `claim_verification.pitch.decompose_pitch`
+# turns a seller's prose into atomic `seller_asserted` claims with source spans, and
+# `claim_verification.verify` grades each against the exchange's own catalogue snapshot — the
+# path a served auction really takes, and the reason two bids differing by one word rank apart
+# with the liar's claim `contradicted`.
+#
+# Nothing enforces a `description`, so nothing was red: the sentence contradicted R8, R18 and
+# D55 in the one file a consumer of this protocol reads first, and would have kept doing so.
+# The gate below is the enforcement that was missing, and it is deliberately anchored in the
+# RUNNING extractor rather than in a list of words: if the product ever stops decomposing
+# prose, the first assertion fails and the description has to be corrected in that direction
+# instead of this one.
+
+#: The sentence that was false. No artifact in this package may carry it again.
+FALSIFIED_MESSAGE_DESCRIPTION = "it is never a source of claims"
+
+
+def _normalised(text: str) -> str:
+    """`text` with every run of whitespace collapsed — both generators re-wrap a description
+    to their own line width, so a line-for-line comparison would fail on formatting alone."""
+    return " ".join(text.split())
+
+
+def test_a_sellers_prose_really_is_decomposed_into_seller_asserted_claims() -> None:
+    """The reality half. This is what the description is required to describe.
+
+    Driven through `claim_verification.pitch.decompose_pitch`, which is the decomposer
+    `exchange.ranking.verification` calls on a served auction — not a re-implementation.
+    """
+    # `packages/verification/src` is the DIRECTORY; `claim_verification` is the import
+    # namespace it is reached by (`.pkgroot/claim_verification`). They differ, and the
+    # spelling that works in the tree is the one an image has to ship.
+    from claim_verification.pitch import SELLER_ASSERTED, decompose_pitch  # noqa: PLC0415
+
+    claims = decompose_pitch(
+        "Every order ships the same day and carries a two-year warranty.",
+        store_id="store-1",
+        auction_id="auction-1",
+        vocabulary=("warranty_months", "ships_same_day"),
+    )
+    assert claims, (
+        "the pitch decomposer returned nothing for prose it is supposed to read; if prose has "
+        "genuinely stopped being a source of claims, correct the Bid.message description back "
+        "rather than deleting this gate"
+    )
+    for claim in claims:
+        assert claim["provenance"]["source"] == SELLER_ASSERTED, (
+            f"a claim minted from a seller's prose is stamped {claim['provenance']['source']!r}; "
+            "the whole D55 asymmetry rests on it being seller_asserted"
+        )
+        assert claim.get("source_span"), f"{claim['key']!r} carries no source span into the prose"
+
+
+def test_the_bid_message_description_says_what_the_field_actually_is() -> None:
+    """R8/R18/D55: the schema must not tell the next reader that prose is inert."""
+    description = DEFS["Bid"]["properties"]["message"]["description"]
+    normalised = _normalised(description).lower()
+
+    assert FALSIFIED_MESSAGE_DESCRIPTION not in normalised, (
+        "protocol.schema.json still declares Bid.message 'never a source of claims'. A seller's "
+        "prose is decomposed into seller_asserted claims and graded against the catalogue "
+        f"snapshot (R8, R18, D55): {description!r}"
+    )
+    for required in ("seller_asserted", "decompos", "catalog"):
+        assert required in normalised, (
+            f"the Bid.message description never mentions {required!r}, so it does not say what "
+            f"happens to the field: {description!r}"
+        )
+
+
+def test_the_corrected_message_description_reached_both_generated_languages() -> None:
+    """One source of truth is only one source of truth if the generated views carry it.
+
+    A schema edit that is not regenerated leaves the Python and TypeScript views telling a
+    consumer the opposite of the schema, which is the same defect one layer down.
+    """
+    description = _normalised(DEFS["Bid"]["properties"]["message"]["description"])
+    for label, path in (("python", PYTHON_OUT), ("typescript", TS_OUT)):
+        rendered = path.read_text(encoding="utf-8")
+        stripped = _normalised(rendered.replace("*", " "))
+        assert description in stripped, (
+            f"the generated {label} view does not carry the corrected Bid.message description; "
+            f"run `python -m contracts.codegen`"
+        )
+        assert FALSIFIED_MESSAGE_DESCRIPTION not in _normalised(rendered).lower(), (
+            f"the generated {label} view still says Bid.message is never a source of claims"
+        )

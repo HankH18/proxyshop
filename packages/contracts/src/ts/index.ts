@@ -83,6 +83,7 @@ export {
 export {
   CLAIM_VERIFICATION_STATUSES,
   CONSTRAINT_OPS,
+  DENIAL_CODES,
   ENVELOPE_ACTIVATIONS,
   LABEL_FROM_THEIR_WEBSITE,
   LABEL_STORE_CONFIRMED,
@@ -97,6 +98,7 @@ export {
   STORE_TIERS,
   TRUST_DIMENSIONS,
   buyerLabel,
+  denialCode,
 } from "./vocabulary.js";
 
 export {
