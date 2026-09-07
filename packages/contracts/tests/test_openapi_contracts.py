@@ -165,16 +165,28 @@ def test_the_example_checker_rejects_a_missing_signing_envelope() -> None:
         )
 
 
+# The two controls below used to corrupt `trust GET /stores/{store_id}/trust responses.200`,
+# whose schema was a bare `$ref` to `TrustSnapshot`. T-312 unpinned that operation — it was
+# published, served by nothing, and, declaring no identity parameter, unservable as written —
+# so they are repointed at `trust GET /snapshot responses.200`.
+#
+# That is a STRICTER anchor, not a weaker substitute. `/snapshot`'s schema reaches the same
+# definition through `additionalProperties: {"$ref": ...TrustSnapshot}`, so the second control
+# now proves the resolver follows a `$ref` nested one level inside a subschema rather than only
+# at the root. A registry that resolved bare `$ref`s and silently dropped nested ones would have
+# passed the old test and fails this one.
 def test_the_example_checker_rejects_an_empty_payload() -> None:
-    good = _one_example("trust", "/stores/{store_id}/trust", "responses.200")
-    assert example_errors(good._replace(value={}))
+    good = _one_example("trust", "/snapshot", "responses.200")
+    assert example_errors(good._replace(value={"store-1": {}}))
 
 
 def test_the_example_checker_resolves_protocol_refs_rather_than_ignoring_them() -> None:
     """If the `$ref` silently failed to resolve, every example would validate against `true` and
     the whole file would be green for the wrong reason."""
-    good = _one_example("trust", "/stores/{store_id}/trust", "responses.200")
-    five_dims = {k: v for k, v in good.value["dims"].items() if k != "catalog_claim_accuracy"}
-    assert example_errors(good._replace(value={**good.value, "dims": five_dims})), (
+    good = _one_example("trust", "/snapshot", "responses.200")
+    store_id, snapshot = next(iter(good.value.items()))
+    five_dims = {k: v for k, v in snapshot["dims"].items() if k != "catalog_claim_accuracy"}
+    broken = {**good.value, store_id: {**snapshot, "dims": five_dims}}
+    assert example_errors(good._replace(value=broken)), (
         "a five-dimension TrustSnapshot must fail — if it passes, the $ref is not resolving"
     )

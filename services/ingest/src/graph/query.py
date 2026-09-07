@@ -1,5 +1,14 @@
 """Candidate retrieval: vector similarity **and** attribute nodes (T-012, acceptance 2).
 
+Two reads live here and they answer different questions:
+
+* :func:`candidate_products` — "which products match this need?"
+* :func:`candidate_shops` — "which SHOPS plausibly serve it?", the roster D55's organic side
+  is assembled from. It is a *pivot* over the product read, not a rival retrieval, so every
+  refusal below applies to it unchanged; and only provenanced facts survive the pivot,
+  because a roster row is what a buyer-side pitch is built from and the platform may only
+  pitch what it has checked. :func:`roster_provenance_exclusions` names what was dropped.
+
 DESIGN, twice over: retrieval is "Neo4j vector + attributes", and products are "never
 matched by free-text name alone". Both clauses are enforced here rather than trusted:
 
@@ -29,6 +38,8 @@ from typing import Any
 from ..embeddings import EmbeddingProvider, get_embedding_provider
 from .model import (
     EMBEDDING_DIMENSIONS,
+    SOURCE_ID_PROPERTY,
+    SUPPORTED_BY,
     InvalidEmbeddingVector,
     canonical_text,
     category_id,
@@ -668,6 +679,432 @@ def candidate_products(
     return _run(session, _VECTOR_HEAD, parameters=parameters, scored=True)
 
 
+# =======================================================================================
+# The shop-shaped read: "which shops plausibly serve this need?"  (D55)
+# =======================================================================================
+#
+# WHY THIS IS A SECOND READ RATHER THAN A WIDENED FIRST ONE. `candidate_products` answers
+# "which products", and under D55 the exchange's first question is "which SHOPS do we
+# solicit" — the organic side of the split, assembled by the platform from its own crawl.
+# Before this section, this module contained ZERO occurrences of `Store`, `Offer`, `SELLS`
+# or `MAKES_OFFER` while `upsert.py` wrote all four: the whole supply side of DESIGN's model
+# was write-only. The roster is built as a PIVOT over the product read rather than as a
+# rival retrieval so that every refusal `candidate_products` makes — the free-text-name ban,
+# `UnretrievableQuery`, the four vector-index refusals — applies to it unchanged. A second,
+# laxer door into the same catalog is exactly how those refusals stop meaning anything.
+#
+# WHY IT DOES NOT ROUTE THROUGH `IntentCluster`, which is the obvious alternative:
+#
+#   1. There is no edge to route on. `MATERIAL_FACT_EDGES` is SELLS, MAKES_OFFER, FOR,
+#      HAS_VARIANT, IN_CATEGORY, HAS_ATTRIBUTE, CONTAINS, COMPATIBLE_WITH, SAME_AS, STATES —
+#      not one of them touches `IntentCluster`. Routing through clusters means first
+#      inventing an edge type, which is a model change, not a query.
+#   2. The invented edge would land OUTSIDE the provenance audit unless it were also added to
+#      `MATERIAL_FACT_EDGES`, and `IntentCluster` is a VOCABULARY_LABELS node, deliberately
+#      excluded from the node half of `provenance_violations`. Putting an unaudited hop in
+#      the middle of the one path D55 requires to be checkable is precisely backwards.
+#   3. Measured on this database: the `cluster_id_unique` index reports readCount 0 and
+#      lastRead NULL, and `upsert_intent_cluster` has no caller of any kind. There is no
+#      cluster data to route through, so a cluster hop would be a join against an empty set
+#      that silently returns no shops at all.
+#
+# So the roster walks the material-fact edges that already exist and are already audited,
+# and clustering stays where `apps/exchange/src/retrieval/clusters.py` put it — above this
+# library, over an operator-stated catalogue.
+
+
+#: How many products the roster retrieves before pivoting to shops. KNOWN BOUND, stated
+#: rather than buried, exactly as :data:`DEFAULT_OVERSAMPLE` states its own: a shop whose
+#: only matching product ranks below this cut-off is not on the roster. Shops per product
+#: are unbounded, so raising this widens *product* recall, never shop recall for a product
+#: already in the window.
+DEFAULT_ROSTER_PRODUCTS = 25
+
+
+def _sourced_node(variable: str) -> str:
+    """Cypher for "this material-fact node has a resolvable ``Source``".
+
+    Args:
+        variable: the bound node variable.
+
+    Returns:
+        A boolean Cypher expression — the same condition ``_UNSOURCED_NODES`` in
+        :mod:`ingest.graph.upsert` negates, so the roster and the audit are one rule stated
+        twice rather than two rules that can drift.
+    """
+    return f"EXISTS {{ ({variable})-[:{SUPPORTED_BY}]->(:Source) }}"
+
+
+def _sourced_edge(variable: str) -> str:
+    """Cypher for "this material-fact edge carries a ``source_id`` that resolves".
+
+    Neo4j has no relationship-on-a-relationship, so an edge's provenance is the
+    :data:`~ingest.graph.model.SOURCE_ID_PROPERTY` written onto it — and a ``source_id`` that
+    names no ``Source`` node is not provenance, which is why the existence check is here and
+    not merely a ``IS NOT NULL``.
+
+    Args:
+        variable: the bound relationship variable.
+
+    Returns:
+        A boolean Cypher expression.
+    """
+    return (
+        f"({variable}.{SOURCE_ID_PROPERTY} IS NOT NULL AND EXISTS {{ "
+        f"MATCH (:Source {{{SOURCE_ID_PROPERTY}: {variable}.{SOURCE_ID_PROPERTY}}}) }})"
+    )
+
+
+#: The store columns every roster branch returns, so the two halves of the ``UNION`` line up.
+_ROSTER_STORE_COLUMNS = """
+       s.store_id AS store_id,
+       coalesce(s.domain, '') AS domain,
+       coalesce(s.business_identity, '') AS business_identity,
+       coalesce(s.tier, 2) AS tier,
+       [x IN [(s)-[:SUPPORTED_BY]->(src:Source) | src.source_id] WHERE x IS NOT NULL]
+           AS store_sources,
+       p.product_id AS product_id"""
+
+#: Two carrying relations, one result shape. ``SELLS`` is the store's statement that it sells
+#: the product; the ``MAKES_OFFER -> Offer -> FOR -> Variant <- HAS_VARIANT`` chain is an
+#: observed priced listing of a variant of it. Both are material facts in DESIGN's own edge
+#: vocabulary and both are provenanced, so both put a shop on the roster — and neither is
+#: inferred from the other, because ``link_sells`` and ``upsert_offer`` are separate writes
+#: and an adapter may legitimately have observed only one of them.
+_ROSTER = f"""
+MATCH (s:Store)-[e:SELLS]->(p:Product)
+WHERE p.product_id IN $product_ids
+  AND {_sourced_node("s")}
+  AND {_sourced_edge("e")}
+RETURN{_ROSTER_STORE_COLUMNS},
+       'SELLS' AS via,
+       null AS offer_id,
+       null AS variant_id,
+       null AS price,
+       null AS currency,
+       null AS availability,
+       null AS observed_at,
+       [] AS offer_sources
+UNION
+MATCH (s:Store)-[mo:MAKES_OFFER]->(o:Offer)-[f:FOR]->(v:Variant)<-[hv:HAS_VARIANT]-(p:Product)
+WHERE p.product_id IN $product_ids
+  AND {_sourced_node("s")}
+  AND {_sourced_node("o")}
+  AND {_sourced_edge("mo")}
+  AND {_sourced_edge("f")}
+  AND {_sourced_edge("hv")}
+RETURN{_ROSTER_STORE_COLUMNS},
+       'MAKES_OFFER' AS via,
+       o.offer_id AS offer_id,
+       v.variant_id AS variant_id,
+       o.price AS price,
+       coalesce(o.currency, '') AS currency,
+       coalesce(o.availability, '') AS availability,
+       coalesce(o.observed_at, '') AS observed_at,
+       [x IN [(o)-[:SUPPORTED_BY]->(osrc:Source) | osrc.source_id] WHERE x IS NOT NULL]
+           AS offer_sources
+"""
+
+#: The negation of :data:`_ROSTER`'s provenance conditions, so what the roster dropped is
+#: reportable instead of merely absent. Same two branches, same joins, opposite predicate.
+_ROSTER_EXCLUSIONS = f"""
+MATCH (s:Store)-[e:SELLS]->(p:Product)
+WHERE p.product_id IN $product_ids
+  AND (NOT {_sourced_node("s")} OR NOT {_sourced_edge("e")})
+RETURN s.store_id AS store_id,
+       p.product_id AS product_id,
+       CASE WHEN NOT {_sourced_node("s")} THEN 'unsourced_store' ELSE 'unsourced_sells' END
+           AS reason
+UNION
+MATCH (s:Store)-[mo:MAKES_OFFER]->(o:Offer)-[f:FOR]->(v:Variant)<-[hv:HAS_VARIANT]-(p:Product)
+WHERE p.product_id IN $product_ids
+  AND (NOT {_sourced_node("s")}
+       OR NOT {_sourced_node("o")}
+       OR NOT {_sourced_edge("mo")}
+       OR NOT {_sourced_edge("f")}
+       OR NOT {_sourced_edge("hv")})
+RETURN s.store_id AS store_id,
+       p.product_id AS product_id,
+       CASE WHEN NOT {_sourced_node("s")} THEN 'unsourced_store' ELSE 'unsourced_offer' END
+           AS reason
+"""
+
+
+@dataclass(frozen=True)
+class ShopOffer:
+    """One observed, fully provenanced priced listing behind a roster row.
+
+    Every field here came off a chain in which the ``Offer`` node carried a
+    ``SUPPORTED_BY -> Source`` **and** all three of ``MAKES_OFFER``, ``FOR`` and
+    ``HAS_VARIANT`` carried a ``source_id`` that resolves. A price that failed any of those
+    is not represented as ``None`` on this object — the object is simply not created, and
+    :func:`roster_provenance_exclusions` names it.
+    """
+
+    offer_id: str
+    product_id: str
+    variant_id: str
+    price: float
+    currency: str
+    availability: str
+    observed_at: str
+    source_ids: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class ShopCandidate:
+    """One shop the exchange could solicit, with what the platform has checked about it.
+
+    The organic half of D55: this is assembled by the platform from its own crawl, so
+    everything on it is a fact the platform already holds and can stand behind. A shop with
+    no observed :class:`ShopOffer` is **not** a defective row — it is a crawled shop whose
+    price the platform never observed, and stating a price for it would be the platform
+    authoring a claim it did not check.
+
+    Attributes:
+        product_ids: the matched products this shop carries, best-matching first.
+        via: which carrying relations put it here — ``SELLS``, ``MAKES_OFFER``, or both.
+        source_ids: the ``Source`` ids supporting the ``Store`` node itself.
+        best_score: the best score among :attr:`product_ids`, in the units
+            :class:`Candidate` reports. Meaningless (and ``0.0``) when :attr:`scored` is
+            ``False``, for exactly the reason ``Candidate.scored`` exists.
+        scored: whether a similarity was measured at all, i.e. whether the underlying
+            product read took the vector path.
+    """
+
+    store_id: str
+    domain: str
+    business_identity: str
+    tier: int
+    product_ids: list[str] = field(default_factory=list)
+    offers: list[ShopOffer] = field(default_factory=list)
+    via: list[str] = field(default_factory=list)
+    source_ids: list[str] = field(default_factory=list)
+    best_score: float = 0.0
+    scored: bool = True
+
+    @property
+    def best_cosine(self) -> float | None:
+        """The best raw cosine behind this shop, or ``None`` when none was measured."""
+        return None if not self.scored else cosine_from_score(self.best_score)
+
+    @property
+    def lowest_price(self) -> float | None:
+        """The cheapest provenanced offer, or ``None`` when the platform observed no price.
+
+        ``None`` is a real answer here and not a missing one: it is the difference between
+        "this shop lists it at 28.00" and "the platform has never checked what this shop
+        charges", and collapsing the second into a number is the D55 failure this whole read
+        is shaped to avoid.
+        """
+        return min((offer.price for offer in self.offers), default=None)
+
+    @property
+    def currencies(self) -> list[str]:
+        """The distinct currencies of :attr:`offers`, sorted. Empty when there are none."""
+        return sorted({offer.currency for offer in self.offers})
+
+
+@dataclass(frozen=True)
+class RosterExclusion:
+    """One (shop, product) pair the roster refused, and why.
+
+    ``reason`` is one of:
+
+    * ``unsourced_store`` — the ``Store`` node has no ``SUPPORTED_BY -> Source``. The shop is
+      off the roster entirely: the platform has checked nothing about it.
+    * ``unsourced_sells`` — the ``Store`` is sourced but the ``SELLS`` claim is not. The
+      *claim* is dropped, not the shop; the same shop reached through an honest edge is still
+      on the roster.
+    * ``unsourced_offer`` — the shop and the carrying relation are fine but the priced
+      listing is not. The shop keeps its row and loses its price.
+    """
+
+    store_id: str
+    product_id: str
+    reason: str
+
+
+def candidate_shops(
+    session: Any,
+    *,
+    query_text: str | None = None,
+    embedding: Sequence[float] | None = None,
+    provider: EmbeddingProvider | None = None,
+    attribute_filters: Sequence[AttributeFilter] = (),
+    category: str | None = None,
+    ingredients_all: Sequence[str] = (),
+    ingredients_none: Sequence[str] = (),
+    brand: str | None = None,
+    status: str | None = "active",
+    limit: int = 10,
+    product_limit: int = DEFAULT_ROSTER_PRODUCTS,
+    oversample: int = DEFAULT_OVERSAMPLE,
+) -> list[ShopCandidate]:
+    """Which shops plausibly serve this need — the roster the exchange solicits (D55).
+
+    Retrieves candidate products with :func:`candidate_products` (so every argument below
+    means exactly what it means there, and every refusal it makes applies here) and then
+    pivots them onto shops by walking ``(:Store)-[:SELLS]->(:Product)`` and
+    ``(:Store)-[:MAKES_OFFER]->(:Offer)-[:FOR]->(:Variant)<-[:HAS_VARIANT]-(:Product)``.
+
+    **Only provenanced facts survive the pivot.** A ``Store`` with no
+    ``SUPPORTED_BY -> Source``, a ``SELLS`` edge whose ``source_id`` resolves to nothing, an
+    ``Offer`` reached through an unsourced link — none of them reach a roster row, because
+    under D55 the buyer-side agent may only assemble a pitch from facts the platform has
+    already checked, and a roster row is the input to that pitch. What is dropped is
+    reportable rather than merely absent: see :func:`roster_provenance_exclusions`.
+
+    Args:
+        session: an open ``neo4j.Session``.
+        query_text: text to embed. Used **only** as embedding input, exactly as in
+            :func:`candidate_products` — there is no shop-name match here either.
+        embedding: a pre-computed query vector; takes precedence over ``query_text``.
+        provider: the provider used to embed ``query_text``.
+        attribute_filters: structured predicates, all of which must hold.
+        category: a category name.
+        ingredients_all: ingredient names the product must contain.
+        ingredients_none: ingredient names the product must not contain.
+        brand: exact brand match.
+        status: exact product status; defaults to ``active``.
+        limit: how many **shops** to return.
+        product_limit: how many products to retrieve before pivoting. See
+            :data:`DEFAULT_ROSTER_PRODUCTS` for the recall bound this sets.
+        oversample: index rows fetched per requested product, passed straight through.
+
+    Returns:
+        Up to ``limit`` :class:`ShopCandidate` rows, ordered by :attr:`ShopCandidate.
+        best_score` descending and then by ``store_id`` — a shop roster whose order depended
+        on Neo4j's storage order would make every downstream ranking assertion flaky.
+
+    Raises:
+        UnretrievableQuery: no vector and no structured predicate. Inherited deliberately:
+            "every shop in the catalog" is the same forbidden request as "every product",
+            wearing a different noun.
+        ValueError: ``limit``, ``product_limit`` or ``oversample`` is not positive.
+        InvalidEmbeddingVector: as :func:`candidate_products`.
+        VectorIndexUnusable: as :func:`candidate_products` — mismatch, incomplete pass or
+            empty index. The roster refuses rather than pivoting a noise ranking.
+    """
+    if limit <= 0 or product_limit <= 0:
+        raise ValueError(f"limit and product_limit must be positive, got {limit} / {product_limit}")
+
+    candidates = candidate_products(
+        session,
+        query_text=query_text,
+        embedding=embedding,
+        provider=provider,
+        attribute_filters=attribute_filters,
+        category=category,
+        ingredients_all=ingredients_all,
+        ingredients_none=ingredients_none,
+        brand=brand,
+        status=status,
+        limit=product_limit,
+        oversample=oversample,
+    )
+    if not candidates:
+        return []
+
+    # `candidate_products` already ordered these; keep its ranking rather than inventing a
+    # second one, so a shop's position is derived from the product ranking the rest of the
+    # system reasons about.
+    rank = {candidate.product_id: index for index, candidate in enumerate(candidates)}
+    score = {candidate.product_id: candidate.score for candidate in candidates}
+    scored = candidates[0].scored
+
+    rows = session.run(_ROSTER, product_ids=list(rank)).data()
+
+    shops: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        shop = shops.setdefault(
+            row["store_id"],
+            {
+                "domain": row["domain"],
+                "business_identity": row["business_identity"],
+                "tier": int(row["tier"]),
+                "sources": set(row["store_sources"]),
+                "products": set(),
+                "via": set(),
+                "offers": {},
+            },
+        )
+        shop["sources"].update(row["store_sources"])
+        shop["products"].add(row["product_id"])
+        shop["via"].add(row["via"])
+        # `price is not None` is not defensive padding. `Offer` requires a price, so
+        # `upsert_offer` always writes one — but the whole reason the provenance conditions
+        # above are Cypher rather than a Python convention is that this library must survive
+        # nodes written by raw Cypher, another library, or an adapter that skipped
+        # `ingest.graph.upsert`. A priced listing with no price is not a priced listing, and
+        # the honest handling is the same as an unchecked one: no `ShopOffer`, so
+        # `lowest_price` stays `None` and nothing states a number nobody observed. Without
+        # this the row would instead crash the whole roster on `float(None)`.
+        if row["offer_id"] is not None and row["price"] is not None:
+            shop["offers"][row["offer_id"]] = ShopOffer(
+                offer_id=row["offer_id"],
+                product_id=row["product_id"],
+                variant_id=row["variant_id"],
+                price=float(row["price"]),
+                currency=row["currency"],
+                availability=row["availability"],
+                observed_at=row["observed_at"],
+                source_ids=sorted(row["offer_sources"]),
+            )
+
+    roster = [
+        ShopCandidate(
+            store_id=store_id,
+            domain=shop["domain"],
+            business_identity=shop["business_identity"],
+            tier=shop["tier"],
+            product_ids=sorted(shop["products"], key=lambda pid: (rank[pid], pid)),
+            offers=sorted(shop["offers"].values(), key=lambda o: (o.price, o.offer_id)),
+            via=sorted(shop["via"]),
+            source_ids=sorted(shop["sources"]),
+            best_score=max(score[pid] for pid in shop["products"]),
+            scored=scored,
+        )
+        for store_id, shop in shops.items()
+    ]
+    roster.sort(key=lambda shop: (-shop.best_score, shop.store_id))
+    return roster[:limit]
+
+
+def roster_provenance_exclusions(
+    session: Any, *, product_ids: Sequence[str]
+) -> list[RosterExclusion]:
+    """Every (shop, product) pair :func:`candidate_shops` refused over provenance, and why.
+
+    The roster's refusals are silent by construction — an excluded shop is simply not in the
+    list — and a silent exclusion is indistinguishable from "no such shop exists", which is
+    the reading that is certainly wrong when an adapter has quietly been writing unsourced
+    facts. This is the same two joins with the provenance condition negated, so it reports
+    exactly what the roster dropped rather than an approximation of it.
+
+    Args:
+        session: an open ``neo4j.Session``.
+        product_ids: the products to audit the supply side of — normally the ids from the
+            :class:`Candidate` list a roster was built from.
+
+    Returns:
+        The exclusions, sorted by ``(store_id, product_id, reason)``. Empty is the healthy
+        answer and is not a ``return []``: ``test_graph_roster.py`` drives three different
+        sabotages through it and asserts each one is named.
+    """
+    return sorted(
+        (
+            RosterExclusion(
+                store_id=str(row["store_id"]),
+                product_id=str(row["product_id"]),
+                reason=str(row["reason"]),
+            )
+            for row in session.run(_ROSTER_EXCLUSIONS, product_ids=list(product_ids)).data()
+        ),
+        key=lambda exclusion: (exclusion.store_id, exclusion.product_id, exclusion.reason),
+    )
+
+
 def cosine_from_score(score: float | None) -> float:
     """Recover the raw cosine similarity from a ``queryNodes`` cosine score.
 
@@ -754,16 +1191,22 @@ def products_missing_status(session: Any) -> list[str]:
 
 __all__ = [
     "DEFAULT_OVERSAMPLE",
+    "DEFAULT_ROSTER_PRODUCTS",
     "MAX_INDEX_FETCH",
     "AttributeFilter",
     "Candidate",
     "EmbeddingIndexEmpty",
     "EmbeddingProviderMismatch",
     "EmbeddingRunIncomplete",
+    "RosterExclusion",
+    "ShopCandidate",
+    "ShopOffer",
     "UnretrievableQuery",
     "VectorIndexUnusable",
     "candidate_products",
+    "candidate_shops",
     "cosine_from_score",
     "products_missing_embeddings",
     "products_missing_status",
+    "roster_provenance_exclusions",
 ]

@@ -49,9 +49,13 @@ export const PINNED_ROUTES: readonly Route[] = [
   {domain: "merchant", method: "put", path: "/stores/{store_id}/envelope"},
   {domain: "merchant", method: "post", path: "/stores/{store_id}/kill"},
   {domain: "trust", method: "post", path: "/events"},
-  {domain: "trust", method: "get", path: "/stores/{store_id}/trust"},
   {domain: "trust", method: "get", path: "/snapshot"},
-  {domain: "trust", method: "post", path: "/feedback/{order_ref}"},
+  // T-312 UNPINNED two trust routes DESIGN §Interfaces still lists. Each was published, served
+  // by nothing, and unservable AS PUBLISHED: `GET /stores/{store_id}/trust` declares no identity
+  // parameter, so serving it as written hands any anonymous caller any store's full
+  // per-dimension posture; `POST /feedback/{order_ref}` declares no routing evidence, so serving
+  // it as written takes R14 feedback from a buyer the network never routed. The Python twin
+  // carries the full reasoning; re-pin either in the change that serves it.
   {domain: "ingest", method: "post", path: "/refresh/{store_id}"},
   // Served surfaces that were reachable and undeclared until T-266 / T-312 / T-317.
   {domain: "exchange", method: "get", path: "/auctions/{auction_id}"},
@@ -61,6 +65,9 @@ export const PINNED_ROUTES: readonly Route[] = [
   {domain: "trust", method: "get", path: "/events/replay"},
   {domain: "trust", method: "get", path: "/events/{event_id}"},
   {domain: "trust", method: "post", path: "/claims/verifications"},
+  // R4 + R12's join: where a completed purchase becomes a trust update.
+  {domain: "trust", method: "get", path: "/reconcile"},
+  {domain: "trust", method: "post", path: "/reconcile"},
   {domain: "ingest", method: "get", path: "/er/config"},
   {domain: "ingest", method: "post", path: "/er/match"},
   {domain: "ingest", method: "post", path: "/er/resolve"},

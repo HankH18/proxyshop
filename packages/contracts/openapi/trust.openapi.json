@@ -1316,45 +1316,6 @@
         }
       }
     },
-    "/stores/{store_id}/trust": {
-      "get": {
-        "operationId": "getStoreTrust",
-        "summary": "The served TrustSnapshot for one store.",
-        "parameters": [
-          { "name": "store_id", "in": "path", "required": true, "schema": { "type": "string" } }
-        ],
-        "responses": {
-          "200": {
-            "description": "The snapshot, with all six dimensions (D53).",
-            "content": {
-              "application/json": {
-                "schema": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/TrustSnapshot" },
-                "example": {
-                  "store_id": "store-1",
-                  "score": 0.62,
-                  "confidence": 0.4,
-                  "effective_sample_size": 12.5,
-                  "score_version": "1.0.0",
-                  "snapshot_version": "1.0.0",
-                  "computed_through_event": "ev-0003",
-                  "low_data": false,
-                  "dims": {
-                    "price_honored": { "alpha": 2.0, "beta": 1.0, "decayed_at": "2026-01-01T00:00:00Z" },
-                    "discount_honored": { "alpha": 2.0, "beta": 1.0, "decayed_at": "2026-01-01T00:00:00Z" },
-                    "shipped_on_time": { "alpha": 2.0, "beta": 1.0, "decayed_at": "2026-01-01T00:00:00Z" },
-                    "not_returned": { "alpha": 2.0, "beta": 1.0, "decayed_at": "2026-01-01T00:00:00Z" },
-                    "feedback_match": { "alpha": 2.0, "beta": 1.0, "decayed_at": "2026-01-01T00:00:00Z" },
-                    "catalog_claim_accuracy": { "alpha": 2.0, "beta": 1.0, "decayed_at": "2026-01-01T00:00:00Z" }
-                  },
-                  "blacklisted": false
-                },
-                "x-example-schema": "TrustSnapshot"
-              }
-            }
-          }
-        }
-      }
-    },
     "/snapshot": {
       "get": {
         "operationId": "getAllTrustSnapshots",
@@ -1403,50 +1364,222 @@
         }
       }
     },
-    "/feedback/{order_ref}": {
-      "post": {
-        "operationId": "submitFeedback",
-        "summary": "Post-purchase buyer feedback (R14), pseudonymous.",
+    "/reconcile": {
+      "get": {
+        "operationId": "readReconciliation",
+        "summary": "What the chain says about every purchase in it. Appends nothing.",
+        "description": "R4's diagnosis door: the pixel and the webhook reconciled with the webhook authoritative, computed and NOT landed. An operator asking \"did this purchase grade, and how?\" must not have to append to an append-only ledger to find out; `POST /reconcile` is the door for a caller that wants the verdicts recorded. Nothing on this service is authenticated, which is why `limit` is bounded and why the unjoinable-webhook screen runs before the fold rather than after it.",
         "parameters": [
-          { "name": "order_ref", "in": "path", "required": true, "schema": { "type": "string" } }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": false,
-                "required": ["matched_pitch"],
-                "properties": {
-                  "matched_pitch": { "type": "boolean" },
-                  "reason": { "type": ["string", "null"] },
-                  "pseudonymous_context": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/PseudonymousContext" }
-                }
-              },
-              "example": {
-                "matched_pitch": false,
-                "reason": "ships_within missed",
-                "pseudonymous_context": { "cluster_id": "cluster-serum", "pseudonym": "psn-0001" }
-              }
-            }
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "How many reconciled verdicts to serialise. The fold is never capped; `verdicts_truncated` says whether this bit.",
+            "schema": { "type": "integer", "minimum": 1, "default": 50 }
           }
-        },
+        ],
         "responses": {
-          "202": {
-            "description": "Accepted; folded into feedback_match.",
+          "200": {
+            "description": "The fold, computed and not landed.",
             "content": {
               "application/json": {
                 "schema": {
                   "type": "object",
-                  "additionalProperties": false,
-                  "required": ["event_id", "dim"],
+                  "required": [
+                    "ledger_events_scanned",
+                    "inputs",
+                    "unjoinable_webhooks",
+                    "store_aliases_applied",
+                    "reconciled",
+                    "observations",
+                    "events",
+                    "observation_events",
+                    "verdicts_truncated"
+                  ],
                   "properties": {
-                    "event_id": { "type": "string" },
-                    "dim": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/TrustDimension" }
+                    "ledger_events_scanned": { "type": "integer", "minimum": 0 },
+                    "inputs": {
+                      "type": "object",
+                      "additionalProperties": { "type": "integer", "minimum": 0 },
+                      "description": "How many of each LedgerEventKind the fold joined on."
+                    },
+                    "unjoinable_webhooks": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "`order_paid` deliveries naming no order, screened out BEFORE the fold. `POST /events` admits them and the append-only trigger makes the row un-evictable, so they are reported here rather than turned into an outage for every later purchase."
+                    },
+                    "store_aliases_applied": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Events whose store name was translated from a shop domain onto the platform `store_id` before joining. The two halves of one checkout do not name the store the same way."
+                    },
+                    "reconciled": { "type": "integer", "minimum": 0 },
+                    "observations": { "type": "integer", "minimum": 0 },
+                    "events": {
+                      "type": "array",
+                      "items": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/LedgerEvent" },
+                      "description": "The `reconciled` verdicts, up to `limit`."
+                    },
+                    "observation_events": {
+                      "type": "array",
+                      "items": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/LedgerEvent" },
+                      "description": "The `offer_integrity` observations those verdicts imply (R12)."
+                    },
+                    "verdicts_truncated": { "type": "boolean" }
                   }
                 },
-                "example": { "event_id": "ev-0004", "dim": "feedback_match" }
+                "example": {
+                  "ledger_events_scanned": 5,
+                  "inputs": { "accepted": 1, "checkout_pixel": 1, "order_paid": 1, "code_created": 1, "checkout_redirect": 1 },
+                  "unjoinable_webhooks": 0,
+                  "store_aliases_applied": 1,
+                  "reconciled": 1,
+                  "observations": 2,
+                  "events": [
+                    {
+                      "event_id": "reconciled:store-northroast:gid%3A//shopify/Order/5500000000001",
+                      "ts": "2026-09-07T09:17:01.335Z",
+                      "kind": "reconciled",
+                      "store_id": "store-northroast",
+                      "order_ref": "gid://shopify/Order/5500000000001",
+                      "payload": {
+                        "order_ref": "gid://shopify/Order/5500000000001",
+                        "checkout_token": "2e6183a3950e4af0a12954f641cb4365",
+                        "product_ref": "prod-northroast-hx",
+                        "bid_ref": "bid-served",
+                        "price_honored": true,
+                        "discount_honored": false,
+                        "price_comparable": true,
+                        "discount_comparable": false,
+                        "observed_price": 350.1,
+                        "observed_discount_percentage": null,
+                        "promised_price": 389.0,
+                        "promised_price_basis": "total_price",
+                        "promised_discount_percentage": 10.0,
+                        "authority": "order_paid",
+                        "pixel_missing": false,
+                        "pixel_price": null,
+                        "pixel_agrees": false
+                      }
+                    }
+                  ],
+                  "observation_events": [
+                    {
+                      "event_id": "offer_integrity:store-northroast:gid%3A//shopify/Order/5500000000001:price",
+                      "ts": "2026-09-07T09:17:01.335Z",
+                      "kind": "offer_integrity",
+                      "store_id": "store-northroast",
+                      "order_ref": "gid://shopify/Order/5500000000001",
+                      "payload": {
+                        "bid_ref": "bid-served",
+                        "field": "price",
+                        "promised": 389.0,
+                        "observed": 350.1,
+                        "dim": "price_honored",
+                        "type": "fulfilled",
+                        "observed_at": "2026-09-07T09:17:01.335Z",
+                        "reconciled_event_id": "reconciled:store-northroast:gid%3A//shopify/Order/5500000000001",
+                        "authority": "order_paid"
+                      }
+                    },
+                    {
+                      "event_id": "offer_integrity:store-northroast:gid%3A//shopify/Order/5500000000001:discount",
+                      "ts": "2026-09-07T09:17:01.335Z",
+                      "kind": "offer_integrity",
+                      "store_id": "store-northroast",
+                      "order_ref": "gid://shopify/Order/5500000000001",
+                      "payload": {
+                        "bid_ref": "bid-served",
+                        "field": "discount",
+                        "promised": 10.0,
+                        "observed": null,
+                        "dim": "discount_honored",
+                        "type": "unsupported",
+                        "observed_at": "2026-09-07T09:17:01.335Z",
+                        "reconciled_event_id": "reconciled:store-northroast:gid%3A//shopify/Order/5500000000001",
+                        "authority": "order_paid"
+                      }
+                    }
+                  ],
+                  "verdicts_truncated": false
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "reconcileLedger",
+        "summary": "Reconcile the chain and land the trust update it implies.",
+        "description": "The same fold, appended. The `reconciled` verdicts and the `offer_integrity` observations go onto the hash-chained ledger AND into `ledger.trust_observations` — the table `GET /snapshot` reads — which is R12's \"one trust system, not two\" taken literally: a transaction outcome moves the same per-dimension Betas a verification outcome moves. Every `event_id` is derived from the order and `event_id` is the ledger's idempotency key, so this is idempotent by construction and safe to run on a schedule, after a delivery, or twice by mistake.",
+        "responses": {
+          "200": {
+            "description": "What was appended, what was already there, and what was written.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ledger_events_scanned",
+                    "inputs",
+                    "unjoinable_webhooks",
+                    "store_aliases_applied",
+                    "reconciled",
+                    "observations",
+                    "appended",
+                    "already_present",
+                    "observations_written",
+                    "observations_persisted",
+                    "reconciled_event_ids"
+                  ],
+                  "properties": {
+                    "ledger_events_scanned": { "type": "integer", "minimum": 0 },
+                    "inputs": {
+                      "type": "object",
+                      "additionalProperties": { "type": "integer", "minimum": 0 }
+                    },
+                    "unjoinable_webhooks": { "type": "integer", "minimum": 0 },
+                    "store_aliases_applied": { "type": "integer", "minimum": 0 },
+                    "reconciled": { "type": "integer", "minimum": 0 },
+                    "observations": { "type": "integer", "minimum": 0 },
+                    "appended": {
+                      "type": "object",
+                      "additionalProperties": { "type": "integer", "minimum": 0 },
+                      "description": "Events this run added to the chain, by kind."
+                    },
+                    "already_present": {
+                      "type": "object",
+                      "additionalProperties": { "type": "integer", "minimum": 0 },
+                      "description": "Events a previous run had already appended. Kept separate from `appended` so \"nothing landed\" and \"nothing to land\" are never the same number."
+                    },
+                    "observations_written": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Rows written into `ledger.trust_observations`. A failed write never fails the fold: the verdicts are already on the chain, so this is a convergence step and re-running converges."
+                    },
+                    "observations_persisted": {
+                      "type": "boolean",
+                      "description": "Whether a relational connection was available at all, so a deployment cannot mistake \"no connection\" for \"nothing to write\"."
+                    },
+                    "reconciled_event_ids": {
+                      "type": "array",
+                      "items": { "type": "string", "minLength": 1 }
+                    }
+                  }
+                },
+                "example": {
+                  "ledger_events_scanned": 5,
+                  "inputs": { "accepted": 1, "checkout_pixel": 1, "order_paid": 1, "code_created": 1, "checkout_redirect": 1 },
+                  "unjoinable_webhooks": 0,
+                  "store_aliases_applied": 1,
+                  "reconciled": 1,
+                  "observations": 2,
+                  "appended": { "reconciled": 1, "offer_integrity": 2 },
+                  "already_present": { "reconciled": 0, "offer_integrity": 0 },
+                  "observations_written": 0,
+                  "observations_persisted": false,
+                  "reconciled_event_ids": ["reconciled:store-northroast:gid%3A//shopify/Order/5500000000001"]
+                }
               }
             }
           }

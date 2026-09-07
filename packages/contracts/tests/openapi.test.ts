@@ -130,8 +130,13 @@ describe("the example checker can reject", () => {
   const bidExample = examples().find(
     (e) => e.domain === "store-agent" && e.where === "responses.200",
   )!;
+  // Was `trust GET /stores/{store_id}/trust`, whose schema was a bare `$ref` to TrustSnapshot.
+  // T-312 unpinned that operation — published, served by nothing, and declaring no identity
+  // parameter — so this anchors on `GET /snapshot`, which reaches the same definition through
+  // `additionalProperties: {$ref}`. That is stricter: a resolver that followed a root `$ref`
+  // and silently dropped a nested one would have passed the old control and fails this one.
   const snapshotExample = examples().find(
-    (e) => e.domain === "trust" && e.path === "/stores/{store_id}/trust",
+    (e) => e.domain === "trust" && e.path === "/snapshot",
   )!;
 
   it("rejects a Bid whose store_id is the wrong type", () => {
@@ -153,12 +158,14 @@ describe("the example checker can reject", () => {
   it("resolves protocol $refs rather than silently ignoring them", () => {
     // If the `$ref` did not resolve, every example would validate against `true` and this whole
     // file would be green for the wrong reason.
-    const snapshot = snapshotExample.value as Record<string, Record<string, unknown>>;
-    const fiveDims = {...snapshot["dims"]};
+    const byStore = snapshotExample.value as Record<string, Record<string, unknown>>;
+    const storeId = Object.keys(byStore)[0]!;
+    const snapshot = byStore[storeId]!;
+    const fiveDims = {...(snapshot["dims"] as Record<string, unknown>)};
     delete fiveDims["catalog_claim_accuracy"];
     const problems = exampleErrors({
       ...snapshotExample,
-      value: {...snapshot, dims: fiveDims},
+      value: {...byStore, [storeId]: {...snapshot, dims: fiveDims}},
     });
     expect(problems.length).toBeGreaterThan(0);
   });

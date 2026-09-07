@@ -55,17 +55,23 @@ from .model import (
     slug,
 )
 from .query import (
+    DEFAULT_ROSTER_PRODUCTS,
     AttributeFilter,
     Candidate,
     EmbeddingIndexEmpty,
     EmbeddingProviderMismatch,
     EmbeddingRunIncomplete,
+    RosterExclusion,
+    ShopCandidate,
+    ShopOffer,
     UnretrievableQuery,
     VectorIndexUnusable,
     candidate_products,
+    candidate_shops,
     cosine_from_score,
     products_missing_embeddings,
     products_missing_status,
+    roster_provenance_exclusions,
 )
 from .reembed import ReembedReport, embedding_text, graph_driver, reembed_products
 from .schema import (
@@ -123,6 +129,7 @@ from .upsert import (
 )
 
 __all__ = [
+    "DEFAULT_ROSTER_PRODUCTS",
     "EMBEDDING_PROPERTY",
     "EMBEDDING_RUN_COMPLETE",
     "EMBEDDING_RUN_DEGRADED",
@@ -161,7 +168,10 @@ __all__ = [
     "ProvenanceRequired",
     "ProvenanceViolation",
     "ReembedReport",
+    "RosterExclusion",
     "SchemaReport",
+    "ShopCandidate",
+    "ShopOffer",
     "Source",
     "Store",
     "UnretrievableQuery",
@@ -172,6 +182,7 @@ __all__ = [
     "attribute_value_id",
     "await_indexes",
     "candidate_products",
+    "candidate_shops",
     "canonical_text",
     "category_id",
     "clear_product_embedding",
@@ -195,6 +206,7 @@ __all__ = [
     "provenance_violations",
     "rebuild_vector_index",
     "record_embedding_run",
+    "roster_provenance_exclusions",
     "reembed_products",
     "schema_report",
     "schema_statements",

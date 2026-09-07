@@ -72,9 +72,26 @@ PINNED_ROUTES: tuple[Route, ...] = (
     Route("merchant", "put", "/stores/{store_id}/envelope"),
     Route("merchant", "post", "/stores/{store_id}/kill"),
     Route("trust", "post", "/events"),
-    Route("trust", "get", "/stores/{store_id}/trust"),
     Route("trust", "get", "/snapshot"),
-    Route("trust", "post", "/feedback/{order_ref}"),
+    # T-312 UNPINNED two trust routes DESIGN §Interfaces still lists, and the reason is not
+    # "nobody got to them". Each was published, served by nothing, and unservable AS PUBLISHED:
+    #
+    #   * `GET /stores/{store_id}/trust` declares no identity parameter of any kind, so serving
+    #     it as written hands any anonymous caller any store's full per-dimension posture. The
+    #     read that door describes is R9's — a merchant reading its OWN score and why — and R9's
+    #     dashboard does not exist (`apps/merchant/app/dashboard/` holds one empty `.gitkeep`).
+    #     `GET /snapshot` cannot stand in for it: it answers every store at once, which is the
+    #     one shape a shop-facing read must not have.
+    #   * `POST /feedback/{order_ref}` declares `matched_pitch` / `reason` /
+    #     `pseudonymous_context` and no routing evidence, so serving it as written takes R14
+    #     feedback from a buyer the network never routed. The routed-buyer gate already exists,
+    #     once, in `buyer_svc.feedback.submission.submit_feedback`; a second decider is the
+    #     failure `apps/buyer/app/feedback/feedback.ts` names in its own header. Trust's real
+    #     feedback intake is `POST /events` with `kind: "feedback"`, which `trust.feedback`
+    #     folds into `feedback_match`.
+    #
+    # Re-pin either one in the change that serves it — with an identity parameter, and with the
+    # caller that reads it. `apps/trust/tests/test_contract_surface.py` holds this ruling.
     Route("ingest", "post", "/refresh/{store_id}"),
     # Served surfaces that were reachable and undeclared until T-266 / T-312 / T-317.
     Route("exchange", "get", "/auctions/{auction_id}"),
@@ -84,6 +101,11 @@ PINNED_ROUTES: tuple[Route, ...] = (
     Route("trust", "get", "/events/replay"),
     Route("trust", "get", "/events/{event_id}"),
     Route("trust", "post", "/claims/verifications"),
+    # R4 + R12's join: where a completed purchase becomes a trust update. Unauthenticated and
+    # appending to a hash-chained ledger, which is the strongest case in this service for a
+    # route being written down. Served by `trust.reconcile.routes` since the S1 back half.
+    Route("trust", "get", "/reconcile"),
+    Route("trust", "post", "/reconcile"),
     Route("ingest", "get", "/er/config"),
     Route("ingest", "post", "/er/match"),
     Route("ingest", "post", "/er/resolve"),
