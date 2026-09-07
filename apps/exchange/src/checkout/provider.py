@@ -1177,6 +1177,18 @@ class CheckoutProvider:
                         "unit_price": offer.get("unit_price"),
                         "total_price": offer.get("total_price"),
                         "discount": offer.get("discount"),
+                        # The dispatch promise, carried for the same reason the price and the
+                        # discount are: `trust.reconcile` grades a promise against what the
+                        # webhooks observed, and it reads every one of them off THIS event
+                        # (`engine._promised`). Left out, `promised_delivery_days` was always
+                        # `None` on the minting path, so `delivery_comparable` was always
+                        # False and `shipped_on_time` — one of the six trust dimensions —
+                        # could never move for any store. `Offer.delivery_estimate_days` is a
+                        # published, optional protocol field; the handoff path's `accepted`
+                        # body (`accept._handoff_events`) has always carried the whole offer,
+                        # so this makes the two accept paths gradeable alike rather than
+                        # widening what the ledger is allowed to hold.
+                        "delivery_estimate_days": offer.get("delivery_estimate_days"),
                     },
                 },
             ),

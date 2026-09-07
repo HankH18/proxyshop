@@ -73,6 +73,11 @@ def unwired() -> Any:
         use_registered_domains(previous)
 
 
+#: The one order every counterparty event below is about. Named rather than repeated so the
+#: webhook and the fulfilment cannot drift apart and land in two groups.
+ORDER_REF = "gid://shopify/Order/5500000000001"
+
+
 def paid_webhook(checkout_token: Any, *, total_price: float = 90.0) -> dict[str, Any]:
     """An ``order_paid`` ledger event in the shape the reconciler reads.
 
@@ -86,10 +91,10 @@ def paid_webhook(checkout_token: Any, *, total_price: float = 90.0) -> dict[str,
         "ts": "2026-01-01T00:00:00+00:00",
         "kind": "order_paid",
         "store_id": "store-a",
-        "order_ref": "gid://shopify/Order/5500000000001",
+        "order_ref": ORDER_REF,
         "payload": {
             "checkout_token": checkout_token,
-            "order_ref": "gid://shopify/Order/5500000000001",
+            "order_ref": ORDER_REF,
             "total_price": total_price,
             "discountApplications": [{"type": "percentage", "value": 10.0}],
         },
@@ -215,15 +220,19 @@ def test_an_overcharge_is_caught_only_because_the_offer_travelled() -> None:
 # =====================================================================================
 # the served route, not just the function
 # =====================================================================================
-def served_accept(unwired_marker: None) -> dict[str, Any]:
-    """Accept a bid over HTTP and hand back the ``accepted`` event the ledger recorded."""
+def served_accept(unwired_marker: None, bid: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Accept a bid over HTTP and hand back the ``accepted`` event the ledger recorded.
+
+    ``bid`` defaults to :func:`honest_bid`; a caller passes one only to state something the
+    default offer does not, such as a dispatch promise.
+    """
     machine = AuctionStateMachine()
     auction_id = "auction-route-join"
     machine.create(auction_id, intent_id="intent-1", cluster_id="cluster-1", roster=[])
     machine.open(auction_id, now=1_700_000_000.0)
     machine.close(auction_id, now=1_700_000_001.0)
     book = InMemoryAuctionBids()
-    book.record(auction_id, [honest_bid()])
+    book.record(auction_id, [bid if bid is not None else honest_bid()])
     app = create_app()
     configure_accept(
         app,
@@ -276,3 +285,135 @@ def test_the_served_accepts_own_event_reconciles_against_a_webhook_naming_it(
 
     # The control, on the served event rather than a hand-built one.
     assert reconcile([without(event, "checkout_token"), paid_webhook(token)]) == []
+
+
+# =====================================================================================
+# the dispatch promise — the third thing the accepted offer is graded on
+# =====================================================================================
+#
+# `trust.reconcile.engine` grades three promises off this one event: the price, the
+# discount, and the dispatch window. The first two are covered above. This section covers
+# the third, and it exists because the served accept used to drop it: the checkout port
+# projected the offer down to `{product_ref, unit_price, total_price, discount}` when it
+# built the `accepted` body, so `engine._promised` read `delivery_estimate_days: None` on
+# every real checkout, `delivery_comparable` was False for every order ever placed, and
+# `shipped_on_time` — one of the six trust dimensions — could not move for any store. A
+# store could promise next-day dispatch, be believed, take three weeks, and pay nothing.
+#
+# Each of these pairs with a control that takes the field back out of the served event, for
+# the same reason every other join test here does: without it they would pass on a
+# reconciler that had graded delivery some other way.
+
+#: The dispatch window the bid below promises, in days.
+PROMISED_DISPATCH_DAYS = 2.0
+
+#: The instant `paid_webhook` stamps its order with. The delivery clock starts here — the
+#: merchant platform's own record of when the order was placed — so both fulfilments below
+#: are measured from it rather than from a wall clock.
+ORDER_PLACED_AT = "2026-01-01T00:00:00+00:00"
+
+
+def bid_promising_dispatch(days: float = PROMISED_DISPATCH_DAYS) -> dict[str, Any]:
+    """:func:`honest_bid` with a dispatch promise on its offer.
+
+    ``delivery_estimate_days`` is a published, optional field of the protocol ``Offer``, so
+    this is an ordinary bid rather than a specially shaped one.
+    """
+    bid = honest_bid()
+    return {**bid, "offer": {**bid["offer"], "delivery_estimate_days": days}}
+
+
+def fulfilment(fulfilled_at: str, *, order_ref: str = ORDER_REF) -> dict[str, Any]:
+    """An ``order_fulfilled`` ledger event — when the store says it actually shipped.
+
+    Written by this test for the same reason ``paid_webhook`` is: it is the counterparty.
+    What is measured is whether the exchange's ``accepted`` event states a promise this can
+    be graded against, not whether any particular merchant currently sends one.
+    """
+    return {
+        "event_id": f"order_fulfilled:{order_ref}",
+        "ts": fulfilled_at,
+        "kind": "order_fulfilled",
+        "store_id": "store-a",
+        "order_ref": order_ref,
+        "payload": {"order_ref": order_ref, "fulfilled_at": fulfilled_at},
+    }
+
+
+def without_the_promise(event: dict[str, Any]) -> dict[str, Any]:
+    """The same accepted event with ``delivery_estimate_days`` taken back out of its offer.
+
+    The control: this is byte-for-byte what the served accept used to write.
+    """
+    offer = {k: v for k, v in event["payload"]["offer"].items() if k != "delivery_estimate_days"}
+    stripped = {**event, "payload": {**event["payload"], "offer": offer}}
+    assert "delivery_estimate_days" not in stripped["payload"]["offer"]
+    return stripped
+
+
+def test_the_served_accept_carries_the_dispatch_promise_onto_the_ledger(
+    unwired: None,
+) -> None:
+    """The promise the buyer was shown reaches the record that grades it."""
+    event = served_accept(unwired, bid_promising_dispatch())
+
+    assert event["payload"]["offer"]["delivery_estimate_days"] == PROMISED_DISPATCH_DAYS
+    # Still the published body: this widens what the offer projection carries, not what the
+    # `accepted` kind is allowed to be.
+    assert validate_ledger_payload("accepted", event["payload"]) == []
+
+
+def test_a_promise_the_served_market_made_is_graded_late_when_it_shipped_late(
+    unwired: None,
+) -> None:
+    """Two days promised over HTTP, nine days observed: a verdict, not an "unknown"."""
+    event = served_accept(unwired, bid_promising_dispatch())
+    token = event["payload"]["checkout_token"]
+
+    payload = reconcile([event, paid_webhook(token), fulfilment("2026-01-10T00:00:00+00:00")])[0][
+        "payload"
+    ]
+
+    assert payload["delivery_comparable"] is True
+    assert payload["shipped_on_time"] is False
+    assert payload["promised_delivery_days"] == PROMISED_DISPATCH_DAYS
+    assert payload["observed_dispatch_days"] == pytest.approx(9.0)
+
+
+def test_the_same_served_promise_is_graded_kept_when_it_shipped_inside_the_window(
+    unwired: None,
+) -> None:
+    """The other side of the verdict, so the test above is not measuring a constant False."""
+    event = served_accept(unwired, bid_promising_dispatch())
+    token = event["payload"]["checkout_token"]
+
+    payload = reconcile([event, paid_webhook(token), fulfilment("2026-01-02T12:00:00+00:00")])[0][
+        "payload"
+    ]
+
+    assert payload["delivery_comparable"] is True
+    assert payload["shipped_on_time"] is True
+    assert payload["observed_dispatch_days"] == pytest.approx(1.5)
+
+
+def test_control_without_the_promise_the_late_delivery_is_ungradeable(
+    unwired: None,
+) -> None:
+    """Take the field back out and the same three-week dispatch grades to nothing.
+
+    Not "the verdict flips" — ``shipped_on_time`` is False either way, which is exactly what
+    made this defect invisible. The readable difference is ``delivery_comparable``, and the
+    population that reads these verdicts treats a False verdict on an INCOMPARABLE field as
+    "the record did not say" rather than as a broken promise. So before the fix every late
+    dispatch was silently a non-finding.
+    """
+    event = served_accept(unwired, bid_promising_dispatch())
+    token = event["payload"]["checkout_token"]
+    late = fulfilment("2026-01-10T00:00:00+00:00")
+
+    graded = reconcile([event, paid_webhook(token), late])[0]["payload"]
+    ungraded = reconcile([without_the_promise(event), paid_webhook(token), late])[0]["payload"]
+
+    assert graded["delivery_comparable"] is True and graded["shipped_on_time"] is False
+    assert ungraded["delivery_comparable"] is False
+    assert ungraded["promised_delivery_days"] is None

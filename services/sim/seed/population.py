@@ -192,19 +192,20 @@ DEFAULT_MAX_DISCOUNT_PCT = 30.0
 #: than swallowed because a population that quietly never reports lateness looks exactly like a
 #: market where nothing ever ships late.
 DELIVERY_UNGRADEABLE_NOTICE = (
-    "GAP (apps/exchange, outside this lane): NOT ONE order in this run had a gradeable\n"
-    "dispatch promise, so `shipped_on_time` was False for every order regardless of when it\n"
-    "actually shipped, and no shopper ever answered 'as_described_but_late'.\n"
-    "  Cause, measured: `apps/exchange/src/checkout/provider.py:1175` projects the accepted\n"
-    "  offer down to exactly {product_ref, unit_price, total_price, discount} when it writes\n"
-    "  the `accepted` ledger event. `Offer.delivery_estimate_days` is dropped there, and\n"
-    "  `trust.reconcile.reconciled_event` reads the delivery promise off precisely that event\n"
-    "  (`_promised(accepted)`), so it sees `promised_delivery_days: null` ->\n"
-    "  `delivery_comparable: false` -> `shipped_on_time: false`, always.\n"
-    "  The bids this population sends DO carry `delivery_estimate_days`, and the comparison\n"
-    "  itself is implemented and correct (`RECONCILED_DIMENSIONS` maps delivery ->\n"
-    "  shipped_on_time). The promise simply never reaches the record that grades it, so one of\n"
-    "  the six trust dimensions is ungradeable end to end on the served checkout path."
+    "REGRESSION: not one order in this run had a gradeable dispatch promise, so\n"
+    "`shipped_on_time` was False for every order regardless of when it actually shipped, and\n"
+    "no shopper could answer 'as_described_but_late'. A market where nothing is ever late\n"
+    "reads exactly like a market nobody measured, which is why this prints rather than\n"
+    "passing quietly.\n"
+    "  This WAS true of every run: `apps/exchange/src/checkout/provider.py` projected the\n"
+    "  accepted offer down to {product_ref, unit_price, total_price, discount} and dropped\n"
+    "  `Offer.delivery_estimate_days`, while `trust.reconcile.reconciled_event` reads the\n"
+    "  promise off precisely that event (`_promised(accepted)`). It is closed: the accepted\n"
+    "  event carries the promise now, and both accept paths grade alike.\n"
+    "  So seeing this again means the promise has stopped reaching the record that grades it.\n"
+    "  Check what the `accepted` event carries before looking anywhere else — the comparison\n"
+    "  itself (`RECONCILED_DIMENSIONS` maps delivery -> shipped_on_time) has always worked,\n"
+    "  and the bids this population sends have always carried the field."
 )
 
 #: The discount depth a store actually pitches, inside that envelope. Below the cap on purpose:
