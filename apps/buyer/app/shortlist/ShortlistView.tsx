@@ -11,7 +11,7 @@
  * `0`. A card that quietly dropped its price line would leave a shopper comparing a store
  * that quoted nothing against one that quoted, with nothing on screen saying so.
  *
- * Five things here are load-bearing:
+ * Six things here are load-bearing:
  *
  * 1. **Every slot's provenance labels are rendered, always.** Not on hover, not behind a
  *    "details" toggle. R2's point is that a buyer can see which claims a store stands
@@ -30,7 +30,13 @@
  *    never behind a hover — provenance a buyer has to go looking for is provenance they did
  *    not have when they chose. A promise whose evidence cannot be named reads `unverified`
  *    rather than being hidden or, worse, defaulted to `store-confirmed`.
- * 5. **One accept per mount, and the shortlist collapses rather than pads.** A double click
+ * 5. **The two voices are rendered as two voices.** A slot's `pitch` carries the platform's
+ *    own case (organic, written for every candidate) and, where a shop has an advocate, that
+ *    shop's own words (sponsored, the thing a shop buys). `PitchPanel` below renders them in
+ *    separate, separately-attributed blocks and never merges them, because a shopper who
+ *    reads the seller's motive in the platform's voice has no reason to discount it. A
+ *    seller's prose is untrusted text and is rendered as text: no markup, no link.
+ * 6. **One accept per mount, and the shortlist collapses rather than pads.** A double click
  *    on Accept is the gesture that asks for two checkouts for one auction; the ref below is
  *    the client's half of the ledger the service keeps. And a shortlist with one eligible
  *    store renders one slot — there is no padding-out with a store that failed a filter.
@@ -38,11 +44,14 @@
  * This component performs no I/O. It renders what it is given and calls back; `shortlist.ts`
  * owns the wire.
  */
-import { useCallback, useRef, useState } from 'react'
+import { Fragment, useCallback, useRef, useState } from 'react'
 
 import {
+  VOICE_PLATFORM,
+  VOICE_STORE,
   labelTone,
   slotLabels,
+  voiceOrder,
   type AcceptOutcome,
   type Shortlist,
   type ShortlistPrice,
@@ -50,6 +59,7 @@ import {
   type ShortlistSlot,
   type SlotCommitment,
   type SlotDiscount,
+  type SlotPitch,
 } from './shortlist'
 
 export interface ShortlistViewProps {
@@ -146,6 +156,156 @@ function commitmentText(commitment: SlotCommitment): string {
   return unit ? `${promise} — ${spelled} ${unit}` : `${promise} — ${spelled}`
 }
 
+/**
+ * WHY THIS ONE — the two voices, kept apart on the screen (SPEC core tenet, D55).
+ *
+ * This is the organic/sponsored split arriving in front of a person, and the only rule that
+ * matters here is that a reader can tell which voice they are reading. Four things do that
+ * work, and each of them is a decision rather than a style:
+ *
+ * 1. **Each voice is its own element with its own attribution sentence, in words, above the
+ *    prose it belongs to.** Not a colour, not an icon, not a tooltip: a shopper who has to
+ *    hover to learn that the sentence praising this shop was written BY the shop has already
+ *    read it as the platform's. The store block says Proxyshop did not write it and does not
+ *    vouch for it; the platform block says Proxyshop wrote it and may only use facts it has
+ *    already checked. Neither sentence is reachable without the other being on screen too.
+ * 2. **The shop leads inside its own slot** — `voiceOrder`'s default and the order the
+ *    service serves. That is presentation, and it is precisely what a shop buys by joining:
+ *    not visibility, not a better score, the right to make its case in its own voice.
+ * 3. **A seller's pitch is UNTRUSTED TEXT and is rendered as text.** It is a JSX text child,
+ *    so React escapes it; there is no `dangerouslySetInnerHTML` in this file and no `<a>`
+ *    anywhere in this component. This matters more than it looks: measured, the service
+ *    strips NOTHING out of a store's message — `store_pitch_of` drops a blank, over-long or
+ *    control-bearing message and otherwise carries the seller's bytes unchanged, while the
+ *    forbidden-character screen applies to the PLATFORM's case and never the seller's. So a
+ *    `<b>` and an `https://` really do arrive here, and this hop is the only one that decides
+ *    whether they become markup and a link. They do not.
+ * 4. **An absent voice is stated, never blank.** A scraped shop has no advocate and that is
+ *    the ordinary case, not an error — so the slot says the shop has none rather than leaving
+ *    a reader to conclude it had nothing to say. Likewise a shop the crawl holds nothing
+ *    usable about: the platform says it has checked nothing rather than filling the space.
+ *
+ * WHERE IT SITS, and why: below WHAT IT IS / WHAT IT COSTS / WHAT IS PROMISED, above the
+ * scores. Persuasion does not get to lead over the price and the commitments a shopper can
+ * hold somebody to, and the scores below it are diagnostics rather than an argument.
+ */
+function PitchPanel({ slot, pitch }: { slot: ShortlistSlot; pitch: SlotPitch }) {
+  const order = voiceOrder(pitch)
+  const facts = pitch.facts
+  // Nothing to attribute and nothing to audit. Rendering the heading alone would be the
+  // empty attributed box this panel exists to never draw.
+  if (order.length === 0 && facts.length === 0) return null
+  const factCount = facts.length
+
+  return (
+    <section
+      className="pitch"
+      aria-label={`Why this one: ${slot.bid_ref}`}
+      data-testid={`pitch-${slot.bid_ref}`}
+    >
+      <h4>Why this one</h4>
+
+      {order.map((voice) =>
+        voice === VOICE_STORE ? (
+          <blockquote
+            key={voice}
+            className="voice"
+            data-voice="store"
+            data-testid={`store-voice-${slot.bid_ref}`}
+          >
+            <p className="voice-attribution">
+              <strong>The shop&rsquo;s own words.</strong> This shop is in the network, and its
+              own advocate wrote this for you. Proxyshop did not write it, has not edited it
+              and does not vouch for it: it is the seller&rsquo;s case in the seller&rsquo;s
+              voice, which is the thing a shop buys by joining.
+            </p>
+            {/* A JSX text child. Never markup, never a link, never trimmed — these are the
+                store's bytes and this is the last hop before a person reads them. */}
+            <p className="voice-body">{pitch.store_pitch}</p>
+          </blockquote>
+        ) : (
+          <blockquote
+            key={voice}
+            className="voice"
+            data-voice="platform"
+            data-testid={`platform-voice-${slot.bid_ref}`}
+          >
+            <p className="voice-attribution">
+              <strong>Proxyshop&rsquo;s case.</strong> Your own agent wrote this, and it may
+              only use facts Proxyshop has already checked about this shop &mdash; it is not
+              allowed to introduce one it has not. Every candidate gets this voice, including
+              shops that never joined the network.
+            </p>
+            <p className="voice-body">{pitch.platform_case}</p>
+          </blockquote>
+        ),
+      )}
+
+      {order.includes(VOICE_STORE) ? null : (
+        // MEASURED, and the reason this sentence names TWO causes instead of the obvious
+        // one. `store_pitch: null` is not "a scraped shop with no advocate" at this hop: the
+        // buyer service reads it off the slot's `message`, and `contracts.protocol
+        // .ShortlistSlot` is `extra="forbid"` with no message field, so a store agent's real
+        // pitch is dropped at the exchange boundary before it can reach this origin. On the
+        // devstack BOTH shops that bid are in-network, both have an advocate, and both come
+        // back `null`. A gloss that said "this shop has no advocate" would therefore be false
+        // on every card this stack can currently draw — the page does not guess which cause
+        // it is looking at, because from here the two are the same value.
+        <p className="gloss" data-testid={`no-store-voice-${slot.bid_ref}`}>
+          <strong>Nothing here is in this shop&rsquo;s own voice.</strong> Either Proxyshop
+          found this shop by crawling &mdash; in which case it has no advocate of its own, has
+          not asked for anything and is not paying for this placement &mdash; or it has one
+          and its message did not survive the exchange&rsquo;s published shortlist contract,
+          which carries no field to put it in. This page cannot tell those two apart and will
+          not guess. Either way, what you have read above is Proxyshop&rsquo;s own case and
+          not the seller&rsquo;s.
+        </p>
+      )}
+
+      {order.includes(VOICE_PLATFORM) ? null : (
+        <p className="gloss" data-testid={`no-platform-voice-${slot.bid_ref}`}>
+          Proxyshop has checked nothing about this shop that it could say out loud, so it is
+          saying nothing rather than writing something plausible under its own name. What you
+          have read above is the seller&rsquo;s own claim and nobody else&rsquo;s.
+        </p>
+      )}
+
+      {factCount > 0 ? (
+        // The facts are served IN FULL so a reader can see the copy above is a subset of what
+        // was checked rather than a summary of something else. That sentence is the claim and
+        // it is on the screen unopened; the enumeration behind it is the audit, and it is one
+        // click rather than a hover because every fact in it is already a line on this card.
+        <details data-testid={`pitch-facts-${slot.bid_ref}`}>
+          <summary data-testid={`pitch-facts-summary-${slot.bid_ref}`}>
+            Proxyshop checked {factCount} {factCount === 1 ? 'thing' : 'things'} about this
+            shop. The case above leads with some of them; these are all of them.
+          </summary>
+          <dl className="facts">
+            {facts.map((fact) => (
+              <Fragment key={`${fact.kind}:${fact.key}`}>
+                <dt data-testid={`pitch-fact-key-${slot.bid_ref}`}>{fact.key}</dt>
+                <dd data-testid={`pitch-fact-value-${slot.bid_ref}`}>
+                  {fact.value}{' '}
+                  {/* A fact's own provenance label where it has one. `null` is a real answer
+                      — the exchange's own published price and trust are not a store's claim
+                      and must not borrow a store's badge — so it renders as no badge at all
+                      rather than as `unverified`, which would be this page inventing a
+                      verdict nobody reached. */}
+                  {fact.label === null ? (
+                    <span className="gloss">({fact.kind}, published by the exchange)</span>
+                  ) : (
+                    <span data-tone={labelTone(fact.label)}>{fact.label}</span>
+                  )}
+                </dd>
+              </Fragment>
+            ))}
+          </dl>
+        </details>
+      ) : null}
+    </section>
+  )
+}
+
 export function ShortlistView({
   shortlist,
   onAccept,
@@ -236,6 +396,12 @@ export function ShortlistView({
                 No commitments — this store promised nothing alongside the price.
               </p>
             )}
+
+            {/* WHY THIS ONE — see `PitchPanel`. Below the price and the commitments so that
+                persuasion never leads over what a shopper can hold somebody to, and above
+                the scores, which are diagnostics rather than an argument. `null` is the
+                ordinary case and draws nothing at all. */}
+            {slot.pitch ? <PitchPanel slot={slot} pitch={slot.pitch} /> : null}
 
             <p data-testid={`fit-${slot.bid_ref}`}>
               {slot.fit_score === undefined ? 'fit not reported' : `fit ${slot.fit_score}`}

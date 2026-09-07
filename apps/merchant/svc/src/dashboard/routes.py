@@ -50,10 +50,18 @@ from fastapi import APIRouter, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from merchant_svc.bidding import store_agent_context
-from merchant_svc.envelope import ENVELOPES, UnknownStore
+from merchant_svc.envelope import ACTIVE, ENVELOPES, KILLED, UnknownStore
+from merchant_svc.envelope.digest import approval_digest
 from merchant_svc.http_limits import BodyTooLarge, read_capped_body
 from merchant_svc.install.routes import ADMIN_TOKEN_ENV
 from merchant_svc.install.signatures import secure_equals
+from merchant_svc.install.tokens import TOKENS
+from merchant_svc.onboarding.routes import APPROVAL_HEADER
+from merchant_svc.onboarding.script import (
+    INTENT_CLUSTERS_ENV,
+    interview_script,
+    shop_domain_for,
+)
 
 from .config import (
     UI_DIST_ENV,
@@ -207,9 +215,9 @@ def _envelope_panel(store_id: str) -> dict[str, Any]:
             "state": "absent",
             "detail": (
                 "no envelope has ever been recorded for this store, so there is nothing to "
-                "edit and nothing to activate. Onboarding writes version 1 "
-                "(POST /stores/{store_id}/envelope's interview); until then the agent is in "
-                "shadow and submits nothing."
+                "edit and nothing to activate. Answer the interview in the `onboarding` panel "
+                "and PUT the transcript to /stores/{store_id}/envelope; that writes version 1, "
+                "in shadow. Until then the agent submits nothing."
             ),
             "activation": context["envelope"]["activation"],
             "may_bid": context["may_bid"],
@@ -234,6 +242,150 @@ def _envelope_panel(store_id: str) -> dict[str, Any]:
         "may_bid": context["may_bid"],
         "reason": context["reason"],
     }
+
+
+def _observation_surface(store_id: str) -> dict[str, Any]:
+    """R6's first half: is this store's outcome-observation surface registered?
+
+    R6 asks onboarding to register it *and* run the interview. The registration is the Shopify
+    install — offline token, web pixel, order webhooks — which ``merchant_svc.install`` already
+    serves at ``GET /install?shop=…``; what it had no reader for was "did it happen". A store
+    can hold an approved envelope and bid with nobody watching what it ships, and R12's
+    ``shipped_on_time`` and ``not_returned`` are then graded on no observations at all.
+
+    Reported rather than enforced, and the distinction is deliberate: making activation refuse
+    an uninstalled store would refuse every store this repo's own fixtures and offline runs
+    onboard (C9 — a ticket verify never reaches Shopify), which is a refusal that rejects
+    honest traffic to make a point. The panel names it; nothing here blocks on it.
+    """
+    shop_domain = shop_domain_for(store_id)
+    token = TOKENS.get(shop_domain)
+    return {
+        "registered": token is not None,
+        "shop_domain": shop_domain,
+        "start_url": f"/install?shop={shop_domain}",
+        "detail": (
+            "the network's Shopify app is installed for this shop: the web pixel and the order "
+            "webhooks are what R12 grades this store's shipped-on-time and returns record from"
+            if token is not None
+            else "this shop has no offline token on file, so no pixel event and no order "
+            "webhook will ever reach the network for it. Onboarding can finish without it — "
+            "the envelope and its approval are independent — but the store's transaction "
+            "trust dimensions will be graded on nothing until the app is installed."
+        ),
+    }
+
+
+def _onboarding_panel(store_id: str, losses: Mapping[str, Any]) -> dict[str, Any]:
+    """R6: the interview a merchant answers, and the document they sign to go live.
+
+    **This is the panel that made R6 reachable.** Everything under it already existed and was
+    served — the envelope routes, the version algebra, the approval gate, the kill switch — and
+    a merchant could reach none of it: the interview ran only under
+    ``python -m merchant_svc.onboarding`` on somebody's laptop, and the approval digest was
+    published nowhere, so the ``X-Envelope-Approval`` header could only be filled by
+    re-implementing :func:`~merchant_svc.envelope.digest.approval_digest` outside this service.
+
+    Two things it therefore publishes, and neither is decoration:
+
+    * the interviewer's **turns**, so the client asks the service's questions and hands back a
+      transcript rather than authoring cluster ids and claim types in a browser;
+    * the exact **approval artifact**, digest included, with ``approver`` and ``approved_at``
+      left out. Left out rather than filled with a placeholder: a template carrying
+      ``"approver": "<your name>"`` would activate an envelope under that string if a client
+      posted it back unchanged, and ``ApprovalArtifact.parse`` refuses an absent approver.
+
+    ``losses`` is the exchange's own report for this store, and its clusters are one of the
+    three real sources the multi-select is offered from — see
+    :mod:`merchant_svc.onboarding.script`.
+    """
+    report_clusters = [
+        str(row.get("cluster_id"))
+        for row in (losses.get("by_cluster") or ())
+        if isinstance(row, Mapping) and row.get("cluster_id")
+    ]
+    try:
+        current = ENVELOPES.current(store_id)
+    except UnknownStore:
+        current = None
+
+    document = current.to_contract().model_dump(mode="json") if current is not None else None
+    script = interview_script(store_id, envelope=document, report_clusters=report_clusters)
+
+    if current is None:
+        step = "interview"
+    elif current.activation == ACTIVE:
+        step = "active"
+    elif current.activation == KILLED:
+        step = "killed"
+    else:
+        step = "approval"
+
+    approval: dict[str, Any] | None = None
+    if current is not None and step == "approval":
+        approval = {
+            "store_id": current.store_id,
+            "version": current.version,
+            "envelope_hash": approval_digest(current),
+            # The artifact, missing exactly the two fields only a person can supply. Sent back
+            # as-is it is refused ("the approval names no approver"), which is the fail-closed
+            # direction: a client that forgets to collect a name activates nothing.
+            "artifact": {"envelope_hash": approval_digest(current)},
+            "needs": ["approver", "approved_at"],
+            "header": APPROVAL_HEADER,
+            "activate": {
+                "method": "PUT",
+                "path": f"/stores/{store_id}/envelope",
+                "body": {"activation": ACTIVE},
+            },
+            "detail": (
+                "the merchant signs these terms, not this document's lifecycle state: the "
+                "digest covers the version and the five walls, so editing anything mints a "
+                "new version whose approval nobody has given yet"
+            ),
+        }
+
+    panel: dict[str, Any] = {
+        "state": OK,
+        "detail": (
+            "the merchant answers these in plain English and the service reads the answers; "
+            "nothing goes live until the approval below is signed and sent back."
+        ),
+        "step": step,
+        "observation_surface": _observation_surface(store_id),
+        "interview": script,
+        "approval": approval,
+        "submit": {
+            "method": "PUT",
+            "path": f"/stores/{store_id}/envelope",
+            "body": "the served turns with a {'role': 'merchant', 'text': …} after each, "
+            "plus completed_at",
+        },
+    }
+    if not script["clusters_configured"]:
+        # NOT `not_configured`, and the distinction is measured rather than stylistic: the
+        # interview really is served and really is answerable without a cluster taxonomy, so
+        # a refusal state here would be this panel claiming to be broken while carrying a
+        # working script — the exact "a refusal that renders as rows" the Panel type forbids.
+        # What IS unconfigured is the network's taxonomy, so that is what names the variable.
+        #
+        # Keyed on the taxonomy and NOT on "does the question have options". A store with a
+        # loss history fills that question from its own report, so an options-keyed test
+        # reported a deployment with an unreadable NETWORK_INTENT_CLUSTERS as healthy.
+        panel["missing"] = [INTENT_CLUSTERS_ENV]
+        panel["detail"] += (
+            f" This deployment states no readable intent clusters ({INTENT_CLUSTERS_ENV} is "
+            "unset or malformed)."
+        )
+        panel["detail"] += (
+            " The only clusters on offer are ones this store's own envelope or loss report "
+            "already names, so a cluster the network has published and this store has never "
+            "been solicited for cannot be chosen here."
+            if script["options_offered"]
+            else " Nothing is on offer at all, so an envelope answered now pursues no cluster "
+            "— and a store that pursues no cluster is never solicited."
+        )
+    return panel
 
 
 def _window(start: float | None, end: float | None) -> tuple[float, float]:
@@ -278,6 +430,7 @@ async def read_dashboard(
     losses = await fetch_losses(config, store_id, start=begin, end=finish)
     snapshot = await fetch_trust_snapshot(config, store_id)
     events = await fetch_trust_events(config, store_id)
+    loss_body = losses.as_json()
 
     agent_missing = config.store_agent_missing()
     entries = [entry.as_json() for entry in SOLICITATIONS.entries(store_id)]
@@ -309,8 +462,9 @@ async def read_dashboard(
         content={
             "store_id": store_id,
             "generated_at": datetime.now(UTC).isoformat(),
+            "onboarding": _onboarding_panel(store_id, loss_body),
             "envelope": _envelope_panel(store_id),
-            "losses": losses.as_json(),
+            "losses": loss_body,
             "trust": snapshot.as_json(),
             "trust_events": events.as_json(),
             "bids": bids,

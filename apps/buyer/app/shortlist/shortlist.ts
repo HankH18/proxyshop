@@ -94,6 +94,86 @@ export interface SlotCommitment {
   readonly label: string
 }
 
+/**
+ * ONE CHECKED FACT the platform holds about a candidate, as `/render` serves it.
+ *
+ * `label` is the buyer-facing provenance label for THIS fact where it has one — a commitment
+ * is a published `Claim` and carries its source's label — and `null` for the exchange's own
+ * published fields (price, trust), which are not a store's claim and must not borrow a
+ * store's badge. `null` is therefore a real answer here and is not rendered as a label.
+ */
+export interface PitchFact {
+  readonly key: string
+  readonly value: string
+  /** `price` | `commitment` | `trust` — the platform's own vocabulary, rendered, not mapped. */
+  readonly kind: string
+  readonly label: string | null
+}
+
+/** The two voices `SlotPitch.voices` names. Recognised, never invented — see `voiceOrder`. */
+export const VOICE_STORE = 'store'
+export const VOICE_PLATFORM = 'platform'
+
+/**
+ * WHAT THIS SLOT SAYS TO THIS SHOPPER, AND IN WHOSE VOICE (SPEC core tenet, D55).
+ *
+ * The organic/sponsored split, arriving at the last hop. These two strings are NOT two
+ * qualities of one thing and this app may not blur them:
+ *
+ * * `platform_case` is the ORGANIC result — the platform's own case for this candidate,
+ *   written by the buyer-side agent from facts the platform already checked and constrained
+ *   to them. Every candidate gets one, scraped shops included, because the buyer-side agent
+ *   wants the shopper to buy *a* product.
+ * * `store_pitch` is the SPONSORED result — the shop's own advocate's words, byte for byte.
+ *   It is the thing a shop BUYS by joining the network, and it is `null` for a scraped shop,
+ *   which has no advocate. Never paraphrased and never merged into the case beside it.
+ *
+ * The asymmetry is liability, not tidiness: the platform owns the false claim when the
+ * platform writes the copy, so its own voice is bounded by its own snapshot, while the
+ * seller's voice carries the seller's motive and is the one verified adversarially upstream.
+ * A shopper who cannot tell which voice they are reading has been handed the seller's motive
+ * wearing the platform's credibility.
+ */
+export interface SlotPitch {
+  readonly platform_case: string
+  /** `assembled` (the deterministic rendering) or `written` (prose that passed the screen). */
+  readonly platform_case_source: string
+  readonly store_pitch: string | null
+  /** Which voices the service is serving, in its order. See `voiceOrder`. */
+  readonly voices: readonly string[]
+  /**
+   * Every fact the platform holds about this candidate, ranked for this shopper — not only
+   * the ones the case leads with. Served in full deliberately, so a reader can see the copy
+   * is a SUBSET of what was checked rather than a summary of something else.
+   */
+  readonly facts: readonly PitchFact[]
+}
+
+/**
+ * The voices to render, in the order to render them.
+ *
+ * **PRESENCE comes from the content and ORDER comes from `voices`**, and the split is
+ * deliberate. A voice named in `voices` with nothing behind it would render as an attributed
+ * empty box — the one shape rule 2 of this screen forbids — and a string present in the pitch
+ * but missing from `voices` would be content the page silently swallowed. Reading each from
+ * the field that can actually answer it makes both impossible.
+ *
+ * The default order is store-then-platform: the shop leads INSIDE ITS OWN SLOT, which is
+ * presentation and is exactly what a shop buys. It applies only when `voices` names neither.
+ */
+export function voiceOrder(pitch: SlotPitch): readonly string[] {
+  const present: string[] = []
+  if (typeof pitch.store_pitch === 'string' && pitch.store_pitch.trim() !== '') {
+    present.push(VOICE_STORE)
+  }
+  if (pitch.platform_case.trim() !== '') present.push(VOICE_PLATFORM)
+  const stated = Array.isArray(pitch.voices) ? pitch.voices : []
+  const ordered = stated.filter((voice) => present.includes(voice))
+  // Anything the service did not order goes after, in the default order, so content is never
+  // dropped by a `voices` list that disagreed with the pitch it arrived with.
+  return [...ordered, ...present.filter((voice) => !ordered.includes(voice))]
+}
+
 /** One shortlist slot, as `GET /auctions/{id}/shortlist` sends it. */
 export interface ShortlistSlot {
   readonly slot: ShortlistSlotName | string
@@ -125,6 +205,16 @@ export interface ShortlistSlot {
   readonly product?: ShortlistProduct | null
   readonly price?: ShortlistPrice | null
   readonly commitments?: readonly SlotCommitment[] | null
+  /**
+   * The case for this slot and whose voice makes it, or `null`.
+   *
+   * `null` is the honest and ORDINARY answer, in two different situations the screen renders
+   * identically because a shopper has no use for the distinction: a producer older than this
+   * field, and a candidate the platform holds nothing sayable about whose shop also sent no
+   * message. The second is `buyer_svc.pitch.writing.pitch_for` deciding to say less rather
+   * than invent a reason to buy. Neither renders as an empty attributed box.
+   */
+  readonly pitch?: SlotPitch | null
 }
 
 /** A whole shortlist. It collapses rather than pads: one eligible store means one slot. */

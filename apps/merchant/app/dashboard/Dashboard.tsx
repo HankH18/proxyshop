@@ -18,8 +18,23 @@
 import { useCallback, useEffect, useState } from 'react'
 
 import type { DashboardPage } from './api'
-import { DashboardRefused, killStore, readDashboard, saveEnvelope, solicitBid } from './api'
-import { BidsCard, EnvelopeCard, KillSwitch, LossesCard, TrustCard } from './Cards'
+import {
+  approveEnvelope,
+  DashboardRefused,
+  killStore,
+  readDashboard,
+  saveEnvelope,
+  solicitBid,
+  submitInterview,
+} from './api'
+import {
+  BidsCard,
+  EnvelopeCard,
+  KillSwitch,
+  LossesCard,
+  OnboardingCard,
+  TrustCard,
+} from './Cards'
 import './dashboard.css'
 
 const TOKEN_KEY = 'proxyshop.merchant.admin-token'
@@ -163,6 +178,22 @@ export function Dashboard(): JSX.Element {
 
       {page ? (
         <div className="columns">
+          {/*
+            First on the page, and that is the ordering R6 asks for rather than a layout
+            preference: a merchant with no envelope has nothing to kill, nothing to solicit and
+            no losses to read. Every other card below is about a store that has already joined.
+          */}
+          <OnboardingCard
+            panel={page.onboarding}
+            busy={busy === 'interview' || busy === 'approve'}
+            error={busy === '' && actionError ? actionError : ''}
+            onSubmitInterview={(turns, completedAt) =>
+              void act('interview', () => submitInterview(storeId, token, turns, completedAt))
+            }
+            onApprove={(artifact, header) =>
+              void act('approve', () => approveEnvelope(storeId, token, artifact, header))
+            }
+          />
           <KillSwitch
             storeId={storeId}
             activation={page.envelope.activation}

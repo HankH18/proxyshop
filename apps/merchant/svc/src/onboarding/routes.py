@@ -17,6 +17,39 @@ field on the ``Envelope`` body to carry an approval artifact, so the artifact ar
 without one is stored in ``shadow``: the body is the merchant's *request*, and the approval
 is the only thing that grants it. This is written down in the ticket's report as a contract
 gap rather than smuggled in — see the module's tests for the behaviour it pins.
+
+**THREE REPRESENTATIONS OF ONE RESOURCE, AND WHY THERE IS NO FOURTH ROUTE (R6).**
+``PUT /stores/{id}/envelope`` means *put this store's envelope into the state I describe*, and
+a merchant can describe that state in three ways. All three end in the same two objects —
+``EnvelopeVersions.put`` and ``EnvelopeVersions.activate`` — so there is exactly one door to
+the approval gate and nothing goes around it:
+
+``{"store_id": …, "floors": …, …}``
+    the DESIGN Envelope document. What the dashboard's envelope editor sends. Unchanged.
+
+``{"turns": [...], "completed_at": …}``
+    a completed plain-language onboarding **interview**. This is R6's missing door: before it,
+    the only way to turn an interview into an envelope was ``python -m merchant_svc.onboarding``
+    on an operator's laptop, and the merchant's own page told them to call a route
+    (``POST /stores/{store_id}/envelope``) that does not exist. The turns the client sends back
+    are the ones ``GET /stores/{id}/dashboard`` served it, so no cluster id, product ref,
+    commitment key or claim type is ever authored in a browser. Always lands in ``shadow`` —
+    :func:`~merchant_svc.onboarding.flow.envelope_from_transcript` will not produce anything
+    else, and ``put`` forces it again.
+
+``{"activation": "active"}`` — terms omitted
+    **activate the version already on file**, against the ``X-Envelope-Approval`` artifact.
+    This exists because activation must not mint a version: the digest the merchant signed
+    covers *one* document (``version`` is inside it), so a form that re-submitted the terms
+    would create v2 and invalidate the approval collected for v1 — the exact edit-after-approve
+    substitution :func:`~merchant_svc.envelope.versions.activate_envelope` refuses. Before this,
+    the only callers who could activate over HTTP were ones that computed the canonical digest
+    of a version *that did not exist yet*, in Python, in-process. A browser cannot.
+
+The discriminator is deliberately made of fields, not of a mode flag: a body naming any
+approved term is an envelope, a body naming turns is an interview, a body naming neither and
+asking for ``active`` is an activation. A body that looks like two of them is refused rather
+than guessed at, because guessing which one a merchant meant is guessing at their limits.
 """
 
 from __future__ import annotations
@@ -31,6 +64,7 @@ from fastapi.responses import JSONResponse
 from merchant_svc.envelope import (
     ACTIVE,
     ENVELOPES,
+    SHADOW,
     ApprovalRejected,
     EnvelopeError,
     EnvelopeInvalid,
@@ -38,9 +72,12 @@ from merchant_svc.envelope import (
     UnknownStore,
     VersionWentBackwards,
 )
+from merchant_svc.envelope.model import ENVELOPE_FIELDS
 from merchant_svc.http_limits import BodyTooLarge, read_capped_body
 from merchant_svc.install.routes import ADMIN_TOKEN_ENV
 from merchant_svc.install.signatures import secure_equals
+from merchant_svc.onboarding.flow import envelope_from_transcript
+from merchant_svc.onboarding.interview import TranscriptRejected
 
 _log = logging.getLogger(__name__)
 
@@ -48,6 +85,20 @@ router = APIRouter()
 
 #: The header a written approval artifact arrives in. See the module docstring.
 APPROVAL_HEADER = "X-Envelope-Approval"
+
+#: The keys that make a body an onboarding **interview** rather than an envelope. The first
+#: four are the spellings ``merchant_svc.onboarding.interview.read_transcript`` accepts; the
+#: fifth is the wrapper ``fixtures/interviews/`` uses and ``python -m merchant_svc.onboarding``
+#: unwraps, admitted here so the document a merchant is handed by support is the document this
+#: route takes.
+_INTERVIEW_KEYS: frozenset[str] = frozenset(
+    {"turns", "transcript", "messages", "dialogue", "interview"}
+)
+
+#: The keys that make a body an **envelope document**. Any one of them is enough: a partial
+#: envelope must be refused as a bad envelope (naming the field that is wrong) rather than
+#: silently re-read as some other representation.
+_ENVELOPE_KEYS: frozenset[str] = frozenset(ENVELOPE_FIELDS) - {"activation"}
 
 
 def _problem(status: int, reason: str, **detail: Any) -> JSONResponse:
@@ -106,14 +157,81 @@ async def read_envelope(store_id: str, request: Request) -> Any:
     return JSONResponse(content=envelope.to_contract().model_dump(mode="json"))
 
 
+def _representation(submitted: dict[str, Any]) -> str:
+    """Which of the three bodies this is: ``"envelope"``, ``"interview"`` or ``"activation"``.
+
+    Raises:
+        ValueError: the body is two of them at once, or none of them. Both are refused rather
+            than resolved: a document that is half an envelope and half an interview says two
+            different things about the merchant's limits, and picking one is picking their
+            limits for them.
+    """
+    keys = {str(key) for key in submitted}
+    if submitted.get("approval") is not None:
+        # Refused loudly rather than ignored. An artifact in the BODY is the one shape that
+        # would look like it worked while being dropped on the floor — ``EnvelopeVersions.put``
+        # passes ``approval=None`` and the field simply vanishes — and "the request said it was
+        # approved" is exactly the say-so R6 refuses. The artifact travels in a header.
+        #
+        # Keyed on the VALUE, not on the key. ``Envelope.to_dict()`` emits ``"approval": None``
+        # by design ("the recorded artifact is part of what this version *is*"), so every
+        # client that round-trips an envelope through it sends the key. Refusing on the key
+        # rejected three of this suite's own honest requests — measured, not imagined — which
+        # is the same shape of over-broad validator that once refused 538 of 558 bids.
+        raise ValueError(
+            f"a written approval artifact is not part of an envelope body; send it in the "
+            f"{APPROVAL_HEADER} header, which is the only channel that activates anything"
+        )
+    looks_like_interview = bool(keys & _INTERVIEW_KEYS)
+    looks_like_envelope = bool(keys & _ENVELOPE_KEYS)
+    if looks_like_interview and looks_like_envelope:
+        raise ValueError(
+            "the body carries both interview turns and envelope terms; it is one or the "
+            f"other, never both: {sorted(keys)}"
+        )
+    if looks_like_interview:
+        return "interview"
+    if looks_like_envelope:
+        return "envelope"
+    if submitted.get("activation") == ACTIVE:
+        return "activation"
+    raise ValueError(
+        "the body is neither an envelope (it names none of "
+        f"{sorted(_ENVELOPE_KEYS)}), nor an onboarding interview (none of "
+        f"{sorted(_INTERVIEW_KEYS)}), nor a request to activate the version on file "
+        f'({{"activation": "{ACTIVE}"}}): {sorted(keys)}'
+    )
+
+
+def _envelope_from_interview(submitted: dict[str, Any]) -> dict[str, Any]:
+    """The version-1 envelope a submitted interview produces, as a document ``put`` accepts.
+
+    Raises:
+        TranscriptRejected: the interview is unreadable, skipped a question, or answered one
+            in a way nothing here can read. Every one of those is a refusal rather than a
+            default — see :func:`~merchant_svc.onboarding.flow.envelope_from_transcript`, and
+            note that the message is merchant-facing prose ("the price-floor answer for the
+            whole store names neither a price nor a refusal"), which is why it is echoed.
+    """
+    transcript: Any = submitted.get("interview") or submitted
+    envelope = envelope_from_transcript(transcript)
+    # NOT honoured here and deliberately re-derived by `put`: the version, and the activation.
+    # `envelope_from_transcript` already forces SHADOW, and this is the second of the two
+    # places that force it — R7 is not a property one function happens to have.
+    return dict(envelope.to_dict(), activation=SHADOW)
+
+
 @router.put("/stores/{store_id}/envelope")
 async def write_envelope(store_id: str, request: Request) -> Any:
-    """Replace the store's envelope terms, creating a new version.
+    """Set the store's envelope: from terms, from an onboarding interview, or activate it.
 
     The submitted ``version`` is ignored — it is derived from what is already on file, so a
     stale client cannot reinstate limits the merchant has already replaced. The submitted
     ``activation`` is honoured **only** when the request also carries a written approval
     artifact bound to the terms being stored; otherwise the new version is ``shadow``.
+
+    See the module docstring for the three body representations and why activation is one of
+    them rather than a fourth route.
     """
     refusal = _refuse_unless_admin(request)
     if refusal is not None:
@@ -136,13 +254,47 @@ async def write_envelope(store_id: str, request: Request) -> Any:
         return _problem(400, "unreadable-approval", detail=str(exc))
 
     try:
-        stored = ENVELOPES.put(store_id, submitted)
-    except StoreMismatch as exc:
-        return _problem(409, "wrong-store", detail=str(exc))
-    except VersionWentBackwards as exc:
-        return _problem(409, "version-went-backwards", detail=str(exc))
-    except EnvelopeInvalid as exc:
+        representation = _representation(submitted)
+    except ValueError as exc:
         return _problem(400, "not-an-envelope", detail=str(exc))
+
+    terms: dict[str, Any] | None = submitted
+    if representation == "interview":
+        try:
+            terms = _envelope_from_interview(submitted)
+        except TranscriptRejected as exc:
+            # A merchant-facing refusal, echoed verbatim: it names the question and the
+            # sentence that could not be read, which is the only thing that tells them what
+            # to type instead. An interview that half-parsed would leave a wall unset, and a
+            # wall nobody set reads as "no wall".
+            return _problem(400, "unreadable-interview", store_id=store_id, detail=str(exc))
+    elif representation == "activation":
+        # Nothing to store: this body describes no terms. The version already on file is the
+        # one the merchant signed for, and minting another would invalidate their approval.
+        terms = None
+
+    if terms is not None:
+        try:
+            stored = ENVELOPES.put(store_id, terms)
+        except StoreMismatch as exc:
+            return _problem(409, "wrong-store", detail=str(exc))
+        except VersionWentBackwards as exc:
+            return _problem(409, "version-went-backwards", detail=str(exc))
+        except EnvelopeInvalid as exc:
+            return _problem(400, "not-an-envelope", detail=str(exc))
+    else:
+        try:
+            stored = ENVELOPES.current(store_id)
+        except UnknownStore:
+            return _problem(
+                404,
+                "no-envelope",
+                store_id=store_id,
+                detail=(
+                    "there is no version to activate; answer the onboarding interview first "
+                    "(GET /stores/{store_id}/dashboard serves it)"
+                ),
+            )
 
     if submitted.get("activation") == ACTIVE:
         try:

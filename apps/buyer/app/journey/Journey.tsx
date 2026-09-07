@@ -358,13 +358,26 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
           wire.fetcher,
         )
         const record = await loadAuction(created.auction_id, wire.fetcher)
-        // `/render` labels a shortlist. When the exchange has forgotten this auction there
-        // is no shortlist to label — not an empty one, none — so the call is not made at
-        // all rather than made with `null` and its refusal shown as a failure.
+        // `/render` labels a shortlist AND writes each candidate's case (D55). When the
+        // exchange has forgotten this auction there is no shortlist to label — not an empty
+        // one, none — so the call is not made at all rather than made with `null` and its
+        // refusal shown as a failure.
+        //
+        // The intent and the profile go WITH it, and they are the same two objects the
+        // confirm above sent: the intent this buyer confirmed and the coarsened profile the
+        // buyer service's own vault and coarsener answered with. Neither is composed here.
+        // Without them the buyer-side agent writes the UNCONDITIONED reading — measured on
+        // the devstack, `"Offer held until: …. Also price: 78.00 USD; free returns: 30
+        // days."` — instead of the per-shopper one, `"You said price was a must-have, and
+        // here it is: 78.00 USD. …"`. Both are the platform's own voice; only the second is
+        // the case D55 is about, and this page had the material for it all along.
         const slots =
           record.liveness === 'forgotten'
             ? []
-            : await renderShortlist(record.shortlist, wire.fetcher)
+            : await renderShortlist(record.shortlist, wire.fetcher, {
+                intent,
+                profile: { pseudonym: profile.pseudonym, buckets: profile.buckets },
+              })
         setStage({ created, record, slots })
       })
     },
@@ -767,6 +780,23 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
             belongs to the store&rsquo;s own catalogue, nothing in this app resolves one, and
             the exchange does not copy one through. So the card shows the reference the
             exchange sent rather than a product name this page would have had to invent.
+          </li>
+          <li data-testid="gap-store-voice">
+            <strong>The shop&rsquo;s own voice: computed, and not on the wire to here</strong>{' '}
+            &mdash; every card above carries Proxyshop&rsquo;s own case, and none of them
+            carries the shop&rsquo;s. That is not this page declining to show it. A store
+            agent really does write a per-shopper pitch and really does put it on{' '}
+            <code>Bid.message</code>, and <code>POST /buyer/shortlist/render</code> really
+            does carry one back verbatim as <code>pitch.store_pitch</code> when a slot arrives
+            holding one. What sits between them is the exchange&rsquo;s published shortlist
+            contract: <code>contracts.protocol.ShortlistSlot</code> is{' '}
+            <code>extra=&quot;forbid&quot;</code> and declares no message field, so the
+            seller&rsquo;s words are dropped at that boundary and never reach this origin.
+            Measured on this stack: both shops that bid are in-network, both have an advocate,
+            and both came back <code>store_pitch: null</code>. Until that contract carries the
+            message, every slot here shows the organic voice only &mdash; so what a shop buys
+            by joining is the one thing this screen cannot yet show you, and this page says so
+            rather than letting the platform&rsquo;s voice stand in for the seller&rsquo;s.
           </li>
           <li data-testid="gap-model">
             <strong>The questions came from no live model</strong> — the buyer service

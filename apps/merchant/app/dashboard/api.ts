@@ -145,9 +145,82 @@ export interface BidsPanel extends PanelBase {
   entries?: SolicitationRow[]
 }
 
+/**
+ * One interviewer turn, exactly as the service authored it and exactly as it goes back.
+ *
+ * THE FIELDS BESIDE `text` ARE THE POINT. `question`, `product_ref`, `options`,
+ * `commitment_key` and `claim_type` are the service's vocabulary — D53's closed claim-type
+ * set, the exchange's cluster ids, Shopify variant gids — and this page never authors one.
+ * It renders `text`, collects a sentence, and hands the turn back untouched with a
+ * `{role: 'merchant', text}` behind it. A browser that invented a `claim_type` would be
+ * inventing a trust dimension.
+ */
+export interface InterviewTurn {
+  role: string
+  text: string
+  question?: string
+  product_ref?: string | null
+  commitment_key?: string
+  claim_type?: string
+  options?: { cluster_id: string; label: string }[]
+}
+
+export interface InterviewQuestion {
+  question: string
+  prompt: string
+  answer: string
+  may_decline: boolean
+  product_ref?: string | null
+  commitment_key?: string
+  claim_type?: string
+  options?: { cluster_id: string; label: string }[]
+}
+
+export interface InterviewScript {
+  turns: InterviewTurn[]
+  questions: InterviewQuestion[]
+  required_questions: string[]
+  /** The DEPLOYMENT stated a readable intent-cluster taxonomy. */
+  clusters_configured: boolean
+  /** The pursue question has at least one option, from any of its three sources. */
+  options_offered: boolean
+  missing: string[]
+}
+
+/**
+ * The written approval, minted by the service.
+ *
+ * `artifact` arrives carrying ONLY `envelope_hash`, and `needs` names the two fields a person
+ * has to add. That asymmetry is deliberate on the service's side and must be preserved here:
+ * a template pre-filled with a placeholder name would activate a merchant's envelope under
+ * that placeholder if this page ever posted it back unchanged.
+ */
+export interface ApprovalToSign {
+  store_id: string
+  version: number
+  envelope_hash: string
+  artifact: { envelope_hash: string }
+  needs: string[]
+  header: string
+  detail: string
+}
+
+export interface OnboardingPanel extends PanelBase {
+  step: 'interview' | 'approval' | 'active' | 'killed'
+  observation_surface: {
+    registered: boolean
+    shop_domain: string
+    start_url: string
+    detail: string
+  }
+  interview: InterviewScript
+  approval: ApprovalToSign | null
+}
+
 export interface DashboardPage {
   store_id: string
   generated_at: string
+  onboarding: OnboardingPanel
   envelope: EnvelopePanel
   losses: LossesPanel
   trust: TrustPanel
@@ -226,6 +299,63 @@ export async function saveEnvelope(
     method: 'PUT',
     headers: { ...authHeaders(token), 'content-type': 'application/json' },
     body: JSON.stringify(document),
+  })
+  if (!response.ok) throw await refusalFrom(response)
+  return (await response.json()) as EnvelopeDocument
+}
+
+/**
+ * Hand the answered interview to the service. R6's missing door, from the browser's side.
+ *
+ * `turns` is the SERVED script with the merchant's prose spliced in and nothing else added;
+ * `completed_at` is the one field this page contributes, and it is the instant the merchant
+ * finished. It is stamped here rather than by the service on purpose: every standing
+ * commitment the envelope records is provenanced from it, so reading a server clock would
+ * make the same transcript produce a different envelope on every run.
+ *
+ * Comes back as the stored envelope, always in `shadow`. Nothing a merchant can say in an
+ * interview activates anything — that is what the approval is for.
+ */
+export async function submitInterview(
+  storeId: string,
+  token: string,
+  turns: InterviewTurn[],
+  completedAt: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<EnvelopeDocument> {
+  const response = await fetchImpl(`/stores/${encodeURIComponent(storeId)}/envelope`, {
+    method: 'PUT',
+    headers: { ...authHeaders(token), 'content-type': 'application/json' },
+    body: JSON.stringify({ completed_at: completedAt, turns }),
+  })
+  if (!response.ok) throw await refusalFrom(response)
+  return (await response.json()) as EnvelopeDocument
+}
+
+/**
+ * Record the merchant's written approval and activate the version it covers.
+ *
+ * The body describes NO terms. That is what keeps the approval valid: a body carrying terms
+ * would mint the next version, and the digest the merchant signed covers the version number
+ * as well as the walls — so the freshly minted one would be a document nobody approved. The
+ * artifact travels in the header the service named, never in the body, because a body field
+ * saying "approved" is exactly the say-so R6 refuses.
+ */
+export async function approveEnvelope(
+  storeId: string,
+  token: string,
+  artifact: Record<string, unknown>,
+  header: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<EnvelopeDocument> {
+  const response = await fetchImpl(`/stores/${encodeURIComponent(storeId)}/envelope`, {
+    method: 'PUT',
+    headers: {
+      ...authHeaders(token),
+      'content-type': 'application/json',
+      [header]: JSON.stringify(artifact),
+    },
+    body: JSON.stringify({ activation: 'active' }),
   })
   if (!response.ok) throw await refusalFrom(response)
   return (await response.json()) as EnvelopeDocument

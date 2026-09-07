@@ -38,10 +38,19 @@ from merchant_svc.onboarding.interview import (
     TranscriptRejected,
     read_transcript,
 )
+from merchant_svc.onboarding.script import (
+    INTENT_CLUSTERS_ENV,
+    STANDING_COMMITMENTS,
+    cluster_options,
+    interview_script,
+    shop_domain_for,
+)
 
 __all__ = [
+    "INTENT_CLUSTERS_ENV",
     "QUESTIONS",
     "REQUIRED_QUESTIONS",
+    "STANDING_COMMITMENTS",
     "AnswerNotUnderstood",
     "ApprovalArtifact",
     "ApprovalRejected",
@@ -54,9 +63,12 @@ __all__ = [
     "activate",
     "approval_artifact_template",
     "approval_digest",
+    "cluster_options",
     "edit",
     "envelope_from_transcript",
+    "interview_script",
     "kill",
     "read_transcript",
+    "shop_domain_for",
     "store_id_from_transcript",
 ]

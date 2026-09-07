@@ -379,3 +379,108 @@ pre {
 .gaps li {
   margin-bottom: 0.6rem;
 }
+
+/* ---- the two voices (D55) -------------------------------------------------
+ *
+ * The organic result and the sponsored one, on one card. The words do the work —
+ * each block carries an attribution sentence naming its author — and these rules
+ * only make the boundary between them impossible to miss at a glance. Nothing
+ * here is the ONLY carrier of the distinction: strip this file out entirely and
+ * the two blocks still say who wrote them, in prose, above the prose.
+ */
+.pitch {
+  margin: 0.85rem 0 0.2rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--rule);
+}
+
+.pitch > h4 {
+  margin: 0 0 0.5rem;
+}
+
+.voice {
+  margin: 0 0 0.7rem;
+  padding: 0.6rem 0.85rem;
+  border-radius: 8px;
+  border: 1px solid var(--rule);
+  border-left-width: 5px;
+}
+
+/* The SPONSORED voice: the shop's own advocate, which the shop pays for. */
+.voice[data-voice="store"] {
+  border-left-color: var(--observed);
+  background: #fdf7ea;
+}
+
+/* The ORGANIC voice: the platform's own case, written for every candidate. */
+.voice[data-voice="platform"] {
+  border-left-color: var(--accent);
+  background: #eef2fd;
+}
+
+.voice-attribution {
+  margin: 0 0 0.45rem;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: var(--ink-soft);
+}
+
+.voice[data-voice="store"] .voice-attribution strong {
+  color: var(--observed);
+}
+
+.voice[data-voice="platform"] .voice-attribution strong {
+  color: var(--accent);
+}
+
+/* The prose itself: the seller's bytes, or the platform's sentence. Plain text in
+   both cases — `overflow-wrap` because a seller may write a URL and this page will
+   not turn it into a link, so it has to wrap somewhere. */
+.voice-body {
+  margin: 0;
+  font-size: 0.95rem;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.pitch details {
+  margin-top: 0.2rem;
+}
+
+.pitch .facts {
+  grid-template-columns: minmax(8rem, 14rem) 1fr;
+  margin: 0.5rem 0 0.2rem;
+  font-size: 0.88rem;
+}
+
+/* A provenance badge beside one fact, and beside one commitment. Same pill the
+   slot's aggregate labels get; `li[data-tone]` above cannot reach either, because
+   both are spans inside a row that carries no tone of its own. */
+span[data-tone] {
+  display: inline-block;
+  padding: 0.05rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+span[data-tone="confirmed"] {
+  color: var(--confirmed);
+  background: #e6f4ec;
+}
+
+span[data-tone="observed"] {
+  color: var(--observed);
+  background: #fbf1de;
+}
+
+span[data-tone="unverified"] {
+  color: var(--unverified);
+  background: #fbe9e7;
+}
+
+span[data-tone="unknown"] {
+  color: var(--ink-soft);
+  background: #eef0f3;
+}

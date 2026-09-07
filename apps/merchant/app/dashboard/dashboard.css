@@ -76,7 +76,11 @@ textarea.code { width: 100%; background: #10141d; color: var(--ink); border: 1px
   border: 1px solid var(--line); }
 .pill--active, .pill--bid { color: var(--good); border-color: #2c4b3a; }
 .pill--killed, .pill--declined { color: var(--bad); border-color: #4b2c2c; }
-.pill--shadow { color: var(--warn); border-color: #4b432c; }
+.pill--shadow, .pill--approval, .pill--interview { color: var(--warn); border-color: #4b432c; }
+
+/* The approval digest, shown verbatim so a merchant can compare it against what they signed.
+   Wrapping is deliberate: a 71-character hash that overflows its card is a hash nobody reads. */
+.hash { overflow-wrap: anywhere; font-size: .74rem; }
 
 .score { display: flex; align-items: baseline; gap: .6rem; margin: .2rem 0 .5rem; }
 .score__value { font-size: 2rem; font-weight: 600; }

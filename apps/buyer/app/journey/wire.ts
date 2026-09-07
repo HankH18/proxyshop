@@ -44,12 +44,14 @@
 import { CONFIRM_PATH, assertConfirmable, type AuctionCreated, type Intent } from '../intent/intent'
 import {
   LABEL_UNVERIFIED,
+  type PitchFact,
   type Shortlist,
   type ShortlistPrice,
   type ShortlistProduct,
   type ShortlistSlot,
   type SlotCommitment,
   type SlotDiscount,
+  type SlotPitch,
   type TrustSummary,
 } from '../shortlist/shortlist'
 
@@ -809,7 +811,90 @@ function readCommitments(value: unknown): readonly SlotCommitment[] | null {
 }
 
 /**
- * Label a shortlist for display (R2). `shortlist` is forwarded verbatim — see the docstring.
+ * ONE CHECKED FACT off a served pitch, or `undefined` when this row is not one.
+ *
+ * `key` and `value` are both required and both must be strings: a fact whose value this
+ * client cannot read as text has nothing in it a shopper could read, and printing the object
+ * would put `[object Object]` on the page under the platform's own name. `label` is `null`
+ * for the exchange's own published fields — see `PitchFact` — so a non-string label reads
+ * `null` rather than being coerced into a badge nobody issued.
+ */
+function readPitchFact(value: unknown): PitchFact | undefined {
+  if (!isRecord(value)) return undefined
+  const key = asString(value.key).trim()
+  const text = asString(value.value).trim()
+  if (!key || !text) return undefined
+  return {
+    key,
+    value: text,
+    kind: asString(value.kind).trim(),
+    label: isNonEmptyString(value.label) ? value.label.trim() : null,
+  }
+}
+
+/**
+ * The case for one slot and whose voice makes it (D55), or `null`.
+ *
+ * Three things here are load-bearing rather than defensive:
+ *
+ * 1. **`store_pitch` is a STRING or it is `null`.** The service carries a shop's message byte
+ *    for byte and screens nothing out of it — measured:
+ *    `buyer_svc.pitch.writing.store_pitch_of` drops a message that is blank, over 1200
+ *    characters or control-bearing and otherwise returns the seller's bytes UNCHANGED, while
+ *    `FORBIDDEN_CHARACTERS` and the invented-number arithmetic screen the PLATFORM's case and
+ *    never the seller's. So markup and URLs really do arrive here. They stay text (the screen
+ *    renders them as a JSX text child), and anything that is not a string becomes `null`
+ *    rather than reaching React as a child it would refuse or print as an object.
+ * 2. **Whitespace is not trimmed off `store_pitch`.** It is the shop's bytes; this client is
+ *    the last hop and the one place a "tidy-up" would be invisible. A blank-but-present
+ *    message reads `null` — there is no voice in it — but a message with content keeps every
+ *    character the store wrote.
+ * 3. **`facts` keeps the served ORDER.** `material_for` ranked them for this shopper, and a
+ *    re-sorted list would be this page overruling the ranking it is displaying evidence for.
+ */
+export function readPitch(value: unknown): SlotPitch | null {
+  if (!isRecord(value)) return null
+  const storePitch = value.store_pitch
+  const facts: PitchFact[] = []
+  for (const row of asArray(value.facts)) {
+    const fact = readPitchFact(row)
+    if (fact !== undefined) facts.push(fact)
+  }
+  return {
+    platform_case: asString(value.platform_case),
+    platform_case_source: asString(value.platform_case_source),
+    store_pitch:
+      typeof storePitch === 'string' && storePitch.trim() !== '' ? storePitch : null,
+    voices: asArray(value.voices).filter(isNonEmptyString),
+    facts,
+  }
+}
+
+/** The shopper the case is being written for. Both halves optional — see `renderShortlist`. */
+export interface ShopperContext {
+  /** The intent the buyer CONFIRMED, as `confirmIntent` answered with it. */
+  readonly intent?: unknown
+  /** The coarsened profile `GET /buyer/profile` served. Never composed by this page. */
+  readonly profile?: unknown
+}
+
+/**
+ * Label a shortlist for display (R2) and get each candidate's case (D55).
+ *
+ * `shortlist` is forwarded verbatim — see the docstring at the top of this module.
+ *
+ * **`context` is what makes the served case THIS shopper's**, and it is optional on the
+ * service too. Measured on the devstack, the same demo-woolworks slot comes back as
+ * `"Offer held until: 2026-09-07. Also price: 78.00 USD; free returns: 30 days."` with no
+ * context and `"You said price was a must-have, and here it is: 78.00 USD. Also offer held
+ * until: 2026-09-07; free returns: 30 days."` with the confirmed intent and the served
+ * profile. Both are honest — an unconditioned organic result is still the organic result, and
+ * a screen that has not confirmed an intent yet is a real caller — but only the second is the
+ * per-shopper reading this page actually has the material for.
+ *
+ * A key it has no value for is OMITTED rather than sent as `null`: the body a caller with no
+ * shopper sends is then byte-identical to the one every caller older than this parameter
+ * sent, so "no context" cannot drift into "a context that says nothing".
  *
  * Returns the slots the service labelled, each carrying the auction id the service pushed
  * down onto it, so `acceptSlot` has an auction to name.
@@ -817,11 +902,15 @@ function readCommitments(value: unknown): readonly SlotCommitment[] | null {
 export async function renderShortlist(
   shortlist: unknown,
   fetcher: Fetcher,
+  context: ShopperContext = {},
 ): Promise<readonly RenderedSlot[]> {
+  const body: Record<string, unknown> = { shortlist }
+  if (context.intent !== undefined && context.intent !== null) body.intent = context.intent
+  if (context.profile !== undefined && context.profile !== null) body.profile = context.profile
   const response = await fetcher(RENDER_PATH, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ shortlist }),
+    body: JSON.stringify(body),
   })
   const payload = await readJson(response, 'render shortlist')
   if (!isRecord(payload) || !Array.isArray(payload.slots)) {
@@ -850,6 +939,10 @@ export async function renderShortlist(
       product: readProduct(row.product),
       price: readPrice(row.price),
       commitments: readCommitments(row.commitments),
+      // D55's whole point, and the field this mapper used to omit. `RenderedSlot` ignores
+      // unknown keys, so the omission broke nothing and cost everything: the store's own
+      // words and the platform's own case were computed, served, and read by nobody.
+      pitch: readPitch(row.pitch),
     }),
   )
 }

@@ -2002,3 +2002,172 @@ describe('the reasons a shortlist is empty, in a shopper’s words', () => {
     expect(screen.getByTestId('gloss-store-refused-422').textContent).toContain('HTTP 422')
   })
 })
+
+/**
+ * D55 ON THE WIRE — the pitch this client used to drop, and the shopper context it used to
+ * withhold.
+ *
+ * Two separate defects, both MEASURED against the devstack (three real store agents, the
+ * real exchange, the real buyer service) on the merino-beanie conversation:
+ *
+ * 1. `POST /buyer/shortlist/render` answers with a `pitch` object on every slot it can say
+ *    anything about, and `readRenderedSlots` mapped a fixed field list that did not name it.
+ *    `RenderedSlot` ignores unknown keys, so nothing broke — the whole of what the persuasion
+ *    market decided was simply computed, served and never read.
+ * 2. The client sent `{shortlist}` alone. `intent` and `profile` are optional on `RenderBody`,
+ *    and WITHOUT them the served case for demo-woolworks is
+ *      "Offer held until: 2026-09-07. Also price: 78.00 USD; free returns: 30 days."
+ *    while WITH them it is
+ *      "You said price was a must-have, and here it is: 78.00 USD. Also offer held until:
+ *       2026-09-07; free returns: 30 days."
+ *    Both strings are that run's own bytes. The unconditioned reading is a real answer — a
+ *    screen that has not confirmed an intent is a real caller — but it is not the one this
+ *    page has, and it is not the per-shopper case D55 is about.
+ */
+const SERVED_PITCH = {
+  platform_case:
+    'You said price was a must-have, and here it is: 78.00 USD. Also offer held until: ' +
+    '2026-09-07; free returns: 30 days.',
+  platform_case_source: 'assembled',
+  store_pitch: null,
+  voices: ['platform'],
+  facts: [
+    { key: 'price', value: '78.00 USD', kind: 'price', label: null },
+    { key: 'offer held until', value: '2026-09-07', kind: 'price', label: null },
+    { key: 'free returns', value: '30 days', kind: 'commitment', label: 'store-confirmed' },
+    { key: 'reliability', value: '82%', kind: 'trust', label: null },
+  ],
+}
+
+describe('the case each candidate makes, and in whose voice', () => {
+  it('reads the served pitch off a slot instead of dropping it', async () => {
+    const { fetcher } = recorder(() =>
+      json({ slots: [{ ...RENDERED_SLOT, pitch: SERVED_PITCH }] }),
+    )
+
+    const slots = await renderShortlist({ slots: [] }, fetcher)
+
+    expect(slots[0]?.pitch?.platform_case).toBe(SERVED_PITCH.platform_case)
+    expect(slots[0]?.pitch?.platform_case_source).toBe('assembled')
+    expect(slots[0]?.pitch?.store_pitch).toBeNull()
+    expect(slots[0]?.pitch?.voices).toEqual(['platform'])
+    // Every fact, in the served order, with each one's own label — `null` stays `null`.
+    expect(slots[0]?.pitch?.facts).toEqual(SERVED_PITCH.facts)
+  })
+
+  it("carries a shop's own words byte for byte, markup and URLs included", async () => {
+    // MEASURED: `buyer_svc.pitch.writing.store_pitch_of` strips NOTHING. It drops a message
+    // that is blank, over 1200 characters or control-bearing, and otherwise returns the
+    // seller's bytes unchanged — `FORBIDDEN_CHARACTERS` screens the PLATFORM's case, never
+    // the seller's. So this client may not "tidy" one either.
+    const words = 'Since 1974. <b>Free wool wash</b> — https://demo-woolworks.example.com/about'
+    const { fetcher } = recorder(() =>
+      json({ slots: [{ ...RENDERED_SLOT, pitch: { ...SERVED_PITCH, store_pitch: words, voices: ['store', 'platform'] } }] }),
+    )
+
+    const slots = await renderShortlist({ slots: [] }, fetcher)
+
+    expect(slots[0]?.pitch?.store_pitch).toBe(words)
+    expect(slots[0]?.pitch?.voices).toEqual(['store', 'platform'])
+  })
+
+  it('drops a pitch it cannot read rather than putting an object on the screen', async () => {
+    // A `store_pitch` that is not a string would reach React as a child it refuses to
+    // render, and a `facts` row that is not an object would print as `[object Object]`.
+    const { fetcher } = recorder(() =>
+      json({
+        slots: [
+          {
+            ...RENDERED_SLOT,
+            pitch: {
+              platform_case: 42,
+              platform_case_source: null,
+              store_pitch: { text: 'nice hat' },
+              voices: ['store', 7, ''],
+              facts: [{ key: 'price', value: '78.00 USD', kind: 'price', label: 3 }, 'nope'],
+            },
+          },
+        ],
+      }),
+    )
+
+    const slots = await renderShortlist({ slots: [] }, fetcher)
+
+    const pitch = slots[0]?.pitch
+    expect(pitch).not.toBeUndefined()
+    expect(pitch?.platform_case).toBe('')
+    expect(pitch?.store_pitch).toBeNull()
+    expect(pitch?.voices).toEqual(['store'])
+    expect(pitch?.facts).toEqual([{ key: 'price', value: '78.00 USD', kind: 'price', label: null }])
+  })
+
+  it('leaves a slot with no pitch null, and never invents an empty one', async () => {
+    const { fetcher } = recorder(() => json({ slots: [{ ...RENDERED_SLOT, pitch: null }] }))
+    const withNull = await renderShortlist({ slots: [] }, fetcher)
+    expect(withNull[0]?.pitch).toBeNull()
+
+    // A producer older than the field sends no key at all. Same answer, not an empty object.
+    const older = recorder(() => json({ slots: [RENDERED_SLOT] }))
+    const withNone = await renderShortlist({ slots: [] }, older.fetcher)
+    expect(withNone[0]?.pitch).toBeNull()
+  })
+
+  it('sends the confirmed intent and the coarsened profile, so the case is this shoppers', async () => {
+    const { fetcher, calls } = recorder(() => json({ slots: [RENDERED_SLOT] }))
+    const shortlist = { auction_id: AUCTION_ID, slots: [RAW_SLOT] }
+    const profile = { pseudonym: VAULT_PSEUDONYM, buckets: BUCKETS }
+
+    await renderShortlist(shortlist, fetcher, { intent: INTENT, profile })
+
+    expect(bodyOf(calls[0]?.init)).toEqual({ shortlist, intent: INTENT, profile })
+  })
+
+  it('sends neither key when it has neither, so the unconditioned reading stays reachable', async () => {
+    const { fetcher, calls } = recorder(() => json({ slots: [RENDERED_SLOT] }))
+    const shortlist = { auction_id: AUCTION_ID, slots: [RAW_SLOT] }
+
+    await renderShortlist(shortlist, fetcher, {})
+
+    // Not `intent: null` and not `intent: undefined` — the key is absent, which is the body
+    // every caller older than this parameter sends.
+    expect(bodyOf(calls[0]?.init)).toEqual({ shortlist })
+  })
+
+  it('puts both voices on the page, attributed, when the service serves both', async () => {
+    const words = 'We have been knitting merino in Yorkshire since 1974.'
+    const { fetcher } = demoService({
+      rendered: [
+        {
+          ...RENDERED_SLOT,
+          pitch: { ...SERVED_PITCH, store_pitch: words, voices: ['store', 'platform'] },
+        },
+      ],
+    })
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Shortlist')
+
+    expect(await screen.findByTestId(`store-voice-${BID_REF}`)).toHaveTextContent(words)
+    expect(screen.getByTestId(`platform-voice-${BID_REF}`)).toHaveTextContent(
+      SERVED_PITCH.platform_case,
+    )
+  })
+
+  it('asks the render route for THIS shopper by name, from the page', async () => {
+    const { fetcher, calls } = demoService()
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Shortlist')
+
+    const rendered = calls.find((call) => call.path === RENDER_PATH)
+    const body = bodyOf(rendered?.init) as { intent?: unknown; profile?: unknown }
+    // The intent the buyer actually confirmed, and the profile the service's own vault and
+    // coarsener answered with. Neither is composed here.
+    expect(body.intent).toEqual(INTENT)
+    expect(body.profile).toEqual({ pseudonym: VAULT_PSEUDONYM, buckets: BUCKETS })
+  })
+})

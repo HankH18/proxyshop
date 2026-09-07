@@ -465,3 +465,230 @@ describe('a slot the exchange had nothing for', () => {
     expect(price.toLowerCase()).toContain('no currency')
   })
 })
+
+/**
+ * D55 ON THE SCREEN — the organic result and the sponsored one, and a reader who can tell
+ * which is which.
+ *
+ * `POST /buyer/shortlist/render` serves a `pitch` per slot, and everything in it was
+ * MEASURED against the devstack (`apps/buyer/devstack/run.py` — three real store agents, the
+ * real exchange, the real buyer service) on the merino-beanie conversation. The two fixtures
+ * below are that run's own bytes:
+ *
+ *   * `SPONSORED_PITCH` is demo-woolworks' slot. Its `platform_case` and all four `facts` are
+ *     the served ones. Its `store_pitch` is a store message posted onto the slot on the way
+ *     into `/render` and carried back byte for byte — see `STORE_PITCH_IS_NOT_ON_THE_WIRE`.
+ *   * `ORGANIC_PITCH` is demo-alpine-supply's slot exactly as served: `store_pitch: null`,
+ *     `voices: ["platform"]`. That is the ORGANIC result — a candidate the platform pitches
+ *     out of its own crawl, with no advocate of its own.
+ *
+ * `store_pitch` carries markup and a URL in these tests for a measured reason.
+ * `buyer_svc.pitch.writing.store_pitch_of` strips NOTHING: it drops a message that is not a
+ * string, is blank, is over 1200 characters or carries control characters, and otherwise
+ * returns the store's bytes unchanged. `FORBIDDEN_CHARACTERS` (`{}<>[]|\^~`) and the
+ * invented-number arithmetic are the screen over the PLATFORM's written case, and they never
+ * touch the seller's. So a `<b>` and an `https://` really do arrive here, and this last hop
+ * is the only place that decides whether they become markup and a link. They must not.
+ */
+const SPONSORED_CASE =
+  'You said price was a must-have, and here it is: 78.00 USD. Also offer held until: ' +
+  '2026-09-07; reliability: 82%.'
+
+const SHOP_OWN_WORDS =
+  'We have been knitting merino in Yorkshire since 1974 and every beanie is finished by ' +
+  'hand. Try it for 30 days -- if it is not the warmest hat you own, send it back on us. ' +
+  'Read more at https://demo-woolworks.example.com/about <b>free wool wash</b> included.'
+
+const SPONSORED_PITCH = {
+  platform_case: SPONSORED_CASE,
+  platform_case_source: 'assembled',
+  store_pitch: SHOP_OWN_WORDS,
+  voices: ['store', 'platform'],
+  facts: [
+    { key: 'price', value: '78.00 USD', kind: 'price', label: null },
+    { key: 'offer held until', value: '2026-09-07', kind: 'price', label: null },
+    { key: 'reliability', value: '82%', kind: 'trust', label: null },
+    { key: 'free returns', value: '30 days', kind: 'commitment', label: LABEL_STORE_CONFIRMED },
+  ],
+} as const
+
+const ORGANIC_PITCH = {
+  platform_case:
+    'You said price was a must-have, and here it is: 72.00 USD. Also offer held until: ' +
+    '2026-09-07; reliability: 61%.',
+  platform_case_source: 'assembled',
+  store_pitch: null,
+  voices: ['platform'],
+  facts: [
+    { key: 'price', value: '72.00 USD', kind: 'price', label: null },
+    { key: 'offer held until', value: '2026-09-07', kind: 'price', label: null },
+    { key: 'reliability', value: '61%', kind: 'trust', label: null },
+    { key: 'ships within', value: '2 business days', kind: 'commitment', label: LABEL_STORE_CONFIRMED },
+  ],
+} as const
+
+const SPONSORED_SLOT: ShortlistSlot = { ...PRICED_SLOT, pitch: SPONSORED_PITCH }
+const ORGANIC_SLOT: ShortlistSlot = { ...PRICED_SLOT, pitch: ORGANIC_PITCH }
+
+describe('the two voices, and a shopper who can tell them apart', () => {
+  it("carries the shop's own words byte for byte", () => {
+    render(<ShortlistView shortlist={one(SPONSORED_SLOT)} onAccept={vi.fn()} />)
+    expect(screen.getByTestId('store-voice-bid-e7-7')).toHaveTextContent(SHOP_OWN_WORDS)
+  })
+
+  it("shows the platform's own case beside it, in the platform's words", () => {
+    render(<ShortlistView shortlist={one(SPONSORED_SLOT)} onAccept={vi.fn()} />)
+    expect(screen.getByTestId('platform-voice-bid-e7-7')).toHaveTextContent(SPONSORED_CASE)
+  })
+
+  it('never puts one voice inside the other', () => {
+    render(<ShortlistView shortlist={one(SPONSORED_SLOT)} onAccept={vi.fn()} />)
+    const store = screen.getByTestId('store-voice-bid-e7-7')
+    const platform = screen.getByTestId('platform-voice-bid-e7-7')
+    // Two separate elements, neither containing the other, neither carrying the other's text.
+    expect(store.contains(platform)).toBe(false)
+    expect(platform.contains(store)).toBe(false)
+    expect(store.textContent ?? '').not.toContain(SPONSORED_CASE)
+    expect(platform.textContent ?? '').not.toContain(SHOP_OWN_WORDS)
+  })
+
+  it('says whose voice each one is, in words, without a hover', () => {
+    render(<ShortlistView shortlist={one(SPONSORED_SLOT)} onAccept={vi.fn()} />)
+    const store = (screen.getByTestId('store-voice-bid-e7-7').textContent ?? '').toLowerCase()
+    const platform = (
+      screen.getByTestId('platform-voice-bid-e7-7').textContent ?? ''
+    ).toLowerCase()
+    // The seller's block names the SELLER as the author and says it is what the shop paid
+    // for; the platform's names the PLATFORM and says it was written from checked facts.
+    expect(store).toContain('shop')
+    expect(store).toContain('own words')
+    expect(platform).toContain('proxyshop')
+    expect(platform).toContain('checked')
+    // And neither attribution is the other's.
+    expect(store).not.toContain('proxyshop wrote')
+  })
+
+  it('leads with the shop inside its own slot, which is what the shop bought', () => {
+    const { container } = render(
+      <ShortlistView shortlist={one(SPONSORED_SLOT)} onAccept={vi.fn()} />,
+    )
+    const text = container.textContent ?? ''
+    expect(text.indexOf(SHOP_OWN_WORDS)).toBeGreaterThan(-1)
+    expect(text.indexOf(SHOP_OWN_WORDS)).toBeLessThan(text.indexOf(SPONSORED_CASE))
+  })
+
+  it('renders a seller pitch as TEXT: no markup, no link, ever', () => {
+    const { container } = render(
+      <ShortlistView shortlist={one(SPONSORED_SLOT)} onAccept={vi.fn()} />,
+    )
+    const store = screen.getByTestId('store-voice-bid-e7-7')
+    // The `<b>` arrives as four characters and stays four characters.
+    expect(store.textContent ?? '').toContain('<b>free wool wash</b>')
+    expect(store.querySelector('b')).toBeNull()
+    expect(store.innerHTML).not.toContain('<b>')
+    // The URL is on the screen as the seller wrote it and is not somewhere to click.
+    expect(store.textContent ?? '').toContain('https://demo-woolworks.example.com/about')
+    expect(container.querySelectorAll('a')).toHaveLength(0)
+    expect(container.querySelector('script')).toBeNull()
+  })
+
+  it('renders a seller pitch that is nothing but an attack as text too', () => {
+    const attack =
+      '<img src=x onerror="alert(1)"> <a href="https://evil.example/cart">click here</a>'
+    const { container } = render(
+      <ShortlistView
+        shortlist={one({ ...SPONSORED_SLOT, pitch: { ...SPONSORED_PITCH, store_pitch: attack } })}
+        onAccept={vi.fn()}
+      />,
+    )
+    expect(screen.getByTestId('store-voice-bid-e7-7')).toHaveTextContent(attack)
+    expect(container.querySelectorAll('a')).toHaveLength(0)
+    expect(container.querySelectorAll('img')).toHaveLength(0)
+  })
+
+  it('gives a scraped shop the platform voice and no empty box where an advocate would be', () => {
+    render(<ShortlistView shortlist={one(ORGANIC_SLOT)} onAccept={vi.fn()} />)
+    expect(screen.getByTestId('platform-voice-bid-e7-7')).toHaveTextContent(
+      ORGANIC_PITCH.platform_case,
+    )
+    // No seller block at all — not a blank one, not an "undefined", not a null.
+    expect(screen.queryByTestId('store-voice-bid-e7-7')).toBeNull()
+    const card = screen.getByTestId('slot-bid-e7-7').textContent ?? ''
+    expect(card).not.toContain('undefined')
+    expect(card).not.toContain('null')
+    // And it SAYS the seller's voice is missing rather than leaving a reader to guess that
+    // this shop simply had nothing to say.
+    //
+    // It must NOT say "this shop has no advocate", and that assertion is here because this
+    // test asserted exactly that until the devstack was driven. `store_pitch: null` has two
+    // causes at this hop and they are indistinguishable from here: a scraped shop with no
+    // advocate, and an in-network shop whose `Bid.message` was dropped by the exchange's
+    // `extra="forbid"` shortlist contract. On the running stack it is always the SECOND —
+    // both bidding shops are in-network — so the obvious gloss would be false on every card.
+    const why = (screen.getByTestId('no-store-voice-bid-e7-7').textContent ?? '').toLowerCase()
+    // The typographic apostrophe is the one the page renders (`&rsquo;`), asserted as the
+    // character it becomes rather than as the entity.
+    expect(why).toContain('nothing here is in this shop’s own voice')
+    expect(why).toContain('crawling')
+    expect(why).toContain('shortlist contract')
+    expect(why).not.toMatch(/this shop has no advocate/)
+  })
+
+  it('shows the facts the case was drawn from, and says the case is a subset of them', () => {
+    render(<ShortlistView shortlist={one(SPONSORED_SLOT)} onAccept={vi.fn()} />)
+    const facts = screen.getByTestId('pitch-facts-bid-e7-7')
+    // Every served fact, key and value, and each one's own provenance label where it has one.
+    for (const fact of SPONSORED_PITCH.facts) {
+      expect(facts).toHaveTextContent(fact.key)
+      expect(facts).toHaveTextContent(fact.value)
+    }
+    expect(facts).toHaveTextContent(LABEL_STORE_CONFIRMED)
+    // The subset sentence is on the screen WITHOUT opening anything: it is the claim, and the
+    // enumeration behind it is the audit.
+    const summary = (screen.getByTestId('pitch-facts-summary-bid-e7-7').textContent ?? '')
+      .toLowerCase()
+    expect(summary).toContain('4')
+    expect(summary).toContain('checked')
+  })
+
+  it('renders no pitch block at all for a slot the platform had nothing to say about', () => {
+    render(<ShortlistView shortlist={one({ ...PRICED_SLOT, pitch: null })} onAccept={vi.fn()} />)
+    expect(screen.queryByTestId('pitch-bid-e7-7')).toBeNull()
+    expect(screen.queryByTestId('store-voice-bid-e7-7')).toBeNull()
+    expect(screen.queryByTestId('platform-voice-bid-e7-7')).toBeNull()
+    // The rest of the card is untouched.
+    expect(screen.getByTestId('price-bid-e7-7')).toBeInTheDocument()
+  })
+
+  it('renders a producer older than the pitch field without a blank block', () => {
+    render(<ShortlistView shortlist={one(PRICED_SLOT)} onAccept={vi.fn()} />)
+    expect(screen.queryByTestId('pitch-bid-e7-7')).toBeNull()
+    expect(screen.getByTestId('slot-bid-e7-7').textContent ?? '').not.toContain('undefined')
+  })
+
+  it('shows the store voice alone when the platform has checked nothing', () => {
+    // MEASURED shape: `buyer_svc.pitch.writing.pitch_for` returns `platform_case: ""`,
+    // `voices: ["store"]` and `facts: []` for an in-network shop the crawl holds nothing
+    // usable about. The platform says NOTHING rather than writing filler under its own name.
+    render(
+      <ShortlistView
+        shortlist={one({
+          ...PRICED_SLOT,
+          pitch: {
+            platform_case: '',
+            platform_case_source: 'assembled',
+            store_pitch: 'We have been roasting on this street since 1998.',
+            voices: ['store'],
+            facts: [],
+          },
+        })}
+        onAccept={vi.fn()}
+      />,
+    )
+    expect(screen.getByTestId('store-voice-bid-e7-7')).toHaveTextContent('since 1998')
+    expect(screen.queryByTestId('platform-voice-bid-e7-7')).toBeNull()
+    const why = (screen.getByTestId('no-platform-voice-bid-e7-7').textContent ?? '').toLowerCase()
+    expect(why).toContain('checked')
+    expect(screen.queryByTestId('pitch-facts-bid-e7-7')).toBeNull()
+  })
+})

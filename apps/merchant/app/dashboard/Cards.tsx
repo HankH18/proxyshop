@@ -19,7 +19,9 @@ import { useState } from 'react'
 import type {
   BidsPanel,
   EnvelopePanel,
+  InterviewTurn,
   LossesPanel,
+  OnboardingPanel,
   SolicitationRow,
   TrustEventsPanel,
   TrustPanel,
@@ -37,6 +39,197 @@ function instant(raw: string | undefined): string {
   if (!raw) return '—'
   const parsed = new Date(raw)
   return Number.isNaN(parsed.getTime()) ? raw : parsed.toLocaleString()
+}
+
+// ======================================================================================
+// Onboarding — R6's interview, and the written approval that activates what it produced
+// ======================================================================================
+/**
+ * The interview a merchant can actually reach, and the approval they actually sign.
+ *
+ * WHAT WAS TRUE BEFORE THIS CARD
+ * ------------------------------
+ * Nothing on this page could create an envelope. The interview ran only under
+ * `python -m merchant_svc.onboarding <transcript.json>` on an operator's laptop, and the
+ * approval digest was published by no route at all — so the `X-Envelope-Approval` header
+ * could only be filled by re-implementing the service's canonical SHA-256 in the browser.
+ * A merchant could not join the network through the product.
+ *
+ * TWO RULES THIS COMPONENT MAY NEVER BREAK
+ * ----------------------------------------
+ * 1. **It authors no machine-readable field.** The served turn goes back byte for byte with a
+ *    merchant turn behind it. Every `cluster_id`, `product_ref`, `commitment_key` and
+ *    `claim_type` rides inside it. The only thing this file adds to the transcript is
+ *    `completed_at`, and the only thing the merchant adds is prose.
+ * 2. **It cannot activate anything.** The approve button sends a body describing no terms and
+ *    an artifact the SERVICE minted the hash for. If the merchant has not typed their name,
+ *    the button is disabled here and the service refuses it there — two independent refusals
+ *    for one safety property, because a form validation is not a gate.
+ */
+export function OnboardingCard({
+  panel,
+  onSubmitInterview,
+  onApprove,
+  busy,
+  error,
+}: {
+  panel: OnboardingPanel
+  onSubmitInterview: (turns: InterviewTurn[], completedAt: string) => void
+  onApprove: (artifact: Record<string, unknown>, header: string) => void
+  busy: boolean
+  error: string
+}): JSX.Element {
+  const [said, setSaid] = useState<Record<number, string>>({})
+  const [approver, setApprover] = useState('')
+  const surface = panel.observation_surface
+  const asked = panel.interview.turns
+    .map((turn, index) => ({ turn, index }))
+    .filter(({ turn }) => typeof turn.question === 'string' && turn.question.length > 0)
+  const unanswered = asked.filter(({ index }) => (said[index] ?? '').trim() === '')
+
+  return (
+    <Card title="Onboarding" requirement="R6 · R7">
+      <PanelNotice panel={panel} />
+      {/*
+        `PanelNotice` renders nothing in the `ok` state, and this panel IS ok while one of its
+        questions has nothing to offer: the interview is served and answerable without a
+        cluster taxonomy. So the missing variable is named here instead of being swallowed —
+        an empty multi-select that said nothing would read as "this store pursues nothing",
+        which is a term the merchant never set.
+      */}
+      {panel.state === 'ok' && panel.missing !== undefined && panel.missing.length > 0 ? (
+        <div className="notice notice--not_configured" role="status">
+          <p className="notice__missing">
+            Set{' '}
+            {panel.missing.map((name, index) => (
+              <span key={name}>
+                {index > 0 ? ', ' : ''}
+                <code>{name}</code>
+              </span>
+            ))}
+            .
+          </p>
+          <p className="notice__detail">{panel.detail}</p>
+        </div>
+      ) : null}
+      <p className="status-line">
+        This store is at step <span className={`pill pill--${panel.step}`}>{panel.step}</span>.
+      </p>
+
+      <p className={surface.registered ? 'muted' : 'error'}>
+        <strong>Outcome observation:</strong>{' '}
+        {surface.registered ? 'registered' : 'not registered'} for{' '}
+        <code>{surface.shop_domain}</code>.{' '}
+        {surface.registered ? null : <a href={surface.start_url}>Install the app</a>}
+      </p>
+      <p className="muted">{surface.detail}</p>
+
+      {panel.step === 'interview' || panel.step === 'approval' ? (
+        <form
+          className="stack"
+          onSubmit={(event) => {
+            event.preventDefault()
+            const turns: InterviewTurn[] = []
+            panel.interview.turns.forEach((turn, index) => {
+              // The served turn, untouched. Spreading it rather than rebuilding it is what
+              // guarantees this page never drops a field it does not itself understand.
+              turns.push(turn)
+              if (typeof turn.question === 'string' && turn.question.length > 0) {
+                turns.push({ role: 'merchant', text: said[index] ?? '' })
+              }
+            })
+            onSubmitInterview(turns, new Date().toISOString())
+          }}
+        >
+          <p className="muted">
+            Answer in your own words. A sentence like <em>“twenty percent, and that’s the
+            ceiling”</em> sets the cap; <em>“no, nothing special there”</em> sets no floor at
+            all. An answer this service cannot read is refused rather than filed as blank — a
+            wall that quietly failed to parse is a wall you think you have and do not.
+          </p>
+          {asked.map(({ turn, index }) => (
+            <div className="stack" key={`${String(turn.question)}-${index}`}>
+              <label htmlFor={`interview-${index}`}>{turn.text}</label>
+              {turn.options !== undefined && turn.options.length > 0 ? (
+                <p className="muted">
+                  On offer:{' '}
+                  {turn.options.map((option, position) => (
+                    <span key={option.cluster_id}>
+                      {position > 0 ? ', ' : ''}
+                      <em>{option.label}</em>
+                    </span>
+                  ))}
+                </p>
+              ) : null}
+              <input
+                id={`interview-${index}`}
+                name={`interview-${index}`}
+                value={said[index] ?? ''}
+                onChange={(event) => {
+                  const next = event.target.value
+                  setSaid((current) => ({ ...current, [index]: next }))
+                }}
+              />
+            </div>
+          ))}
+          {error ? <p className="error">{error}</p> : null}
+          <button type="submit" disabled={busy || unanswered.length > 0}>
+            {busy
+              ? 'Reading your answers…'
+              : unanswered.length > 0
+                ? `${String(unanswered.length)} question(s) still to answer`
+                : 'Turn these answers into version 1 (shadow)'}
+          </button>
+        </form>
+      ) : null}
+
+      {panel.approval !== null ? (
+        <form
+          className="stack"
+          onSubmit={(event) => {
+            event.preventDefault()
+            const approval = panel.approval
+            if (approval === null) return
+            onApprove(
+              {
+                ...approval.artifact,
+                approver: approver.trim(),
+                approved_at: new Date().toISOString(),
+              },
+              approval.header,
+            )
+          }}
+        >
+          <h3>Approve v{panel.approval.version} in writing</h3>
+          <p className="muted">{panel.approval.detail}</p>
+          <p className="muted">
+            Bound to <code className="hash">{panel.approval.envelope_hash}</code>. This hash is
+            the service’s, not this page’s: it is a digest of the terms you just read, and an
+            approval only ever activates the exact document it was given for.
+          </p>
+          <label htmlFor="approver">Your name, as the person approving these terms</label>
+          <input
+            id="approver"
+            name="approver"
+            value={approver}
+            onChange={(event) => setApprover(event.target.value)}
+          />
+          {error ? <p className="error">{error}</p> : null}
+          <button type="submit" disabled={busy || approver.trim() === ''}>
+            {busy ? 'Recording…' : 'I approve these terms — go live'}
+          </button>
+        </form>
+      ) : null}
+
+      {panel.step === 'active' ? (
+        <p className="muted">
+          This store’s envelope is live under a recorded approval. Editing any term mints the
+          next version in <strong>shadow</strong>: the approval on file is bound to the version
+          it covers, so new terms need a new signature.
+        </p>
+      ) : null}
+    </Card>
+  )
 }
 
 // ======================================================================================
