@@ -2606,6 +2606,25 @@ def _merchant_store_agent() -> FastAPI:
     discounts nothing is not worth minting) and a `variant_ref` (a cart permalink is
     variant-scoped, D25). Both are published `Offer` fields and both survive the exchange's own
     `RECORDED_OFFER_FIELDS` whitelist, which is what lets them reach `POST /codes` at all.
+
+    **The discount's `provenance` block is not decoration and it is not new material** (R8/S5a).
+    It was missing here while `contracts.boundary.validate_bid` had no call site in
+    `apps/exchange/src`, so this double emitted a shape nothing in the tree checked — and one
+    NO hosted producer can emit: `store_agent.runtime.bidding._discount` is the only place an
+    `Offer.discount` is constructed in this repository, it returns `None` when there is no
+    grant, and when there is one it copies the grant's own `Provenance` onto it. Measured on
+    the real runtime, one demo-market store with an intro rule::
+
+        offer.discount -> {"type": "percentage", "value": 10.0,
+                           "provenance": {"source": "envelope_rule",
+                                          "ref": "envelope:demo-woolworks:v0#…", …}}
+        validate_bid(that bid, path="hosted")                     -> ok=True   reasons=[]
+        validate_bid(the same bid with ONLY the block removed, …) -> ok=False
+            reasons=['claim_without_provenance:offer.discount']
+
+    So the block below is this double catching up with its own product, not a concession to a
+    new rule: an agent that could really bid this offer would have sent it. Nothing this file
+    asserts changed.
     """
     app = FastAPI(title="store-agent-myshopify")
 
@@ -2621,7 +2640,16 @@ def _merchant_store_agent() -> FastAPI:
                     "variant_ref": "gid://shopify/ProductVariant/1001",
                     "unit_price": 90.0,
                     "currency": "USD",
-                    "discount": {"type": "percentage", "value": 10.0},
+                    "discount": {
+                        "type": "percentage",
+                        "value": 10.0,
+                        "provenance": {
+                            "source": "envelope_rule",
+                            "ref": f"envelope:{MERCHANT_STORE}:v1#max_discount_pct",
+                            "observed_at": "2026-01-01T00:00:00Z",
+                            "authority_rank": 1,
+                        },
+                    },
                     "commitments": [],
                     "total_price": 90.0,
                     "expires_at": "2999-01-01T00:00:00Z",

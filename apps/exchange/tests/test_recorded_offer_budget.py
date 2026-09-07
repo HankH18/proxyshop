@@ -112,7 +112,24 @@ def _honest_offer() -> dict[str, Any]:
         # declaring a discount, and an unauthorized one falls back `bid_price_unreconcilable`
         # — which records the exchange's own manufactured offer instead of the store's, and
         # would leave this file measuring a fallback rather than the bid it means to.
-        "discount": {"type": "percentage", "value": 10},
+        #
+        # THREE halves now: `provenance` is what makes this a discount a hosted agent could
+        # really have sent (R8/S5a). The auction door runs the shared boundary's provenance
+        # walk, and a `discount` present with no provenance at all falls back
+        # `bid_claim_unprovenanced` — the same "measuring a fallback rather than the bid"
+        # trap, one field over. `store_agent.runtime.bidding._discount` is the only producer
+        # of this field in the tree and it copies the authorizing grant's own provenance, so
+        # the block below is what a real bid carries rather than paperwork added to pass.
+        "discount": {
+            "type": "percentage",
+            "value": 10,
+            "provenance": {
+                "source": "envelope_rule",
+                "ref": f"envelope:{STORE_ID}:v1#max_discount_pct",
+                "observed_at": "2026-01-01T00:00:00Z",
+                "authority_rank": 1,
+            },
+        },
     }
 
 
@@ -130,7 +147,13 @@ def _hostile_offer(vector: str) -> dict[str, Any]:
     elif vector == "discount":
         # `_recordable_offer` projects `discount` onto {type, value}. That projection is a
         # whitelist, not a bound: the padding rides through it intact inside `type`.
-        offer["discount"] = {"type": [[0] * PAD], "value": 0}
+        #
+        # The padding is written INTO the honest block rather than over it, so the offer keeps
+        # its provenance and this vector still drives the BUDGET. Replacing the whole block
+        # dropped the provenance too, and the bid was then refused by the R8 boundary in
+        # `auction/collect.py` — which is a correct refusal for a different reason, and it made
+        # this case measure the R10 fallback's recording instead of the padding's.
+        offer["discount"] = {**offer["discount"], "type": [[0] * PAD], "value": 0}
     else:  # pragma: no cover - a typo in a parametrize id must not pass silently
         raise AssertionError(f"unknown vector {vector!r}")
     return offer

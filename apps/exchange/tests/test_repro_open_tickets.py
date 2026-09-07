@@ -948,6 +948,17 @@ def test_the_served_versus_published_sweep_is_armed() -> None:
 #   CAUSATION: removing the `/auctions/{auction_id}` entry from
 #     packages/contracts/openapi/exchange.openapi.json (and its two PINNED_ROUTES rows)
 #     returns this node to the BEFORE failure verbatim.
+#
+# SEVENTH OPERATION, later and by the same rule. R9's loss reports landed
+# `exchange.reports.routes` — a producer writing rows at every auction close, a bounded log,
+# and `GET /reports/losses` behind a bearer token whose table resolves the store FROM the token
+# — and it landed RED here on purpose (served 7, published 6; served but NOT published:
+# ['GET /reports/losses']) rather than hiding the route behind `include_in_schema=False` or
+# mounting it only when a token file is configured, either of which would have kept this node
+# green while a live authenticated door answered outside every contract review. The repair was
+# again PUBLISH: the path plus its examples in exchange.openapi.json, and one row in
+# `contracts.openapi.PINNED_ROUTES` and its TypeScript twin. Removing any of those three
+# returns this node to that failure verbatim.
 def test_t312_the_exchange_serves_exactly_the_operations_its_contract_publishes() -> None:
     """The exchange's served surface and its published contract, in both directions.
 
@@ -960,6 +971,7 @@ def test_t312_the_exchange_serves_exactly_the_operations_its_contract_publishes(
                    GET  /auctions/{auction_id}/shortlist
                    POST /internal/outcomes
                    POST /v1/auctions/{auction_id}/bids
+                   GET  /reports/losses
 
     Both directions are asserted together on purpose. Serving every published path while
     leaving a served one undeclared still leaves the surface diverging from its specification,
@@ -975,53 +987,51 @@ def test_t312_the_exchange_serves_exactly_the_operations_its_contract_publishes(
     )
 
 
-# MARKER REASON REWRITTEN, and the marker deliberately KEPT. The text that stood here was
-# false in three of its four claims, measured on this branch: trust does NOT serve "only the
-# six raw-ledger /events operations" (it serves eight, including `GET /snapshot` and
-# `POST /claims/verifications`), `GET /snapshot` does NOT measure 404 (T-261 served it), and
-# the five read-side /events operations ARE now declared. A strict-xfail whose stated reason is
-# false is how a gate stops being readable evidence — this file says so above
-# `test_the_published_denial_reason_has_an_enumerated_vocabulary` — so the reason is corrected
-# to what is actually still red, and only that.
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-312 (trust half), RE-MEASURED on this branch: the served-but-unpublished direction "
-        "is CLOSED — trust.openapi.json now declares all eight operations trust.main serves "
-        "(GET /events, /events/head, /events/verify, /events/replay, /events/{event_id} and "
-        "POST /claims/verifications joined POST /events and GET /snapshot). What is still red "
-        "is the other direction and only it: GET /stores/{store_id}/trust and "
-        "POST /feedback/{order_ref} are published and served by nothing, 10 published against "
-        "8 served. Closing it needs a decision this lane cannot take and a file it does not "
-        "own. Both repairs are out of scope AND unsound as-is: SERVING them means a new "
-        "apps/trust/src/<feature>/routes.py, and nothing in the repo would call either door — "
-        "the exchange reads trust through GET /snapshot (composition.py trust_endpoint) and "
-        "the buyer's R14 feedback already reaches trust through POST /events "
-        "(proxyshop_support/trust_ledger.py TRUST_EVENTS_PATH), so each new route would be "
-        "born with zero callers, which is the island this batch exists to remove. UNPUBLISHING "
-        "them means deleting two routes DESIGN.md §Service APIs pins, plus repointing the two "
-        "example-checker fixtures in packages/contracts/tests that use "
-        "trust /stores/{store_id}/trust responses.200 as their known-good body. Keep this "
-        "marker until that decision is made; remove it with the fix"
-    ),
-)
+# T-312 (trust half) CLOSED — the `xfail(strict=True)` marker that stood here is REMOVED, and
+# the assertion below is untouched. The marker's own reason said "remove it with the fix"; the
+# fix landed in 342a8fb, which unpinned `GET /stores/{store_id}/trust` and
+# `POST /feedback/{order_ref}` (each published, served by nothing, and unservable as written —
+# the per-store read declares no identity parameter, the feedback door no routing evidence),
+# declared `GET`/`POST /reconcile`, and repointed the two example-checker fixtures that had
+# used the per-store read's 200 body as their known-good value.
+#
+# VERIFIED BEFORE REMOVAL, by building `trust.main` and reading `app.openapi()['paths']`
+# against `packages/contracts/openapi/trust.openapi.json` — both directions, printed in full:
+#
+#   served (10)     GET /events            GET /events/head   GET /events/replay
+#                   GET /events/verify     GET /events/{}     GET /reconcile
+#                   GET /snapshot          POST /claims/verifications
+#                   POST /events           POST /reconcile
+#   published (10)  the same ten, exactly
+#   published but NOT served: none
+#   served but NOT published: none
+#
+# The removed text was ALSO stale in two of its claims, recorded here rather than preserved
+# above a green node. It said "10 published against 8 served" — it is 10 against 10, because
+# trust gained the two `/reconcile` operations and lost the two unservable ones. And it said
+# "the buyer's R14 feedback already reaches trust through POST /events
+# (proxyshop_support/trust_ledger.py TRUST_EVENTS_PATH)", which was the EXCHANGE's wiring, not
+# the buyer's: `apps/exchange/src/composition.py` publishes auction transitions through that
+# module, and the buyer's own feedback seam did not exist until d6c81f7 ("R14: the buyer's
+# feedback route reaches the trust ledger instead of 503-ing in every deployment"), which is
+# where `apps/buyer/svc/src/composition.py` first imported it.
 def test_t312_the_trust_service_serves_exactly_the_operations_its_contract_publishes() -> None:
-    """Two promises the trust service publishes and does not keep.
+    """The trust service's served surface and its published contract, in both directions.
 
-    Measured on this branch by building the app and reading ``app.openapi()['paths']``::
+    Measured after the fix by building the app and reading ``app.openapi()['paths']``::
 
-        served     POST /events            GET /events        GET /events/head
+        served == published ==
+                   POST /events            GET /events        GET /events/head
                    GET  /events/replay     GET /events/verify GET /events/{event_id}
                    GET  /snapshot          POST /claims/verifications
-        published  the eight above, plus
-                   GET  /stores/{store_id}/trust   -> 404
-                   POST /feedback/{order_ref}      -> 404
+                   GET  /reconcile         POST /reconcile
 
-    The trust *scores* are readable — through ``GET /snapshot``, which is what the exchange's
-    client actually reads — so the per-store door is a second read of the same computation
-    with no consumer, and the buyer's feedback already reaches the ledger through
-    ``POST /events``. That is the whole of what is left, and it is a product decision about two
-    DESIGN-pinned interfaces rather than a missing implementation.
+    Both directions are asserted together on purpose. Serving every published path while
+    leaving a served one undeclared still leaves the surface diverging from its specification,
+    which is the property this gate is for — not a checklist of names. The other half of that
+    symmetry is what the sweep's floors above defend: ``served == published`` is satisfiable by
+    deleting a promise, so a shrinking contract trips
+    ``test_the_served_versus_published_sweep_is_armed`` even with this marker gone.
 
     This half lives in the exchange's repro file rather than under ``apps/trust/tests`` because
     it needs no file there: it imports ``trust.main`` and reads

@@ -155,11 +155,30 @@ from datetime import UTC, datetime
 from typing import Any
 
 from contracts.boundary import (
+    HOSTED_PATH,
     MAX_DISCOUNT_ROSTER_KEY,
+    REASON_CLAIM_PROVENANCE_EMPTY_SOURCE,
+    REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE,
+    REASON_CLAIM_VALUE_UNWALKABLE,
+    REASON_CLAIM_WITHOUT_PROVENANCE,
+    REASON_CODE_UNUSABLE,
+    REASON_DISCOUNT_OVER_AUTHORIZED_DEPTH,
+    REASON_HOSTED_NON_HOOK_PROVENANCE,
+    REASON_OFFER_EXPIRED,
+    REASON_OFFER_EXPIRY_MISSING,
+    REASON_OFFER_EXPIRY_UNPARSEABLE,
+    REASON_PRICE_UNDER_DECLARED_DEPTH,
     REASON_PRICE_UNRECONCILABLE,
+    REASON_SCHEMA_INVALID,
+    REASON_STORE_BLACKLISTED,
+    REASON_TRUST_SNAPSHOT_UNAVAILABLE,
+    REASON_UNKNOWN_PATH,
+    REASON_UNVERIFIABLE_CLAIM_SITE,
+    REASON_UNVERIFIED_DISCOUNT_AUTHORISATION,
     ROSTER_PRICE_BELOW_FLOOR,
     price_floor,
     price_reasons,
+    validate_bid,
 )
 from contracts.boundary import MINIMUM_PAYABLE_AMOUNT as _MINIMUM_PAYABLE_AMOUNT
 from contracts.boundary import PRICE_FLOOR_FRACTION as _PRICE_FLOOR_FRACTION
@@ -167,6 +186,7 @@ from contracts.boundary import PRICE_FLOOR_FRACTION as _PRICE_FLOOR_FRACTION
 from .state import AUCTION_TTL_SECONDS
 
 __all__ = [
+    "BOUNDARY_REASONS_ANSWERED_ELSEWHERE",
     "BidEntry",
     "FALLBACK_OFFER_TTL_SECONDS",
     "FALLBACK_REASONS",
@@ -176,10 +196,12 @@ __all__ = [
     "MINIMUM_PAYABLE_AMOUNT",
     "PRICE_BELOW_FLOOR_REASON",
     "PRICE_FLOOR_FRACTION",
+    "PROVENANCE_REASON_PREFIXES",
     "REFUSAL_FIELD",
     "STORE_DECLINED_REASON",
     "STORE_REFUSED_REASON",
     "UNDISCLOSED_REFUSAL_DETAIL",
+    "UNPROVENANCED_CLAIM_REASON",
     "UNRECONCILABLE_PRICE_REASON",
     "collect_bids",
     "fallback_expires_at",
@@ -279,6 +301,124 @@ PRICE_BELOW_FLOOR_REASON = ROSTER_PRICE_BELOW_FLOOR
 STORE_DECLINED_REASON = "store_declined"
 STORE_REFUSED_REASON = "store_refused"
 
+#: R8/S5a. The store answered, in time, with a well-formed bid — and a claim in it carries no
+#: provenance the hosted path admits.
+#:
+#: A seventh named refusal for the same reason the price one is a seventh rather than a shrug:
+#: this is a *provenance* refusal, not a transport fault, not latency and not an unauthorized
+#: depth, and an operator reading "you were slow" when what happened is "you stated a fact and
+#: could not say where it came from" is being told the wrong thing about their own agent.
+#:
+#: **Measured before this existed** (``POST /auctions``, one store, list price 200, varying only
+#: the claim's provenance)::
+#:
+#:     owner_statement (control)                        -> real bid, [store-confirmed], 0.545
+#:     {} / source:"" / seller_asserted / null / absent -> real bid, SHORTLISTED,        0.545
+#:
+#: The bid was admitted, scored identically to the honest one and merely relabelled
+#: ``[unverified]`` — which is a rendering choice, not a boundary. ``validate_bid`` had no call
+#: site anywhere in ``apps/exchange/src``; every occurrence there was a comment about its own
+#: absence, and every real call was a test.
+UNPROVENANCED_CLAIM_REASON = "bid_claim_unprovenanced"
+
+#: The refusal families this door ENFORCES out of :func:`contracts.boundary.validate_bid`'s
+#: verdict: R8/R18/S5's provenance walk, at every claim-bearing site inside the bid.
+#:
+#: This clause is kept and the others are not, and the reason is evidence rather than taste.
+#: The provenance question is decidable from the bid ALONE — no roster, no snapshot, no clock —
+#: so this call site can answer it completely. Every other clause needs evidence this function
+#: does not hold, or is already answered by named machinery on the same served path; see
+#: :data:`BOUNDARY_REASONS_ANSWERED_ELSEWHERE`, which names each one and where.
+PROVENANCE_REASON_PREFIXES: frozenset[str] = frozenset(
+    {
+        REASON_CLAIM_WITHOUT_PROVENANCE,
+        REASON_CLAIM_PROVENANCE_EMPTY_SOURCE,
+        REASON_CLAIM_PROVENANCE_UNKNOWN_SOURCE,
+        REASON_HOSTED_NON_HOOK_PROVENANCE,
+        REASON_UNVERIFIABLE_CLAIM_SITE,
+        REASON_CLAIM_VALUE_UNWALKABLE,
+        REASON_UNVERIFIED_DISCOUNT_AUTHORISATION,
+    }
+)
+
+#: The refusal families this door deliberately does NOT act on, each with the thing that
+#: answers it instead. Written down as data rather than as prose because
+#: ``test_hosted_bid_boundary.py`` asserts that this set plus
+#: :data:`PROVENANCE_REASON_PREFIXES` covers every ``REASON_*`` the shared boundary publishes —
+#: so a family added to ``packages/contracts`` turns a test red instead of being dropped on the
+#: floor by an allow-list nobody remembered to widen.
+#:
+#: ``price_*`` / ``discount_over_authorized_depth``
+#:     :func:`_price_refusal`, three lines above the boundary call, runs the SAME walk with the
+#:     roster row as evidence and its own R10 abstention (:func:`_is_judged`) on top. Acting on
+#:     the copy inside ``validate_bid``'s verdict would report one bad price twice, under two
+#:     different fallback reasons — the mislabelling ``FALLBACK_REASONS`` was split apart to end.
+#: ``offer_expired`` / ``offer_expiry_missing`` / ``offer_expiry_unparseable``
+#:     :func:`exchange.ranking.filters.expiry_reason`, at ranking, against the auction's CLOSE
+#:     rather than against its deadline. Judging expiry here would judge it at a different
+#:     instant from the one the shortlist is built at, and the two would disagree about exactly
+#:     the offers that expire inside the fan-out.
+#: ``store_blacklisted`` / ``trust_snapshot_unavailable``
+#:     R12's three gates — :func:`exchange.orchestration.solicit_bids` before solicitation,
+#:     :func:`exchange.ranking.filters.blacklist_reason` before ranking, and the accept path
+#:     before checkout. ``collect_bids`` is handed an ALREADY-ELIGIBLE roster (D54) and holds no
+#:     snapshot, so a verdict from here would be manufactured from the roster it was given —
+#:     a tautology wearing a trust verdict's name.
+#: ``schema_invalid``
+#:     **Nothing.** This is a real, open hole and it is named here rather than implied: measured
+#:     over this repo's own suite, 511 of 558 bids reaching this function fail
+#:     ``Bid.model_validate`` — overwhelmingly on ``agent_version``/``schema_version``, which the
+#:     hand-written agent doubles in ``apps/exchange/tests`` do not send. Enforcing it here is a
+#:     second refusal with a false-positive class two orders of magnitude larger than this one's,
+#:     and it needs its own fixture corpus before it can be turned on. ``ranking/serving.py``'s
+#:     ``_slot_discount`` documents the consequence that survives: a store-written ``discount``
+#:     block reaches the published shortlist and is validated there, per field, rather than here.
+#: D52's two request-signing reasons
+#:     **Deliberately absent from this set, from this module's imports, and from its prose as
+#:     identifiers — and that absence is C3, not an oversight.** They are answered by the
+#:     external door (``exchange.external_bids.routes`` ->
+#:     ``store_agent.external.door.receive_bid`` -> ``validate_external_submission``): a hosted
+#:     Tier-1 agent holds no key and has nothing to sign with, so ``validate_bid`` does not
+#:     judge them here by default. They are not NAMED here because the frozen C3/S7 import lint
+#:     (``.swarm-loop/acceptance/test_spec_criteria.py``) forbids ``apps/exchange`` importing
+#:     any name containing ``envelope`` — a merchant's economic envelope is a surface this
+#:     service may not read, and the lint is a name check that cannot tell that homonym from
+#:     D52's cryptographic one. Importing them cost a red acceptance run, which is the lint
+#:     doing its job on a false positive; the right answer is that the exchange does not need
+#:     the names, not that the check should be taught an exception. The partition gate in
+#:     ``test_hosted_bid_boundary.py`` accounts for both, read off the contract module by
+#:     attribute, so the totality guarantee below is unaffected.
+#: ``unknown_path``
+#:     Unreachable: :data:`contracts.boundary.HOSTED_PATH` is a constant, not a caller's word.
+#: ``code_unusable``
+#:     ``contracts.boundary.minted_code_reasons``, at the mint — a code is not a bid field and
+#:     ``validate_bid`` never emits this one.
+BOUNDARY_REASONS_ANSWERED_ELSEWHERE: frozenset[str] = frozenset(
+    {
+        REASON_PRICE_UNRECONCILABLE,
+        REASON_PRICE_UNDER_DECLARED_DEPTH,
+        REASON_DISCOUNT_OVER_AUTHORIZED_DEPTH,
+        REASON_OFFER_EXPIRED,
+        REASON_OFFER_EXPIRY_MISSING,
+        REASON_OFFER_EXPIRY_UNPARSEABLE,
+        REASON_STORE_BLACKLISTED,
+        REASON_TRUST_SNAPSHOT_UNAVAILABLE,
+        REASON_SCHEMA_INVALID,
+        REASON_UNKNOWN_PATH,
+        REASON_CODE_UNUSABLE,
+    }
+)
+
+#: What :func:`_provenance_refusal` passes for ``trust_snapshot``.
+#:
+#: An empty mapping, and it is not a stand-in for a snapshot: it makes the boundary's
+#: eligibility clause answer ``trust_snapshot_unavailable`` for every store, which is then
+#: dropped by :data:`PROVENANCE_REASON_PREFIXES`. Passing a table BUILT FROM THE ROSTER would be
+#: worse than passing nothing — it would answer "eligible" with the roster's own existence and
+#: make R12's clause a tautology that reads, in a verdict object, exactly like a trust check
+#: that ran. The empty mapping is the honest spelling of "this call site is not the trust gate".
+_NO_TRUST_EVIDENCE: Mapping[str, Any] = {}
+
 #: Where the exchange's own solicitor writes that refusal on the response it hands back.
 #:
 #: The EXCHANGE writes this field, never a store: the solicitor puts the store's reply under
@@ -349,6 +489,7 @@ FALLBACK_REASONS: tuple[str, ...] = (
     "response_not_stamped",
     "arrival_stamp_unparseable",
     UNRECONCILABLE_PRICE_REASON,
+    UNPROVENANCED_CLAIM_REASON,
     STORE_DECLINED_REASON,
     STORE_REFUSED_REASON,
 )
@@ -382,6 +523,17 @@ class BidEntry:
     #: Kept because ``fallback_reason`` is a fixed vocabulary a loss report aggregates on, while
     #: *which* relation the bid broke is what the store's operator actually needs told.
     price_reasons: list[str] = field(default_factory=list)
+    #: The shared boundary's own reason strings when this entry fell back because a claim in it
+    #: carried no provenance the hosted path admits (``fallback_reason ==
+    #: UNPROVENANCED_CLAIM_REASON``). Empty otherwise.
+    #:
+    #: A SECOND field rather than more strings in ``price_reasons``, for the reason
+    #: ``FALLBACK_REASONS`` was split apart in the first place: ``price_reasons`` is documented
+    #: and asserted as the price wall's verdict, and a reader who found
+    #: ``claim_without_provenance:offer.discount`` there would reasonably conclude the exchange
+    #: had decided something about the price. It did not; it decided something about the
+    #: paperwork. The two walls refuse different things and are quoted back separately.
+    boundary_reasons: list[str] = field(default_factory=list)
     #: What the ROSTER lists this store's product at, as a finite positive number, or ``None``
     #: where the roster states no price the exchange can read.
     #:
@@ -865,6 +1017,57 @@ def _price_refusal(bid: Mapping[str, Any], rostered: Mapping[str, Any]) -> list[
     return [ILLEGIBLE_OFFER_REASON]
 
 
+def _provenance_refusal(bid: Mapping[str, Any], deadline: float) -> list[str]:
+    """R8/S5a: the shared boundary's provenance verdict on this hosted bid.
+
+    This is ``contracts.boundary.validate_bid``'s first call site in ``apps/exchange/src``.
+    Until it existed, S5a — "a claim carrying no provenance record, absent or empty, is rejected
+    on every path, hosted and external" — held on the external door alone; the hosted door
+    admitted the identical claim, ranked it identically, and relabelled the buyer-facing slot
+    ``[unverified]``. See :data:`UNPROVENANCED_CLAIM_REASON` for the measurement.
+
+    **Why this is the right layer, given that the module docstring calls this function pure.**
+    The provenance question needs no collaborator: not the roster, not a trust snapshot, not a
+    clock. It is decidable from the bytes of the bid, exactly as the price wall's arithmetic is
+    decidable from the bid and the roster row — so it belongs where the exchange already holds
+    the store's reply and already asks the shared boundary a question about it. Nothing is
+    injected and nothing is read from the environment.
+
+    **Why only part of the verdict is acted on.** ``validate_bid`` answers the whole R8/R18/S5
+    table in one call, and three of its clauses are already answered on this served path by
+    machinery that holds better evidence than this function does. Acting on the copies inside
+    this verdict would report one fault twice under two fallback reasons. Each dropped family is
+    named, with its real answerer, in :data:`BOUNDARY_REASONS_ANSWERED_ELSEWHERE` — including
+    the one that is answered by nothing, which is written down as an open hole rather than
+    left to look like a decision.
+
+    Args:
+        bid: the store's reply, as it arrived.
+        deadline: the auction's close, passed as ``now`` so this stays a pure function of its
+            arguments. The instant only feeds the expiry clause, whose reasons are dropped —
+            but leaving it to DEFAULT would put a ``datetime.now(UTC)`` read inside a function
+            this module's docstring promises is deterministic. Passed as the raw float rather
+            than as a ``datetime``: ``contracts.boundary.parse_timestamp`` already reads epoch
+            seconds and answers ``None`` for a value no clock can express, where
+            ``datetime.fromtimestamp`` would raise ``OverflowError`` out of the middle of
+            ``collect_bids`` — the exact class of escape ``_unusable_because`` exists to stop.
+
+    Returns:
+        The provenance reasons, in the boundary's own vocabulary, or ``[]``.
+    """
+    verdict = validate_bid(
+        bid,
+        path=HOSTED_PATH,
+        trust_snapshot=_NO_TRUST_EVIDENCE,
+        now=deadline,
+    )
+    return [
+        reason
+        for reason in verdict.reasons
+        if str(reason).split(":", 1)[0] in PROVENANCE_REASON_PREFIXES
+    ]
+
+
 def _unusable_because(response: Mapping[str, Any], deadline: float) -> str | None:
     """Why this response cannot be counted, or ``None`` when it can.
 
@@ -1009,6 +1212,25 @@ def collect_bids(
             if refused:
                 reason = UNRECONCILABLE_PRICE_REASON
 
+        unprovenanced: list[str] = []
+        if reason is None and answer is not None:
+            # R8/S5a. The price is one this roster authorizes; the remaining question is whether
+            # the store can say where its facts CAME from. A hosted agent's every claim had to
+            # come out of a tool hook that stamped its own provenance, so a hosted bid carrying
+            # a claim with none is not a policy question — it is evidence that something
+            # bypassed the hooks.
+            #
+            # **Second, not first, and the order is deliberate rather than incidental.** A bid
+            # that breaks both walls is one fault to the store's operator, not two, and the
+            # price wall is the one this exchange already ran — so keeping it first leaves every
+            # existing `bid_price_unreconcilable` verdict spelled exactly as it was, and this
+            # refusal names only bids the price wall had nothing against. Refusing in the other
+            # order would relabel bids that are already refused today, which is churn in an
+            # operator-facing vocabulary bought for nothing: the bid is degraded either way.
+            unprovenanced = _provenance_refusal(dict(answer["bid"]), deadline)
+            if unprovenanced:
+                reason = UNPROVENANCED_CLAIM_REASON
+
         # Read once, from the ROSTER row, and carried on both branches: the published
         # `price_value` feature is a comparison between what this row lists and what the entry
         # charges, and a fallback is a real rankable offer that has to be comparable too (R10).
@@ -1040,6 +1262,7 @@ def collect_bids(
                     received_at=None,
                     fallback_reason=reason,
                     price_reasons=refused,
+                    boundary_reasons=unprovenanced,
                     list_price=listed,
                 )
             )

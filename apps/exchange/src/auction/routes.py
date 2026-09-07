@@ -72,6 +72,8 @@ from ..ranking.serving import (
     trust_snapshot_of,
     weights_of,
 )
+from ..reports.log import record_losses
+from ..reports.routes import loss_log_of
 from ..retrieval.clusters import assign_cluster, configure_clusters, intent_clusters_of
 from ..retrieval.criteria import MAX_CANDIDATE_LIMIT
 from ..retrieval.fit import FitLogError, annotate_bid_payload
@@ -1646,6 +1648,27 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
                 result.entries,
             ),
         )
+
+    # R9's win/loss log, written where the verdicts are: this is the only place holding the
+    # ranker's rows, the shortlist that says who was SHOWN, and the intent whose cluster the
+    # report aggregates by, all at once. Until this line `exchange.reports.build_loss_report`
+    # had no producer anywhere in the repository — its only input was a test fixture — so a
+    # merchant-facing route on top of it would have served an empty report forever.
+    #
+    # `ranking["candidates"]` is `rank()`'s ROW projection, which is the one carrying `eligible`,
+    # `exclusion_reasons` and `components`; those three are what decide a loss's category, and
+    # none of them is on `ranking["projected"]`. Deliberately NOT the merged rows the bid book
+    # gets: the merge folds in the offer and the platform domain, which a loss row has no use
+    # for and which would widen what the report's egress scan has to suppress for nothing.
+    record_losses(
+        loss_log_of(request.app),
+        auction_id=auction_id,
+        cluster_id=str(intent.get("cluster_id", "")),
+        candidates=ranking["candidates"],
+        shortlist=shortlist,
+        intent=intent,
+        now=closed_at,
+    )
 
     return CreateAuctionResponse(
         auction_id=auction_id,

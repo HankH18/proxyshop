@@ -426,12 +426,15 @@ __all__ = [
     "MAX_DEPLOYMENT_BYTES",
     "MAX_DEPLOYMENT_SELLERS",
     "MAX_KEYRING_BYTES",
+    "MAX_REPORT_TOKENS_BYTES",
     "MAX_MERCHANT_REPLY_BYTES",
     "MAX_MERCHANT_TOKEN_BYTES",
     "MAX_SOLICIT_WALL_CLOCK_SECONDS",
     "MAX_UNDELIVERED_LEDGER_EVENTS",
     "MERCHANT_CODES_PATH",
     "MERCHANT_TOKEN_FILE_KEY",
+    "REPORT_TOKENS_FILE_KEY",
+    "REPORT_TOKENS_INLINE_KEY",
     "MERCHANT_TOKEN_INLINE_KEY",
     "MERCHANT_URL_KEY",
     "MerchantCodeCreationRefused",
@@ -456,6 +459,7 @@ __all__ = [
     "merchant_codes_endpoint",
     "read_deployment",
     "read_external_bid_keyring",
+    "read_report_tokens",
     "read_merchant_admin_token",
     "solicitation_profile",
     "trust_events_url",
@@ -593,6 +597,27 @@ MAX_MERCHANT_REPLY_BYTES = 64 * 1024
 #: bearer token is tens of characters; four kilobytes is a very generous ceiling for one.
 MAX_MERCHANT_TOKEN_BYTES = 4096
 
+#: The document key naming R9's report tokens FILE, and the key that is refused beside it.
+#:
+#: ``{store_id: token}``, and it is per-store rather than one shared administrative secret
+#: because of WHAT the route it configures serves: ``GET /reports/losses`` hands one merchant
+#: its own losses (R9). A single token would authenticate a caller and say nothing about which
+#: store's report it may read, so the store id would have to arrive as a parameter beside it —
+#: and "check that the caller owns the store it named" is a comparison that can be forgotten.
+#: Resolving the store FROM the token means there is no parameter in which to ask the wrong
+#: question. See :mod:`exchange.reports.routes`.
+#:
+#: The inline spelling is refused for the reason :data:`KEYRING_INLINE_KEY` is: this document
+#: is a plain JSON file that gets pasted around, and silently ignoring a typed-in table would
+#: leave an operator believing reports were configured while every merchant got ``503``.
+REPORT_TOKENS_FILE_KEY = "report_tokens_file"
+REPORT_TOKENS_INLINE_KEY = "report_tokens"
+
+#: The most bytes the report token file may occupy. Read once per process, so this is the same
+#: "a path pointing at something else" guard :data:`MAX_KEYRING_BYTES` is, sized for one short
+#: token per store rather than for a keyring of rotating secrets.
+MAX_REPORT_TOKENS_BYTES = 256 * 1024
+
 #: The wall-clock ceiling on ONE store's solicitation, from the request leaving to its last
 #: byte arriving.
 #:
@@ -724,6 +749,11 @@ class Deployment:
     #: description of a deployment, and reading a secret while validating one would put the
     #: keys in every caller's hands, including the two that only wanted to check the syntax.
     external_bid_keyring_file: str | None = None
+    #: Path to the file holding R9's ``{store_id: token}`` report tokens, or ``None`` when this
+    #: deployment states none and ``GET /reports/losses`` therefore serves nobody. A PATH and
+    #: never the tokens, and read at bind time rather than here, for the reasons the two
+    #: attributes above are.
+    report_tokens_file: str | None = None
 
     @property
     def eligibility_rows(self) -> dict[str, str]:
@@ -997,7 +1027,112 @@ def parse_deployment(document: Any, *, source: str) -> Deployment:
         merchant_url=merchant_url,
         merchant_admin_token_file=_merchant_token_file(body, source),
         external_bid_keyring_file=_keyring_file(body, source),
+        report_tokens_file=_report_tokens_file(body, source),
     )
+
+
+def _report_tokens_file(body: Mapping[str, Any], source: str) -> str | None:
+    """The path this document names R9's report tokens at, or ``None``.
+
+    Refuses the INLINE spelling first, exactly as :func:`_keyring_file` does and for the same
+    reason: a document carrying ``{"report_tokens": {...}}`` is an operator who has typed live
+    bearer tokens into a file that gets pasted around, and silently ignoring the key would
+    leave them believing reports were configured while every merchant kept getting ``503``.
+    The message quotes the key NAME and never a value.
+    """
+    if body.get(REPORT_TOKENS_INLINE_KEY) is not None:
+        raise DeploymentConfigurationError(
+            f"{source}: {REPORT_TOKENS_INLINE_KEY!r} is not a key this document may carry — a "
+            f"deployment document holds no secret material, because it is a plain JSON file "
+            f"that gets pasted around. State {REPORT_TOKENS_FILE_KEY!r} instead, naming a file "
+            f"that holds {{store_id: token}} and that only this service can read"
+        )
+    stated = body.get(REPORT_TOKENS_FILE_KEY)
+    if stated is None:
+        return None
+    if not isinstance(stated, str) or not stated.strip():
+        raise DeploymentConfigurationError(
+            f"{source}: {REPORT_TOKENS_FILE_KEY} must be a non-empty path to the file holding "
+            f"this exchange's {{store_id: token}} report tokens, got {type(stated).__name__}. "
+            f"Omit the key entirely to run an exchange that serves no merchant its losses"
+        )
+    return stated.strip()
+
+
+def read_report_tokens(path: str, *, source: str) -> Mapping[str, str]:
+    """The ``{store_id: token}`` table ``path`` holds. Raises rather than degrading.
+
+    Every refusal below has the same symptom if it is tolerated — ``GET /reports/losses``
+    answers ``401`` or ``503`` to a merchant holding a correct token — and that sentence names
+    the merchant, not the deployment. So a table that was NAMED and cannot be used is a
+    start-up refusal that says which file and which row.
+
+    **Nothing here quotes a token**, only the store id and a type name. The store id already
+    travels in every report body; the token is the one value in this file that must never reach
+    a log, a 503 body or an exception's ``__str__``.
+
+    An EMPTY table (``{}``) is accepted and binds: it is a person stating that this exchange has
+    no merchant on reports yet, and it behaves exactly as omitting the key does — every caller
+    is refused. An empty FILE is not JSON and is refused, which is the truncation case worth
+    telling apart.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DeploymentConfigurationError(
+            f"{source}: the report tokens at {path} could not be read "
+            f"({exc.__class__.__name__}: {exc}). A named-but-unreadable table is a "
+            f"misconfiguration, not an exchange with no merchants on reports, so it is refused "
+            f"rather than answered `401` to every merchant who asks for its own losses"
+        ) from exc
+
+    if len(text) > MAX_REPORT_TOKENS_BYTES:
+        raise DeploymentConfigurationError(
+            f"{source}: the report tokens at {path} are {len(text)} bytes; this exchange reads "
+            f"at most {MAX_REPORT_TOKENS_BYTES}. One short token per store fits inside that "
+            f"many times over, so a file this size is a path pointing at something else"
+        )
+
+    try:
+        document = json.loads(text)
+    except Exception as exc:  # noqa: BLE001 - RecursionError is not a ValueError
+        raise DeploymentConfigurationError(
+            f"{source}: the report tokens at {path} are not valid JSON ({type(exc).__name__})"
+        ) from exc
+
+    if not isinstance(document, Mapping):
+        raise DeploymentConfigurationError(
+            f"{source}: the report tokens at {path} must be a JSON object of "
+            f"{{store_id: token}}, got {type(document).__name__}"
+        )
+
+    tokens: dict[str, str] = {}
+    seen: dict[str, str] = {}
+    for store_id, token in document.items():
+        if not isinstance(store_id, str) or not store_id.strip():
+            raise DeploymentConfigurationError(
+                f"{source}: the report tokens at {path} name a store that is not a non-empty "
+                f"string ({type(store_id).__name__}); no report could ever be addressed to it"
+            )
+        if not isinstance(token, str) or not token.strip():
+            raise DeploymentConfigurationError(
+                f"{source}: the report tokens at {path} hold no usable token for store "
+                f"{store_id!r} ({type(token).__name__}). A blank token is not 'this store has "
+                f"no access' — the route drops empty rows, so the store would be refused while "
+                f"the file looked configured"
+            )
+        if token.strip() in seen:
+            # Two stores sharing a token is not a duplicate row, it is a merchant able to read
+            # another merchant's losses — the exact leak this table's shape exists to prevent.
+            raise DeploymentConfigurationError(
+                f"{source}: the report tokens at {path} give stores {seen[token.strip()]!r} and "
+                f"{store_id!r} the same token. The token is what names the store on "
+                f"`GET /reports/losses`, so a shared one lets one merchant read the other's "
+                f"win/loss report (R9)"
+            )
+        seen[token.strip()] = store_id
+        tokens[store_id.strip()] = token.strip()
+    return tokens
 
 
 def _merchant_token_file(body: Mapping[str, Any], source: str) -> str | None:
@@ -2555,6 +2690,18 @@ def configure_exchange(
         if unset("registered_domains"):
             configure_accept(app, registered_domains=registry)
             bound.append("registered_domains")
+
+    if deployment.report_tokens_file and unset("report_tokens"):
+        # R9's merchant-facing door. Bound only when the document names a file, so an exchange
+        # that has not asked for reports serves nobody — which the route answers as a 503 that
+        # names this key, rather than as an empty report that reads like "you never lose".
+        from .reports.routes import configure_reports  # noqa: PLC0415
+
+        configure_reports(
+            app,
+            tokens=read_report_tokens(deployment.report_tokens_file, source=deployment.source),
+        )
+        bound.append("report_tokens")
 
     if deployment.checkout_mode and unset("checkout_mode"):
         configure_accept(app, checkout_mode=deployment.checkout_mode)

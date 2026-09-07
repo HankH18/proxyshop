@@ -449,6 +449,110 @@
           "204": { "description": "Recorded." }
         }
       }
+    },
+    "/reports/losses": {
+      "get": {
+        "operationId": "readLossReport",
+        "summary": "One merchant's own aggregated win/loss report over a window (R9).",
+        "description": "Served by `exchange.reports.routes` and fed by a real producer: `POST /auctions` writes one loss row per candidate at close (`reports.log.record_losses`), and this door reads back only the rows whose SUBJECT is the calling store. The store is resolved FROM the bearer token — the table is `{store_id: token}` — so there is no path, query or body field in which to ask for another merchant's losses, and every row is compared with `hmac.compare_digest` so the time taken says nothing about which token was presented. A deployment that has not named `report_tokens_file` in its composition document holds no table and serves nobody (503) rather than opening itself the moment the environment is incomplete. The body carries reason categories and unmet buyer criteria only — no rival identity and no amount — enforced by `reports.loss.build_loss_report`'s projection rather than by a list of forbidden field names, and re-checked by that function's egress scan, which refuses the response with a 500 carrying nothing from the report rather than shipping a body holding a value the projection never read. R9's merchant dashboard does not exist in this repository yet; this is the published URL it, a merchant's own script, or `curl` reaches.",
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": true,
+            "description": "`Bearer <this store's report token>`. The token IS the store identity — the exchange resolves the subject store from it — which is why this operation declares no `store_id` parameter of any kind. A request with no bearer, or one carrying a token in no row of the table, is refused 401 without naming a store and without echoing what arrived.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "start",
+            "in": "query",
+            "required": true,
+            "description": "Window start, epoch seconds. Inclusive.",
+            "schema": { "type": "number" }
+          },
+          {
+            "name": "end",
+            "in": "query",
+            "required": true,
+            "description": "Window end, epoch seconds. Inclusive.",
+            "schema": { "type": "number" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "This store's own losses, aggregated by intent cluster. A store that lost nothing in the window is served an empty `by_cluster`, not a 404: \"you lost nothing\" is an answer, and a 404 would be indistinguishable from a store the exchange has never heard of.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/LossReport" },
+                "example": {
+                  "store_id": "store-small",
+                  "window": { "start": 1788700000.0, "end": 1788800000.0 },
+                  "by_cluster": [
+                    {
+                      "cluster_id": "cluster-loss-1",
+                      "lost": 1,
+                      "reasons": { "fit": 1, "price": 0, "commitments": 0, "trust": 0 },
+                      "unmet_criteria": ["capacity_l gte 30"]
+                    }
+                  ]
+                },
+                "x-example-schema": "LossReport"
+              }
+            }
+          },
+          "400": {
+            "description": "The window itself does not read — `end` before `start`, or a NaN bound. A malformed ROW is the exchange's own fault and is a 500 rather than a 400 dressed up as one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["error", "detail"],
+                  "properties": {
+                    "error": { "const": "invalid-window" },
+                    "detail": { "type": "string" }
+                  }
+                },
+                "example": { "error": "invalid-window", "detail": "window 'end' precedes 'start'" }
+              }
+            }
+          },
+          "401": {
+            "description": "No bearer, or a bearer in no row of the token table. Names no store and echoes nothing that arrived: a refusal quoting the presented token would put it in every proxy log between here and the caller.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["error"],
+                  "properties": { "error": { "const": "unauthorized" } }
+                },
+                "example": { "error": "unauthorized" }
+              }
+            }
+          },
+          "503": {
+            "description": "This exchange holds no report token table, so it serves no merchant its losses. An empty expected value compared against an empty supplied one is a route that opens itself when the environment is incomplete, so an unconfigured deployment refuses every caller instead.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["error", "detail"],
+                  "properties": {
+                    "error": { "const": "reports-not-configured" },
+                    "detail": { "type": "string" }
+                  }
+                },
+                "example": {
+                  "error": "reports-not-configured",
+                  "detail": "this exchange holds no report token table, so it serves no merchant its losses. State `report_tokens_file` in the deployment document"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

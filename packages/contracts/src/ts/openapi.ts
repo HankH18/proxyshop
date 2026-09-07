@@ -81,6 +81,14 @@ export const PINNED_ROUTES: readonly Route[] = [
   {domain: "merchant", method: "get", path: "/install/shops"},
   // R13's receiving end: the door trust pushes one store's own trust delta through.
   {domain: "store-agent", method: "post", path: "/v1/trust-events"},
+  // R9's merchant-facing report door. Deliberately in neither block above: DESIGN §Interfaces
+  // does not pin it, and it is not one of the surfaces that were "reachable and undeclared
+  // until T-266 / T-312 / T-317" — that heading dates a finding about routes four services
+  // were already answering, and this route did not exist then. It is declared under the rule
+  // the Python twin's docstring states: a route the service ANSWERS is declared here. The
+  // store is resolved from the bearer token, so the published operation carries an
+  // `Authorization` header and no `store_id` parameter of any kind.
+  {domain: "exchange", method: "get", path: "/reports/losses"},
 ];
 
 const HTTP_METHODS = ["get", "put", "post", "delete", "patch", "head", "options", "trace"] as const;

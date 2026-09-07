@@ -121,6 +121,31 @@ PINNED_ROUTES: tuple[Route, ...] = (
     # Reachable by anyone who can reach a hosted agent, so it is declared here for the
     # same reason the sixteen above are.
     Route("store-agent", "post", "/v1/trust-events"),
+    # R9's merchant-facing report door, and neither block above is the honest home for it.
+    #
+    # NOT the DESIGN §Interfaces block: DESIGN's exchange line pins five routes and this is not
+    # one of them, so filing it there would make this tuple assert that DESIGN pins a path
+    # DESIGN does not mention. (DESIGN arguably SHOULD — the caller is a shop, not the exchange
+    # itself — but that is an edit to a file this entry does not own, and mis-filing the row is
+    # not how to request it.)
+    #
+    # NOT the "served surfaces that were reachable and undeclared until T-266 / T-312 / T-317"
+    # block either, and this is where the recent `POST /v1/trust-events` precedent stops
+    # applying: that heading is a dated FINDING about routes four services were already
+    # answering when those three tickets measured them. `GET /reports/losses` was not among
+    # them and could not have been — it did not exist. It landed with R9's loss reports (a
+    # producer writing rows at every auction close, `reports.log.record_losses`; a bounded log;
+    # this door) and it landed RED on purpose, served and published nowhere, rather than hidden
+    # behind `include_in_schema=False` or mounted only when a token file is configured. Filing
+    # it under that heading would date a brand-new route to a sweep it postdates.
+    #
+    # What DOES fit is the rule this docstring states above: a route the service ANSWERS is
+    # declared here. It is merchant-AUTHENTICATED rather than internal — the token table is
+    # `{store_id: token}` and the subject store is resolved from the bearer, which is why the
+    # published operation carries an `Authorization` header parameter and no `store_id` of any
+    # kind — and an authenticated door is the last thing that should be reachable without a
+    # contract review.
+    Route("exchange", "get", "/reports/losses"),
 )
 
 _HTTP_METHODS = ("get", "put", "post", "delete", "patch", "head", "options", "trace")

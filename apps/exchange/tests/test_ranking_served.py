@@ -1024,15 +1024,15 @@ def test_a_fallback_slot_shows_the_roster_list_price_and_commits_to_nothing():
 
 
 @pytest.mark.parametrize(
-    ("label", "overrides"),
+    ("label", "overrides", "admitted"),
     [
-        ("a product_ref that is not a string", {"product_ref": 7}),
-        ("no product_ref at all", {"product_ref": None}),
-        ("a variant_ref that is not a string", {"variant_ref": 9}),
-        ("a currency that is not a string", {"currency": 5}),
-        ("commitments that are a string", {"commitments": "free returns, honest"}),
-        ("commitments that are not claims", {"commitments": [1, "x", None, {"key": "k"}]}),
-        ("a commitment with no provenance", {"commitments": [{"key": "k", "value": "v"}]}),
+        ("a product_ref that is not a string", {"product_ref": 7}, True),
+        ("no product_ref at all", {"product_ref": None}, True),
+        ("a variant_ref that is not a string", {"variant_ref": 9}, True),
+        ("a currency that is not a string", {"currency": 5}, True),
+        ("commitments that are a string", {"commitments": "free returns, honest"}, True),
+        ("commitments that are not claims", {"commitments": [1, "x", None, {"key": "k"}]}, False),
+        ("a commitment with no provenance", {"commitments": [{"key": "k", "value": "v"}]}, False),
         (
             "a commitment whose source is invented",
             {
@@ -1049,21 +1049,42 @@ def test_a_fallback_slot_shows_the_roster_list_price_and_commits_to_nothing():
                     }
                 ]
             },
+            False,
         ),
     ],
 )
-def test_no_offer_a_store_can_write_turns_the_published_shortlist_into_a_500(label, overrides):
+def test_no_offer_a_store_can_write_turns_the_published_shortlist_into_a_500(
+    label, overrides, admitted
+):
     """The failure mode that made the obvious version of this change unshippable.
 
-    NOTHING on the auction path validates a bid against the schema — ``validate_bid`` has no call
-    site in ``apps/exchange/src``, which ``auction/routes.py`` states — so ``offer`` is arbitrary
-    store-written JSON. Publishing it verbatim into a slot pinned by ``response_model=Shortlist``
-    hands any store a one-request 500 on the buyer's own route. Every shape below is therefore
-    driven through the real door: 201, then 200, then the two bodies equal.
+    Publishing a store-written ``offer`` verbatim into a slot pinned by
+    ``response_model=Shortlist`` hands any store a one-request 500 on the buyer's own route.
+    Every shape below is therefore driven through the real door: 201, then 200, then the two
+    bodies equal. **That half is asserted for all eight shapes and is what this test is for.**
 
     The last case is the interesting one and it is not garbage: it is a well-formed ``Claim``
     whose ``provenance.source`` is not in the closed ``ProvenanceSource`` enum. A closed enum is
     exactly what a store gets wrong by accident.
+
+    ``admitted`` — and why an earlier version of this docstring is now wrong
+    ----------------------------------------------------------------------
+    It used to say "NOTHING on the auction path validates a bid against the schema —
+    ``validate_bid`` has no call site in ``apps/exchange/src``". That was a true measurement and
+    it is no longer true: ``auction/collect.py`` now runs the shared boundary's R8/S5a
+    provenance walk on every hosted reply, at ``bid.claims``, ``offer.commitments`` AND
+    ``offer.discount``. The three shapes flagged ``admitted=False`` write a claim into
+    ``offer.commitments`` with no provenance, or with a source no tool hook mints, so they are
+    refused at the door and the store is represented by its R10 list-price fallback — which
+    satisfies no hard constraint (``test_a_fallback_still_satisfies_no_hard_constraint_and_is_
+    excluded_on_that_alone``) and therefore fills no slot.
+
+    The rest of ``offer`` is still arbitrary store-written JSON — provenance is the only clause
+    wired, and ``schema_invalid`` is explicitly NOT (see
+    ``exchange.auction.collect.BOUNDARY_REASONS_ANSWERED_ELSEWHERE``) — so the five
+    ``admitted=True`` shapes reach the slot builder exactly as they did, and the assertions on
+    them are unchanged. The flag is asserted rather than assumed: a shape whose treatment
+    silently flips turns this red instead of skipping its own tail.
     """
     app = _wired_app(
         bidders=Bidders({STORE_A: _bid_with_offer(STORE_A, **overrides)}), stores=(STORE_A,)
@@ -1072,38 +1093,124 @@ def test_no_offer_a_store_can_write_turns_the_published_shortlist_into_a_500(lab
 
     body = _post(app, [_rostered(STORE_A, 100.0)])
 
-    (slot,) = body["shortlist"]["slots"]
+    # The 500-proof, for every shape: the published door answers, and answers the same object
+    # the auction returned inline. Whether the bid was admitted or refused is irrelevant here —
+    # a refusal that 500ed the buyer's route would be the same defect wearing a verdict.
     read_back = client.get(f"/auctions/{body['auction_id']}/shortlist")
     assert read_back.status_code == 200, f"{label}: {read_back.text}"
     assert read_back.json() == body["shortlist"], label
+
+    (entry,) = body["entries"]
+    assert (not entry["fallback"]) is admitted, (
+        f"{label}: the boundary's treatment of this shape changed — entry={entry}"
+    )
+
+    if not admitted:
+        from exchange.auction.collect import UNPROVENANCED_CLAIM_REASON  # noqa: PLC0415
+
+        assert entry["fallback_reason"] == UNPROVENANCED_CLAIM_REASON, f"{label}: {entry}"
+        assert body["shortlist"]["slots"] == [], (
+            f"{label}: a boundary-refused bid became a slot; its fallback satisfies no hard "
+            f"constraint and must fill none: {body['shortlist']['slots']}"
+        )
+        return
+
+    (slot,) = body["shortlist"]["slots"]
     # Unreadable is served as `null`, never as the store's own bytes and never as a zero.
     assert slot["price"]["unit_price"] == pytest.approx(100.0), slot
     for key in ("product", "commitments"):
         assert slot[key] is None or isinstance(slot[key], (dict, list)), slot
 
 
-def test_a_commitment_the_exchange_cannot_read_is_dropped_rather_than_shown():
-    """One good commitment beside three bad ones: the buyer is shown exactly the good one.
+#: One good commitment beside three bad ones — no provenance, not a claim at all, and a source
+#: no hook mints. The mixture is the point: it is what a store sends when it is careless about
+#: three of four promises, and both tests below are about what the buyer is shown for it.
+_MIXED_COMMITMENTS: list[Any] = [
+    {"key": "no_provenance", "value": "trust me"},
+    {
+        "key": "free_returns",
+        "value": "30 days",
+        "provenance": {
+            "source": "owner_statement",
+            "ref": "envelope:free_returns",
+            "observed_at": "2026-01-01T00:00:00Z",
+            "authority_rank": 1,
+        },
+    },
+    "ships fast",
+    {"key": "bad_source", "value": "v", "provenance": {"source": "vibes", "ref": "r"}},
+]
 
-    Dropping is the honest answer. A commitment with no provenance is not a weaker promise, it is
-    not a promise — nothing could later grade the store against it — so publishing it under a name
-    the shopper reads as a commitment would be the exchange vouching for a string.
+
+def test_a_commitment_the_exchange_cannot_read_never_reaches_the_buyer_at_all():
+    """The served answer to the mixture, which is now STRONGER than "the bad ones are dropped".
+
+    This test used to assert that the slot showed exactly ``["free_returns"]`` — the renderer
+    dropping what it could not read. That assertion was right about the renderer and is kept, in
+    :func:`test_the_slot_renderer_still_drops_a_commitment_it_cannot_read`, driven at the seam
+    where it is still reachable.
+
+    What changed underneath it is not the renderer: ``auction/collect.py`` now runs the shared
+    boundary's R8/S5a provenance walk on every hosted reply, and ``offer.commitments`` is one of
+    the three claim-bearing sites it covers. So a bid carrying ANY unprovenanced commitment is
+    refused at the door and the store is represented by its list-price fallback. The buyer is
+    shown none of the four rather than one of the four, and that is a stronger form of the same
+    property — the exchange declines to vouch for a bid whose author could not say where three
+    of its promises came from, rather than quietly publishing the fourth.
+
+    Both halves are asserted here, because "no slot" alone would also be what a broken exchange
+    produces: the ENTRY is present, it is the exchange's own fallback, and it names the boundary
+    that refused it.
     """
-    bid = _bid_with_offer(
-        STORE_A,
-        commitments=[
-            {"key": "no_provenance", "value": "trust me"},
-            _commitment("free_returns", "30 days"),
-            "ships fast",
-            {"key": "bad_source", "value": "v", "provenance": {"source": "vibes", "ref": "r"}},
-        ],
-    )
+    from exchange.auction.collect import UNPROVENANCED_CLAIM_REASON  # noqa: PLC0415
+
+    bid = _bid_with_offer(STORE_A, commitments=list(_MIXED_COMMITMENTS))
     app = _wired_app(bidders=Bidders({STORE_A: bid}), stores=(STORE_A,))
 
     body = _post(app, [_rostered(STORE_A, 100.0)])
 
-    (slot,) = body["shortlist"]["slots"]
-    assert [c["key"] for c in slot["commitments"]] == ["free_returns"], slot
+    (entry,) = body["entries"]
+    assert entry["fallback"] is True, entry
+    assert entry["fallback_reason"] == UNPROVENANCED_CLAIM_REASON, entry
+    assert body["shortlist"]["slots"] == [], body["shortlist"]["slots"]
+
+    # The control, and it is what keeps this from passing on an exchange that shows nobody
+    # anything: the same bid with every commitment provenanced is admitted and IS shortlisted.
+    honest = _bid_with_offer(
+        STORE_A,
+        commitments=[_commitment("free_returns", "30 days"), _commitment("ships_fast", "2 days")],
+    )
+    honest_body = _post(
+        _wired_app(bidders=Bidders({STORE_A: honest}), stores=(STORE_A,)),
+        [_rostered(STORE_A, 100.0)],
+    )
+    (honest_entry,) = honest_body["entries"]
+    assert honest_entry["fallback"] is False, honest_entry
+    (slot,) = honest_body["shortlist"]["slots"]
+    assert [c["key"] for c in slot["commitments"]] == ["free_returns", "ships_fast"], slot
+
+
+def test_the_slot_renderer_still_drops_a_commitment_it_cannot_read():
+    """The original property of the test above, kept, at the seam it is still reachable from.
+
+    Dropping is the honest answer. A commitment with no provenance is not a weaker promise, it is
+    not a promise — nothing could later grade the store against it — so publishing it under a name
+    the shopper reads as a commitment would be the exchange vouching for a string.
+
+    The boundary in ``auction/collect.py`` now refuses such a bid before the renderer sees it, so
+    over ``POST /auctions`` this is defence in depth rather than the only wall. Defence in depth
+    is worth keeping and worth testing: ``shortlist_commitments`` is a published seam
+    (``exchange.ranking.serving.__all__``) with callers other than the auction route's own
+    happy path, and a renderer that started trusting its input would be one boundary change away
+    from publishing a string as a promise.
+    """
+    from exchange.ranking.serving import shortlist_commitments  # noqa: PLC0415
+
+    rendered = shortlist_commitments({"commitments": list(_MIXED_COMMITMENTS)})
+
+    assert rendered is not None, "the one readable commitment was dropped with the three bad ones"
+    assert [c["key"] for c in rendered] == ["free_returns"], rendered
+    assert shortlist_commitments({"commitments": ["ships fast", 1, None]}) is None
 
 
 def test_r2s_three_fields_are_absent_from_the_rank_rows_that_could_not_carry_them():
