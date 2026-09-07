@@ -98,6 +98,7 @@ __all__ = [
     "slot_labels",
     "slot_price",
     "slot_product",
+    "slot_rows",
 ]
 
 #: :attr:`LabelledSlot.labels_source` — the exchange sent these labels and we printed them.
@@ -423,6 +424,30 @@ def label_slot(slot: Any, *, auction_id: str = "", derive: bool = True) -> Label
     )
 
 
+def slot_rows(shortlist: Any) -> list[Any]:
+    """The slots of a ``Shortlist`` (or a bare sequence of slots), **as the caller sent them**.
+
+    Exported because a second consumer needs the same rows in the same order:
+    :func:`buyer_svc.pitch.pitches_for` reads each slot's ``message`` — the shop-authored
+    pitch that ``LabelledSlot`` deliberately does not carry — and its result is zipped with
+    :func:`render_shortlist`'s by POSITION. Two copies of this extraction could disagree
+    about how many rows there are, and a pitch that drifted one slot sideways would attach
+    one store's promises to another store's price. One function, both callers.
+
+    ``[]`` for anything that is not a readable sequence of slots, which is the same answer
+    :func:`render_shortlist` has always given for one.
+    """
+    slots = read(shortlist, "slots", None)
+    if slots is None:
+        slots = shortlist
+    if slots is None or isinstance(slots, (str, bytes)):
+        return []
+    try:
+        return list(slots)
+    except TypeError:
+        return []
+
+
 def render_shortlist(shortlist: Any, *, derive: bool = True) -> list[LabelledSlot]:
     """Every slot of a ``Shortlist`` (or a bare sequence of slots), labelled for display.
 
@@ -431,13 +456,4 @@ def render_shortlist(shortlist: Any, *, derive: bool = True) -> list[LabelledSlo
     making the caller re-attach it is how a slot ends up accepted against the wrong auction.
     """
     auction_id = text(read(shortlist, "auction_id", ""))
-    slots = read(shortlist, "slots", None)
-    if slots is None:
-        slots = shortlist
-    if slots is None or isinstance(slots, (str, bytes)):
-        return []
-    try:
-        iterator = list(slots)
-    except TypeError:
-        return []
-    return [label_slot(slot, auction_id=auction_id, derive=derive) for slot in iterator]
+    return [label_slot(slot, auction_id=auction_id, derive=derive) for slot in slot_rows(shortlist)]

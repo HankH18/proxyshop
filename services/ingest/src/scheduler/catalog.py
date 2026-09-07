@@ -388,6 +388,9 @@ class CatalogRefreshReport:
     ``ops`` counts the graph writes the snapshot implied and ``written`` names the ids that
     actually landed, so "we had nothing to do" (``ops == 0``) stays distinguishable from
     "we had work and could not do it" (``ops > 0``, ``written == ()``, a warning saying why).
+
+    ``embedded`` is the third of those states and the one that used to be missing: work that
+    landed but is *unreachable*. See the field's own note.
     """
 
     store_id: str
@@ -402,6 +405,12 @@ class CatalogRefreshReport:
     changed: int = 0
     ops: int = 0
     written: tuple[str, ...] = ()
+    #: How many of the products this refresh wrote now carry a vector, i.e. how many of them
+    #: retrieval can actually see. ``written`` says the facts landed; this says they are
+    #: reachable, and the two are genuinely different outcomes — a crawl that wrote a full,
+    #: fully-provenanced catalog and embedded none of it answers every shopper query with
+    #: ``[]`` and reports nothing wrong.
+    embedded: int = 0
     warnings: tuple[str, ...] = ()
     hash_index: Mapping[str, str] = field(default_factory=dict)
 
@@ -516,7 +525,7 @@ class CatalogRefreshRunner:
             ops = catalog.to_upserts(snapshot)
 
             warnings = list(snapshot.warnings)
-            written = self._apply(ops, warnings)
+            written, embedded = self._apply(ops, warnings)
             self.hashes[target.store_id] = dict(snapshot.hash_index)
             self._runs += 1
 
@@ -533,6 +542,7 @@ class CatalogRefreshRunner:
             changed=len(snapshot.changed_products),
             ops=len(ops),
             written=tuple(written),
+            embedded=embedded,
             warnings=tuple(warnings),
             hash_index=dict(snapshot.hash_index),
         )
@@ -544,35 +554,98 @@ class CatalogRefreshRunner:
         pages T-021 extracts produce ``UpsertOp`` records of the same shape, and they must
         reach the graph through the same session handling rather than a second copy of it.
         """
-        return self._apply(list(ops), warnings if warnings is not None else [])
+        written, _embedded = self._apply(list(ops), warnings if warnings is not None else [])
+        return written
 
     # -- internals ---------------------------------------------------------------------
 
     def _adapter_for(self, target: StoreTarget) -> CatalogAdapter:
         return self.adapter_factory(target.source, cassette=target.cassette, clock=self._clock)
 
-    def _apply(self, ops: Sequence[UpsertOp], warnings: list[str]) -> list[str]:
-        """Replay ``ops`` against the graph, or say why they were not replayed.
+    def _apply(self, ops: Sequence[UpsertOp], warnings: list[str]) -> tuple[list[str], int]:
+        """Replay ``ops`` against the graph and embed what they wrote, or say why not.
 
         An empty ``ops`` is the differential guarantee doing its job and must not open a
         connection: a crawl that found nothing changed does no graph work at all, including
         no connection attempt.
+
+        The embed shares this session rather than opening a second one, so a refresh is
+        still one connection, and it runs *after* the writes because it reads the products
+        back with the categories and attributes those writes just gave them.
+
+        Returns:
+            ``(written_ids, embedded_count)``.
         """
         if not ops:
-            return []
+            return [], 0
         if self.session_factory is None:
             warnings.append(
                 f"{len(ops)} graph write(s) computed but not applied: no session factory"
             )
-            return []
+            return [], 0
         try:
             with self.session_factory() as session:
-                return list(apply_upserts(session, ops))
+                written = list(apply_upserts(session, ops))
+                return written, self._embed(session, ops, warnings)
         except Exception as exc:  # noqa: BLE001 - the driver's failures are not a closed set
             warnings.append(
                 f"{len(ops)} graph write(s) computed but not applied: {type(exc).__name__}: {exc}"
             )
-            return []
+            return [], 0
+
+    def _embed(self, session: Any, ops: Sequence[UpsertOp], warnings: list[str]) -> int:
+        """Make the products this refresh wrote retrievable, and never raise while doing it.
+
+        WHY A CRAWL EMBEDS AT ALL. A ``Product`` with no vector is invisible to
+        :func:`ingest.graph.query.candidate_products` and therefore to
+        :func:`~ingest.graph.query.candidate_shops`, which is the roster the exchange
+        solicits under D55. Measured on the live instance before this existed: a refresh
+        landed a complete, fully-provenanced two-product catalog — ``provenance_violations``
+        empty, every ``SELLS`` and ``MAKES_OFFER`` edge sourced — and
+        ``candidate_shops(query_text=...)`` answered ``[]``. Not an error; ``[]``. The
+        organic half of D55 is the platform rendering its OWN crawl, so a crawl the
+        platform's own retrieval cannot see is not an organic result at all.
+
+        Not :func:`~ingest.graph.reembed.reembed_products`: that is the operator's
+        whole-catalog script, and calling it here would re-embed every store's catalog on
+        every refresh of one store and stamp a whole-catalog coverage claim after reading a
+        fraction of it.
+
+        WHY IT IS A WARNING AND NOT AN EXCEPTION. The same posture as the write above, for
+        the same reason: a crawl whose results could not be indexed is still information,
+        and the report keeps "nothing to embed" apart from "could not embed" — the second
+        names the products and says why. An embed that raised would also discard the
+        ``written`` ids of writes that had already committed.
+
+        Args:
+            session: the session the writes just went through.
+            ops: the ops that were replayed; the ``product`` ones name what to embed.
+            warnings: appended to on failure.
+
+        Returns:
+            How many of those products now carry a vector.
+        """
+        from ..graph.reembed import embed_products  # noqa: PLC0415 - keeps the driver lazy
+
+        product_ids = [
+            op.node.product_id for op in ops if op.kind == "product" and op.node is not None
+        ]
+        if not product_ids:
+            return 0
+        try:
+            report = embed_products(session, product_ids)
+        except Exception as exc:  # noqa: BLE001 - provider and driver failures are open sets
+            warnings.append(
+                f"{len(product_ids)} product(s) written but NOT embedded, so they are "
+                f"invisible to every vector query: {type(exc).__name__}: {exc}"
+            )
+            return 0
+        if report.skipped:
+            warnings.append(
+                f"{len(report.skipped)} product(s) written but NOT embedded, so they are "
+                f"invisible to every vector query: {', '.join(report.skipped)}"
+            )
+        return report.embedded
 
     def _job_id(self, store_id: str, snapshot: CatalogSnapshot) -> str:
         """A per-run identifier that is stable for a given store, run index and clock."""

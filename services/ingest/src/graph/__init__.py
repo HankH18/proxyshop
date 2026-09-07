@@ -55,6 +55,7 @@ from .model import (
     slug,
 )
 from .query import (
+    DEFAULT_OVERSAMPLE,
     DEFAULT_ROSTER_PRODUCTS,
     AttributeFilter,
     Candidate,
@@ -73,7 +74,13 @@ from .query import (
     products_missing_status,
     roster_provenance_exclusions,
 )
-from .reembed import ReembedReport, embedding_text, graph_driver, reembed_products
+from .reembed import (
+    ReembedReport,
+    embed_products,
+    embedding_text,
+    graph_driver,
+    reembed_products,
+)
 from .schema import (
     ADAPTER_LOOKUP_INDEXES,
     EMBEDDING_RUN_COMPLETE,
@@ -129,6 +136,7 @@ from .upsert import (
 )
 
 __all__ = [
+    "DEFAULT_OVERSAMPLE",
     "DEFAULT_ROSTER_PRODUCTS",
     "EMBEDDING_PROPERTY",
     "EMBEDDING_RUN_COMPLETE",
@@ -207,6 +215,7 @@ __all__ = [
     "rebuild_vector_index",
     "record_embedding_run",
     "roster_provenance_exclusions",
+    "embed_products",
     "reembed_products",
     "schema_report",
     "schema_statements",

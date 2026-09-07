@@ -43,6 +43,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field, StrictBool
 
 from ..composition import DeploymentConfigurationError, ExchangeCallFailed, ensure_configured
+from ..pitch import pitch_writer, pitches_for
 from ._spellings import bind_spellings
 from .errors import (
     AcceptError,
@@ -55,7 +56,7 @@ from .errors import (
     UnusableSlot,
 )
 from .handoff import accept
-from .labels import render_shortlist
+from .labels import render_shortlist, slot_rows
 
 #: Starlette 0.5x renamed ``HTTP_422_UNPROCESSABLE_ENTITY`` to ``..._CONTENT`` and emits a
 #: DeprecationWarning on the old name. Resolved once, here, so this module names neither
@@ -69,6 +70,8 @@ __all__ = [
     "RenderBody",
     "RenderResponse",
     "RenderedCommitment",
+    "RenderedPitch",
+    "RenderedPitchFact",
     "RenderedSlot",
     "router",
 ]
@@ -80,9 +83,20 @@ EXCHANGE_CLIENT_ATTR = "exchange_client"
 
 
 class RenderBody(BaseModel):
-    """A shortlist as the exchange sent it."""
+    """A shortlist as the exchange sent it, and who it is being rendered for."""
 
     shortlist: dict[str, Any]
+    #: The confirmed structured intent (``Intent.to_dict()``), for the buyer-side agent to
+    #: choose emphasis with. **Optional**: with none, every slot still gets the platform's
+    #: case, ranked by kind alone — an unconditioned organic result is still the organic
+    #: result, and a screen that has not confirmed an intent yet is a real caller.
+    intent: dict[str, Any] | None = None
+    #: The COARSENED profile ``GET /buyer/profile`` serves (``{"pseudonym", "buckets"}``), or
+    #: a bare buckets object. Only the five allowlisted bucket keys are ever read out of it
+    #: (:data:`buyer_svc.pitch.material.PROFILE_BUCKET_KEYS`); everything else it carries —
+    #: the pseudonym included — becomes a token the case is screened against rather than
+    #: something the case may use. R5, and the render is a served response.
+    profile: dict[str, Any] | None = None
     #: ``StrictBool``, not ``bool``, and this is not a style preference. Pydantic's default
     #: (lax) mode coerces the JSON strings ``"yes"``, ``"true"``, ``"on"`` and ``"1"`` into
     #: ``True`` — measured on this tree at 2.13, where it turned a body carrying no boolean
@@ -100,6 +114,44 @@ class RenderedCommitment(BaseModel):
     value: Any = None
     unit: str | None = None
     label: str
+
+
+class RenderedPitchFact(BaseModel):
+    """One true thing the platform holds about this candidate (D55).
+
+    ``label`` is the buyer-facing provenance label for THIS fact where it has one — a
+    commitment is a published ``Claim`` and carries its source's label — and ``null`` for the
+    exchange's own published fields (price, trust), which are not a store's claim and must not
+    borrow a store's badge.
+    """
+
+    key: str
+    value: str
+    kind: str
+    label: str | None = None
+
+
+class RenderedPitch(BaseModel):
+    """The case for one slot, and whose voice is making it (SPEC core tenet, D55).
+
+    The organic/sponsored split, on the wire. ``platform_case`` is the platform's own case,
+    authored from facts the platform already holds and constrained to them. ``store_pitch`` is
+    the shop's own message, byte for byte — the thing a shop buys by joining — and it is
+    ``null`` for a scraped shop that has no advocate. The two are never merged: ``voices`` says
+    which of them the screen is showing and in what order, and both are labelled, because a
+    shopper reading the platform's voice has no reason to discount it and must be able to tell
+    it from the seller's.
+    """
+
+    platform_case: str
+    #: ``"assembled"`` (the deterministic rendering of the facts) or ``"written"`` (a model's
+    #: prose that survived the screen). A shopper does not need this; an operator does.
+    platform_case_source: str
+    store_pitch: str | None = None
+    voices: list[str]
+    #: Every fact the platform holds here, ranked for this shopper — not just the ones the
+    #: case said. Served in full so a reader can see the copy is a SUBSET of checked material.
+    facts: list[RenderedPitchFact]
 
 
 class RenderedSlot(BaseModel):
@@ -131,6 +183,10 @@ class RenderedSlot(BaseModel):
     #: R2's COMMITMENTS. ``null`` means the exchange sent none — never an empty list, which
     #: would read to a shopper as a store that promised nothing.
     commitments: list[RenderedCommitment] | None = None
+    #: The case for this slot (D55). ``null`` when the platform holds nothing sayable about
+    #: this candidate and the shop sent no message of its own — saying less, rather than
+    #: inventing a reason to buy.
+    pitch: RenderedPitch | None = None
 
 
 class RenderResponse(BaseModel):
@@ -160,9 +216,36 @@ class AcceptResponse(BaseModel):
 
 @router.post("/render", response_model=RenderResponse)
 async def render_route(body: RenderBody) -> RenderResponse:
-    """Label a shortlist for display (R2). Creates nothing, accepts nothing."""
+    """Label a shortlist for display (R2) and make each candidate's case (D55).
+
+    Creates nothing and accepts nothing: this handler takes no ``Request``, so it holds no
+    ``app.state`` and therefore cannot reach an exchange client. That is why the buyer-side
+    agent's model client comes from :func:`buyer_svc.pitch.pitch_writer` — a module-level
+    seam — rather than from the application.
+
+    The pitches are zipped onto the labelled slots **by position**, from
+    :func:`~buyer_svc.accept.labels.slot_rows`, which is the one function both the labeller
+    and the pitcher iterate. Ranking is the exchange's published formula (R11) and nothing
+    here reorders, filters or drops a slot: a render with a broken model returns exactly the
+    slots a render with a working one returns.
+    """
     slots = render_shortlist(body.shortlist, derive=body.derive_missing_labels)
-    return RenderResponse(slots=[RenderedSlot(**slot.to_dict()) for slot in slots])
+    pitches = pitches_for(
+        slots,
+        slot_rows(body.shortlist),
+        intent=body.intent,
+        profile=body.profile,
+        writer=pitch_writer(),
+    )
+    return RenderResponse(
+        slots=[
+            RenderedSlot(
+                **slot.to_dict(),
+                pitch=None if pitch is None else RenderedPitch(**pitch.to_dict()),
+            )
+            for slot, pitch in zip(slots, pitches, strict=True)
+        ]
+    )
 
 
 def _bind_the_deployment(request: Request) -> None:

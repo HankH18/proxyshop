@@ -64,8 +64,14 @@ class ReembedReport:
         return not self.skipped and self.embedded == self.products
 
 
-_READ_PRODUCTS = """
+#: One product page with the structured context :func:`embedding_text` composes from. The
+#: ``__SELECTOR__`` hole is the only difference between the whole-catalog pass and the
+#: named-subset one, so the two embed **identical** text for the same product and their
+#: vectors stay comparable inside one index. Two copies of this Cypher would not stay that
+#: way: a category added to one and not the other silently splits the space.
+_READ_PRODUCTS_TEMPLATE = """
 MATCH (p:Product)
+__SELECTOR__
 OPTIONAL MATCH (p)-[:IN_CATEGORY]->(c:Category)
 WITH p, collect(DISTINCT c.name) AS categories
 OPTIONAL MATCH (p)-[:HAS_ATTRIBUTE]->(a:AttributeValue)
@@ -84,6 +90,16 @@ RETURN p.product_id AS product_id,
 ORDER BY product_id
 SKIP $skip LIMIT $limit
 """
+
+#: The whole-catalog page, unchanged: every ``Product`` in the graph, ordered and paged.
+_READ_PRODUCTS = _READ_PRODUCTS_TEMPLATE.replace("__SELECTOR__", "")
+
+#: The named-subset page. ``$product_ids`` is an explicit list rather than a store filter
+#: because the crawl knows exactly which products it wrote and a store-shaped predicate
+#: would re-embed a store's whole catalog on every refresh of one changed product.
+_READ_NAMED_PRODUCTS = _READ_PRODUCTS_TEMPLATE.replace(
+    "__SELECTOR__", "WHERE p.product_id IN $product_ids"
+)
 
 
 def read_products(
@@ -188,6 +204,185 @@ def _still_embedded(session: Any, product_ids: Sequence[str]) -> list[str]:
     ]
 
 
+def _live_index_width(session: Any, provider: EmbeddingProvider) -> int:
+    """The width the **live** ``product_embedding`` index was built for.
+
+    Not the width D6 pins: after an explicit ``rebuild_vector_index(dimensions=N)`` those
+    differ, and the vectors have to match the index that exists rather than the one the
+    decision describes.
+
+    Args:
+        session: an open ``neo4j.Session``.
+        provider: the provider about to write vectors.
+
+    Returns:
+        The live index's dimension.
+
+    Raises:
+        RuntimeError: the index does not exist, so every vector written would be unreachable.
+        EmbeddingDimensionMismatch: the provider emits a different width. Neo4j would accept
+            every write and then match none of them.
+    """
+    index_dimensions = schema_report(session).vector_dimensions
+    if index_dimensions is None:
+        raise RuntimeError(
+            f"the {VECTOR_INDEX_NAME} index does not exist; call apply_schema(session) "
+            f"before embedding, or every vector written here is unreachable"
+        )
+    if provider.dimension != index_dimensions:
+        raise EmbeddingDimensionMismatch(
+            f"provider {provider.name!r} emits {provider.dimension}-d vectors but the live "
+            f"{VECTOR_INDEX_NAME} index is {index_dimensions}-d. Neo4j would accept every "
+            f"write and then match none of them. Rebuild the index for this width first: "
+            f"python -m ingest.graph.reembed --provider {provider.name} --rebuild-index"
+        )
+    return int(index_dimensions)
+
+
+def _embed_page(
+    session: Any,
+    rows: Sequence[dict[str, Any]],
+    *,
+    provider: EmbeddingProvider,
+    dimensions: int,
+) -> tuple[list[str], list[str]]:
+    """Embed one page of product rows. The single write loop both passes share.
+
+    Args:
+        session: an open ``neo4j.Session``.
+        rows: product rows in :data:`_READ_PRODUCTS_TEMPLATE`'s shape.
+        provider: the provider to embed with.
+        dimensions: the live index width, already checked against ``provider``.
+
+    Returns:
+        ``(embedded_ids, skipped_ids)`` for this page, in row order.
+    """
+    texts = [embedding_text(row) for row in rows]
+    vectors = provider.embed_batch(texts)
+    embedded: list[str] = []
+    skipped: list[str] = []
+    for row, text, vector in zip(rows, texts, vectors, strict=True):
+        if not text:
+            # A product with no name and no structured context embeds to the zero vector,
+            # which cosine cannot rank. Leaving it unembedded and *reported* is honest;
+            # writing a zero vector would make it silently unreachable instead.
+            #
+            # "Unembedded" has to be made true, not merely intended. Skipping the write and
+            # moving on leaves whatever vector a PREVIOUS pass wrote sitting on the product
+            # — in the previous provider's space, inside an index this pass is filling with
+            # a different one. Measured: the stale row still ranks (0.4911 against a
+            # legitimate 0.4953) while `products_missing_embeddings()`,
+            # `products_missing_status()` and `provenance_violations()` all report ``[]``,
+            # because the product *has* an embedding and a vector is not a material fact.
+            # Removing it hands that product to the one detector that needs no marker at
+            # all, and costs nothing recoverable: there was no text to re-embed it from.
+            skipped.append(row["product_id"])
+            clear_product_embedding(session, product_id=row["product_id"])
+            continue
+        set_product_embedding(
+            session, product_id=row["product_id"], embedding=vector, dimensions=dimensions
+        )
+        embedded.append(row["product_id"])
+    return embedded, skipped
+
+
+def embed_products(
+    session: Any,
+    product_ids: Sequence[str],
+    provider: EmbeddingProvider | None = None,
+    *,
+    batch_size: int = DEFAULT_BATCH_SIZE,
+    await_index: bool = True,
+) -> ReembedReport:
+    """Embed a **named set** of products — what a crawl owes the graph it just wrote.
+
+    :func:`reembed_products` is the operator's whole-catalog script and cannot be what a
+    per-store refresh calls: it re-reads and re-embeds every product of every store on every
+    crawl, and its :class:`~ingest.graph.schema.EmbeddingRun` marker is a claim about the
+    whole catalog. This is the incremental half. Same composition
+    (:data:`_READ_PRODUCTS_TEMPLATE`), same provider resolution, same width guard, same
+    per-row skip rule — a different selector.
+
+    **It deliberately writes no ``EmbeddingRun`` marker.** The marker answers "who filled
+    this index, and did the pass cover the catalog"; a run that read four products of nine
+    hundred can answer neither, and stamping ``complete`` after it would certify a coverage
+    claim nobody checked. What the marker does instead is *constrain* this call: if a
+    recorded pass names another provider, embedding here would put a second vector space
+    into an index whose marker says it holds one, and cosine across two spaces is noise. So
+    that case refuses rather than writes, the products stay visibly unembedded, and
+    :func:`ingest.graph.query.products_missing_embeddings` — which needs no marker at all —
+    is what names them.
+
+    Args:
+        session: an open ``neo4j.Session``.
+        product_ids: the products to embed. Ids that name no ``Product`` are ignored, so a
+            caller may pass the ids a write *attempted*; the report counts what was read.
+        provider: the provider to embed with. Defaults to
+            :func:`~ingest.embeddings.get_embedding_provider`, i.e. to ``EMBEDDING_PROVIDER``
+            — the same resolution the read side uses, which is what keeps D19's provider
+            swap config-only on this path too.
+        batch_size: products per round trip.
+        await_index: wait for the vector index to absorb the writes, so a query issued
+            straight after this call sees them. That immediacy is the whole point on the
+            crawl path: the refresh reports "these products are retrievable now".
+
+    Returns:
+        A :class:`ReembedReport` over the named subset. ``products`` is how many of
+        ``product_ids`` existed, not how many were asked for.
+
+    Raises:
+        ValueError: ``batch_size`` is not positive.
+        RuntimeError: the vector index does not exist.
+        EmbeddingDimensionMismatch: the provider's width is not the live index's.
+        ~ingest.graph.query.EmbeddingProviderMismatch: a recorded pass filled this index with
+            a different provider's vectors.
+    """
+    from .query import EmbeddingProviderMismatch  # noqa: PLC0415 - read side, imported lazily
+
+    if batch_size <= 0:
+        raise ValueError(f"batch_size must be positive, got {batch_size}")
+    resolved = provider or get_embedding_provider()
+    index_dimensions = _live_index_width(session, resolved)
+
+    recorded = embedding_run(session)
+    if recorded is not None and recorded.provider != resolved.name:
+        raise EmbeddingProviderMismatch(
+            f"refusing to embed {len(product_ids)} product(s) with {resolved.name!r}: the "
+            f"last recorded pass over {recorded.index} was {recorded.provider!r}, so these "
+            f"vectors would form a SECOND space inside an index whose marker says it holds "
+            f"one, and every cosine across the two is noise. Re-embed the catalog first: "
+            f"EMBEDDING_PROVIDER={resolved.name} python -m ingest.graph.reembed"
+        )
+
+    wanted = list(dict.fromkeys(str(product_id) for product_id in product_ids))
+    products = 0
+    embedded: list[str] = []
+    skipped: list[str] = []
+    skip = 0
+    while wanted:
+        rows = session.run(
+            _READ_NAMED_PRODUCTS, product_ids=wanted, skip=skip, limit=batch_size
+        ).data()
+        if not rows:
+            break
+        page_embedded, page_skipped = _embed_page(
+            session, rows, provider=resolved, dimensions=index_dimensions
+        )
+        products += len(rows)
+        embedded.extend(page_embedded)
+        skipped.extend(page_skipped)
+        skip += len(rows)
+    if await_index and embedded:
+        await_indexes(session)
+    return ReembedReport(
+        provider=resolved.name,
+        dimension=index_dimensions,
+        products=products,
+        embedded=len(embedded),
+        skipped=sorted(skipped),
+    )
+
+
 def reembed_products(
     session: Any,
     provider: EmbeddingProvider | None = None,
@@ -242,23 +437,7 @@ def reembed_products(
     if batch_size <= 0:
         raise ValueError(f"batch_size must be positive, got {batch_size}")
     resolved = provider or get_embedding_provider()
-    # The width the LIVE index was built for, not the width D6 pins: after an explicit
-    # `rebuild_vector_index(dimensions=N)` those differ, and the vectors have to match the
-    # index that exists, not the one the decision describes.
-    live = schema_report(session)
-    index_dimensions = live.vector_dimensions
-    if index_dimensions is None:
-        raise RuntimeError(
-            f"the {VECTOR_INDEX_NAME} index does not exist; call apply_schema(session) "
-            f"before embedding, or every vector written here is unreachable"
-        )
-    if resolved.dimension != index_dimensions:
-        raise EmbeddingDimensionMismatch(
-            f"provider {resolved.name!r} emits {resolved.dimension}-d vectors but the live "
-            f"{VECTOR_INDEX_NAME} index is {index_dimensions}-d. Neo4j would accept every "
-            f"write and then match none of them. Rebuild the index for this width first: "
-            f"python -m ingest.graph.reembed --provider {resolved.name} --rebuild-index"
-        )
+    index_dimensions = _live_index_width(session, resolved)
     # Stamp the index BEFORE the first batch, and again after the last.
     #
     # Two failures this closes, one needing an operator mistake and one needing only a
@@ -289,34 +468,12 @@ def reembed_products(
         rows = session.run(_READ_PRODUCTS, skip=skip, limit=batch_size).data()
         if not rows:
             break
-        texts = [embedding_text(row) for row in rows]
-        vectors = resolved.embed_batch(texts)
-        for row, text, vector in zip(rows, texts, vectors, strict=True):
-            products += 1
-            if not text:
-                # A product with no name and no structured context embeds to the zero
-                # vector, which cosine cannot rank. Leaving it unembedded and *reported* is
-                # honest; writing a zero vector would make it silently unreachable instead.
-                #
-                # "Unembedded" has to be made true, not merely intended. Skipping the write
-                # and moving on leaves whatever vector a PREVIOUS pass wrote sitting on the
-                # product — in the previous provider's space, inside an index this pass is
-                # filling with a different one. Measured: the stale row still ranks (0.4911
-                # against a legitimate 0.4953) while `products_missing_embeddings()`,
-                # `products_missing_status()` and `provenance_violations()` all report ``[]``,
-                # because the product *has* an embedding and a vector is not a material fact.
-                # Removing it hands that product to the one detector that needs no marker at
-                # all, and costs nothing recoverable: there was no text to re-embed it from.
-                skipped.append(row["product_id"])
-                clear_product_embedding(session, product_id=row["product_id"])
-                continue
-            set_product_embedding(
-                session,
-                product_id=row["product_id"],
-                embedding=vector,
-                dimensions=index_dimensions,
-            )
-            embedded += 1
+        page_embedded, page_skipped = _embed_page(
+            session, rows, provider=resolved, dimensions=index_dimensions
+        )
+        products += len(rows)
+        embedded += len(page_embedded)
+        skipped.extend(page_skipped)
         skip += len(rows)
     report = ReembedReport(
         provider=resolved.name,

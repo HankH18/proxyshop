@@ -1,0 +1,647 @@
+{
+  "corpus_version": "2.0.0",
+  "collected_at": "2026-09-07T19:10:16.175246+00:00",
+  "collector": "scripts/collect_real_catalogs.py",
+  "user_agent": "ProxyShopBot/0.1 (catalog research; contact: hank.holcomb@challenger.gauntletai.com)",
+  "politeness": {
+    "robots_txt": "fetched and respected per host",
+    "min_seconds_between_requests_per_host": 2.0,
+    "max_requests_per_host": 45,
+    "max_pages_per_host": 40,
+    "page_size": 250,
+    "crawl_delay": "a declared Crawl-delay widens the interval and never narrows it",
+    "retries": "none — 403/404/429 is a recorded outcome, not something to retry around",
+    "scope": "public catalogue data only"
+  },
+  "selection": {
+    "policy": "entire catalogue — every product on every page, nothing filtered",
+    "why": "A category-biased corpus builds a system that can only answer one question and silently removes the hardest part of retrieval: discriminating relevant inventory from a large body of irrelevant inventory. The irrelevant stock is not overhead, it is the test.",
+    "dropped": "exact duplicate product ids across pages only; counted per store"
+  },
+  "storage": {
+    "compressed": true,
+    "format": "gzip (mtime=0, level 9) over JSONL",
+    "note": "A storage decision only. No product is dropped and no field is trimmed, so what is stored is the whole catalogue."
+  },
+  "notes": [
+    "POINT-IN-TIME SNAPSHOT of other companies' public catalogues. Prices and inventory move; assert shape and relationships, never a dollar amount.",
+    "Product records are the exact bytes the storefront served, unnormalised.",
+    "Collected by hand. No test in this repository opens a socket (D3/C9)."
+  ],
+  "stores": [
+    {
+      "host": "gaiaherbs.com",
+      "role": "relevant",
+      "effective_origin": "https://www.gaiaherbs.com",
+      "robots": {
+        "url": "https://www.gaiaherbs.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-07T19:10:16.232478+00:00",
+        "sha256": "63be68c09c2111befd22af92922da4e53913417b9e9d99c82834ee0ce6a49aa6",
+        "bytes": 3634,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.gaiaherbs.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-07T19:10:18.237107+00:00",
+          "sha256": "fb8b6bad8bc30f7d6c148f7d4036d14cdabe1396527c891f0f369b75cfd281d1",
+          "bytes": 410123,
+          "elapsed_ms": 211,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 111,
+      "products_recorded": 111,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/gaiaherbs.com.products.jsonl.gz",
+        "provenance": "stores/gaiaherbs.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "3785ae868b21549b03a7baaa2253eea8f8809c47507c96824f7e2a2dc366a322",
+        "provenance": "dee171a988075094752d8a758d3354a41865d65d061f8a033439bd472ac4a868"
+      },
+      "bytes": {
+        "products": {
+          "raw": 410109,
+          "on_disk": 51690
+        },
+        "provenance": {
+          "raw": 43872,
+          "on_disk": 7826
+        }
+      }
+    },
+    {
+      "host": "bulksupplements.com",
+      "role": "relevant",
+      "effective_origin": "https://www.bulksupplements.com",
+      "robots": {
+        "url": "https://www.bulksupplements.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-07T19:10:18.451438+00:00",
+        "sha256": "b3b75ef965f3922f40688be5558ea0f59dc84c4a6c01c58f108eb629b02ba391",
+        "bytes": 3660,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.bulksupplements.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-07T19:10:20.451656+00:00",
+          "sha256": "46477e04186932b66f96f20dde28c44436118b682c2cd060485cf077ad947a9f",
+          "bytes": 2018273,
+          "elapsed_ms": 872,
+          "note": ""
+        },
+        {
+          "url": "https://www.bulksupplements.com/products.json?limit=250&page=2",
+          "status": 200,
+          "fetched_at": "2026-09-07T19:10:22.456670+00:00",
+          "sha256": "c45f6f1353b853031136f82bf6de630fedad6027905b5aea66dd578f584615ab",
+          "bytes": 2154559,
+          "elapsed_ms": 1230,
+          "note": ""
+        },
+        {
+          "url": "https://www.bulksupplements.com/products.json?limit=250&page=3",
+          "status": 200,
+          "fetched_at": "2026-09-07T19:10:24.458778+00:00",
+          "sha256": "6f6556161c6af16a8cd92c828bb8601d7729332c707c87be82b07dc4350de026",
+          "bytes": 2239775,
+          "elapsed_ms": 916,
+          "note": ""
+        },
+        {
+          "url": "https://www.bulksupplements.com/products.json?limit=250&page=4",
+          "status": 200,
+          "fetched_at": "2026-09-07T19:10:26.463814+00:00",
+          "sha256": "a106bc18c254e5fd0b3d8b74f0b2691106fc0d9c97072d361bf84993bde9e4e3",
+          "bytes": 501264,
+          "elapsed_ms": 368,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 4,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 805,
+      "products_recorded": 805,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/bulksupplements.com.products.jsonl.gz",
+        "provenance": "stores/bulksupplements.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "c201a6d80934842e23e3bb8eafaa4c4ab6c5a0b88977862164371ec7af8427ee",
+        "provenance": "625a6fdbf800866a3f905f280159dbc596fa1870e5ef1d64fa38bfcaedb822b3"
+      },
+      "bytes": {
+        "products": {
+          "raw": 6913815,
+          "on_disk": 843185
+        },
+        "provenance": {
+          "raw": 326631,
+          "on_disk": 55642
+        }
+      }
+    },
+    {
+      "host": "nutricost.com",
+      "role": "relevant",
+      "effective_origin": "https://nutricost.com",
+      "robots": {
+        "url": "https://nutricost.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-07T19:10:26.835913+00:00",
+        "sha256": "530dc2c86b7abe30c5dda8437c5370b26cebe416b73ffde861b2531d8ca7dcd3",
+        "bytes": 3620,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://nutricost.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-07T19:10:28.840939+00:00",
+          "sha256": "06821ece357d1529bd22ed9ea75b4ccf3d7cd80bce2033036ce4c8fc6e230eec",
+          "bytes": 1218700,
+          "elapsed_ms": 907,
+          "note": ""
+        },
+        {
+          "url": "https://nutricost.com/products.json?limit=250&page=2",
+          "status": 200,
+          "fetched_at": "2026-09-07T19:10:30.845984+00:00",
+          "sha256": "4dc36987d9b82ead0535f993ce76dac0a09aeb28b8a5cabced009958299e3080",
+          "bytes": 1010150,
+          "elapsed_ms": 474,
+          "note": ""
+        },
+        {
+          "url": "https://nutricost.com/products.json?limit=250&page=3",
+          "status": 200,
+          "fetched_at": "2026-09-07T19:10:32.851024+00:00",
+          "sha256": "883fd9dd406ea37b3a41b2a3af7de2a2a184915913619fb28fd2aa2c324206ce",
+          "bytes": 1052207,
+          "elapsed_ms": 648,
+          "note": ""
+        },
+        {
+          "url": "https://nutricost.com/products.json?limit=250&page=4",
+          "status": 200,
+          "fetched_at": "2026-09-07T19:10:34.856075+00:00",
+          "sha256": "9608c82feb7597bc69648dca099beac29752db041457c8f65fedaa2decc82824",
+          "bytes": 35349,
+          "elapsed_ms": 144,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 4,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 755,
+      "products_recorded": 755,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/nutricost.com.products.jsonl.gz",
+        "provenance": "stores/nutricost.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "b6ce64fe39dffeb181efa8144554a741a0c6d4181fe87531a444997dce0b1884",
+        "provenance": "5849170b654769abc105520635577dd7e1b25b9df15250a009eca3b5c019b316"
+      },
+      "bytes": {
+        "products": {
+          "raw": 3316350,
+          "on_disk": 375089
+        },
+        "provenance": {
+          "raw": 308124,
+          "on_disk": 53802
+        }
+      }
+    },
+    {
+      "host": "oregonswildharvest.com",
+      "role": "relevant",
+      "effective_origin": "https://oregonswildharvest.com",
+      "robots": {
+        "url": "https://oregonswildharvest.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-07T19:10:35.001513+00:00",
+        "sha256": "569fba514927869d4ae010da3993e38a9b1229e4fb99a6f472dc17eba85d225d",
+        "bytes": 3654,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://oregonswildharvest.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-07T19:10:37.004480+00:00",
+          "sha256": "0a7dbfc2d888138274cf4c82ed77a756783fe81b4ca95e5476fed9647df3b716",
+          "bytes": 729046,
+          "elapsed_ms": 775,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 189,
+      "products_recorded": 189,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/oregonswildharvest.com.products.jsonl.gz",
+        "provenance": "stores/oregonswildharvest.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "23fe1a5d210e53be885a1f5e4af141e4b3ed2fcdac904aad3d6febb4eefe9c20",
+        "provenance": "744da8f2aa5e2faed0783e38065d6f4ee10b94c1b622e8bfc12ec4ade96bb1ce"
+      },
+      "bytes": {
+        "products": {
+          "raw": 729032,
+          "on_disk": 77589
+        },
+        "provenance": {
+          "raw": 76347,
+          "on_disk": 12742
+        }
+      }
+    },
+    {
+      "host": "toniiq.com",
+      "role": "relevant",
+      "effective_origin": "https://www.toniiq.com",
+      "robots": {
+        "url": "https://www.toniiq.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-07T19:10:37.783739+00:00",
+        "sha256": "8e8cffee119c3dadaaa558a029aac57811844e953e3b4aa44976a21b0ffe5a25",
+        "bytes": 3616,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.toniiq.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-07T19:10:39.785393+00:00",
+          "sha256": "54f10d761f8694b5bdc4d31a0eff5ff9040a72622a6a82e9447b6163c0fa9013",
+          "bytes": 379408,
+          "elapsed_ms": 574,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 103,
+      "products_recorded": 103,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/toniiq.com.products.jsonl.gz",
+        "provenance": "stores/toniiq.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "b64c0962ab3d26fc43320c8756e6e3cfe2dfb2b75f67c0917f63d442640f452c",
+        "provenance": "35fc6c28fd09ecf4a0b95a011175fd8e7b81c74ec5738aa0167499089cbe2bb8"
+      },
+      "bytes": {
+        "products": {
+          "raw": 379394,
+          "on_disk": 44494
+        },
+        "provenance": {
+          "raw": 39936,
+          "on_disk": 7385
+        }
+      }
+    },
+    {
+      "host": "doublewoodsupplements.com",
+      "role": "relevant",
+      "effective_origin": "https://doublewoodsupplements.com",
+      "robots": {
+        "url": "https://doublewoodsupplements.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-07T19:10:40.363286+00:00",
+        "sha256": "194ee62ea0e371d70faecf681ddc70f517bce99963aa6374be589cfa58adc9f3",
+        "bytes": 3660,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://doublewoodsupplements.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-07T19:10:42.364271+00:00",
+          "sha256": "e6d8d6757606b7bc42db7a116c1f0e9291ee02139439bbba3d8d9b3a2cbd3f23",
+          "bytes": 1040016,
+          "elapsed_ms": 684,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 201,
+      "products_recorded": 201,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/doublewoodsupplements.com.products.jsonl.gz",
+        "provenance": "stores/doublewoodsupplements.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "68e63f0b29a6b089daf67863d4bffff823f37f176f2cccfde559b09e64a869b1",
+        "provenance": "5efe24b1f276a1e881db6a9cc8c8677982a4073b2fe893193ead0c38635d04c7"
+      },
+      "bytes": {
+        "products": {
+          "raw": 1040002,
+          "on_disk": 146690
+        },
+        "provenance": {
+          "raw": 81261,
+          "on_disk": 14561
+        }
+      }
+    },
+    {
+      "host": "purebulk.com",
+      "role": "relevant",
+      "effective_origin": "https://purebulk.com",
+      "robots": {
+        "url": "https://purebulk.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-07T19:10:43.055575+00:00",
+        "sha256": "aab07d5799505735637eb3ebd4b26fc9bbad6878dc5c1e5a4daed7d6c08d8938",
+        "bytes": 3614,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://purebulk.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-07T19:10:45.059277+00:00",
+          "sha256": "e29f1547ab54282d243ecdfec14c469fdc7c4e0419ed4d8d16752e208711648e",
+          "bytes": 2050590,
+          "elapsed_ms": 1293,
+          "note": ""
+        },
+        {
+          "url": "https://purebulk.com/products.json?limit=250&page=2",
+          "status": 200,
+          "fetched_at": "2026-09-07T19:10:47.063604+00:00",
+          "sha256": "bb1feacc4bafd9ed8036562cd05ffd2edf7409d43fc63864a1184a26b1d7dc21",
+          "bytes": 2386823,
+          "elapsed_ms": 850,
+          "note": ""
+        },
+        {
+          "url": "https://purebulk.com/products.json?limit=250&page=3",
+          "status": 200,
+          "fetched_at": "2026-09-07T19:10:49.066985+00:00",
+          "sha256": "4f728a9ce8c93f6100e6c96b931284103571ef99b8b4e88a8f6996396148afe1",
+          "bytes": 524458,
+          "elapsed_ms": 332,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 3,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 550,
+      "products_recorded": 550,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/purebulk.com.products.jsonl.gz",
+        "provenance": "stores/purebulk.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "57d5aa6cdc8b17003226bf82811d547b71dab798c9131317bae5315de5579baa",
+        "provenance": "1a6477f5160c7940cb0fa770b569e7ff7dea925d27028ddef9cc1c99b70d1ec5"
+      },
+      "bytes": {
+        "products": {
+          "raw": 4961829,
+          "on_disk": 740846
+        },
+        "provenance": {
+          "raw": 218397,
+          "on_disk": 37435
+        }
+      }
+    },
+    {
+      "host": "paradiseherbs.com",
+      "role": "relevant",
+      "effective_origin": "https://paradiseherbs.com",
+      "robots": {
+        "url": "https://paradiseherbs.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-07T19:10:49.402653+00:00",
+        "sha256": "273293d0c0a673963074ed0c67a2955bf2397d88b62f9dacb96d6de94238b560",
+        "bytes": 3636,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://paradiseherbs.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-07T19:10:51.404628+00:00",
+          "sha256": "6e3d04958b2ced9076edfcc0130aa4acf4548877e3ad6d8ab5714e21142bdc57",
+          "bytes": 229627,
+          "elapsed_ms": 353,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 90,
+      "products_recorded": 90,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/paradiseherbs.com.products.jsonl.gz",
+        "provenance": "stores/paradiseherbs.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "567e08f7ae76fa576b5568cc370abd5ddc907ebb50c2cb971ba9ba29f543b689",
+        "provenance": "9cb43c4279ad94f0cff1a829ae9105d055d6af4195304adadc91cc649a7a915c"
+      },
+      "bytes": {
+        "products": {
+          "raw": 229613,
+          "on_disk": 32761
+        },
+        "provenance": {
+          "raw": 36076,
+          "on_disk": 6630
+        }
+      }
+    },
+    {
+      "host": "livemomentous.com",
+      "role": "negative_control",
+      "effective_origin": "https://www.livemomentous.com",
+      "robots": {
+        "url": "https://www.livemomentous.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-07T19:10:51.760279+00:00",
+        "sha256": "d7e081ebbdb64e4af6808d15ea14e26d3ef01afe97367f14d1065bb1d334fc98",
+        "bytes": 3646,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.livemomentous.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-07T19:10:53.760653+00:00",
+          "sha256": "03642c729633aad305629b3ef58445b075a927885eaa663d9ad16cd5b7f08068",
+          "bytes": 419706,
+          "elapsed_ms": 390,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 90,
+      "products_recorded": 90,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/livemomentous.com.products.jsonl.gz",
+        "provenance": "stores/livemomentous.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "1b061e41c9ea98382e8949cf06041b3d27d8d613d0b753e38b42e6ddaa3dc035",
+        "provenance": "619a69beac6c5a740dc4dbeb945f127563bf133be8b45b7e77c314ec0a044e3d"
+      },
+      "bytes": {
+        "products": {
+          "raw": 419692,
+          "on_disk": 67273
+        },
+        "provenance": {
+          "raw": 36182,
+          "on_disk": 6601
+        }
+      }
+    },
+    {
+      "host": "nakednutrition.com",
+      "role": "negative_control",
+      "effective_origin": "https://nakednutrition.com",
+      "robots": {
+        "url": "https://nakednutrition.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-07T19:10:54.154316+00:00",
+        "sha256": "8b25002a8cbe994e1edeaabc1197485ac7c65c320d34f1beaa267ba8eca9b06b",
+        "bytes": 7399,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://nakednutrition.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-07T19:10:56.159337+00:00",
+          "sha256": "0850fbf6535e34ea45c1a9881aff18ca5a26787592f8dd0f146a5908e1dc5b53",
+          "bytes": 718835,
+          "elapsed_ms": 522,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 199,
+      "products_recorded": 199,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/nakednutrition.com.products.jsonl.gz",
+        "provenance": "stores/nakednutrition.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "69b8156987e48f242c001db603de1549542cf47bbb73949601b725924d01c5d0",
+        "provenance": "de9855b3a425f9cd791b2f7c93a0e47034291d53821678eedb4b4ef100efc88e"
+      },
+      "bytes": {
+        "products": {
+          "raw": 718821,
+          "on_disk": 101182
+        },
+        "provenance": {
+          "raw": 80880,
+          "on_disk": 13594
+        }
+      }
+    }
+  ],
+  "totals": {
+    "stores_collected": 10,
+    "stores_skipped": 0,
+    "stores_truncated": 0,
+    "products": 3093,
+    "duplicates_dropped": 0,
+    "requests_made": 28,
+    "bytes_raw": 20366363,
+    "bytes_on_disk": 2697017
+  },
+  "per_store_counts": {
+    "gaiaherbs.com": 111,
+    "bulksupplements.com": 805,
+    "nutricost.com": 755,
+    "oregonswildharvest.com": 189,
+    "toniiq.com": 103,
+    "doublewoodsupplements.com": 201,
+    "purebulk.com": 550,
+    "paradiseherbs.com": 90,
+    "livemomentous.com": 90,
+    "nakednutrition.com": 199
+  }
+}
