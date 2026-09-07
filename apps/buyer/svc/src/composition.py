@@ -209,6 +209,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
 
+from proxyshop_support.trust_ledger import (
+    DEFAULT_LEDGER_TIMEOUT_SECONDS,
+    ENV_TRUST_URL,
+    SOURCE_DEFAULT,
+    SOURCE_ENVIRONMENT,
+    SOURCE_STATED,
+    TrustLedgerPublisher,
+    trust_endpoint,
+)
+
 # The ONE import from a sibling package at module scope, and it is cycle-free by inspection:
 # `intent/__init__.py` imports `clarifier`, `confirmation`, `errors`, `extraction` and
 # `models`, and `routes.py` — the only file under `intent/` that imports THIS module — is not
@@ -228,22 +238,32 @@ __all__ = [
     "ENV_EXCHANGE_URL",
     "ENV_ROSTER",
     "ENV_ROSTER_JSON",
+    "ENV_TRUST_URL",
     "ENV_UI_DIST",
     "EXCHANGE_CLIENT_ATTR",
+    "LEDGER_SINK_ATTR",
+    "LEDGER_STATE_FLAG",
+    "LEDGER_SUBJECT",
     "MAX_DEPLOYMENT_BYTES",
     "MAX_EXCHANGE_RESPONSE_BYTES",
     "MAX_EXCHANGE_WALL_CLOCK_SECONDS",
     "MAX_RECORDED_AUCTIONS",
     "MAX_ROSTER_BYTES",
     "MAX_ROSTER_ENTRIES",
+    "PUBLISHED_LEDGER_FIELDS",
     "STATE_FLAG",
     "Deployment",
     "DeploymentConfigurationError",
     "ExchangeCallFailed",
     "HttpExchangeClient",
+    "LedgerNotDelivered",
     "NoRosterBound",
+    "TrustLedgerSink",
+    "bind_ledger_sink",
     "configure_buyer",
     "ensure_configured",
+    "ensure_ledger_sink",
+    "ledger_event_body",
     "mount_ui",
     "parse_deployment",
     "read_deployment",
@@ -289,6 +309,50 @@ STATE_FLAG = "buyer_composition"
 #: strings the routes read, so the duplication is pinned rather than trusted.
 AUCTION_CLIENT_ATTR = "auction_client"
 EXCHANGE_CLIENT_ATTR = "exchange_client"
+
+#: Where the TRUST-ledger sink lives on the app — ``buyer_svc.feedback.routes``' one seam.
+#:
+#: Spelled here for the same reason the two above are, and pinned against the route's own
+#: ``LEDGER_SINK_ATTR`` by ``tests/test_feedback_ledger_wiring.py``. Two spellings of this name
+#: is a composition root that binds an attribute nothing reads, which is indistinguishable from
+#: no composition root at all — and "no composition root at all" is exactly what this seam had.
+LEDGER_SINK_ATTR = "ledger_sink"
+
+#: ``app.state`` flag saying this app has been through :func:`ensure_ledger_sink`. Separate from
+#: :data:`STATE_FLAG` on purpose: the exchange seam and the trust seam fail independently, and a
+#: deployment with no roster (which leaves :data:`STATE_FLAG` unset so the roster can arrive
+#: later) must not thereby re-resolve the trust address on every feedback submission.
+LEDGER_STATE_FLAG = "buyer_ledger_composition"
+
+#: How a wiring-time log line names this process's ledger writes.
+LEDGER_SUBJECT = "buyer feedback"
+
+#: The ``LedgerEvent`` fields that may leave this process, and therefore the WHOLE of what a
+#: shopper's answer publishes. R5 in the only form that survives an append-only, unauthenticated
+#: read door: this is a whitelist, so a field added to a future order record — a pseudonym, an
+#: address, a session id — cannot reach the ledger by being carried along.
+#:
+#: ``prev_hash`` is absent deliberately and is not merely unused: ``trust.events.routes.EventIn``
+#: documents that the chain's own fields "are not accepted from a client under any spelling", and
+#: ``trust.ledger.canonical_event`` drops them, so sending one is at best noise and at worst a
+#: producer asserting a position in a history it cannot see.
+PUBLISHED_LEDGER_FIELDS: tuple[str, ...] = (
+    "event_id",
+    "ts",
+    "kind",
+    "auction_id",
+    "store_id",
+    "order_ref",
+    "payload",
+)
+
+#: How a wiring-time log line spells where the trust address came from. Same three answers
+#: ``exchange.composition`` and ``merchant_svc.composition`` report, in the same words.
+_TRUST_SOURCE_PHRASE = {
+    SOURCE_STATED: "stated by this deployment",
+    SOURCE_ENVIRONMENT: f"the {ENV_TRUST_URL} environment variable",
+    SOURCE_DEFAULT: "the built-in default",
+}
 
 #: Every key this document may carry. An unrecognised key is refused against this set.
 DOCUMENT_KEYS = frozenset({"exchange_url", "roster", "request_timeout_seconds"})
@@ -1347,6 +1411,219 @@ def ensure_configured(app: Any, env: Mapping[str, str] | None = None) -> tuple[s
     if deployment.roster:
         setattr(app.state, STATE_FLAG, bound)
     return bound
+
+
+# =====================================================================================
+# The trust-LEDGER seam — where a shopper's answer to R14's prompt actually goes
+# =====================================================================================
+# WHAT WAS MEASURED
+# -----------------
+# `POST /buyer/feedback` reads its sink from `app.state.ledger_sink` and NO composition root in
+# this repository ever set it. On the app exactly as `buyer_svc.main.create_app()` builds it,
+# with no test wiring:
+#
+#     POST /buyer/feedback {"order": {...routed...}, "response": {...}}  -> 503
+#     {"detail": "submit_feedback() was given no ledger sink, so this feedback has nowhere
+#                 to land."}
+#
+# `feedback/routes.py` was right not to construct one (a buyer service that mints its own ledger
+# client cannot be pointed at a stub) and right to say so in its own header — "nothing in this
+# repository sets that attribute yet". This is that missing half, and it is the same shape the
+# exchange's `bind_ledger_sink` has, through the same shared writer, so buyer grows no fifth
+# hand-rolled HTTP client and no dependency on `apps/exchange` or `apps/trust`.
+#
+# WHY IT IS A DEFAULT AND NOT AN OPT-IN
+# --------------------------------------
+# The exchange's `default_ledger_sink` states the argument and it applies here unchanged: a
+# producer reachable only through configuration is a producer no deployment in this repository
+# reaches. `docker compose up` sets no BUYER_DEPLOYMENT variable, so a seam bound only from a
+# deployment document would be unbound in the stack this repo ships. `TRUST_URL` resolves through
+# `proxyshop_support.trust_ledger.trust_endpoint` — document, then environment, then
+# `http://trust:8084`, which is the compose service name `apps/buyer/compose.yaml` already
+# forwards to this service and which no line of `apps/buyer` read before this.
+#
+# WHAT A DEPLOYMENT WITH NO REACHABLE TRUST SERVICE DOES, AND WHY
+# ----------------------------------------------------------------
+# It answers **503 with the event id to retry under**, and never 201.
+#
+# There is precedent in this repository for the other posture — merchant's `publish_ledger_record`
+# and the exchange's `HttpTrustLedgerSink` both swallow a failed publish, count it, and let the
+# request succeed — and it is right *there* and wrong *here*, for a reason about what the request
+# is. An auction transition and an order webhook are audit records of work whose primary result
+# must not be thrown away because the audit sink hiccuped. A feedback submission has no other
+# result: recording the human's answer IS the request. A 201 for an answer that landed nowhere
+# looks identical to the buyer, grades the store on nothing, and is the "silently accepting and
+# dropping a human's answer" that R14's whole point forbids.
+#
+# The never-raising posture is kept where it belongs: `TrustLedgerPublisher.publish` still
+# catches every transport failure and counts it, `status()` still reads the standing condition
+# after the log line has scrolled away, and nothing here can put a 500 on a shopper's screen.
+# What the sink does with a `False` is *tell the truth about it*.
+
+
+class LedgerNotDelivered(RuntimeError):
+    """The shopper's answer did not reach the chained ledger. NOT "it failed".
+
+    Raised by :meth:`TrustLedgerSink.append` and caught by
+    ``buyer_svc.feedback.submission.submit_feedback``'s blanket handler, which turns it into
+    :class:`~buyer_svc.feedback.errors.LedgerWriteUncertain` — a 503 carrying the ``event_id``
+    to re-attempt under. "Uncertain" is the honest word: an at-least-once POST whose write
+    commits and whose acknowledgement is then lost is indistinguishable from one that never
+    arrived, so the order's claim stands and only a retry under the SAME id is admitted.
+
+    Its message names the trust service, because it is logged by ``submit_feedback`` where an
+    operator can act on it. It does not reach the shopper: the route deliberately replaces the
+    sink's own message with one carrying no host — see ``feedback/routes.py``'s
+    ``LedgerWriteUncertain`` branch.
+    """
+
+
+def _ledger_text(value: Any) -> str:
+    """One identifier as text the trust door will take, or ``""``. Cannot raise.
+
+    Containers and booleans are ``""`` rather than their ``repr``, for the reason merchant's
+    ``_pixel_text`` gives: ``str(["ord-1"])`` is a perfectly good-looking string that names
+    nothing and joins to nothing.
+    """
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, (Mapping, Sequence)) and not isinstance(value, str):
+        return ""
+    try:
+        return str(value).strip()
+    except Exception:  # noqa: BLE001 - a __str__ that raises is not a reason to fail a request
+        return ""
+
+
+def ledger_event_body(event: Any) -> dict[str, Any]:
+    """One ``LedgerEvent`` as the JSON body ``POST /events`` accepts. Total; never raises.
+
+    A whitelist over :data:`PUBLISHED_LEDGER_FIELDS`, never a dump of the object: R5 promises
+    stores never receive buyer identity, the trust ledger is append-only behind an
+    unauthenticated read door, and anything published on it is public forever. An empty optional
+    is omitted rather than sent as ``null``, which is what ``trust.ledger.canonical_event`` does
+    to it anyway — ``{"a": 1}`` and ``{"a": 1, "store_id": null}`` must not be two events.
+
+    Being total is a requirement rather than a nicety (see :class:`TrustLedgerSink`): this runs
+    on a shopper's request path, and a projection that could raise would put a 500 on their
+    screen for an answer that is fine.
+    """
+    raw_payload = getattr(event, "payload", None)
+    payload: dict[str, Any] = {}
+    if isinstance(raw_payload, Mapping):
+        try:
+            payload = {str(key): value for key, value in raw_payload.items()}
+        except Exception:  # noqa: BLE001 - see the docstring; a hostile mapping loses its body
+            payload = {}
+
+    body: dict[str, Any] = {"payload": payload}
+    for name in PUBLISHED_LEDGER_FIELDS:
+        if name == "payload":
+            continue
+        text_value = _ledger_text(getattr(event, name, None))
+        if text_value or name in ("event_id", "ts", "kind"):
+            body[name] = text_value
+    return body
+
+
+class TrustLedgerSink:
+    """The buyer's one ledger sink: it POSTs to the trust service's published ``POST /events``.
+
+    A ``LEDGER_SINK_METHODS``-shaped ``append``, so ``submit_feedback`` finds it first, wrapped
+    around the SHARED :class:`~proxyshop_support.trust_ledger.TrustLedgerPublisher` — the same
+    writer the exchange's ``HttpTrustLedgerSink`` and merchant's ``publish_ledger_record`` use.
+    Composed rather than inherited (merchant's arrangement, not the exchange's) because this
+    service needs no in-process readback: the buyer's own record of what it submitted is
+    ``FeedbackLedger``, which already exists and is what makes a retry safe.
+
+    :meth:`append` raises exactly one exception, :class:`LedgerNotDelivered`, and only when the
+    publisher reports that the event did not land. Everything else — DNS, connect, timeout, a
+    proxy answering something unparseable, a 5xx — is caught and counted inside ``publish``, so
+    the raise is a decision this class made rather than an exception that escaped.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        *,
+        timeout: float = DEFAULT_LEDGER_TIMEOUT_SECONDS,
+        log: logging.Logger | None = None,
+        subject: str = LEDGER_SUBJECT,
+    ) -> None:
+        self._publisher = TrustLedgerPublisher(
+            url, timeout=timeout, log=log if log is not None else _log, subject=subject
+        )
+
+    @property
+    def url(self) -> str:
+        """The trust service this sink writes to."""
+        return self._publisher.url
+
+    @property
+    def publisher(self) -> TrustLedgerPublisher:
+        """The shared writer underneath, for an operator or a health route."""
+        return self._publisher
+
+    def status(self) -> dict[str, Any]:
+        """The standing delivery condition — url, delivering, delivered, lost, last failure."""
+        return self._publisher.status()
+
+    def append(self, event: Any) -> None:
+        """Publish one event, or say plainly that it did not land."""
+        try:
+            body = ledger_event_body(event)
+        except Exception as exc:  # noqa: BLE001 - ledger_event_body is total; this is the belt
+            _log.exception("a feedback event could not be projected for the trust ledger")
+            raise LedgerNotDelivered(
+                f"a feedback event could not be projected onto the published LedgerEvent shape, "
+                f"so it was not written to the trust ledger at {self._publisher.url}"
+            ) from exc
+        if not self._publisher.publish(body):
+            raise LedgerNotDelivered(
+                f"the trust service at {self._publisher.url} did not take this feedback event "
+                f"({self._publisher.status()['last_failure']}). Set {ENV_TRUST_URL} to a "
+                f"reachable trust service; nothing was recorded that this process can see."
+            )
+
+
+def bind_ledger_sink(
+    base_url: str | None = None, env: Mapping[str, str] | None = None
+) -> TrustLedgerSink:
+    """Build the sink, and say at ``INFO`` where this process writes a shopper's answers.
+
+    ``INFO`` and not ``WARNING``, for the reason ``exchange.composition.bind_ledger_sink`` gives:
+    a deployment that states no ``TRUST_URL`` has not made a mistake — the default is the compose
+    service name, which is the correct address in the stack this repository ships. There is
+    nothing to warn about, only something to state, and start-up is where the person who can act
+    on it is looking.
+    """
+    url, source = trust_endpoint(base_url, env)
+    _log.info(
+        "buyer composition: %s is appended to the trust service at %s (%s). A submission that "
+        "does not land is answered 503 with the event id to retry under, never a quiet 201",
+        LEDGER_SUBJECT,
+        url,
+        _TRUST_SOURCE_PHRASE.get(source, source),
+    )
+    return TrustLedgerSink(url)
+
+
+def ensure_ledger_sink(app: Any, env: Mapping[str, str] | None = None) -> Any:
+    """Bind this app's trust-ledger sink once, and hand it back. Idempotent.
+
+    Called from ``POST /buyer/feedback`` rather than from ``create_app`` because ``main.py`` is
+    orchestrator-frozen (B6(iii)) — the same request-time start-up hook
+    :func:`ensure_configured` is, taken in the route that needs it.
+
+    ``hasattr`` and not ``getattr(..., None) is None``, exactly as :func:`configure_buyer`'s
+    ``unset`` does: a deployment or a test that wrote ``app.state.ledger_sink = None`` has said
+    something, and binding a live client over it would overrule a caller that said no. Anything
+    already bound — a test's recording double, a deployment that composed its own — wins.
+    """
+    if not hasattr(app.state, LEDGER_SINK_ATTR):
+        setattr(app.state, LEDGER_SINK_ATTR, bind_ledger_sink(env=env))
+        setattr(app.state, LEDGER_STATE_FLAG, True)
+    return getattr(app.state, LEDGER_SINK_ATTR, None)
 
 
 # =====================================================================================

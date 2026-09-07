@@ -17,6 +17,7 @@ network never routed.
 from __future__ import annotations
 
 import importlib
+import socket
 
 import pytest
 from fastapi.testclient import TestClient
@@ -62,9 +63,22 @@ def client(sink):
 
 
 @pytest.fixture()
-def sinkless_client():
-    """An app whose composition root forgot to wire a ledger sink."""
+def sinkless_client(monkeypatch):
+    """An app with no sink of its own, pointed at a trust service that answers nothing.
+
+    "No sink" stopped being reachable when `buyer_svc.composition.ensure_ledger_sink` landed:
+    the composition root binds one by default, because a seam reachable only through
+    configuration is a seam the shipped `docker compose up` never binds. What this fixture
+    still gets, and what these tests are actually about, is a deployment whose feedback has
+    nowhere to land — so `TRUST_URL` names a port nothing is listening on. Explicitly, rather
+    than by leaving the default `http://trust:8084` to fail: that default resolves through DNS,
+    which makes the test depend on the machine's resolver and on how long it takes to say no.
+    """
     reset_submitted()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        dead_port = probe.getsockname()[1]
+    monkeypatch.setenv("TRUST_URL", f"http://127.0.0.1:{dead_port}")
     main = importlib.import_module("buyer_svc.main")
     with TestClient(main.create_app()) as test_client:
         yield test_client
@@ -111,7 +125,15 @@ def test_a_submission_reaches_the_ledger_sink_over_http(client, sink) -> None:
     event = sink.events[0]
     assert str(event.kind) == "feedback"
     assert event.order_ref == "ord-http-101"
-    assert event.payload == {"matched_pitch": True, "reason": "yes_as_described"}
+    assert event.payload == {
+        "matched_pitch": True,
+        "reason": "yes_as_described",
+        # The trust routing, without which this event projects into zero trust observations and
+        # the store's posture never moves. See `feedback_payload` and
+        # `tests/test_feedback_ledger_wiring.py`, which drives the projection over the bytes.
+        "dim": "feedback_match",
+        "type": "fulfilled",
+    }
 
     body = response.json()
     assert body["event_id"] == event.event_id
@@ -190,6 +212,9 @@ def test_a_deployment_with_no_ledger_sink_answers_503(sinkless_client) -> None:
     """R14 promises the submission LANDS. Nowhere to land is a 503, never a quiet 201."""
     response = sinkless_client.post(SUBMIT, json={"order": ORDER, "response": ANSWER})
     assert response.status_code == 503, response.text
+    # And the shopper is told how to re-attempt it, rather than having their one piece of
+    # feedback burned by an outage: see `tests/test_feedback_ledger_wiring.py`.
+    assert response.json()["detail"]["retry_with_event_id"] is True
 
 
 def test_asking_for_a_prompt_needs_no_ledger_sink(sinkless_client) -> None:

@@ -16,6 +16,9 @@ from contracts import LEDGER_PAYLOAD_SHAPES, LedgerEvent, validate_ledger_payloa
 from apps.buyer.svc.src.feedback import (
     CHOICE_IDS,
     FEEDBACK_CHOICES,
+    FEEDBACK_DIMENSION,
+    FEEDBACK_NEGATIVE_TYPE,
+    FEEDBACK_POSITIVE_TYPE,
     ContradictoryFeedback,
     FeedbackAlreadySubmitted,
     FeedbackError,
@@ -142,12 +145,25 @@ def test_one_submission_emits_exactly_one_feedback_event(ledger) -> None:
 
 
 def test_the_payload_is_the_published_body_for_the_feedback_kind(ledger) -> None:
-    """T-235's defect class, checked here: one kind must not grow a second body."""
+    """T-235's defect class, checked here: one kind must not grow a second body.
+
+    The body is pinned EXACTLY, and it is four keys rather than two. The two published ones are
+    still there and still validated; the other two are the trust routing (`dim`/`type`) without
+    which `trust.ledger.replay.observations_from_events` projects this event into nothing at all
+    and R14's loop does not exist — see `feedback_payload`. Extra keys are admitted by the
+    contract by design ("a vendor body carries plenty"), so this is the published shape plus the
+    routing, not a second body for one kind.
+    """
     event = submit_feedback(ORDER, ANSWER, Sink(), ledger=ledger)
 
-    assert set(event.payload) == set(LEDGER_PAYLOAD_SHAPES["feedback"])
+    assert set(LEDGER_PAYLOAD_SHAPES["feedback"]) <= set(event.payload)
     assert validate_ledger_payload("feedback", event.payload) == []
-    assert event.payload == {"matched_pitch": True, "reason": "yes_as_described"}
+    assert event.payload == {
+        "matched_pitch": True,
+        "reason": "yes_as_described",
+        "dim": "feedback_match",
+        "type": "fulfilled",
+    }
 
 
 def test_a_payload_missing_a_published_key_would_be_caught_by_the_validator() -> None:
@@ -163,7 +179,12 @@ def test_every_published_option_produces_a_valid_event(choice, ledger) -> None:
     event = submit_feedback(
         dict(ORDER, order_ref=f"ord-{choice.id}"), {"choice": choice.id}, sink, ledger=ledger
     )
-    assert event.payload == {"matched_pitch": choice.matched_pitch, "reason": choice.id}
+    assert event.payload == {
+        "matched_pitch": choice.matched_pitch,
+        "reason": choice.id,
+        "dim": FEEDBACK_DIMENSION,
+        "type": FEEDBACK_POSITIVE_TYPE if choice.matched_pitch else FEEDBACK_NEGATIVE_TYPE,
+    }
     assert validate_ledger_payload("feedback", event.payload) == []
 
 
@@ -547,4 +568,6 @@ def test_feedback_payload_is_usable_on_its_own() -> None:
     assert feedback_payload({"choice": "never_arrived"}) == {
         "matched_pitch": False,
         "reason": "never_arrived",
+        "dim": FEEDBACK_DIMENSION,
+        "type": FEEDBACK_NEGATIVE_TYPE,
     }

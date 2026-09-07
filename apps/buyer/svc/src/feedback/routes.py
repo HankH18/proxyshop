@@ -51,8 +51,26 @@ The ledger sink is read from ``app.state.ledger_sink`` and is **not** constructe
 same reason T-072's ``/buyer/shortlist/accept`` does not construct its exchange client: a buyer
 service that mints its own ledger client cannot be pointed at a stub, and a deployment that
 forgot to wire one should hear about it as a 503 rather than discover it when the first buyer
-answers a prompt. **Nothing in this repository sets that attribute yet** — the buyer→ledger seam
-has no composition root, exactly as the buyer→exchange seam has none. Reported in NEEDS.
+answers a prompt.
+
+It IS constructed by a composition root now. ``buyer_svc.composition.ensure_ledger_sink`` is the
+request-time start-up hook this route takes before reading the attribute — the same hook, in the
+same place and for the same B6(iii) reason, that ``/buyer/shortlist/accept`` takes for its
+exchange client — and it binds the trust service's published ``POST /events`` by default while
+never replacing anything already on ``app.state``. Until it existed the sentence that used to
+end this paragraph was true: *nothing in this repository sets that attribute*, so this route
+answered **503 in every deployment**, and the one channel where a human grades a pitch was dead
+on arrival.
+
+Retrying an uncertain write
+---------------------------
+The 503 for an uncertain write has always said "retry with this ``event_id``", and until the
+composition root landed there was no way to do it: ``SubmitBody`` carried no such field, so an
+outage left the order permanently claimed in this process and every later submission was a 409.
+The body now takes an optional ``event_id``, and it is honoured **only** when it equals the id
+this process already holds for that order and that id has not landed — so a re-attempt writes
+the same row (which a ledger keyed on ``event_id`` collapses to one) while a caller cannot
+choose the id of a row on an append-only ledger. See :func:`_re_attempt_id`.
 """
 
 from __future__ import annotations
@@ -64,6 +82,7 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, StrictBool
 
+from ..composition import ensure_ledger_sink
 from ._spellings import bind_spellings
 from .errors import (
     ContradictoryFeedback,
@@ -81,7 +100,7 @@ from .errors import (
 )
 from .prompt import feedback_prompt
 from .routing import routing
-from .submission import event_view, submit_feedback
+from .submission import event_view, submit_feedback, submitted
 
 _log = logging.getLogger(__name__)
 
@@ -181,6 +200,12 @@ class SubmitBody(BaseModel):
     #: (``buyer_svc.feedback.CHOICE_IDS``) and re-stating it as an enum here would be a second
     #: copy of the option table — the drift D30 exists to prevent.
     response: dict[str, Any]
+    #: The id of a submission this client is RE-ATTEMPTING, from a previous 503's
+    #: ``{"retry_with_event_id": true, "event_id": ...}``. Ignored unless it is exactly the id
+    #: this process already holds, unlanded, for this order — see :func:`_re_attempt_id`. It is
+    #: bounded and shaped like every other identifier on this route because it is compared to a
+    #: value that reaches an append-only ledger.
+    event_id: str = Field(default="", max_length=MAX_REFERENCE, pattern=rf"{REFERENCE_PATTERN}|^$")
 
 
 class OptionView(BaseModel):
@@ -259,6 +284,38 @@ def _pseudonym_for(session_id: str | None) -> str:
         ) from exc
 
 
+def _re_attempt_id(order: Any, offered: str) -> str | None:
+    """The event id to re-attempt this order's submission under, or ``None`` for a fresh one.
+
+    The whole check is "does the id the client offered equal the one THIS PROCESS already holds,
+    unlanded, for this order?" — which is a lookup in ``FeedbackLedger``, not a decision about a
+    caller-supplied value. So a client can re-attempt exactly the submission a previous 503 told
+    it about, and cannot do anything else: an id for an order with no claim, an id that does not
+    match the claim, and an id for a submission already known to have landed are all ignored,
+    and the request proceeds as a fresh submission (which is then refused with the 409 it
+    deserves, carrying the id that already exists).
+
+    That distinction matters more than it looks. ``event_id`` becomes the row's identity on an
+    append-only, hash-chained ledger with no delete; a route that let a caller name it would let
+    anyone squat on an id, or write a second event under an id trust has already sealed.
+    """
+    wanted = offered.strip()
+    if not wanted:
+        return None
+    try:
+        order_ref = routing(order).order_ref
+    except FeedbackError:
+        # An unusable order is the submit path's refusal to make, with its own message.
+        return None
+    if not order_ref:
+        return None
+    book = submitted()
+    if book.landed(order_ref):
+        return None
+    held = book.event_for(order_ref)
+    return held if held is not None and held == wanted else None
+
+
 @router.post("/prompt", response_model=PromptResponse)
 async def prompt_route(body: PromptBody) -> PromptResponse:
     """The one structured prompt for an order, or a reason there is none (R14).
@@ -282,11 +339,21 @@ async def submit_route(
     x_buyer_session: str | None = Header(default=None, alias="X-Buyer-Session"),
 ) -> FeedbackEventView:
     """Record one answered prompt as a ``feedback`` ledger event (R14)."""
+    # The composition root, taken here for the reason `/buyer/shortlist/accept` takes its own:
+    # `main.py` is orchestrator-frozen, so there is no start-up hook to bind a seam in. It never
+    # replaces a sink somebody else wired, so a test's double and a deployment's own client both
+    # still win.
+    ensure_ledger_sink(request.app)
     sink = getattr(request.app.state, LEDGER_SINK_ATTR, None)
     pseudonym = _pseudonym_for(x_buyer_session)
+    order = body.order.model_dump()
     try:
         event = submit_feedback(
-            body.order.model_dump(), body.response, sink, buyer_pseudonym=pseudonym
+            order,
+            body.response,
+            sink,
+            buyer_pseudonym=pseudonym,
+            event_id=_re_attempt_id(order, body.event_id),
         )
     except UnusableOrder as exc:
         raise HTTPException(status_code=_HTTP_422, detail=str(exc)) from exc

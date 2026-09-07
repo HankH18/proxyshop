@@ -2,8 +2,8 @@
 
     >>> from apps.buyer.svc.src.feedback import submit_feedback
     >>> event = submit_feedback(order, {"choice": "yes_as_described"}, sink)
-    >>> event.kind, event.order_ref, event.payload
-    (<LedgerEventKind.feedback: 'feedback'>, 'ord-e7-101', {'matched_pitch': True, 'reason': 'yes_as_described'})
+    >>> event.kind, event.order_ref, sorted(event.payload)
+    (<LedgerEventKind.feedback: 'feedback'>, 'ord-e7-101', ['dim', 'matched_pitch', 'reason', 'type'])
 
 "Lands as a ledger event" is the whole requirement, and the two halves of it are equally
 load-bearing: a *real event on the ledger*, not a row in a table this service owns, and the
@@ -80,7 +80,10 @@ from .routing import ORDER_REF_FIELDS, Routing, routing
 _log = logging.getLogger(__name__)
 
 __all__ = [
+    "FEEDBACK_DIMENSION",
     "FEEDBACK_KIND",
+    "FEEDBACK_NEGATIVE_TYPE",
+    "FEEDBACK_POSITIVE_TYPE",
     "LEDGER_SINK_METHODS",
     "MAX_ECHOED_CHOICE",
     "RESPONSE_CHOICE_FIELDS",
@@ -96,6 +99,43 @@ __all__ = [
 #: The one ledger kind this package produces. A string rather than the enum where it is compared,
 #: because ``LedgerEventKind`` is a ``StrEnum`` and the wire spells it plainly.
 FEEDBACK_KIND = "feedback"
+
+#: The trust dimension a routed buyer's answer lands on, and the two observation types it can
+#: become. These three keys are what turn a ``feedback`` row into a trust OBSERVATION, and
+#: without them R14's loop does not exist — see :func:`feedback_payload` for the measurement.
+#:
+#: ``feedback_match`` is one of ``contracts.TRUST_DIMENSIONS`` (D53's closed six) and is the only
+#: dimension buyer feedback may touch: the approved manifest says it "takes NO verification
+#: outcome at all. It is the post-purchase, buyer-reported match between pitch and delivery
+#: (R14), cross-checked against return behaviour."
+FEEDBACK_DIMENSION = "feedback_match"
+
+#: What "it matched the pitch" becomes. ``fulfilled`` and deliberately not ``verified``: the four
+#: verification statuses are what a claim verifier decides about a catalog fact, and this
+#: dimension takes none of them. ``fulfilled`` is the published positive for "a promise the
+#: transaction record shows was kept", which is what a routed buyer is reporting.
+FEEDBACK_POSITIVE_TYPE = "fulfilled"
+
+#: What "it did not match the pitch" becomes. The approved manifest's ``dishonest_store``
+#: behaviour ``pitch_delivery_mismatch`` is ``{dim: feedback_match, type: mismatch_return}``,
+#: glossed there as "the buyer reports that what arrived does not match what was pitched".
+#:
+#: KNOWN GAP, stated rather than papered over: the manifest's behaviour is a mismatch report
+#: *and a return*, and the published vocabulary has no second buyer-reported negative — so
+#: ``never_arrived`` and ``not_as_described`` land on the same 1.5 as a returned mismatch.
+#: Splitting them needs a new published weight, which is a manifest change and not this
+#: service's to make.
+FEEDBACK_NEGATIVE_TYPE = "mismatch_return"
+
+#: The three names above are spelled HERE rather than imported from ``apps/trust``, and that is
+#: a dependency rule rather than a convenience: the buyer service does not depend on the trust
+#: service's package (it reaches it over HTTP, through ``proxyshop_support.trust_ledger``), and
+#: importing the scorer to learn two strings would put a buyer deployment's import graph through
+#: the trust engine. Ground truth is ``fixtures/manifest.json`` (D18/A3) — the human-approved
+#: document the scorer itself reads its weights from — and
+#: ``tests/test_feedback_ledger_wiring.py`` compares all three against it and against
+#: ``contracts.TRUST_DIMENSIONS``, so a drift is a failure in this lane rather than a silently
+#: unscored observation.
 
 #: Method names a ledger sink may expose, most specific first. The first callable one wins; a
 #: bare callable sink is the last resort. Mirrors ``buyer_svc.accept.EXCHANGE_ACCEPT_METHODS``.
@@ -310,14 +350,53 @@ def _chosen(response: Any) -> FeedbackChoice:
 
 
 def feedback_payload(response: Any) -> dict[str, Any]:
-    """The published ``feedback`` body for one answered prompt.
+    """The published ``feedback`` body for one answered prompt, plus its trust routing.
 
-    Exactly the two keys ``contracts.LEDGER_PAYLOAD_SHAPES["feedback"]`` publishes, and nothing
-    else. ``matched_pitch`` is the boolean ``trust.feedback.engine._is_positive`` reads;
-    ``reason`` is the option id, which is a closed vocabulary rather than prose.
+    The two keys ``contracts.LEDGER_PAYLOAD_SHAPES["feedback"]`` publishes — ``matched_pitch``,
+    the boolean ``trust.feedback.engine._is_positive`` reads, and ``reason``, the option id from
+    a closed vocabulary rather than prose — and the ``dim``/``type`` pair that makes the row a
+    trust OBSERVATION rather than an inert record of one.
+
+    WHY THE ROUTING IS HERE, WHICH IS THE WHOLE OF R14'S SECOND HALF
+    ----------------------------------------------------------------
+    ``trust.ledger.replay.observations_from_events`` is the one projection the trust scorer,
+    ``GET /events/replay?snapshots=true`` and ``POST /events``' own poison check all run, and it
+    makes an observation **only** from an event whose payload names both a ``dim`` and a
+    ``type``. Measured on this tree before these two keys existed, on a payload this function
+    itself produced::
+
+        >>> observations_from_events([{"kind": "feedback", "store_id": "st-1", "ts": "...",
+        ...                            "payload": {"matched_pitch": True,
+        ...                                        "reason": "yes_as_described"}}])
+        []
+
+    So a shopper's answer landed on the append-only ledger, was replayed forever, and moved no
+    store's posture by any amount. The loop R14 exists to close did not exist.
+
+    The translation belongs to the EMITTER by precedent and by argument. ``trust.reconcile.
+    engine.observation_events`` says it in its own docstring — "these events are shaped to what
+    that consumer already requires, rather than the consumer being asked to learn what a
+    ``reconciled`` payload means" — and this service is the emitter of ``feedback``. Extra keys
+    are admitted by design (``contracts.validate_ledger_payload``: "a vendor body carries
+    plenty"), so the published shape is satisfied exactly as before.
+
+    NO ``weight``, AND THAT IS A DECISION
+    --------------------------------------
+    R14 weights feedback by buyer track record and cross-checks it against return behaviour.
+    The buyer service can see neither: it holds no return record and no cross-order history of a
+    pseudonym. An absent ``weight`` is read by the scorer as exactly ``1.0``, which is
+    ``trust.feedback.engine.BASE_FEEDBACK_WEIGHT`` — "the weight of one accepted, uncontradicted
+    piece of feedback" — so what is emitted is the honest base case, and the discount for a
+    contradicting return stays where the evidence for it is. Inventing a number here would be a
+    second opinion about a quantity D49 gives to exactly one owner.
     """
     choice = _chosen(response)
-    return {"matched_pitch": choice.matched_pitch, "reason": choice.id}
+    return {
+        "matched_pitch": choice.matched_pitch,
+        "reason": choice.id,
+        "dim": FEEDBACK_DIMENSION,
+        "type": FEEDBACK_POSITIVE_TYPE if choice.matched_pitch else FEEDBACK_NEGATIVE_TYPE,
+    }
 
 
 def _sink_entrypoint(sink: Any) -> tuple[str, Any]:

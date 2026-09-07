@@ -5,8 +5,8 @@
     True
     >>> prompt = feedback_prompt(order)                    # ONE question, no free-text field
     >>> event = submit_feedback(order, {"choice": "yes_as_described"}, ledger_sink)
-    >>> event.kind, event.payload
-    (<LedgerEventKind.feedback: 'feedback'>, {'matched_pitch': True, 'reason': 'yes_as_described'})
+    >>> event.kind, event.payload["matched_pitch"], event.payload["dim"]
+    (<LedgerEventKind.feedback: 'feedback'>, True, 'feedback_match')
 
 SPEC R14: "Post-purchase feedback: only network-routed buyers, one structured prompt ('did it
 match the pitch?'), weighted by buyer track record, cross-checked against return behavior." The
@@ -26,11 +26,18 @@ takes on the way to the ledger* — and both are promises about **authority**:
   a closed set of five options, with no free-text field anywhere on it — and
   :mod:`buyer_svc.feedback.submission` re-checks that at the write boundary, because the prompt
   having no text box does not stop a client posting a sentence in ``choice``.
-* **It lands as a ledger event.** Not a row in a table this service owns. The body is the one
-  ``contracts.LEDGER_PAYLOAD_SHAPES["feedback"]`` publishes — ``("matched_pitch", "reason")`` —
-  and ``contracts.validate_ledger_payload`` is called on every event before it leaves. See
-  :mod:`buyer_svc.feedback.submission` for the live defect elsewhere in this repo that says why
-  validating at the producing boundary is not ceremony.
+* **It lands as a ledger event, on a trust dimension.** Not a row in a table this service owns.
+  The body carries the two keys ``contracts.LEDGER_PAYLOAD_SHAPES["feedback"]`` publishes —
+  ``("matched_pitch", "reason")`` — and ``contracts.validate_ledger_payload`` is called on every
+  event before it leaves. See :mod:`buyer_svc.feedback.submission` for the live defect elsewhere
+  in this repo that says why validating at the producing boundary is not ceremony. It carries
+  ``dim``/``type`` alongside them, because an event that names neither projects into **zero**
+  trust observations and R14's loop then does not exist; :func:`feedback_payload` holds the
+  measurement.
+* **It is DELIVERED, by a composition root.** ``buyer_svc.composition.ensure_ledger_sink`` binds
+  ``app.state.ledger_sink`` to the trust service's published ``POST /events`` by default, so a
+  deployment nobody configured still records feedback. Before it existed this route answered
+  503 in every deployment in this repository.
 
 What the neighbouring code consumes
 -----------------------------------
@@ -92,7 +99,10 @@ from .routing import (
     routing,
 )
 from .submission import (
+    FEEDBACK_DIMENSION,
     FEEDBACK_KIND,
+    FEEDBACK_NEGATIVE_TYPE,
+    FEEDBACK_POSITIVE_TYPE,
     LEDGER_SINK_METHODS,
     RESPONSE_CHOICE_FIELDS,
     RESPONSE_QUESTION_FIELDS,
@@ -108,7 +118,10 @@ __all__ = [
     "CHOICES_BY_ID",
     "CHOICE_IDS",
     "FEEDBACK_CHOICES",
+    "FEEDBACK_DIMENSION",
     "FEEDBACK_KIND",
+    "FEEDBACK_NEGATIVE_TYPE",
+    "FEEDBACK_POSITIVE_TYPE",
     "LEDGER_SINK_METHODS",
     "ORDER_REF_FIELDS",
     "PROMPT_INPUT_TYPE",
