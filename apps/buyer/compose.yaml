@@ -46,6 +46,16 @@ services:
       # The exchange is reached by service name inside the network, never by localhost.
       EXCHANGE_URL: "${EXCHANGE_URL:-http://exchange:8083}"
       TRUST_URL: "${TRUST_URL:-http://trust:8084}"
+      # R5 magic-link sign-in. With these unset the auth routes answer a deliberate 503
+      # and the journey page shows the service's own words, rather than failing blankly.
+      #
+      # _BASE_URL must be the buyer UI's ORIGIN ROOT, not a sub-path: the page reads the
+      # token off its own `?token=` query string, there is no server-side callback route,
+      # and the static mount has no SPA fallback — so a sub-path base URL 404s before the
+      # page ever loads and the mailed link is dead.
+      PROXYSHOP_BUYER_MAGIC_LINK_SMTP_URL: "${PROXYSHOP_BUYER_MAGIC_LINK_SMTP_URL:-}"
+      PROXYSHOP_BUYER_MAGIC_LINK_SENDER: "${PROXYSHOP_BUYER_MAGIC_LINK_SENDER:-}"
+      PROXYSHOP_BUYER_MAGIC_LINK_BASE_URL: "${PROXYSHOP_BUYER_MAGIC_LINK_BASE_URL:-http://localhost:${BUYER_SVC_PORT:-8081}/}"
     depends_on:
       postgres:
         condition: service_healthy

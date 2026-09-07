@@ -37,6 +37,13 @@ services:
       SHOPIFY_API_KEY: "${SHOPIFY_API_KEY:-}"
       SHOPIFY_API_SECRET: "${SHOPIFY_API_SECRET:-}"
       MERCHANT_APP_URL: "${MERCHANT_APP_URL:-http://localhost:8082}"
+      # Where this merchant publishes verified order webhooks as ledger events. The
+      # composition root falls back to this same default, so the shipped stack works with
+      # the variable unset; naming it here is what makes it OVERRIDABLE for a deployment
+      # whose trust service is not the compose service. An unreachable endpoint is counted
+      # and logged, never raised — a raising sink is answered 500 and Shopify retries it
+      # for 48 hours.
+      TRUST_URL: "${TRUST_URL:-http://trust:8084}"
       # The bearer token the administrative routes require. It appeared in NO compose
       # fragment and in NO .env.example until now, so discount-code minting and every
       # `/install/shops`, `/stores/{id}/envelope` and `/stores/{id}/kill` call was

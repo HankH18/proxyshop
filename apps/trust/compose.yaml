@@ -47,6 +47,13 @@ services:
       PROXYSHOP_PG_DSN_TRUST_RW: "postgresql://trust_rw@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
       PROXYSHOP_PG_DSN_APP: "postgresql://app@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
       PROXYSHOP_ROLE_PASSWORD: "${PROXYSHOP_ROLE_PASSWORD:-}"
+      # R13's address book: a JSON object {store_id: base_url} naming where each store's
+      # agent receives its own trust deltas. There is deliberately NO default and NO
+      # wildcard. Unset is a working stack that computes deltas and delivers none, which is
+      # the safe failure: the only alternative to an address is a guess, and a guessed
+      # address is how one store's trust movement reaches a competitor. A store absent from
+      # this map is simply not told.
+      TRUST_STORE_AGENT_ENDPOINTS: "${TRUST_STORE_AGENT_ENDPOINTS:-}"
       # NO REDIS_URL, and no `depends_on: redis` below. Both were here and both were
       # decoration: this service never opens a Redis connection. Measured —
       # `git grep -n REDIS_URL -- apps/trust/src` is empty, and the only redis name anywhere

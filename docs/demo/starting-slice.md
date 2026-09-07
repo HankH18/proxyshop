@@ -284,7 +284,7 @@ live beat cannot show.
 A filled slot is a `shown` event in the frozen vocabulary — but nothing under `apps/`,
 `packages/` or `services/` writes one. The scripted proof in section 4 emits its own from the
 ranker's real slots, and the S1 flow suite under `e2e/` guards that: it searches the tree for a
-producer of `shown`, `checkout_pixel` or `claim_verified` and turns red the day one appears. So
+producer of `shown`, `checkout_pixel` or `claim_verified` and turns red as soon as one appears. So
 the chain 3.8 serves has no `shown` row in it, and that absence is measured rather than assumed.
 
 ### 3.5 Acceptance, the single-use code and the simulated redirect
