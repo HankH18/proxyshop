@@ -8,6 +8,9 @@ resolve to the same objects — see :mod:`trust._shared._binding`.
 ==============================  ========================================================
 :func:`push_trust_event`        one delta -> one send, to the affected store only.
 :func:`trust_event_payload`     that payload, without sending it.
+:func:`delta_for_event`         what ONE stored ledger event did to a store's posture.
+:func:`announce_trust_event`    that delta, pushed to that store's agent. Never raises.
+:class:`StoreAgentSink`         the addressed, bounded, non-raising HTTP transport.
 :func:`accept_feedback`         the R14 routed-buyer gate, and the weight it earns.
 :func:`feedback_observation`    that verdict -> the weighted observation the scorer reads.
 :func:`scrub`                   the recursive buyer-identity scrub the push applies.
@@ -41,6 +44,12 @@ if __name__ in _SPELLINGS and __name__ != _PRIMARY_SPELLING:
 # E402 below is the point of the block above: the sequencing has to run BEFORE the first
 # relative import, because it is the eager imports that build the second copy.
 from .._shared._binding import bind_submodules as _bind_submodules  # noqa: E402
+from .deltas import (  # noqa: E402
+    MAX_DELTA_HISTORY_EVENTS,
+    HistoryTooLong,
+    delta_for_event,
+    observation_of,
+)
 from .engine import (  # noqa: E402
     BASE_FEEDBACK_WEIGHT,
     DISCLOSURE_POLICY,
@@ -56,6 +65,17 @@ from .engine import (  # noqa: E402
     push_trust_event,
     trust_event_payload,
 )
+from .notify import (  # noqa: E402
+    DEFAULT_PUSH_TIMEOUT_SECONDS,
+    ENV_STORE_AGENT_ENDPOINTS,
+    MAX_UNDELIVERED_TRUST_EVENTS,
+    TRUST_EVENT_PATH,
+    StoreAgentSink,
+    announce_trust_event,
+    store_agent_endpoints,
+    store_history_reader,
+    trust_event_url,
+)
 from .scrub import (  # noqa: E402
     IDENTITY_KEY_SUBSTRINGS,
     IDENTITY_KEYS,
@@ -66,23 +86,36 @@ from .scrub import (  # noqa: E402
 
 __all__ = [
     "BASE_FEEDBACK_WEIGHT",
+    "DEFAULT_PUSH_TIMEOUT_SECONDS",
     "DISCLOSURE_POLICY",
+    "ENV_STORE_AGENT_ENDPOINTS",
     "FEEDBACK_DIMENSION",
     "FEEDBACK_NEGATIVE_TYPE",
     "FEEDBACK_POSITIVE_TYPE",
     "IDENTITY_KEYS",
     "IDENTITY_KEY_SUBSTRINGS",
+    "MAX_DELTA_HISTORY_EVENTS",
+    "MAX_UNDELIVERED_TRUST_EVENTS",
     "REDACTED",
     "RETURN_CONTRADICTION_FACTOR",
+    "TRUST_EVENT_PATH",
     "TRUST_EVENT_SCHEMA_VERSION",
     "TRUST_REPORT_KEY",
     "FeedbackRejected",
+    "HistoryTooLong",
+    "StoreAgentSink",
     "accept_feedback",
+    "announce_trust_event",
+    "delta_for_event",
     "feedback_observation",
+    "observation_of",
     "push_trust_event",
     "scrub",
     "scrub_report",
+    "store_agent_endpoints",
+    "store_history_reader",
     "trust_event_payload",
+    "trust_event_url",
 ]
 
 

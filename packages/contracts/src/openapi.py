@@ -95,6 +95,10 @@ PINNED_ROUTES: tuple[Route, ...] = (
     Route("merchant", "get", "/install"),
     Route("merchant", "get", "/install/callback"),
     Route("merchant", "get", "/install/shops"),
+    # R13's receiving end: the door trust pushes one store's own trust delta through.
+    # Reachable by anyone who can reach a hosted agent, so it is declared here for the
+    # same reason the sixteen above are.
+    Route("store-agent", "post", "/v1/trust-events"),
 )
 
 _HTTP_METHODS = ("get", "put", "post", "delete", "patch", "head", "options", "trace")

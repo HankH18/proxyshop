@@ -74,6 +74,7 @@ above), which is why it is now a claim with gates behind it rather than a commen
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable, Coroutine, Mapping
 from typing import Any
@@ -100,10 +101,12 @@ __all__ = [
     "MAX_EVENT_PAGE",
     "MAX_IDENTIFIER_LENGTH",
     "MAX_SNAPSHOT_REPLAY_EVENTS",
+    "TRUST_EVENT_SINK_ATTR",
     "UNRENDERABLE_IDENTIFIER_CHARACTERS",
     "EventIn",
     "router",
     "store_for",
+    "trust_event_sink",
 ]
 
 #: How many events a read returns when the caller does not say. **A default is not a
@@ -281,6 +284,10 @@ class _BoundedBodyRoute(APIRoute):
         return bounded
 
 
+#: This module's logger. Named ``trust.events.routes`` by ``__name__``, which is what an
+#: operator greps for to see why a store was, or was not, told its score moved.
+_log = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/events", tags=["ledger"], route_class=_BoundedBodyRoute)
 
 
@@ -325,6 +332,86 @@ def store_for(request: Request) -> Any:
         store = default_store()
         request.app.state.event_store = store
     return store
+
+
+#: Set on ``app.state`` once the address book has been resolved, so an application with no
+#: store agents configured re-reads the environment once rather than on every append.
+#: ``None`` is a resolved answer and is cached as one.
+TRUST_EVENT_SINK_ATTR = "trust_event_sink"
+
+
+def trust_event_sink(request: Request) -> Any:
+    """The sink R13 pushes one store's trust delta through, or ``None``.
+
+    Resolution order mirrors :func:`store_for`: whatever was injected on
+    ``app.state.trust_event_sink`` wins, otherwise one is built from
+    :data:`~trust.feedback.notify.ENV_STORE_AGENT_ENDPOINTS` and cached on the application.
+
+    ``None`` — the default in every deployment that has not been told where any store's agent
+    answers — means this door notifies nobody and behaves exactly as it did before R13 was
+    wired. That is deliberate: the alternative to an address is a guess, and a guessed address
+    is how one store's trust movement reaches a competitor.
+
+    The import is function-local for the same reason ``_unreplayable_field``'s is: the ledger
+    writer must stay importable and usable when the scorer is not installed, and
+    ``trust.feedback`` reaches the scorer to compute a delta. An ``ImportError`` here is
+    therefore "this build cannot compute deltas", which is a service that appends and does not
+    notify — never a service that refuses appends.
+    """
+    if hasattr(request.app.state, TRUST_EVENT_SINK_ATTR):
+        return getattr(request.app.state, TRUST_EVENT_SINK_ATTR)
+    sink: Any = None
+    try:
+        from ..feedback.notify import StoreAgentSink, store_agent_endpoints  # noqa: PLC0415
+
+        endpoints = store_agent_endpoints()
+        sink = StoreAgentSink(endpoints) if endpoints else None
+    except Exception:  # noqa: BLE001 - a notifier that cannot be built notifies nobody
+        _log.warning(
+            "the trust-event sink could not be built; appends continue and no store agent "
+            "will be told what its score did",
+            exc_info=True,
+        )
+        sink = None
+    setattr(request.app.state, TRUST_EVENT_SINK_ATTR, sink)
+    return sink
+
+
+def _announce(request: Request, store: Any, outcome: Any) -> None:
+    """Tell the affected store what the event just appended did to its posture.
+
+    **This cannot fail the append, and that is the whole reason it is a function.** The event
+    is already in the hash chain by the time this runs; a store agent that is down, slow or
+    answering 500 is an operational problem with a notification, and turning it into a 5xx
+    would tell the producer that a durable, chained, verifiable event was refused.
+    ``trust.feedback.announce_trust_event`` documents itself as never raising and the
+    ``except`` here is the second belt on the same trousers — it covers this function's own
+    argument-building, which is code that can be wrong too.
+
+    Only on an INSERT. A duplicate ``event_id`` answers ``200`` off the row already stored,
+    and re-notifying on it would charge a store twice for one event the moment its agent
+    starts counting deltas -- the exact "exactly once, to exactly one" property
+    ``push_trust_event`` is written around.
+    """
+    if not outcome.inserted:
+        return
+    sink = trust_event_sink(request)
+    if sink is None:
+        return
+    try:
+        from ..feedback.notify import announce_trust_event, store_history_reader  # noqa: PLC0415
+
+        announce_trust_event(
+            outcome.event,
+            history_reader=store_history_reader(store, before_seq=outcome.seq),
+            sink=sink,
+        )
+    except Exception:  # noqa: BLE001 - see the docstring
+        _log.warning(
+            "notifying the affected store about event %s failed; the event is in the ledger",
+            str(outcome.event.get("event_id", "unknown")),
+            exc_info=True,
+        )
 
 
 def _refuse(exc: EventServiceError) -> HTTPException:
@@ -701,6 +788,12 @@ def post_event(
         outcome = append(store, body)
     except EventServiceError as exc:
         raise _refuse(exc) from exc
+
+    # R13: an event that moves a trust dimension is told to the affected store, and to no
+    # other. Inline rather than backgrounded, so the notification is bounded by the same
+    # request the event arrived on; `_announce` is what guarantees it cannot cost that
+    # request its 201.
+    _announce(request, store, outcome)
 
     response.status_code = 201 if outcome.inserted else 200
     response.headers["Idempotent-Replay"] = "false" if outcome.inserted else "true"

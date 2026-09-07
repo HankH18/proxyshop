@@ -102,6 +102,107 @@
           }
         }
       }
+    },
+    "/v1/trust-events": {
+      "post": {
+        "operationId": "ingestTrustEvent",
+        "summary": "Take one pushed trust delta into this store's posture.",
+        "description": "TRUST \u2192 SELLER, and to the affected seller ONLY (R13). The trust service recomputes this store's posture with and without one ledger event, and pushes the difference here; a broadcast would leak one store's trust movement to its competitors, so an agent answers 409 to an event naming any store but its own. Unsigned, for the same reason POST /v1/bid-requests is: this is the platform addressing a hosted agent by URL, not an external seller crossing the trust boundary.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/TrustEventPayload" },
+              "example": {
+                "store_id": "store-1",
+                "event": {
+                  "event_id": "ev-0007",
+                  "ts": "2026-01-01T00:00:00Z",
+                  "kind": "feedback",
+                  "store_id": "store-1",
+                  "order_ref": "ord-0001",
+                  "payload": {
+                    "dim": "feedback_match",
+                    "type": "contradicted",
+                    "observed_at": "2026-01-01T00:00:00Z",
+                    "trust_report": {
+                      "schema_version": "trust-event-1.0.0",
+                      "reason_code": "contradicted",
+                      "identity_disclosed": false,
+                      "redacted_fields": 0,
+                      "policy": "R13/R5: the affected store learns what moved and never who moved it."
+                    }
+                  }
+                },
+                "dim": "feedback_match",
+                "delta": -0.1666666666666667,
+                "pseudonymous_context": { "cluster_id": "cluster-serum", "pseudonym": "psn-0001" }
+              },
+              "x-example-schema": "TrustEventPayload"
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Ingested. The body is this agent's posture AFTER the event \u2014 an empty 200 would make an ingested event indistinguishable from a discarded one to the only caller that can see this door.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["store_id", "dim", "delta", "event_id", "posture"],
+                  "properties": {
+                    "store_id": { "type": "string", "minLength": 1 },
+                    "dim": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/TrustDimension" },
+                    "delta": { "type": "number" },
+                    "event_id": { "type": "string", "minLength": 1 },
+                    "posture": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["stance", "signals"],
+                      "properties": {
+                        "stance": { "type": "string", "enum": ["guarded", "reinforced", "neutral"] },
+                        "signals": {
+                          "type": "array",
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["dim", "net_delta", "observations"],
+                            "properties": {
+                              "dim": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/TrustDimension" },
+                              "net_delta": { "type": "number" },
+                              "observations": { "type": "integer", "minimum": 0 }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "store_id": "store-1",
+                  "dim": "feedback_match",
+                  "delta": -0.1666666666666667,
+                  "event_id": "ev-0007",
+                  "posture": {
+                    "stance": "guarded",
+                    "signals": [{ "dim": "feedback_match", "net_delta": -0.1666666666666667, "observations": 1 }]
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The event names a store this agent does not advocate for. Sealed state is per store; absorbing a neighbour's feedback would corrupt the posture of both and nothing downstream could detect it."
+          },
+          "422": {
+            "description": "The body is not a readable TrustEventPayload, or its delta is not a finite number (one NaN blinds a dimension permanently)."
+          },
+          "503": {
+            "description": "This process was never given a store context, so it advocates for no store and has no posture to move."
+          }
+        }
+      }
     }
   }
 }

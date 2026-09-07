@@ -72,6 +72,8 @@ export const PINNED_ROUTES: readonly Route[] = [
   {domain: "merchant", method: "get", path: "/install"},
   {domain: "merchant", method: "get", path: "/install/callback"},
   {domain: "merchant", method: "get", path: "/install/shops"},
+  // R13's receiving end: the door trust pushes one store's own trust delta through.
+  {domain: "store-agent", method: "post", path: "/v1/trust-events"},
 ];
 
 const HTTP_METHODS = ["get", "put", "post", "delete", "patch", "head", "options", "trace"] as const;
