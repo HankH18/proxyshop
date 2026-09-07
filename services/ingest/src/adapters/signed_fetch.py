@@ -56,10 +56,12 @@ from .base import (
 from .budgets import BudgetExceeded, CrawlLedger
 from .hashing import canonical_json_hash, has_changed
 from .mapping import (
+    MEDIA_PER_PRODUCT_LIMIT,
     build_upserts,
     coerce_availability,
     coerce_price,
     composite_hash,
+    image_records,
     native_product_key,
     price_is_stated,
     product_id_for,
@@ -69,7 +71,7 @@ from .mapping import (
 )
 from .netguard import FetchRefused
 from .robots import USER_AGENT, may_fetch, robots_url, robots_verdict_for_status
-from .transport import HTTPResult, RequestSigner, SafeHTTPClient, TransportError
+from .transport import HTTPResult, HTTPTransport, RequestSigner, SafeHTTPClient, TransportError
 
 __all__ = ["SignedFetchAdapter"]
 
@@ -90,8 +92,13 @@ class SignedFetchAdapter:
     Args:
         user_agent: the identified crawler agent string (C6).
         signer: optional HMAC signer, so a merchant can verify a crawl is really ours.
-        client: a pre-built transport; one is constructed per request when omitted, which
-            is what keeps the per-request SSRF policy in :class:`CatalogRequest` effective.
+        client: a pre-built transport satisfying
+            :class:`~ingest.adapters.transport.HTTPTransport`; one is constructed per request
+            when omitted, which is what keeps the per-request SSRF policy in
+            :class:`CatalogRequest` effective. This is the seam
+            :class:`~ingest.adapters.recorded.RecordedTransport` uses to replay a recorded
+            crawl without opening a socket — everything above ``client.fetch`` stays the
+            live path.
         clock: returns the ISO-8601 observation timestamp. Injectable for determinism.
         session_password_path: the storefront password form path.
     """
@@ -101,7 +108,7 @@ class SignedFetchAdapter:
         *,
         user_agent: str = USER_AGENT,
         signer: RequestSigner | None = None,
-        client: SafeHTTPClient | None = None,
+        client: HTTPTransport | None = None,
         clock=_now,
         session_password_path: str = PASSWORD_PATH,
     ) -> None:
@@ -232,7 +239,7 @@ class SignedFetchAdapter:
 
     def _unlock(
         self,
-        client: SafeHTTPClient,
+        client: HTTPTransport,
         base: str,
         request: CatalogRequest,
         ledger: CrawlLedger,
@@ -275,7 +282,7 @@ class SignedFetchAdapter:
 
     def _read_catalog(
         self,
-        client: SafeHTTPClient,
+        client: HTTPTransport,
         base: str,
         request: CatalogRequest,
         ledger: CrawlLedger,
@@ -319,6 +326,7 @@ class SignedFetchAdapter:
             page += 1
 
         products: list[ProductRecord] = []
+        truncated_galleries = 0
         for entry, page_url, entry_hash in raw:
             if not native_product_key(entry):
                 # `product_id_for` derives the node id from the store's own identifier, and an
@@ -356,15 +364,28 @@ class SignedFetchAdapter:
             composite = composite_hash(entry_hash, page_hash)
             product_id = self._product_id(request.store_id, entry)
             known = request.known_hashes.get(f"product:{product_id}")
-            products.append(
-                self._to_record(
-                    request.store_id,
-                    entry,
-                    jsonld,
-                    product_url or page_url,
-                    composite,
-                    changed=has_changed(known, composite),
-                )
+            # NOT `record`: that name is the resource-recording closure above, and shadowing
+            # it here made every product-page fetch raise `'ProductRecord' object is not
+            # callable` — measured across 21 tests.
+            product_record, published_images = self._to_record(
+                request.store_id,
+                entry,
+                jsonld,
+                product_url or page_url,
+                composite,
+                changed=has_changed(known, composite),
+            )
+            products.append(product_record)
+            if published_images > len(product_record.images):
+                truncated_galleries += 1
+
+        if truncated_galleries:
+            # Aggregated, not per product: 88 of the 3,093 recorded products publish more
+            # than the limit, and 88 warnings would bury the ones that mean something.
+            warnings.append(
+                f"{truncated_galleries} product(s) published more than "
+                f"{MEDIA_PER_PRODUCT_LIMIT} images; kept the first {MEDIA_PER_PRODUCT_LIMIT} "
+                f"by catalogue position"
             )
         return products
 
@@ -387,7 +408,7 @@ class SignedFetchAdapter:
         digest: str,
         *,
         changed: bool,
-    ) -> ProductRecord:
+    ) -> tuple[ProductRecord, int]:
         """Merge one ``products.json`` entry with its page's JSON-LD into one record.
 
         ``products.json`` wins on anything it states; JSON-LD fills the gaps (brand,
@@ -397,6 +418,11 @@ class SignedFetchAdapter:
         not by whether the value survived coercion: a variant whose ``products.json`` price is
         hostile keeps no price, rather than inheriting the page's. Otherwise a store could
         choose which of its surfaces prices the product by making the other unusable.
+
+        Returns:
+            ``(record, images_published)`` — the second is how many images the catalogue
+            listed, before :data:`~ingest.adapters.mapping.MEDIA_PER_PRODUCT_LIMIT` bounded
+            them, so the caller can report a truncated gallery instead of hiding it.
         """
         native = native_product_key(entry)
         product_id = self._product_id(store_id, entry)
@@ -447,6 +473,7 @@ class SignedFetchAdapter:
             )
 
         categories = tuple(c for c in [str(entry.get("product_type") or "").strip()] if c)
+        images, published = image_records(entry)
         return ProductRecord(
             product_id=product_id,
             canonical_name=title,
@@ -458,7 +485,8 @@ class SignedFetchAdapter:
             changed=changed,
             variants=tuple(variants),
             categories=categories,
-        )
+            images=images,
+        ), published
 
     # -- JSON-LD ---------------------------------------------------------------------------
 

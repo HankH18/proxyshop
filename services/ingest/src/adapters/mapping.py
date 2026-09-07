@@ -36,19 +36,23 @@ from collections.abc import Mapping
 from typing import Any
 from urllib.parse import SplitResult, urlsplit
 
-from ..graph.model import Category, Offer, Product, Source, Store, Variant
-from .base import CatalogSnapshot, UpsertOp
+from ..graph.model import Category, MediaAsset, Offer, Product, Source, Store, Variant
+from .base import CatalogSnapshot, ImageRecord, UpsertOp
 from .hashing import content_hash
 
 __all__ = [
     "AVAILABILITY_VOCABULARY",
+    "MEDIA_PER_PRODUCT_LIMIT",
     "build_upserts",
     "catalog_source",
     "coerce_availability",
     "coerce_price",
     "composite_hash",
+    "image_records",
+    "media_asset_id_for",
     "native_key",
     "native_product_key",
+    "on_seller_domain",
     "price_is_stated",
     "product_id_for",
     "safe_host",
@@ -56,6 +60,12 @@ __all__ = [
     "stable_id",
     "variant_id_for",
 ]
+
+#: How many image records one product may contribute to the graph. Merchant-controlled and
+#: therefore bounded here rather than trusted: see :func:`image_records` for the measurement
+#: behind the number (96.4% of the recorded corpus kept, 2.8% of its products truncated,
+#: worst real product 81 images).
+MEDIA_PER_PRODUCT_LIMIT = 12
 
 #: ``1,234`` and ``1,234,567.89`` are prices; ``12,50`` and ``1,2345`` are not. A comma that
 #: does not group digits in threes is a decimal comma or a typo, and either way the number it
@@ -282,6 +292,113 @@ def variant_id_for(store_id: str, native_product: str, native_variant: str) -> s
     return f"var_{stable_id(store_id, native_product, native_variant)}"
 
 
+def media_asset_id_for(store_id: str, product_id: str, native_image: str) -> str:
+    """The graph's stable ID for one image record of one store's product.
+
+    Keyed on the *graph* product id rather than the store's raw product key, because
+    :func:`product_id_for` already folds (store, native key) into it — so this stays stable
+    across adapters for exactly the reason a variant id does, without a second copy of the
+    native-key rule. ``native_image`` falls back to the image URL upstream, which is what
+    keeps a re-crawl idempotent for a store that numbers no images.
+    """
+    return f"mda_{stable_id(store_id, product_id, native_image)}"
+
+
+def image_records(
+    entry: Mapping[str, Any], *, limit: int = MEDIA_PER_PRODUCT_LIMIT
+) -> tuple[tuple[ImageRecord, ...], int]:
+    """Read ``images[]`` off a catalogue entry into bounded, ordered
+    :class:`~ingest.adapters.base.ImageRecord` values.
+
+    Shared by both adapters for the same reason the rest of this module is (C6): a gallery
+    read two ways is a gallery that lands two ways.
+
+    **The bound is not politeness, it is a ceiling on a hostile input.** ``images[]`` is
+    merchant-controlled and unbounded — a store could publish ten thousand URLs and turn one
+    product into ten thousand graph nodes. Measured on the recorded corpus
+    (``fixtures/real-catalogs/``, 3,093 real products): mean 5.9 images, median 5, p90 10,
+    p99 17, **max 81**. :data:`MEDIA_PER_PRODUCT_LIMIT` keeps 96.4% of every image in that
+    corpus while truncating 2.8% of products, and caps the worst case at
+    :data:`MEDIA_PER_PRODUCT_LIMIT` nodes per product no matter what a store publishes.
+
+    Order is the catalogue's own ``position`` and the tie-break is the entry order, so the
+    kept prefix is the *front* of the gallery — the primary image is never the one dropped.
+
+    Args:
+        entry: one catalogue product, as the store published it.
+        limit: how many images to keep, at most.
+
+    Returns:
+        ``(records, published)`` — the bounded records and how many the catalogue published,
+        so a caller can report the truncation rather than hiding it.
+    """
+    raw = entry.get("images")
+    if not isinstance(raw, list):
+        return (), 0
+    candidates: list[tuple[int, int, Any]] = []
+    for index, item in enumerate(raw):
+        if not isinstance(item, dict):
+            continue
+        src = str(item.get("src") or item.get("url") or "").strip()
+        if not src:
+            # No URL is no asset: it can be neither shown nor checked, and a node keyed on
+            # the empty string would collapse every such image of a product onto one node.
+            continue
+        candidates.append((_position(item.get("position"), index), index, item))
+    published = len(candidates)
+    candidates.sort(key=lambda row: (row[0], row[1]))
+
+    records: list[ImageRecord] = []
+    for position, _index, item in candidates[: max(int(limit), 0)]:
+        src = str(item.get("src") or item.get("url") or "").strip()
+        records.append(
+            ImageRecord(
+                native_id=native_key(item.get("id")) or src,
+                src=src,
+                position=position,
+                alt=str(item.get("alt") or ""),
+                width=_dimension(item.get("width")),
+                height=_dimension(item.get("height")),
+                updated_at=str(item.get("updated_at") or ""),
+            )
+        )
+    return tuple(records), published
+
+
+def _position(value: Any, index: int) -> int:
+    """The catalogue's 1-based gallery position, or the entry order when it states none."""
+    try:
+        position = int(value)
+    except (TypeError, ValueError):
+        return index + 1
+    return position if position > 0 else index + 1
+
+
+def _dimension(value: Any) -> int:
+    """A stated pixel dimension, or ``0`` — never a guess and never a negative number."""
+    if isinstance(value, bool) or value is None:
+        return 0
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return number if number > 0 else 0
+
+
+def on_seller_domain(image_host: str, store_domain: str) -> bool:
+    """Whether ``image_host`` is the store's own registered domain or a subdomain of it.
+
+    The one leg of the owner's verified-media rule ingest can decide without a fetch. A bare
+    suffix test would call ``evilgaiaherbs.com`` a subdomain of ``gaiaherbs.com``, so the
+    match is exact or on a label boundary.
+    """
+    host = str(image_host or "").strip().lower().rstrip(".")
+    domain = str(store_domain or "").strip().lower().rstrip(".")
+    if not host or not domain:
+        return False
+    return host == domain or host.endswith("." + domain)
+
+
 def catalog_source(
     url: str,
     digest: str,
@@ -353,6 +470,7 @@ def build_upserts(
             "that produced it satisfies the provenance audit without providing provenance"
         )
 
+    store_domain = safe_host(snapshot.base_url)
     store_source = catalog_source(
         snapshot.base_url,
         content_hash(snapshot.base_url),
@@ -405,6 +523,31 @@ def build_upserts(
                 UpsertOp(
                     kind="category",
                     node=Category(name=name),
+                    source=source,
+                    context={"product_id": product.product_id},
+                )
+            )
+        for image in product.images:
+            # The asset is keyed on the store's own image identifier, NOT on the URL alone:
+            # Shopify re-stamps `?v=<epoch>` on every image edit, so a URL-keyed node would
+            # mint a fresh MediaAsset on every re-crawl of a store that touched its gallery,
+            # and the old ones would linger, sourced and stale, forever.
+            ops.append(
+                UpsertOp(
+                    kind="media",
+                    node=MediaAsset(
+                        asset_id=media_asset_id_for(
+                            snapshot.store_id, product.product_id, image.native_id
+                        ),
+                        url=image.src,
+                        catalogue_hash=content_hash("\x1f".join(image.catalogue_digest_parts)),
+                        host=safe_host(image.src),
+                        on_seller_domain=on_seller_domain(safe_host(image.src), store_domain),
+                        position=image.position,
+                        alt=image.alt,
+                        width=image.width,
+                        height=image.height,
+                    ),
                     source=source,
                     context={"product_id": product.product_id},
                 )

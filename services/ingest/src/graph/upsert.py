@@ -54,6 +54,7 @@ from .model import (
     Ingredient,
     IntentCluster,
     InvalidEmbeddingVector,
+    MediaAsset,
     Offer,
     PolicyPage,
     Product,
@@ -579,6 +580,52 @@ def upsert_attribute(
     return attribute.attr_id
 
 
+def upsert_media_asset(session: Any, *, product_id: str, asset: MediaAsset, source: Source) -> str:
+    """Upsert a ``MediaAsset`` node and attach it: ``(Product)-[:HAS_MEDIA]->(…)``.
+
+    Both halves are material facts and both are provenanced, for the same reason
+    :func:`upsert_attribute` provenances both: "this URL was published with these
+    dimensions" and "*this product* published it, in this position" are different claims,
+    and the second is the one a media slot renders.
+
+    **No bytes are fetched here, or anywhere in ingest.** The node records what the
+    catalogue said; whether the asset resolves and whether its pixels match are the
+    downstream verifier's two legs of the owner's verified-primary rule. See
+    :class:`~ingest.graph.model.MediaAsset` for exactly what a consumer still needs.
+
+    ``position`` is carried on the edge as well as on the node, because the node is keyed by
+    (store, product, image) and the position is a fact about the *attachment* — a seller who
+    reorders a gallery has changed where an unchanged asset sits, and a media slot picking
+    "the primary" reads the edge.
+
+    Args:
+        session: an open ``neo4j.Session`` or transaction.
+        product_id: the product whose gallery published this asset.
+        asset: the image record as the catalogue published it.
+        source: where the observation came from.
+
+    Returns:
+        ``asset.asset_id``.
+
+    Raises:
+        ProvenanceRequired: the product does not exist yet.
+    """
+    resolved = _require_source(source)
+    _require_nodes(session, [("Product", product_id)])
+    _fact_node(session, "MediaAsset", "asset_id", asset.asset_id, asset.as_properties(), resolved)
+    _fact_edge(
+        session,
+        "HAS_MEDIA",
+        "Product",
+        product_id,
+        "MediaAsset",
+        asset.asset_id,
+        resolved,
+        edge_props={"position": int(asset.position)},
+    )
+    return asset.asset_id
+
+
 def link_ingredient(
     session: Any, *, product_id: str, ingredient: Ingredient, source: Source
 ) -> str:
@@ -1001,6 +1048,7 @@ __all__ = [
     "upsert_category",
     "upsert_ingredient",
     "upsert_intent_cluster",
+    "upsert_media_asset",
     "upsert_offer",
     "upsert_policy_page",
     "upsert_product",

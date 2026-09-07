@@ -43,6 +43,7 @@ __all__ = [
     "CatalogRequest",
     "CatalogSnapshot",
     "FetchedResource",
+    "ImageRecord",
     "ProductRecord",
     "UpsertOp",
     "VariantRecord",
@@ -113,6 +114,58 @@ class VariantRecord:
 
 
 @dataclass(frozen=True)
+class ImageRecord:
+    """One image the catalogue published a **record** of. URL metadata, never bytes.
+
+    The scraper used to read ``title``, ``price``, ``sku`` and ``variants`` and drop
+    ``images[]`` on the floor, so a shortlist slot had nothing to show and the owner's
+    verified-primary media rule had no inputs to be decided from. This record is what
+    survives the crawl now.
+
+    **Nothing here is fetched.** ``src`` is copied out of the catalogue verbatim and is
+    untrusted store input like every other field on a snapshot (C10); ``width``/``height``
+    are what the *seller claims*, not measurements. Ingest deliberately opens no connection
+    to an image host — see :class:`~ingest.graph.model.MediaAsset` for the two legs of the
+    verified check that a fetch, and only a fetch, can close.
+
+    Attributes:
+        native_id: the store's own identifier for the image, when it publishes one. Falls
+            back to the URL, so a store that numbers nothing still gets stable asset ids.
+        src: the image URL, exactly as published — cache-buster query and all, because
+            ``?v=1754936059`` is part of *which version* the catalogue claimed.
+        position: 1-based gallery position. ``1`` is the primary image.
+        alt: merchant-authored alt text.
+        width / height: the pixel dimensions the catalogue states; ``0`` when it does not.
+        updated_at: the seller's own last-modified stamp for this image record, when
+            published. Part of :attr:`catalogue_digest_parts` because an edit that keeps the
+            URL and changes the file is otherwise invisible.
+    """
+
+    native_id: str
+    src: str
+    position: int = 0
+    alt: str = ""
+    width: int = 0
+    height: int = 0
+    updated_at: str = ""
+
+    @property
+    def catalogue_digest_parts(self) -> tuple[str, ...]:
+        """The parts of the record a downstream verifier's pin is taken over.
+
+        Everything the seller states about the file itself, and nothing about where it sits
+        in the gallery: reordering a gallery does not change any image, so a reorder must
+        not expire a verifier's byte pin.
+        """
+        return (
+            str(self.src),
+            str(int(self.width)),
+            str(int(self.height)),
+            str(self.updated_at or ""),
+        )
+
+
+@dataclass(frozen=True)
 class ProductRecord:
     """A product as the storefront presented it. Every field is untrusted store input."""
 
@@ -127,6 +180,10 @@ class ProductRecord:
     variants: tuple[VariantRecord, ...] = ()
     categories: tuple[str, ...] = ()
     attributes: Mapping[str, str] = field(default_factory=dict)
+    #: The product's gallery, already bounded by the adapter — see
+    #: :data:`~ingest.adapters.mapping.MEDIA_PER_PRODUCT_LIMIT`. Ordered by the catalogue's
+    #: own ``position`` so the primary image is first.
+    images: tuple[ImageRecord, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -263,6 +320,15 @@ def apply_upserts(session: Any, ops: Iterable[UpsertOp]) -> list[str]:
                     session,
                     product_id=context["product_id"],
                     attribute=op.node,
+                    source=op.source,
+                )
+            )
+        elif op.kind == "media":
+            written.append(
+                graph_upsert.upsert_media_asset(
+                    session,
+                    product_id=context["product_id"],
+                    asset=op.node,
                     source=op.source,
                 )
             )

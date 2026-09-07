@@ -850,3 +850,95 @@ def test_the_corpus_stays_small_enough_to_live_in_git(corpus: Corpus) -> None:
     raw = corpus.manifest["totals"]["bytes_raw"]
     on_disk = corpus.manifest["totals"]["bytes_on_disk"]
     assert raw / on_disk >= 5.0, f"compression only achieves {raw / on_disk:.1f}x"
+
+
+# --------------------------------------------------------------------------------------
+# the corpus is REACHABLE: it reassembles into the responses the storefronts served, and
+# something in this repository actually loads it
+# --------------------------------------------------------------------------------------
+
+
+def test_every_page_reassembles_byte_for_byte_into_the_response_that_was_served(
+    corpus: Corpus,
+) -> None:
+    """The property that lets the recording be replayed through the LIVE crawl path.
+
+    Until this was checked, "verbatim bytes with provenance" was a claim about individual
+    records. It is more than that: the records of one page, joined with ``,`` inside
+    ``{"products":[`` … ``]}``, reproduce the **whole response body** the storefront served
+    — ``response_sha256`` in the provenance file, taken by the live fetch on 2026-09-07.
+
+    That is what makes ``ingest.adapters.recorded.RecordedTransport`` honest rather than
+    convenient. Feed those bytes to ``SignedFetchAdapter`` and it parses exactly what it
+    would have parsed on the day, so provenance, ids, change detection and the graph writes
+    are produced by the code a live crawl runs, not by a corpus importer written alongside.
+    """
+    pages = 0
+    for store in corpus.collected:
+        by_page: dict[int, list[bytes]] = {}
+        digests: dict[int, str] = {}
+        for raw, prov in zip(store.raw_lines, store.provenance, strict=True):
+            page = int(prov["page"])
+            by_page.setdefault(page, []).append(raw)
+            digests.setdefault(page, prov["response_sha256"])
+        for page, records in sorted(by_page.items()):
+            body = b'{"products":[' + b",".join(records) + b"]}"
+            assert hashlib.sha256(body).hexdigest() == digests[page], (
+                f"{store.host} page {page} does not reassemble into the response that was "
+                f"served; the recording cannot be replayed through the crawl path"
+            )
+            pages += 1
+    assert pages == 18, f"the collection fetched 18 catalogue pages, reassembled {pages}"
+
+
+def test_something_in_this_repository_actually_loads_the_corpus(corpus: Corpus) -> None:
+    """A recorded catalogue nothing reads is a 2.7 MB comment.
+
+    For the whole life of this corpus the only code that opened it was this file. The graph
+    demos ran on ``fixtures/catalog/coffee.json`` — a generator config — while 3,093 real
+    products sat here unread. This asserts a *loader* exists, sees every store, and agrees
+    with the manifest about what is in them.
+
+    It imports the loader rather than reimplementing it: a second reader would agree with
+    the corpus on the day it was written and drift on the next re-collection.
+    """
+    from ingest.adapters.recorded import RecordedCorpus
+
+    loaded = RecordedCorpus.load(CORPUS)
+    assert set(loaded.hosts) == set(ALL_HOSTS)
+    assert loaded.products_recorded == RECORDED_TOTAL
+    assert loaded.integrity_problems() == []
+    for store in loaded.stores:
+        assert store.products_recorded == RECORDED_COUNTS[store.host]
+        assert sum(page.products for page in store.pages) == RECORDED_COUNTS[store.host]
+
+
+def test_the_image_records_the_crawl_used_to_discard_are_all_on_a_platform_cdn(
+    corpus: Corpus,
+) -> None:
+    """The measurement that decides whether verified-primary media can ever fire.
+
+    The owner's rule scores an asset only if it resolves, sits on the seller's **registered
+    domain**, and its content hash matches the catalogue snapshot. Measured here: all 18,165
+    image records in this corpus are served from ``cdn.shopify.com`` and **not one** is on
+    any of the ten sellers' own domains. Under a literal reading of the middle leg, no real
+    image in this corpus would ever score.
+
+    That is a finding for whoever implements scoring — a merchant's platform CDN may or may
+    not count as its registered domain — and it is recorded here because the corpus is where
+    the fact lives. ``ingest.graph.model.MediaAsset.on_seller_domain`` reports it per asset
+    rather than pre-judging it.
+    """
+    from urllib.parse import urlsplit
+
+    hosts: dict[str, int] = {}
+    for store, product in _iter_products(corpus):
+        for image in product.get("images") or []:
+            host = (urlsplit(str(image.get("src") or "")).hostname or "").lower()
+            hosts[host] = hosts.get(host, 0) + 1
+            assert host != store.host and not host.endswith(f".{store.host}"), (
+                f"{store.host} serves an image from its own domain — the corpus-wide claim "
+                f"that none do is no longer true"
+            )
+    assert sum(hosts.values()) == 18_165, f"the corpus carries {sum(hosts.values())} images"
+    assert set(hosts) == {"cdn.shopify.com"}

@@ -35,6 +35,33 @@ from ingest.adapters import (
 )
 
 from proxyshop_support.asgi_server import serve
+from proxyshop_support.contract_sweep import (
+    contract_probe_app as _contract_probe_app,
+)
+from proxyshop_support.contract_sweep import (
+    normalise_route as _normalise_route,  # noqa: F401 - re-exported for T-321's sweep, see below
+)
+from proxyshop_support.contract_sweep import (
+    operation_divergence as _operation_divergence,
+)
+from proxyshop_support.contract_sweep import (
+    operations as _operations,  # noqa: F401 - re-exported for T-321's sweep, see below
+)
+from proxyshop_support.contract_sweep import (
+    published_operations as _published_operations,
+)
+from proxyshop_support.contract_sweep import (
+    served_operations as _served_operations,
+)
+
+# ``_normalise_route`` and ``_operations`` are not called by name in this file — they are
+# reached through ``_published_operations``/``_served_operations`` — and the ``noqa`` above is
+# what keeps them bound anyway. That is deliberate, not an oversight: T-321's sweep
+# (``packages/store-agent/tests/test_repro_open_tickets.py``) counts how many distinct
+# implementations stand behind each helper ROLE across the repo's gate modules, and its arming
+# test requires every role to resolve through at least two of them. Dropping the two unused
+# re-exports would empty two of those roles down to one module and make a "one implementation"
+# verdict unfalsifiable — the sweep would be agreeing with itself about names nobody exposes.
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 INGEST_SRC = REPO_ROOT / "services/ingest/src"
@@ -507,90 +534,16 @@ def test_a_refused_entry_price_does_not_promote_the_other_surfaces_price() -> No
 
 INGEST_OPENAPI = REPO_ROOT / "packages/contracts/openapi/ingest.openapi.json"
 
-#: The methods an OpenAPI path item may carry. Everything else under a path item
-#: (``parameters``, ``summary``, ``$ref``, ``servers``) is not an operation, and counting it as
-#: one would inflate the very non-zero check that arms this sweep.
-HTTP_METHODS = frozenset({"get", "put", "post", "delete", "options", "head", "patch", "trace"})
-
-
-def _normalise_route(path: str) -> str:
-    """``/refresh/{store_id}`` -> ``/refresh/{}``.
-
-    The comparison is about the *wire shape* of a route, not about what the service names its
-    path parameter: an app serving ``/refresh/{sid}`` genuinely answers the contract's
-    ``/refresh/{store_id}``, and failing it for the spelling would make this gate red for a
-    reason the ticket is not about. Failure messages still print the raw spellings, so a real
-    naming divergence stays visible without being fatal.
-
-    ``str.partition`` rather than a regex so no import has to be added to this file's frozen
-    head (E402). Its behaviour on malformed input is stated exactly, because an earlier draft
-    of this docstring claimed something else and was wrong: a ``{`` with no ``}`` anywhere
-    after it is passed through unchanged, but ``/a/{b/{c}`` collapses ``b/{c`` into a single
-    ``{}`` — the first ``{`` pairs with the only ``}``. Nothing in the five contracts is shaped
-    like that today, and the injectivity check in the arming test is what keeps a future one
-    from collapsing two distinct paths onto one string unnoticed.
-    """
-    out: list[str] = []
-    rest = path
-    while "{" in rest:
-        head, _, tail = rest.partition("{")
-        _param, closed, rest = tail.partition("}")
-        if not closed:
-            return "".join(out) + head + "{" + tail
-        out.append(head + "{}")
-    return "".join(out) + rest
-
-
-def _operations(paths: dict[str, Any], *, raw: bool = False) -> set[tuple[str, str]]:
-    """``{(METHOD, path)}`` from an OpenAPI ``paths`` object, normalised unless ``raw``."""
-    return {
-        (method.upper(), path if raw else _normalise_route(path))
-        for path, item in paths.items()
-        for method in item
-        if method.lower() in HTTP_METHODS
-    }
-
-
-def _published_operations(contract: Path, *, raw: bool = False) -> set[tuple[str, str]]:
-    """What an OpenAPI document on disk declares."""
-    return _operations(json.loads(contract.read_text(encoding="utf-8")).get("paths", {}), raw=raw)
-
-
-def _served_operations(app: Any) -> set[tuple[str, str]]:
-    """What a built FastAPI application actually answers."""
-    return _operations(app.openapi().get("paths", {}))
-
-
-def _operation_divergence(served: set[tuple[str, str]], published: set[tuple[str, str]]) -> str:
-    """A message naming BOTH differences, and the counts each side actually iterated."""
-    unserved = sorted(f"{method} {path}" for method, path in published - served)
-    unpublished = sorted(f"{method} {path}" for method, path in served - published)
-    return (
-        f"served {len(served)} operation(s), contract publishes {len(published)}; "
-        f"published but NOT served: {unserved or 'none'}; "
-        f"served but NOT published: {unpublished or 'none'}"
-    )
-
-
-def _contract_probe_app(contract: Path) -> Any:
-    """A synthetic app serving exactly what ``contract`` publishes — the sweep's arming device.
-
-    Three sweeps in this repo were found going QUIET rather than red (T-229 6->0 of 8, T-281
-    70->0 of 79, T-241 48->0 of 66): a loop that iterates zero cases and passes. A
-    served-vs-published comparison carries the same hazard in a nastier form, because
-    ``set() == set()`` is a *pass*. Pointing the extractor at an app whose served set is known
-    — built from the very paths under test — is what makes an empty ``served`` mean "this
-    service serves nothing" rather than "this probe can no longer see routes".
-    """
-    from fastapi import FastAPI  # noqa: PLC0415 - kept out of this file's frozen import head
-
-    def _probe() -> dict[str, Any]:  # pragma: no cover - mounted, never called
-        return {}
-
-    app = FastAPI(title=f"probe:{contract.name}")
-    for method, path in sorted(_published_operations(contract, raw=True)):
-        app.add_api_route(path, _probe, methods=[method])
-    return app
+#: The six contract-sweep helpers used below are NOT defined here (T-321). They were written
+#: out once in this file, once in ``apps/exchange/tests/test_repro_open_tickets.py`` and once in
+#: ``packages/store-agent/tests/test_repro_open_tickets.py``, under two different spellings, with
+#: nothing comparing the copies — and they had already drifted once, the store-agent path
+#: normaliser being a regex that disagreed with this one on ``/a/{b/{c}``. One rule now lives in
+#: :mod:`proxyshop_support.contract_sweep` and all three gates import it; the local names are
+#: kept (see this file's import head) so every call site below reads exactly as it did.
+#:
+#: Nothing this file measures changed: the folded implementation is the logic that was here, and
+#: ``contract_probe_app`` keeps THIS file's ``probe:<contract file name>`` title.
 
 
 def test_the_ingest_served_versus_published_sweep_is_armed() -> None:

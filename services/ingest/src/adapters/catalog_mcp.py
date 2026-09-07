@@ -75,10 +75,12 @@ from .base import (
 from .budgets import BudgetExceeded, CrawlLedger
 from .hashing import canonical_json_hash, has_changed, snapshot_ref
 from .mapping import (
+    MEDIA_PER_PRODUCT_LIMIT,
     build_upserts,
     coerce_availability,
     coerce_price,
     composite_hash,
+    image_records,
     native_key,
     native_product_key,
     product_id_for,
@@ -616,6 +618,17 @@ class CatalogMCPAdapter:
         known = request.known_hashes.get(f"product:{product_id}")
         native = native_product_key(entry)
         currency = _text(entry.get("currency") or entry.get("currency_code")) or ""
+        # Read through the SHARED reader (C6, T-023 acceptance 2): the MCP catalog and
+        # `products.json` both publish `images[]`, and a gallery read two ways is a gallery
+        # that lands in the graph two ways. A payload carrying none yields `()` — the MCP
+        # server simply did not state one, which is not the same as a store with no images
+        # and is why nothing here invents a placeholder.
+        images, published = image_records(entry)
+        if published > len(images):
+            warnings.append(
+                f"{url}: {product_id} published {published} images; kept the first "
+                f"{MEDIA_PER_PRODUCT_LIMIT} by catalogue position"
+            )
 
         return ProductRecord(
             product_id=product_id,
@@ -628,6 +641,7 @@ class CatalogMCPAdapter:
             changed=has_changed(known, digest),
             variants=self._variants(request.store_id, native, entry, currency, url, warnings),
             categories=_categories(entry),
+            images=images,
         )
 
     def _variants(

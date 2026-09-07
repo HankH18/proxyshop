@@ -194,7 +194,7 @@ def is_valid_gtin(value: Any) -> bool:
 
 
 def fold(value: Any) -> str:
-    """Fold text to the form similarity is measured over.
+    r"""Fold text to the form similarity is measured over.
 
     Builds on the graph's :func:`~ingest.graph.model.canonical_text` (NFKC, case-folded,
     whitespace-collapsed) so that ER and the graph agree on what "the same string" means,

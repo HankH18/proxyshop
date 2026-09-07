@@ -21,7 +21,8 @@ DESIGN gives explicit id properties for ``Store``, ``Product``, ``Variant``, ``O
 ``Source``, and names ``Category``, ``AttributeValue``, ``Ingredient``, ``PolicyPage`` and
 ``IntentCluster`` without one. A uniqueness constraint needs a property, so this module
 fixes the missing five: ``category_id``, ``attr_id``, ``ingredient_id``, ``page_id``,
-``cluster_id``. ``attr_id`` and ``ingredient_id`` and ``category_id`` are **content
+``cluster_id`` — and ``asset_id`` for :class:`MediaAsset`, which DESIGN does not name at
+all because the crawl used to throw ``images[]`` away. ``attr_id`` and ``ingredient_id`` and ``category_id`` are **content
 hashes** (:func:`attribute_value_id`, :func:`ingredient_id`, :func:`category_id`) rather
 than free identifiers, so two adapters that observe "SPF 50" independently converge on one
 ``AttributeValue`` node — which is what makes the attribute half of the candidate query a
@@ -52,6 +53,7 @@ ID_PROPERTY: dict[str, str] = {
     "Category": "category_id",
     "AttributeValue": "attr_id",
     "Ingredient": "ingredient_id",
+    "MediaAsset": "asset_id",
     "PolicyPage": "page_id",
     "Source": "source_id",
     "IntentCluster": "cluster_id",
@@ -61,7 +63,7 @@ ID_PROPERTY: dict[str, str] = {
 #: least one ``-[:SUPPORTED_BY]->(:Source)`` edge; :func:`ingest.graph.upsert.
 #: provenance_violations` reports any that does not.
 MATERIAL_FACT_LABELS: frozenset[str] = frozenset(
-    {"Store", "Product", "Variant", "Offer", "AttributeValue", "PolicyPage"}
+    {"Store", "Product", "Variant", "Offer", "AttributeValue", "MediaAsset", "PolicyPage"}
 )
 
 #: Nodes that are *vocabulary*, not observation: a category or an ingredient is a term, and
@@ -97,6 +99,7 @@ MATERIAL_FACT_EDGES: dict[str, tuple[str, str]] = {
     "HAS_VARIANT": ("Product", "Variant"),
     "IN_CATEGORY": ("Product", "Category"),
     "HAS_ATTRIBUTE": ("Product", "AttributeValue"),
+    "HAS_MEDIA": ("Product", "MediaAsset"),
     "CONTAINS": ("Product", "Ingredient"),
     "COMPATIBLE_WITH": ("Product", "Product"),
     "SAME_AS": ("Product", "Product"),
@@ -603,6 +606,137 @@ class AttributeValue:
         }
 
 
+#: The longest ``alt`` text a ``MediaAsset`` keeps. Alt text is merchant-authored free text
+#: (C10) and one product in the recorded corpus ships a 300-character caption; a node
+#: property is not the place for an unbounded string, and nothing downstream reads past a
+#: caption's worth.
+MEDIA_ALT_MAX_CHARS = 512
+
+
+@dataclass(frozen=True)
+class MediaAsset:
+    """``MediaAsset`` — one image the catalogue *published a record of*, never its bytes.
+
+    THIS NODE IS A CLAIM, NOT AN ASSET. Ingest reads ``images[]`` off the catalogue surface
+    and writes what the seller said about each one — where it lives, how big the seller says
+    it is, where it sits in the gallery, and the digest of that record. It does **not**
+    fetch a single image byte, so nothing here asserts that the URL resolves or that the
+    pixels behind it are the ones the catalogue described.
+
+    That restraint is the point. The owner's ruling is *verified-primary media, with
+    labelled-unverified as the fallback*: an asset scores only if it (1) resolves, (2) sits
+    on the seller's registered domain, and (3) its content hash matches the catalogue
+    snapshot for that ``product_ref``. Two of those three legs need a fetch, and a fetch is
+    not ingest's job. What ingest owes the downstream verifier is that the question be
+    **decidable** — every input to legs (2) and (3) present, provenanced, and attached to
+    the product it was published under. See :attr:`on_seller_domain` and
+    :attr:`catalogue_hash`.
+
+    Attributes:
+        asset_id: ``mda_…``, derived from (store, the store's product key, the store's own
+            image id — or the URL when it publishes none), so a re-crawl of an unchanged
+            gallery lands on the same node instead of churning one per run.
+        url: the image URL exactly as the catalogue published it, untouched. Shopify's
+            ``?v=<epoch>`` cache-buster is part of the identity of the version claimed and
+            is deliberately not stripped.
+        host: the URL's lower-cased hostname, stored so leg (2) is a comparison rather than
+            a re-parse of merchant-controlled text in whoever asks next.
+        on_seller_domain: whether :attr:`host` is the store's own registered domain or a
+            subdomain of it. **The only leg of the verified check ingest can decide**, and
+            it is decided from two facts ingest already holds and has sourced.
+            **Measured, and it matters:** all 18,165 image records in
+            ``fixtures/real-catalogs/`` are on ``cdn.shopify.com`` — *zero* on any seller's
+            own domain. Under a literal reading of leg (2) not one real image would score,
+            so whoever implements scoring has to decide whether a merchant's platform CDN
+            counts as the registered domain. That decision is theirs; this flag reports the
+            fact rather than pre-judging it.
+        position: the catalogue's own ordering, 1-based. ``1`` is the primary image, which
+            is the one "verified-primary" is about.
+        alt: merchant-authored alt text, truncated to :data:`MEDIA_ALT_MAX_CHARS`.
+        width / height: the pixel dimensions **the catalogue claims**, ``0`` when unstated.
+            A fetched asset whose real dimensions differ from these contradicts the record.
+        catalogue_hash: the digest of the image record as the snapshot published it (URL,
+            dimensions and the seller's own updated-at). This is the anchor for leg (3):
+            it changes the moment the seller edits the record, so a verifier that pinned a
+            byte digest against one ``catalogue_hash`` knows exactly when its pin expired.
+            It is **not** a hash of the image bytes and must never be compared to one.
+
+    WHAT A DOWNSTREAM CONSUMER STILL NEEDS, exactly, to finish the verified check. Ingest
+    supplies the first three and none of the last four:
+
+    ============================================  =====================================
+    already here                                  still owed by the verifier
+    ============================================  =====================================
+    the URL the catalogue published (:attr:`url`) a **fetch** of it, under the same SSRF
+                                                  guard the crawler runs
+                                                  (:mod:`ingest.adapters.netguard`); leg 1
+    the host, pre-parsed (:attr:`host`) and the   the **ruling** on whether a merchant's
+    seller-domain verdict                         platform CDN counts as its registered
+    (:attr:`on_seller_domain`)                    domain — every image in the recorded
+                                                  corpus is on ``cdn.shopify.com``
+    the seller's own record of the file           a **byte digest** of what it fetched,
+    (:attr:`catalogue_hash`, :attr:`width`,       stored against that ``catalogue_hash``,
+    :attr:`height`), provenanced and attached     so a later fetch can be compared and a
+    to its ``Product``                            seller edit re-opens the check; leg 3
+                                                  a **place to record the verdict** — a
+                                                  property, a node or a table of its own.
+                                                  Nothing in ingest writes one, because a
+                                                  verdict ingest cannot compute would be a
+                                                  claim without evidence
+    ============================================  =====================================
+
+    Two things ingest deliberately does **not** do, so nobody looks for them: it opens no
+    connection to an image host, and it emits no scoring term. An unverified asset may still
+    be shown, labelled; whether it *scores* is the ranker's decision and the ranker is not
+    touched here.
+    """
+
+    asset_id: str
+    url: str
+    catalogue_hash: str
+    host: str = ""
+    on_seller_domain: bool = False
+    position: int = 0
+    alt: str = ""
+    width: int = 0
+    height: int = 0
+
+    def __post_init__(self) -> None:
+        """Refuse an asset that could not be verified or even displayed later.
+
+        Raises:
+            ValueError: ``asset_id``, ``url`` or ``catalogue_hash`` is blank. A media node
+                with no URL is undisplayable *and* unverifiable, so it is the media-shaped
+                version of the hollow ``Source`` — it would satisfy "the catalogue carried
+                images" while carrying nothing anybody can check.
+        """
+        for field_name in ("asset_id", "url", "catalogue_hash"):
+            if not str(getattr(self, field_name)).strip():
+                raise ValueError(
+                    f"MediaAsset.{field_name} must be non-empty: an asset with no "
+                    f"{field_name} can be neither shown nor checked"
+                )
+
+    @property
+    def primary(self) -> bool:
+        """Whether the catalogue published this as the product's first image."""
+        return int(self.position) == 1
+
+    def as_properties(self) -> dict[str, Any]:
+        """The node properties to write."""
+        return {
+            "asset_id": self.asset_id,
+            "url": self.url,
+            "host": self.host,
+            "on_seller_domain": bool(self.on_seller_domain),
+            "position": int(self.position),
+            "alt": str(self.alt or "")[:MEDIA_ALT_MAX_CHARS],
+            "width": int(self.width),
+            "height": int(self.height),
+            "catalogue_hash": self.catalogue_hash,
+        }
+
+
 @dataclass(frozen=True)
 class PolicyPage:
     """``PolicyPage{kind, hash, snapshot_ref}`` plus the ``page_id`` its constraint needs."""
@@ -638,6 +772,7 @@ __all__ = [
     "EMBEDDING_DIMENSIONS",
     "EMBEDDING_PROPERTY",
     "ID_PROPERTY",
+    "MEDIA_ALT_MAX_CHARS",
     "MATERIAL_FACT_LABELS",
     "MATERIAL_FACT_EDGES",
     "VOCABULARY_LABELS",
@@ -649,6 +784,7 @@ __all__ = [
     "InvalidEmbeddingVector",
     "Ingredient",
     "IntentCluster",
+    "MediaAsset",
     "Offer",
     "PolicyPage",
     "Product",

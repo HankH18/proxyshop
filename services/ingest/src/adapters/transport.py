@@ -40,6 +40,7 @@ import ssl
 import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Protocol, runtime_checkable
 from urllib.parse import urljoin, urlunsplit
 
 from .budgets import BudgetExceeded, CrawlLedger
@@ -58,6 +59,7 @@ from .robots import USER_AGENT
 __all__ = [
     "REDIRECT_STATUSES",
     "HTTPResult",
+    "HTTPTransport",
     "RequestSigner",
     "SafeHTTPClient",
     "TransportError",
@@ -69,6 +71,34 @@ _CHUNK = 64 * 1024
 
 class TransportError(RuntimeError):
     """A request could not be completed for a reason that is not a refusal or a budget."""
+
+
+@runtime_checkable
+class HTTPTransport(Protocol):
+    """What :class:`~ingest.adapters.signed_fetch.SignedFetchAdapter` needs from a client.
+
+    Named because the adapter's ``client=`` argument is a real seam and not a convenience:
+    :class:`~ingest.adapters.recorded.RecordedTransport` replays a recorded crawl through
+    it, and typing that seam as ``SafeHTTPClient`` would have forced a subclass — which
+    would inherit :meth:`SafeHTTPClient._open` and make a "replay" that *could* connect.
+    A Protocol keeps the substitute structurally compatible and structurally unable to
+    reach the network.
+
+    :class:`SafeHTTPClient` satisfies this without declaring it, which is the point.
+    """
+
+    def fetch(
+        self,
+        url: str,
+        *,
+        method: str = "GET",
+        body: bytes | None = None,
+        headers: Mapping[str, str] | None = None,
+        allowed_hosts: Sequence[str] = (),
+        ledger: CrawlLedger | None = None,
+    ) -> HTTPResult:
+        """Fetch ``url`` under the caller's allow-list and budget."""
+        ...
 
 
 @dataclass(frozen=True)

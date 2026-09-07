@@ -61,6 +61,7 @@ from ingest.graph import (
     Category,
     Ingredient,
     IntentCluster,
+    MediaAsset,
     Offer,
     PolicyPage,
     Product,
@@ -96,6 +97,7 @@ from ingest.graph import (
     set_product_embedding,
     slug,
     upsert_attribute,
+    upsert_media_asset,
     upsert_offer,
     upsert_policy_page,
     upsert_product,
@@ -462,7 +464,15 @@ def test_material_fact_edge_endpoints_are_labels_the_model_knows() -> None:
 
 
 def test_the_design_edge_vocabulary_is_covered() -> None:
-    """The nine edges DESIGN names, plus SUPPORTED_BY, and nothing invented beyond them."""
+    """The nine edges DESIGN names, plus SUPPORTED_BY, plus HAS_MEDIA — nothing else.
+
+    ``HAS_MEDIA`` is the one addition DESIGN does not name, and it is here rather than
+    absent for a reason the audit depends on: the crawl used to discard ``images[]``, and a
+    media attachment written outside :data:`MATERIAL_FACT_EDGES` would be a real-world claim
+    that :func:`provenance_violations` cannot see. Registering it is what puts an unsourced
+    ``HAS_MEDIA`` inside the audit. Widening this set is still meant to be a deliberate,
+    visible act — which is why it is spelled out here rather than derived.
+    """
     assert set(MATERIAL_FACT_EDGES) == {
         "SELLS",
         "MAKES_OFFER",
@@ -470,6 +480,7 @@ def test_the_design_edge_vocabulary_is_covered() -> None:
         "HAS_VARIANT",
         "IN_CATEGORY",
         "HAS_ATTRIBUTE",
+        "HAS_MEDIA",
         "CONTAINS",
         "COMPATIBLE_WITH",
         "SAME_AS",
@@ -921,6 +932,21 @@ def _seed_full_model(session: Any, source: Source) -> None:
     )
     link_same_as(session, product_id="p-a", other_id="p-b", confidence=0.87, source=source)
     link_compatible_with(session, product_id="p-a", other_id="p-b", source=source)
+    upsert_media_asset(
+        session,
+        product_id="p-a",
+        asset=MediaAsset(
+            asset_id="mda-a",
+            url="https://cdn.store-a.example/alpha.png",
+            catalogue_hash="sha256:aa",
+            host="cdn.store-a.example",
+            on_seller_domain=False,
+            position=1,
+            width=1200,
+            height=1200,
+        ),
+        source=source,
+    )
     upsert_policy_page(session, PolicyPage("page-a", "returns", "sha256:ff"), source=source)
     link_states(
         session,
