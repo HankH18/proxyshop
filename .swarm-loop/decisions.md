@@ -1154,3 +1154,94 @@ and are called out rather than edited): `apps/exchange/compose.yaml` sets
 a concrete provider class named at a call site, which `test_graph.py`'s
 `test_no_caller_names_a_concrete_provider_class` cannot see because it scans
 `services/ingest/src` only.
+
+## D57 — A delivery promise must be EARNED before it counts; the defect was the feed, not the weight **[owner ruling, 2026-09-07]**
+
+**The defect.** `delivery_fit` carries `w_d = 0.10` in the published rank formula, and its feed was
+`Offer.delivery_estimate_days` — a number the bidding store writes into its own reply.
+`features.delivery_fits` normalised those declared numbers across the auction: fastest declared
+reads 1.0, slowest reads 0.0, absent reads the published neutral 0.5. So a store bought up to a
+tenth of the published score by typing a smaller number, and **nothing anywhere checked whether it
+had ever shipped that fast**. The repo already admitted this in
+`ranking/candidates.py`'s own docstring — *"a store moves `price_value` by charging less and
+`delivery_fit` by promising sooner, which is what bidding IS"* — which is true of a PRICE, because a
+price is a commitment the buyer collects at checkout and the exchange reconciles, and false of a
+DISPATCH ESTIMATE, because a promise costs nothing to make and the term was paid out before anyone
+found out whether it was kept.
+
+Note what this is NOT. It is not the R11 hole — the projection copies no published feature, so no
+store could ever write `delivery_fit: 1.0` and be believed. The bidder was not asserting its score.
+It was asserting an INPUT that the formula then converted into score at face value, which is a
+different and quieter failure: every guard in the system was working exactly as designed.
+
+**Ruling (the owner's, verbatim in substance): the ranker should absolutely read delivery — the
+problem is the FEED, not the weight.** `w_d` does not move. Delivery speed is a real thing a shopper
+wants and a real axis a shop can compete on, and dropping the term to close the hole would answer a
+credibility problem by deleting the signal. What changes is what the term is fed:
+
+1. A store's dispatch credibility is its `shipped_on_time` posterior, `alpha / (alpha + beta)`, off
+   the `TrustDims` this exchange already holds at ranking time (`filters.trust_row` is the reader,
+   reused rather than reimplemented so the R12 blacklist gate and this feed can never disagree about
+   which row belongs to whom).
+2. **Insufficient observations means the promise is NOT ADMITTED**: the feature is ABSENT for that
+   store and therefore reads the published neutral 0.5. A store with no shipping history can neither
+   win this term nor be punished by it. The floor is `MIN_DISPATCH_OBSERVATIONS = 5.0` of evidence
+   mass in excess of `TRUST_PRIOR_MASS = 4.0`, and five is not a new number — it is the manifest's
+   own `new_store_prior_n`, already published as the count of clean episodes below which a store is
+   `low_data`. A second, different threshold for "watched enough to be believed" would let the
+   exchange and the trust system disagree about which stores are new, invisibly to both.
+3. With a record, the quote is adjusted before the auction-normalisation runs:
+   `effective_days = days / max(credibility, MIN_DISPATCH_CREDIBILITY)`, with
+   `MIN_DISPATCH_CREDIBILITY = 0.25` bounding the inflation at 4x. Monotone (keeping a promise never
+   costs a store; quoting sooner never costs it either), scale-free (a pure multiplication, so no
+   absolute days-to-score curve is smuggled in — the exchange still holds no shipping model and
+   `Intent.ship_to` still contributes only the fact that everyone in one auction quotes for the same
+   destination), and auditable (one division by one published posterior against one published
+   floor, all of which a store can read off its own snapshot).
+4. Everything else about `delivery_fits` is unchanged: fewer than two admissible estimates is all
+   neutral, a degenerate range is all neutral, inputs are never mutated, and the answer is
+   deterministic.
+
+**Why reading `shipped_on_time` here is not double-counting `trust`.** State the overlap first,
+because there is one and pretending otherwise is how this argument gets discredited later:
+`trust.scoring.score` is the MEAN of the six dimensions' Beta means, so `shipped_on_time` already
+contributes one sixth of the aggregate — at `w_t = 0.20`, up to `0.033` of `rank_score`. The two
+readings are still different things, and the difference is structural rather than a matter of
+degree:
+
+* **They are different inputs on different objects.** `trust` is the row's scalar `score`, read in
+  `scoring.feature_vector` and nowhere else; `delivery_fit` reads one dimension's Beta, in
+  `features.dispatch_credibility`, and never touches `score`. Each is separately addressable, which
+  is what makes the claim testable rather than rhetorical —
+  `test_the_trust_term_and_the_delivery_term_move_independently` moves each while holding the other
+  and asserts the other does not follow, in both directions.
+* **They answer different questions.** `trust` is a LEVEL: how much of this store's whole record is
+  clean, unconditional on what it did in this auction, and not movable at bid time on any horizon a
+  bid can see. `delivery_fit` is CONDITIONAL on a promise made in this auction: the record is not
+  added to the score, it is the exchange rate at which a promise is converted into one. A store that
+  quotes nothing collects nothing from this path no matter how spotless its dispatch record — which
+  is exactly what a term that merely re-credited the same evidence could not do.
+* **The alternative is worse and is the actual double-count.** Leaving the feed as the declared
+  number does not avoid counting `shipped_on_time` twice; it counts an UNVERIFIED assertion once at
+  full weight, alongside the verified record at one sixth of another. The overlap here is the price
+  of grading a claim against the evidence for that same claim, which is what
+  `verified_claim_ratio` already does for product facts and what `trust.reconcile.engine` does when
+  it grades a promised dispatch window against what actually shipped.
+
+**Consequences that are real and are not hidden.**
+
+* `RANKING_FEATURES_VERSION` moves `2.0.0` -> `3.0.0`. Same feature name, same weight, same
+  published neutral, a different number — which is precisely the case that constant exists for
+  (R15/S3: a replay must compare BOTH versions before claiming it reproduced a served score).
+* **An exchange whose trust snapshot carries no `dims` serves `delivery_fit` absent for everybody.**
+  That is the honest failure and it is deliberate: the alternative is inventing a posterior. It is
+  also load-bearing on the wiring — `rank_auction` hands `attach_features` the snapshot, and a
+  caller that hands nothing gets the absent path for all candidates rather than a fabricated one.
+* Trust observations decay toward the prior (30-day half-life, D17), so the admissibility floor is
+  also a staleness gate: a store whose only dispatches are long past falls back under it and its
+  promise stops being admitted. An old record is not a current promise.
+* **The one thing this cannot do**, written here rather than discovered later: a quote of exactly
+  0.0 is the fixed point of any scale-free map, so a store with the worst possible record still
+  reads 0.0 effective days if it claims same-day dispatch. That follows from scale-freedom rather
+  than from an oversight, and the guard against it is not in the ranker — it is that
+  `trust.reconcile.engine` grades exactly that promise every time such a store ships.

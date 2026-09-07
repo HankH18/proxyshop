@@ -4,11 +4,6 @@
     "0": "the primary checkout \u2014 the run's frozen metric commands measure there, and their command strings may never change"
   },
   "leases": {
-    "1": {
-      "claimed_at": "2026-09-06T01:22:07",
-      "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/c21-contracts",
-      "branch": "task/c21-contracts"
-    },
     "7": {
       "claimed_at": "2026-09-07T16:53:36",
       "agent_ref": "sim-image"
