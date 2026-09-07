@@ -1,0 +1,108 @@
+{
+  "artifact_version": "1.0.0",
+  "as_of": "2026-09-07T22:50:37.358Z",
+  "bytes": {
+    "ledger": 13396,
+    "roster": 390,
+    "transcript": 59934
+  },
+  "captured_at": "2026-09-07T22:50:37.363+00:00",
+  "determinism": {
+    "canonical_file": "transcript.json",
+    "excluded_from_the_canonical_form": [
+      "minted discount codes, checkout tokens and permalinks (drawn from `secrets`; a reproducible discount code is a guessable one)",
+      "each feedback event's `event_id` (a UUID) and `ts` (a wall clock)",
+      "the served posture's `decayed_at` (the serve instant)",
+      "the low-order digits of a served score, below 1e-6 rounding"
+    ],
+    "reproduce": "python -m seed run --seed 20260901 --episodes 12 --shoppers 4",
+    "reproducible_files": [
+      "transcript.json",
+      "roster.json"
+    ],
+    "scope": "byte-identical across processes and machines at the same source revision; a change to the exchange, the reconciler or the trust engine moves these bytes and is meant to. See `source`.",
+    "transcript_digest": "d099e437024d6aa760a93653891d5173134908ced1565f9cfd263bdfb2b052ec",
+    "volatile_files": [
+      "collection.json",
+      "ledger.jsonl"
+    ]
+  },
+  "file_sha256": {
+    "ledger": "f9a497bf5f4035386b496c25c42449ce4b5aa3b9a48d2153e9c5626e65338ee9",
+    "roster": "eeb019fef814a393ed49633e3e93d3798e8b95fa76f5322552a768a6766ca56e",
+    "transcript": "0e137e6df0ff97c0eb3e1c4beea4c0c57296119e05b4b6a263e023a55cfb6e6c"
+  },
+  "files": {
+    "ledger": "ledger.jsonl",
+    "roster": "roster.json",
+    "transcript": "transcript.json"
+  },
+  "kind": "simulated-buyer-feedback-population",
+  "marker": {
+    "audit": "seed.provenance.posture_split",
+    "field": "order_ref",
+    "observations_by_store": {
+      "store-brightbean": {
+        "organic": 0,
+        "seeded": 9
+      },
+      "store-harborline": {
+        "organic": 0,
+        "seeded": 8
+      },
+      "store-northroast": {
+        "organic": 0,
+        "seeded": 4
+      },
+      "store-secondchance": {
+        "organic": 0,
+        "seeded": 7
+      },
+      "store-slowreply": {
+        "organic": 0,
+        "seeded": 0
+      }
+    },
+    "organic_events": 0,
+    "prefix": "sim-fb-",
+    "reader": "seed.provenance.is_seeded_event",
+    "seeded_events": 28,
+    "why": "Every observation in this corpus was manufactured. The marker is inside the hash chain because the buyer service copies `order_ref` verbatim onto the sealed event, so a seeded observation cannot be un-marked and an earned one cannot be marked without breaking GET /events/verify. That is what makes this seed data rather than fake data: a reader can compute any store's posture with these observations and without them, retroactively, forever."
+  },
+  "notes": [
+    "SIMULATED BUYER FEEDBACK. Not one answer in this corpus came from a person.",
+    "Every answer travelled through the real POST /buyer/feedback route and became a hash-chained ledger event; the processing path is the production one, and only the caller was synthetic.",
+    "The postures here are a function of the chain and of `as_of`. Replay with `python -m seed replay`, which recomputes them from ledger.jsonl and must reproduce transcript.json's closing_snapshot exactly.",
+    "Going live changes no code on the serving path: stop running the seeder and let real shoppers answer the prompt the buyer app already renders. See the `marker` block for how the two stay distinguishable afterwards."
+  ],
+  "producer": "python -m seed run --seed 20260901 --episodes 12 --shoppers 4",
+  "producer_module": "seed.population",
+  "run": {
+    "answers": 28,
+    "buyer_service": "http://127.0.0.1:55285 (loopback)",
+    "episode_budget": 12,
+    "episodes": 12,
+    "manifest_digest": "0ce80606248b6afe996a5309630359b4bc5fce65fb74d66d3fbc1aae73bffa27",
+    "manifest_version": "1.0.0",
+    "policy": {
+      "noise_rate": 0.15,
+      "response_rate": 0.55
+    },
+    "purchases": 48,
+    "seed": 20260901,
+    "shoppers_per_episode": 4,
+    "trust_service": "http://127.0.0.1:55284 (loopback)"
+  },
+  "simulated": true,
+  "source": {
+    "commit": "7751dea74c6573a8d007a06cc4d22d223b748618",
+    "dirty": true
+  },
+  "stores": [
+    "store-brightbean",
+    "store-northroast",
+    "store-slowreply",
+    "store-secondchance",
+    "store-harborline"
+  ]
+}

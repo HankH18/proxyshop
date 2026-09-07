@@ -83,6 +83,21 @@ COPY packages/contracts/schemas/    /app/packages/contracts/schemas/
 # `No module named 'contracts.generated'` at import time — observed, not theorised.
 COPY packages/contracts/generated/python/ /app/packages/contracts/generated/python/
 COPY proxyshop_support/             /app/proxyshop_support/
+# The simulator, WHOLE — and a plain directory copy is the honest instruction here precisely
+# because `services/sim/src/` now contains nothing this image cannot run. `python -m sim` is
+# the CMD and its closure is the four modules in that directory.
+#
+# The R14 seeding harness used to live here too, and while it did, this COPY was a lie the
+# gate caught: `local_stack.py` imports `buyer_svc` and `population.py` imports
+# `exchange.ranking`, neither of which this image carries, so
+# `test_t301_every_image_copy_set_covers_every_first_party_import_it_ships` was red on this
+# very line. The repair is not to ship those packages — measured, `buyer_svc` cascades to
+# `claim_verification` and `llm`, `exchange.ranking` cascades to `exchange.retrieval` and
+# the `ingest` graph library, and the whole exchange narrowing below is reversed for code
+# whose CMD never runs. The harness is a checkout script rather than a service, so it moved
+# to `services/sim/seed/` (import name `seed`, `.pkgroot/seed`), which is outside this build
+# context's COPY set by construction rather than by a list someone has to maintain. See
+# `services/sim/seed/__init__.py`.
 COPY services/sim/src/           /app/services/sim/src/
 COPY apps/trust/src/             /app/apps/trust/src/
 
