@@ -101,7 +101,12 @@ from ..auction.state import (
     IllegalAuctionTransition,
     UnknownAuction,
 )
-from ..checkout import DEFAULT_CHECKOUT_MODE, NoRegisteredDomains, UnknownCheckoutMode
+from ..checkout import (
+    CHECKOUT_EVENT_KINDS,
+    DEFAULT_CHECKOUT_MODE,
+    NoRegisteredDomains,
+    UnknownCheckoutMode,
+)
 from ..eligibility import StaticSellerEligibility
 from ._spellings import bind_spellings
 from .claims import StoreAcceptanceClaims, acceptance_claims_scope
@@ -613,6 +618,78 @@ def _accepted_offer(result: Any) -> Mapping[str, Any] | None:
     return None
 
 
+#: The frozen ``LedgerEvent`` kind (D24) that :meth:`AuctionStateMachine.accept` records for
+#: the acceptance itself. Written out rather than reused from the ``ACCEPTED`` *state* it
+#: happens to be spelled like, and rather than imported from ``auction.state``'s private
+#: ``_TRANSITION_KIND``: a ledger kind and a state name are two vocabularies, and the one this
+#: filter must not let through is the ledger one.
+_ACCEPTED_KIND = "accepted"
+
+#: The C11 kinds a checkout files that the auction's own transition does NOT write, in the
+#: order ``CheckoutProvider._events`` builds them. ``accepted`` is excluded because the
+#: transition already records it — with the auction's ``intent_id`` and ``cluster_id`` on it,
+#: which the port's copy has no way to know — so forwarding the port's would put TWO
+#: ``accepted`` events in the ledger for one acceptance and an auditor counting acceptances
+#: off the chain would read double. ``services/sim/src/runner.py`` measured exactly that
+#: (12 and 12 in a default run) and refuses it for the same reason.
+_BRIDGE_KINDS: tuple[str, ...] = tuple(
+    kind for kind in CHECKOUT_EVENT_KINDS if kind != _ACCEPTED_KIND
+)
+
+
+def _record_checkout_bridge(machine: AuctionStateMachine, result: Any) -> None:
+    """Forward the checkout's other two events to the ledger the transition already writes.
+
+    ``CheckoutProvider.checkout`` builds all three of
+    :data:`~..checkout.CHECKOUT_EVENT_KINDS` and hands them back on ``CheckoutResult.events``.
+    Until this function existed this route read exactly one of them —
+    :func:`_accepted_offer` reads the ``accepted`` one for its offer body — and dropped the
+    other two, so a served accept put three events on the wire inside the process and one in
+    the ledger. Measured end to end against a real trust service: a whole demo chain of five
+    events with not one bridge among them.
+
+    **Why the two it dropped are the two that matter.** The exchange mints its
+    ``checkout_token`` with ``secrets.token_hex(16)`` *after* the merchant has been called and
+    transmits it nowhere; the store mints its own when the cart is visited and that is the one
+    that rides onto ``orders/paid``. So ``trust.reconcile.engine.reconcile`` cannot join the
+    two halves of a purchase on the token, and bridges them on the single-use discount code
+    instead — the one value that genuinely crossed the wire. It reads that code off exactly
+    ``code_created`` and ``checkout_redirect`` (``reconcile.engine.CODE_BRIDGE_KINDS``), which
+    are exactly these two. Without them an ``accepted`` offer and its ``order_paid`` webhook
+    reconcile to nothing at all, which is why reconciliation over a served run produced zero
+    verdicts.
+
+    **Forwarded, never rebuilt.** The events are the port's own, ``event_id`` and ``ts``
+    included, passed through :meth:`~..auction.ledger.LedgerRecorder.record` — the same
+    recorder, the same sink and the same publish path
+    :meth:`~..auction.state.AuctionStateMachine._transition` uses. No second client is built
+    and no shape is invented here: the bodies were already validated against what
+    ``contracts`` publishes, by ``build_published_event`` at the producing boundary. Keeping
+    the port's ``event_id`` is what makes a retried delivery land once — ``trust.events``
+    admits an ``event_id`` exactly once — rather than twice under two ids.
+
+    **It cannot fail the accept.** ``LedgerRecorder.record`` swallows a sink failure into
+    ``failures`` for the reason its own header gives: losing an audit record is bad and
+    failing a live auction because the audit sink hiccuped is worse. An event the port did not
+    build (T-283 drops a malformed body rather than raising) is simply not here to forward.
+    """
+    for event in getattr(result, "events", ()) or ():
+        if not isinstance(event, Mapping):
+            continue
+        kind = str(event.get("kind", ""))
+        if kind not in _BRIDGE_KINDS:
+            continue
+        machine.ledger.record(
+            kind,
+            event_id=event.get("event_id"),
+            ts=event.get("ts"),
+            auction_id=event.get("auction_id"),
+            store_id=event.get("store_id"),
+            order_ref=event.get("order_ref"),
+            payload=event.get("payload"),
+        )
+
+
 def _denied(reason: str) -> JSONResponse:
     """The 409 body the contract publishes: ``{accepted, denial_reason}`` and nothing else.
 
@@ -745,6 +822,15 @@ async def accept_bid(auction_id: str, body: AcceptBidRequest, request: Request) 
                 f"acceptance is not recorded, so no permalink is returned",
             )
         )
+
+    # AFTER the stamp, never before: `machine.accept` writes the `accepted` event, and the
+    # C11 order (`accepted`, `code_created`, `checkout_redirect`) is the order a reader of the
+    # chain sees. Recording the bridge first would put a code before the acceptance it belongs
+    # to; recording it on the refusal path above would file a `checkout_redirect` for a buyer
+    # who is being handed no permalink. What the refusal path leaves unrecorded is a real and
+    # unchanged gap — a live code exists there and the ledger says nothing about it — and it
+    # is the expiry race, not this ticket.
+    _record_checkout_bridge(machine, result)
 
     return AcceptedOfferResponse(
         permalink_url=str(result.permalink_url),

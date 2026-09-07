@@ -63,10 +63,12 @@ is **measured by this driver in the line above the block that reports it** rathe
 from reading the source, which is why the list shrinks by itself as the product improves. What
 fires is whatever the run measured; on this tree that is one thing:
 
-* reconciliation and the trust projection cannot run over the chain the exchange now writes.
-  ``trust.reconcile.reconcile`` needs ``accepted``, ``checkout_pixel`` and ``order_paid``; only
-  the first has a producer any served path emits, and the ``checkout_token`` seam between the
-  exchange's offer and the merchant's order is still unbound. Beat 7 measures both halves.
+* reconciliation and the trust projection cannot run over the chain this run writes. The
+  *events* are all there now — the exchange's ``accepted`` and both bridge records, and the
+  merchant's ``order_paid`` beside them in one chain — and what is left is that the two halves
+  cannot be scoped to one seller: ``trust.reconcile.reconcile`` namespaces every join key by
+  store, the ``accepted`` event names no store at all, and the order names the shop domain
+  rather than the platform's ``store_id``. Beat 7 measures it.
 
 Three beats that were gaps when this module was written no longer are, and the driver found that
 out the same way — by running them. ``POST /buyer/intent/confirm`` answers 201 now that the buyer
@@ -180,6 +182,16 @@ class JourneyResult:
     ledger_events: list[dict[str, Any]] = field(default_factory=list)
     #: What ``GET /events/verify`` answered about that chain. Empty if trust was never read.
     ledger_verify: dict[str, Any] = field(default_factory=dict)
+
+    #: How many ``reconciled`` verdicts ``trust.reconcile.reconcile`` produces over that
+    #: chain exactly as the trust service served it back. Beat 7 measures this rather than
+    #: reasoning about it, because "the events are all present" and "the purchase reconciles"
+    #: are two different claims and this run can only honestly make the first.
+    reconciled: int = 0
+    #: The same fold with the two facts the chain does not carry supplied by the driver —
+    #: the offer's ``store_id`` and the shop-domain alias. Labelled a probe everywhere it is
+    #: printed: it is the DIAGNOSIS of the gap, never a claim that the product closed it.
+    reconciled_probe: int = 0
 
     order_name: str = ""
     order_total: str = ""
@@ -330,6 +342,46 @@ def _served_trust() -> Iterator[str]:
     app.state.event_store = InMemoryEventStore()
     with serve(app) as url:
         yield url
+
+
+@contextlib.contextmanager
+def _merchant_ledger_address(trust_url: str) -> Iterator[None]:
+    """Tell the MERCHANT where trust is, the way its container is told, and rebuild its writer.
+
+    The exchange is told this address in its deployment document (``trust_url``, below). The
+    merchant has no deployment document: ``TRUST_URL`` is the whole of its configuration for
+    the same fact. ``merchant_svc.composition.trust_publisher`` builds one
+    :class:`~proxyshop_support.trust_ledger.TrustLedgerPublisher` per process out of
+    ``trust_endpoint()``, which resolves that variable and then falls back to
+    ``http://trust:8084`` — the compose service name, which resolves to nothing outside
+    compose.
+
+    Until this driver stated it, that fallback is what beat 6's ``orders/paid`` was really
+    posted at, and the events were really lost: measured, ``ConnectError: nodename nor
+    servname provided`` on every run, at ``ERROR``, from a demo that then exited 0. The
+    authoritative half of the pixel/webhook reconciliation (R4) was going nowhere while every
+    other beat printed green. **Nothing here silences that record** — the level is untouched
+    and the same line still fires for anyone who runs the merchant with no trust service
+    reachable. It stops firing because the events now land, which beat 7 reads back off the
+    trust service over HTTP rather than inferring from a quiet log.
+
+    The publisher is cached per process from its FIRST publish, so stating the variable is
+    only half of it: an interpreter that had already published — a pytest session that ran a
+    merchant test before this one — would keep the old address for the rest of its life.
+    ``set_trust_publisher(None)`` means "rebuild from configuration", never "unwire" (T-247),
+    and it is done on the way out as well, so a publisher aimed at this run's loopback port
+    does not outlive the port.
+    """
+    from merchant_svc.composition import set_trust_publisher
+
+    from proxyshop_support.trust_ledger import ENV_TRUST_URL
+
+    with _environment({ENV_TRUST_URL: trust_url}):
+        set_trust_publisher(None)
+        try:
+            yield
+        finally:
+            set_trust_publisher(None)
 
 
 def _deployment_document(
@@ -517,6 +569,11 @@ def run_journey(stream: TextIO | None = None) -> JourneyResult:
         # would keep that address for the life of the process.
         trust_url = stack.enter_context(_served_trust())
         result.trust_url = trust_url
+
+        # ...and the MERCHANT is told the same address, because it reads a different seam for
+        # it and nothing here was stating that one. See `_merchant_ledger_address`: beat 6's
+        # signed `orders/paid` was being posted at the compose service name and lost.
+        stack.enter_context(_merchant_ledger_address(trust_url))
 
         endpoints: dict[str, str] = {}
         for store in hosted:
@@ -1446,48 +1503,147 @@ def _beat_seven(say: Narrator, result: JourneyResult, trust: Any) -> None:
             "same value?",
             bool(exchange_token) and exchange_token == result.merchant_checkout_token,
         )
+        say.blank()
+        say.say(
+            """
+            Two different values, and they always were: the exchange mints its token with
+            `secrets.token_hex(16)` after the merchant has already been called and transmits
+            it nowhere, so the store mints its own when the cart is visited. Reconciliation
+            does not join on it any more. It bridges the offer to the order through the
+            single-use discount code — the one value that genuinely crossed the wire — which
+            it reads off the `code_created` and `checkout_redirect` records above.
+            """
+        )
+
+    # -- and what reconciliation actually makes of it, run rather than reasoned about ---
+    _beat_seven_reconciliation(say, result)
 
     # -- where it stops -----------------------------------------------------------
+    if result.reconciled:
+        return
     _gap(
         say,
         result,
-        "reconciliation and the trust update cannot run over the ledger chain the exchange writes",
-        """
+        "reconciliation and the trust update cannot run over the ledger chain this run writes",
+        f"""
         The runbook's sections 3.6 and 3.7 close the loop: `trust.reconcile.reconcile` joins
         the accepted offer, the beacon and the webhook into one `reconciled` verdict, and that
         verdict moves the store's trust score, which is the same snapshot the ranker filters
-        on. Both components exist and are tested. The chain above is now real and neither can
-        run over it, for two measured reasons:
+        on. Both components exist and are tested, and the EVENTS are now all in one chain: the
+        exchange's `accepted` with the offer on it, both of the bridge records that carry the
+        single-use code, and the merchant's own `order_paid` — posted to this trust service
+        over HTTP by a different application. The fold over that chain still returns
+        {result.reconciled} verdict(s). One thing blocks it and it is a NAMING problem;
+        a second thing costs evidence rather than the verdict:
 
-        1. `reconcile` needs three kinds — `accepted`, `checkout_pixel`, `order_paid` — and
-           TWO of the three have no producer on any served path. `accepted` is there: it is
-           `seq 5` above, and it carries the offer and the token. The other two are not, and
-           cannot be, because `AuctionStateMachine._transition` is the only caller of
-           `ledger.record` on any SERVED path, so a served run's chain is auction transitions
-           and nothing else. (`retrieval.fit` holds the exchange's only other `record` call,
-           the `bid_placed` producer, and no route reaches it.) `checkout_pixel` has no producer anywhere in this
-           repository — `pixel/src/` holds one empty `.gitkeep`, and `merchant_svc.collector`
-           stops at a `PixelObservation` in memory. The `order_paid` beat 6 verified went into
-           a bounded in-process hand-off buffer that the module itself calls the seam a
-           downstream lane replaces. A driver that manufactured those two events would be
+        1. `reconcile` namespaces every join key by the store that owns it — it has to, a
+           Shopify `order_id` is a per-shop number, and two shops both have order 1001. The
+           two halves of this purchase name the seller differently and one of them does not
+           name it at all. The `accepted` event carries NO `store_id`:
+           `AuctionStateMachine._transition` records every transition with the auction id and
+           a payload and nothing else, so the offer lands in the unattributed scope while the
+           two bridge records beside it are filed under
+           `{result.accepted_store_id or "the winning store"}`. And the `order_paid` names
+           `{_merchant_store_name(result) or "the shop domain"}`, because an unsigned
+           `X-Shopify-Shop-Domain` header is the only shop identity a signed delivery carries
+           at all. Supply both of those and the same three events and the same webhook
+           reconcile: that is the probe printed above, and it is a probe rather than a result
+           precisely because this driver had to supply them.
+
+        2. `checkout_pixel` still has no producer anywhere in this repository — `pixel/src/`
+           holds one empty `.gitkeep`, and `merchant_svc.collector` stops at a
+           `PixelObservation` in memory (beat 6 read one, in process). That one costs
+           EVIDENCE rather than the verdict: a group with no beacon grades `pixel_missing`,
+           which by design is not a blocker. A driver that manufactured a beacon would be
            supplying the evidence whose absence is the defect.
 
-        2. The join is still unmade, and the three lines above are the measurement rather
-           than the claim. The token the exchange stamped into `accepted` really did travel —
-           it is in the chain — but it never reaches the MERCHANT. The checkout provider mints
-           it with `secrets.token_hex(16)` after it has minted the code, and the only thing it
-           hands the shopper is a cart permalink carrying a variant, a quantity and the
-           discount code: no token. The merchant therefore mints its own when the cart is
-           visited, and the two values above are what that produces. `reconcile` no longer
-           joins on that token alone; it also bridges an offer to an order through the
-           single-use code, reading `code_created` and `checkout_redirect`. But those two are
-           exactly the events the checkout port BUILDS and hands back on
-           `CheckoutResult.events`, and that no served path emits: `exchange.accept.routes`
-           reads the `accepted` one for its `offer` body and drops the rest on the floor.
-
-        That is where the starting slice genuinely stops today.
+        The trust side of the naming problem is already built and needs nothing from here:
+        `trust.reconcile.routes.resolve_store_aliases` maps a seller's registered domain onto
+        its `store_id` off the platform's own roster and `POST /reconcile` applies it. It
+        reads `app.sellers`, which is Postgres — and this command runs none, which is why the
+        alias above had to be stated by the probe rather than resolved.
         """,
     )
+
+
+def _merchant_store_name(result: JourneyResult) -> str:
+    """How the MERCHANT's ``order_paid`` names the shop, straight off the served chain."""
+    for event in result.ledger_events:
+        if str(event.get("kind")) == "order_paid":
+            return str(event.get("store_id") or "")
+    return ""
+
+
+def _beat_seven_reconciliation(say: Narrator, result: JourneyResult) -> None:
+    """Fold the served chain through ``reconcile``, then probe what the fold is missing.
+
+    Two numbers, and the difference between them is the whole diagnosis:
+
+    * ``result.reconciled`` — ``reconcile`` over ``GET /events`` exactly as the trust service
+      served it back. This is the product's number.
+    * ``result.reconciled_probe`` — the same fold after this driver supplies the two facts the
+      chain does not carry: the winning ``store_id`` on the ``accepted`` event, and the
+      shop-domain alias that says the order's shop IS that store. Everything else is
+      untouched, so a probe that also returns nothing would mean the diagnosis below is
+      wrong.
+
+    The engine is called in THIS process, and that is the honest framing — the same one beat 6
+    uses for ``handle_delivery``. ``POST /reconcile`` is served, and it reads Postgres for the
+    seller roster and writes trust observations back to it, which this command deliberately
+    does not run. What is real either way is the input: every event folded here came off the
+    wire from a different application.
+    """
+    from trust.reconcile.engine import reconcile
+
+    if not result.ledger_events:
+        return
+
+    say.section("What reconciliation makes of that chain:")
+    try:
+        result.reconciled = len(reconcile(result.ledger_events))
+    except Exception as refusal:  # noqa: BLE001 - a refusal is a measurement, not a crash
+        say.fact("reconcile refused the chain", f"{type(refusal).__name__}: {refusal}")
+        return
+    say.fact("verdicts over the chain as served", result.reconciled)
+
+    shop = _merchant_store_name(result)
+    named = [
+        {**event, "store_id": result.accepted_store_id}
+        if str(event.get("kind")) == "accepted"
+        else event
+        for event in result.ledger_events
+    ]
+    aliased = [
+        {**event, "store_id": result.accepted_store_id}
+        if shop and str(event.get("store_id") or "").lower() == shop.lower()
+        else event
+        for event in named
+    ]
+    try:
+        verdicts = reconcile(aliased)
+    except Exception as refusal:  # noqa: BLE001 - same rule as above
+        say.fact("the probe was refused", f"{type(refusal).__name__}: {refusal}")
+        return
+    result.reconciled_probe = len(verdicts)
+    say.fact("verdicts with the store named on both halves (a PROBE)", result.reconciled_probe)
+    if verdicts:
+        payload = verdicts[0].get("payload") or {}
+        promised = payload.get("promised_price")
+        observed = payload.get("observed_price")
+        say.fact("  promised / observed", f"{promised} / {observed}")
+        say.fact("  price honoured", payload.get("price_honored"))
+        say.fact("  beacon present", not payload.get("pixel_missing"))
+        say.blank()
+        say.say(
+            f"""
+            That second line is a PROBE and not a result. The driver rewrote two `store_id`
+            fields — nothing else — to stand in for the two facts the chain does not carry,
+            and the fold then produced a real verdict from the real events. It is printed
+            because a gap nobody can reproduce is a claim; this one names exactly what is
+            missing and shows what closing it would produce. The product's number is the
+            first line: {result.reconciled}.
+            """
+        )
 
 
 # =====================================================================================
