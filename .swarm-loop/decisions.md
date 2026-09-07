@@ -965,3 +965,80 @@ costs nothing and destroys nothing, and the flag keeps telling the truth.
 a fact about this project: a mechanism that demands a re-measure it provides no way to perform for
 a past cycle. See `W09040017-06` and `B09040017-04` in the machine-level harness document, which
 already carry it from the watchdog's side.
+
+## D55 — Two agents, two objectives: the buyer's agent pitches every candidate, the shop's agent advocates for one **[owner ruling, 2026-09-07]**
+
+The owner redirected the product away from its first-price-sealed-auction framing. His argument is
+mechanical and correct: every store has a maximum discount it will authorise, and a market whose
+allocation rule is dominated by discount guarantees every store reaches that maximum and then
+differentiates on nothing. The system trains its own participants into a commodity market. What
+replaces it is a **matching and persuasion market** — a graph finds plausible shops, and shops
+compete on how well they can make their case.
+
+**The part that is a genuine architectural ruling, and is easy to get wrong:** there are TWO
+pitching agents with DIFFERENT objective functions, and they are not two quality tiers of one
+pipeline.
+
+* The **buyer-side agent** wants the customer to buy *a* product. It maximises conversion across the
+  whole shortlist, so it pitches **every** candidate as attractively as it can — including scraped,
+  non-network shops that have no agent of their own.
+* The **shop-side agent** wants the customer to buy *their* product. It is a dedicated advocate that
+  continuously improves one shop's case.
+
+A scraped shop therefore gets the former and not the latter. **"A dedicated advocate" is the service
+a shop buys by joining the network** — that is the supply-side business argument for the graph, and
+the reason a scraped shop must still be able to appear and still be pitched.
+
+**Ruling, and the constraint that makes it safe:** the buyer-side agent may assemble a pitch ONLY
+from facts already in the exchange's own snapshot for that shop. It may choose emphasis, ordering,
+framing and which true facts to lead with — which is most of persuasion — but it may NOT introduce a
+fact the platform has not checked.
+
+The reason is liability, not tidiness. An agent optimising purely for conversion will oversell, and
+when the PLATFORM writes the copy, the platform owns the false claim — a worse position than a store
+lying about itself, because the buyer has no reason to discount the platform's own voice. A
+buyer-side pitch built from the snapshot is verifiable by construction, since the platform authored
+it from data it already holds. The store-authored pitch is the one that needs adversarial
+verification, because it is the one with a motive.
+
+**Consequence for scoring, which supersedes an earlier proposal in the redirect plan:** the plan
+proposed that a shop with no catalogue snapshot renders "visibly unverified prose scoring zero".
+That is now wrong in its premise — a scraped shop has a snapshot (the platform scraped it) and gets
+a buyer-side pitch grounded in it. What scores zero is a claim the exchange could not check, not a
+shop that lacks an advocate.
+
+**Two further owner rulings recorded at the same time:**
+
+* **Frozen assertions at Phase 3:** invert the three hosted-claim assertions one-for-one in place
+  (which holds every metric count exactly, since `goals.json` is `tolerance: 0`) AND cut a new epoch
+  at the same targets, so the record shows the GOAL changed rather than hiding a product redirection
+  inside a maintenance amendment class. Do not manufacture an amendment class for it.
+* **Media:** verified-primary with labelled-unverified as the fallback. An asset scores only if it
+  resolves, sits on the seller's registered domain, and its content hash matches the catalogue
+  snapshot for that `product_ref`; anything else may still be shown but must be labelled unverified
+  and must not score. Note that no media code exists anywhere in the tree today.
+
+**The owner's own framing of D55, which is clearer than the above and should be the one quoted:**
+this is the organic-versus-sponsored split, taken further. *"Google already does this. For
+non-sponsored results, they just simply scrape what's there. For sponsored results, the advertiser
+is able to go and pay for a little bit more control. That's what we're doing here, just to a greater
+degree."*
+
+Read that way, several things stop being open questions:
+
+* A scraped shop appearing with a platform-authored pitch is the ORGANIC result. The platform
+  renders what it crawled. It is not doing the shop a favour and the shop has not asked for
+  anything; the shopper is the customer being served.
+* An in-network shop is the SPONSORED result, and what it buys is **control over its own
+  presentation** — a dedicated advocate, a pitch conditioned on this buyer, its own choice of
+  commitments, a profile-conditioned discount. "To a greater degree" is the product: the control
+  purchased here is far beyond ad copy.
+* The verification asymmetry follows from the split rather than being an extra rule. The platform's
+  rendering of its own crawl carries the platform's voice and is constrained to the platform's own
+  facts. A seller's purchased message carries the seller's motive and is therefore the one that gets
+  adversarially checked against the snapshot. The rule "the buyer-side agent may not introduce a
+  fact the platform has not checked" is just the organic side declining to launder a claim it did
+  not verify.
+* It also settles what a shop is BUYING, which the earlier framing left vague: not visibility, and
+  not a better score. Visibility is organic and earned by matching. What is bought is the right to
+  make the case in one's own voice, and the loop that improves it.

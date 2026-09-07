@@ -1,5 +1,38 @@
 # ProxyShop — Spec
 
+## Core tenet — organic and sponsored, taken further
+
+**This is the organic-versus-sponsored split of a search engine, taken to a much greater degree.**
+Every other rule in this document is downstream of it.
+
+A search engine scrapes what is there and renders the non-sponsored result in its own voice. An
+advertiser pays for a little more control over the sponsored one. ProxyShop is that, further: a
+shop that joins the network buys a **dedicated advocate agent** that writes a pitch for *this*
+shopper, chooses which commitments to stand behind, and may condition a discount on the profile.
+
+Two agents, two objective functions, and they are NOT two quality tiers of one pipeline:
+
+- The **buyer-side agent** wants the shopper to buy *a* product. It maximises conversion across the
+  whole shortlist, so it pitches **every** candidate as well as it honestly can — scraped shops
+  included. This is the organic result, authored by the platform from its own crawl.
+- The **shop-side agent** wants the shopper to buy *that shop's* product. This is the sponsored
+  result, and it is what a shop buys by joining.
+
+What a shop buys is therefore **not visibility and not a better score** — visibility is organic and
+earned by matching. It is the right to make its case in its own voice, and the loop that improves it.
+
+The buyer-side agent MAY choose emphasis, ordering, framing and which true facts to lead with. It
+MAY NOT introduce a fact the platform has not checked: an agent optimising for conversion will
+oversell, and when the platform writes the copy the platform owns the false claim. A seller's
+purchased message carries the seller's motive and is therefore the one checked adversarially against
+the catalogue snapshot. See `.swarm-loop/decisions.md` D55.
+
+**What this rules out.** Allocation dominated by discount. Every store has a maximum discount it
+will authorise; a market whose award rule is mostly price guarantees every store reaches that
+maximum and then differentiates on nothing, which trains the network into a commodity market and
+destroys the margin it exists to broker. Discount is one saturating term among several, and clearing
+the band is a qualifier rather than a differentiator.
+
 ## Problem & intent
 Product name: **ProxyShop** — a buyer-side shopping agent network (the "pitch protocol" is the underlying seller-bid contract, not the product name).
 
@@ -21,7 +54,7 @@ Merchant (network app + dashboard):
 
 Exchange & trust:
 - R10: Bids are solicited synchronously and in parallel with a hard timeout; every **eligible** Tier-0/Tier-1 store selected for the auction receives either a timely bid or a catalog-derived fallback — a non-responding Tier-1 store falls back to a list-price offer, and Tier-0 stores are represented at list price. Fallback facts are subject to the same verification and hard-constraint rules as bid claims (R18, R19): a fallback cannot satisfy a hard constraint on unverified catalog data.
-- R11: Ranking SHALL be a published deterministic combination of fit score, offer value, and trust; it SHALL be blind to network fees, tier, and envelope contents. First-price sealed auction.
+- R11: Ranking SHALL be a published deterministic combination of fit score, offer value, and trust; it SHALL be blind to network fees, tier, and envelope contents. Allocation is a **sealed solicitation with a published multi-axis award**, not a price auction: solicitations are sealed so a late responder cannot mirror a rival's claims (a verifier confirms a copied claim as readily as an original), and the four differentiated slots are awarded on distinct axes so winning on price wins one slot of four rather than the shortlist. The discount term saturates at the auction's own price band; there is no marginal return past it.
 - R12: Trust score per store = one merged observation framework over **six** dimensions: {price_honored, discount_honored, shipped_on_time, not_returned, feedback_match, catalog_claim_accuracy}. Claim-verification outcomes (verified/contradicted/unsupported/ambiguous, with contradicted weighted heavier than unsupported) and transaction-observed outcomes update the same per-dimension Betas with observation-type weights and time decay — one trust system, not two — so verification observations provide trust signal before any transactions exist. Each verification outcome routes to exactly one dimension through a typed, exhaustive claim-type mapping: offer-integrity claims (price, discount, delivery, returns) update their transaction dimension; product-fact claims (ingredients, compatibility, nutrition, specifications) update `catalog_claim_accuracy`, which exists because a false catalog claim is none of the transaction dimensions and is not a buyer complaint. `feedback_match` stays what R14 makes it. New stores start at a neutral low-confidence prior; a published threshold triggers blacklisting bound to business identity, with review/appeal/expiry states, exposed through a versioned seller-eligibility interface that answers whether a store may participate. That interface is consulted before solicitation, before ranking, and before checkout; its unavailable state is fail-closed at each of the three gates; and **each gate is verified at the public orchestration boundary by a denial test with a positive control**, not inferred from the pure functions beneath it. A guaranteed exploration slice exposes low-data stores.
 - R13: WHEN a trust-relevant event lands (e.g. failed commitment, routed-buyer feedback), THE SYSTEM SHALL push the full pseudonymous event payload to the affected store agent.
 - R14: Post-purchase feedback: only network-routed buyers, one structured prompt ("did it match the pitch?"), weighted by buyer track record, cross-checked against return behavior.
@@ -32,7 +65,7 @@ Exchange & trust:
 
 Learning loops:
 - R16: The exchange ranking policy SHALL update from conversion outcomes (contextual bandit over intent-cluster × store) such that simulated outcome shifts measurably reorder future shortlists.
-- R17: Each store agent SHALL update its own bid policy from its own outcomes (discount depth × commitment set), initialized from network priors built from pitch/value-prop outcomes only — never from discount data of other stores.
+- R17: Each store agent SHALL update its own bid policy from its own outcomes (pitch variant × commitment set × discount depth), initialized from network priors built from pitch/value-prop outcomes only — never from discount data of other stores.
 
 ## Constraints
 - C1: Monorepo; Python for agents/services, TypeScript for buyer UI, merchant app, pixel. Buyer/merchant/exchange/trust are separate deployables.
@@ -62,7 +95,7 @@ Learning loops:
 - S1: End-to-end: intent → ≤3 clarifications → parallel bids → shortlist → accepted offer → code created & validated → checkout completes through the CheckoutProvider port → webhook + pixel reconciled → ledger event → trust update. The simulated redirect provider is the required starting implementation of that step; the Shopify adapter is one alternative behind the same port, and both emit the identical `LedgerEvent` kinds (C11), so the pixel and reconciliation obligations hold on either. Checkable by e2e test running offline against the local stub (C9); the same flow through the Shopify adapter against seeded dev stores (Bogus Gateway) is the documented demo procedure.
 - S2: The scripted dishonest store (behaviors defined in the human-approved fixture manifest) falls below the blacklist threshold within the simulation episode budget and disappears from shortlists. Checkable against the manifest, not the trust engine's own config.
 - S3: Ledger replay reproduces served trust scores bit-for-bit (R15). Checkable by replay test.
-- S4: In simulation, shifting a store's conversion outcomes reorders shortlists for the affected intent cluster (R16), and a store agent's discount depth distribution shifts in the direction of its own win/loss record (R17). Checkable by simulation assertions with fixed seeds.
+- S4: In simulation, shifting a store's conversion outcomes reorders shortlists for the affected intent cluster (R16), and a store agent's pitch-variant distribution shifts in the direction of its own win/loss record (R17), with discount depth as one axis of that policy rather than its whole content. Checkable by simulation assertions with fixed seeds.
 - S5: Two properties at the bid boundary, both required.
   - S5a: A claim carrying no provenance record — absent or empty — is rejected on every path, hosted and external; on the hosted path a claim lacking allowed tool-hook provenance is additionally rejected, and every claim in every accepted bid resolves to a provenance record (R8). Checkable by protocol boundary tests.
   - S5b: External prose is admitted as untrusted data, never as instructions, and extraction assigns `seller_asserted` provenance to each claim it derives *before* that claim reaches the boundary; every extracted factual claim then carries a verification record, and no unverified claim satisfies a hard constraint or counts as verified evidence (R18, R19). Checkable by extraction + verification tests.
