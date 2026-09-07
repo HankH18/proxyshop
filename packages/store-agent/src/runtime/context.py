@@ -22,7 +22,7 @@ the bid, not underneath it.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import quote, urlsplit
 
@@ -48,6 +48,21 @@ INTRO_DISCOUNT_KEY = "intro_discount_pct"
 #: ends byte-identical reproduction (S4). When the context states none, the advocate falls back
 #: to the request's own `respond_by`; see :meth:`AuctionContext.offer_expires_at`.
 OFFER_EXPIRES_AT_KEY = "offer_expires_at"
+
+#: The store-context key carrying pitches that were ALREADY SERVED, as ``{bid_offer_id: text}``.
+#:
+#: R15/S3 promise that a replay reproduces what was served. A pitch is written by a language
+#: model, so it is the one thing in a bid that a replay cannot recompute — regenerate it and the
+#: replay produces a *different, equally plausible* message, and the divergence is silent because
+#: nothing about the new text looks wrong. So a pitch is an ARTIFACT: generated once, carried on
+#: `Bid.message`, stored, and thereafter replayed as an INPUT.
+#:
+#: This is the key a replay harness (or an operator's context file) populates to hand a stored
+#: pitch back to the agent; :func:`~.pitch.compose_pitch` returns it verbatim and calls no model
+#: at all. It is read at the same trust level as the envelope, because it arrives by the same
+#: route — the merchant service's own store context — and the envelope already decides the
+#: discount cap.
+SERVED_PITCHES_KEY = "served_pitches"
 
 #: The store-context keys that may carry the store's own registered domain, in priority order,
 #: read off the context first and off the approved envelope second.
@@ -238,6 +253,9 @@ class AuctionContext:
     #: when the merchant stated none. Defaulted so that adding it broke no caller that built an
     #: `AuctionContext` positionally. See :data:`STORE_DOMAIN_KEYS`.
     store_domain: str | None = None
+    #: Pitches already served for this store, keyed by `bid_offer_id`. See
+    #: :data:`SERVED_PITCHES_KEY`; read through :meth:`replayed_pitch`, never directly.
+    served_pitches: Mapping[str, Any] = field(default_factory=dict)
 
     @property
     def cluster_id(self) -> str:
@@ -351,6 +369,24 @@ class AuctionContext:
             return None
         return f"https://{self.store_domain}/cart/{quote(handle, safe='')}:{int(quantity)}"
 
+    def replayed_pitch(self, offer_ref: Any) -> str | None:
+        """The pitch already served for this offer, verbatim — or `None` if there is none.
+
+        Verbatim is the whole contract (rule F of :mod:`~.pitch`). Nothing here trims, screens or
+        normalises the stored text: what was served is what a replay must reproduce, and an agent
+        that "tidied" a stored artifact on the way back out would reproduce something else while
+        reporting success. It is refused only when it is not text, or is blank — neither of which
+        is a pitch anybody served.
+
+        A missing or malformed `served_pitches` mapping is simply "no stored pitch", so a context
+        that has never been through a replay behaves exactly as it does today.
+        """
+        stored = self.served_pitches
+        if not isinstance(stored, Mapping):
+            return None
+        text = stored.get(str(offer_ref or ""))
+        return text if isinstance(text, str) and text.strip() else None
+
     @property
     def is_cold(self) -> bool:
         """R10: the store has learned nothing yet, so the deterministic default applies."""
@@ -435,6 +471,7 @@ def assemble_context(request: Any, context: Any) -> AuctionContext:
         store_currency=str(currency) if currency else None,
         stated_offer_expiry=str(stated_expiry) if stated_expiry else None,
         store_domain=domain,
+        served_pitches=as_mapping(ctx.get(SERVED_PITCHES_KEY), "served pitches"),
     )
 
 
@@ -484,6 +521,7 @@ def satisfies(op: str, observed: Any, wanted: Any) -> bool:
 __all__ = [
     "INTRO_DISCOUNT_KEY",
     "OFFER_EXPIRES_AT_KEY",
+    "SERVED_PITCHES_KEY",
     "STORE_DOMAIN_KEYS",
     "AuctionContext",
     "HardConstraint",

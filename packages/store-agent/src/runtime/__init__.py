@@ -10,8 +10,12 @@ The public surface, in the order it is used:
 * :class:`~.decline.Decline` / :class:`~.decline.DeclineReason` — the other half of the answer.
   Not bidding is a decision the exchange must be able to read, count and explain.
 * :func:`~.context.assemble_context` / :class:`~.context.AuctionContext` — the store context
-  joined to one request, ordered static-first for prompt caching (DESIGN §Decisions). The bid
-  path itself calls no LLM; the layout is for the pitch that travels beside the bid.
+  joined to one request, ordered static-first for prompt caching (DESIGN §Decisions).
+* :func:`~.pitch.compose_pitch` — the PITCH that travels beside the bid on `Bid.message`: the
+  dedicated advocate a shop buys by joining the network (SPEC core tenet, D55). It argues from
+  the bid's own claims, never from a price, and never raises — a copywriter that failed must not
+  cost the store its bid. The client is injected (``bid(..., llm=...)``), so this package still
+  reads no environment.
 
 Import path: both ``store_agent.runtime`` (the flat-src namespace, via ``.pkgroot``) and
 ``packages.store_agent.src.runtime`` (the repo-root dotted path the frozen suite binds to)
@@ -40,6 +44,7 @@ from .bidding import (
 from .context import (
     INTRO_DISCOUNT_KEY,
     OFFER_EXPIRES_AT_KEY,
+    SERVED_PITCHES_KEY,
     STORE_DOMAIN_KEYS,
     AuctionContext,
     HardConstraint,
@@ -48,6 +53,19 @@ from .context import (
     store_domain_host,
 )
 from .decline import Decline, DeclineReason, is_decline
+from .pitch import (
+    MAX_PITCH_CHARS,
+    PITCH_CONTRACT,
+    PROFILE_BUCKET_KEYS,
+    PitchMaterial,
+    SupportedFact,
+    compose_pitch,
+    fallback_pitch,
+    material_for,
+    pitch_prompt,
+    screen,
+    screen_reasons,
+)
 
 #: The one spelling that owns the module objects. `packages.store_agent.src.runtime` is the same
 #: files reached through the frozen suite's namespace alias; importing it yields *this* module.
@@ -55,7 +73,7 @@ CANONICAL_MODULE = "store_agent.runtime"
 
 #: The submodules aliased alongside the package, so `packages.store_agent.src.runtime.decline`
 #: is also one module object rather than a second copy of `Decline`.
-_ALIASED_SUBMODULES = ("bidding", "context", "decline")
+_ALIASED_SUBMODULES = ("bidding", "context", "decline", "pitch")
 
 
 def _install_canonical_alias() -> bool:
@@ -93,21 +111,33 @@ __all__ = [
     "AGENT_VERSION",
     "CANONICAL_MODULE",
     "INTRO_DISCOUNT_KEY",
-    "OFFER_EXPIRES_AT_KEY",
     "IN_STOCK_KEY",
     "LIST_PRICE_KEY",
+    "MAX_PITCH_CHARS",
+    "OFFER_EXPIRES_AT_KEY",
     "PERCENTAGE",
+    "PITCH_CONTRACT",
+    "PROFILE_BUCKET_KEYS",
+    "SERVED_PITCHES_KEY",
     "STORE_DOMAIN_KEYS",
     "VARIANT_REF_KEYS",
     "AuctionContext",
     "Decline",
     "DeclineReason",
     "HardConstraint",
+    "PitchMaterial",
+    "SupportedFact",
     "assemble_context",
     "bid",
+    "compose_pitch",
+    "fallback_pitch",
     "is_decline",
+    "material_for",
     "offer_id",
+    "pitch_prompt",
     "satisfies",
+    "screen",
+    "screen_reasons",
     "store_domain_host",
 ]
 

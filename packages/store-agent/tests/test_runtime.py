@@ -238,7 +238,27 @@ def test_the_cold_bid_is_the_documented_default_offer() -> None:
         "the version stamp is read downstream as 'which advocate built this', so it is pinned "
         "here as a literal — asserting it equals the constant it came from grades nothing"
     )
-    assert answer.message is None, "the hosted path asserts nothing in prose; claims are evidence"
+    # This line used to read:
+    #     assert answer.message is None, "the hosted path asserts nothing in prose; claims are
+    #                                     evidence"
+    # The contract it encoded was REPLACED, by a decision and not by a convenience. SPEC's
+    # opening "Core tenet" and `.swarm-loop/decisions.md` D55 (an owner ruling) say that what an
+    # in-network shop BUYS is a dedicated advocate that "writes a pitch for THIS shopper" — "the
+    # right to make its case in its own voice" — and `Bid.message` is the field that carries it.
+    # A hosted agent with no voice is precisely the product D55 rules against, so `is None` was
+    # asserting the absence of the feature.
+    #
+    # The half of the old reason that is STILL TRUE is not dropped, it is asserted harder, here
+    # and in `test_pitch.py`: claims remain the evidence, the pitch may assert nothing a claim in
+    # this same bid does not support, and it never carries a number the envelope governs. Pinned
+    # as bytes rather than as a property, because "the deterministic default bid" is a statement
+    # about the whole document — this is the model-free fallback pitch, which is what a store
+    # with no copywriter configured serves, and it is conditioned on this shopper (it leads with
+    # `material` because this intent's hard constraint is on `material`).
+    assert answer.message == (
+        "You asked for material, and it is merino wool. "
+        "Also: free returns: 30 days; ships within: 2 business days."
+    ), "the cold default bid carries the deterministic, model-free pitch (D55)"
 
     # EXACTLY these claims, in this order. `⊆ what the hooks emitted` is the traceability
     # property and it is checked elsewhere; on its own it is also satisfied by a bid carrying

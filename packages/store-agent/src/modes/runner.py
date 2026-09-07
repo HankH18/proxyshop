@@ -352,7 +352,7 @@ class AgentRunner:
     :attr:`killed_by_envelope` for why that asymmetry points the only safe way.
     """
 
-    __slots__ = ("_context", "_deltas", "_mode", "_sink", "_store_id", "_submitter")
+    __slots__ = ("_context", "_deltas", "_llm", "_mode", "_sink", "_store_id", "_submitter")
 
     def __init__(
         self,
@@ -361,6 +361,7 @@ class AgentRunner:
         sink: Any,
         submitter: Any = None,
         mode: Any = None,
+        llm: Any = None,
     ) -> None:
         if sink is None:
             raise ValueError(
@@ -371,6 +372,13 @@ class AgentRunner:
         self._store_id = str(_field(context, "store_id", "") or "")
         self._sink = sink
         self._submitter = submitter
+        # The copywriter that writes this store's pitch onto `Bid.message` (D55). Held rather
+        # than resolved per auction because building one may read a fixture off disk, and passed
+        # straight through to `bid()` because provider selection is the composition root's
+        # business and not the runtime's — see `store_agent.solicitation.copywriter`. `None` is
+        # the ordinary case (no model configured) and yields the deterministic fallback pitch,
+        # so every existing caller of this constructor keeps behaving exactly as it did.
+        self._llm = llm
         self._deltas: dict[TrustDimension, list[float]] = {}
         # Through the setter, so construction and a later flip enforce the same rules.
         self.mode = _envelope_states(context) if mode is None else mode
@@ -509,7 +517,7 @@ class AgentRunner:
         and not the mutable `Bid` behind it, and a submitter that adjusts a price in place would
         otherwise rewrite an audit row that had already been written.
         """
-        answer = bid(request, self._context)
+        answer = bid(request, self._context, llm=self._llm)
         posture = self.trust_posture
         entry = BidLogEntry(
             auction_id=str(_field(answer, "auction_id", "") or ""),

@@ -10,13 +10,19 @@ refuses one built anywhere on this path, and `enforce_bid_provenance` refuses on
 boundary. Those two are the same rule enforced statically and dynamically.
 
 **No LLM anywhere near a price.** `unit_price` is the catalog list price, moved only by a depth
-`authorize_discount` granted. A model may one day write the pitch that travels beside the bid;
-it will never write the number in it (S4).
+`authorize_discount` granted. A model DOES now write the pitch that travels beside the bid —
+:mod:`.pitch`, the advocate a shop buys by joining (D55) — and it never writes, and is never
+shown, the number in it: the pitch's material is filtered by provenance source, so the
+`envelope_rule` grant and the `learned_policy` action, the only two claims carrying a number the
+envelope governs, are structurally outside what the writer can see (S4).
 
-**No clock and no RNG.** `observed_at` comes from the evidence, or from an explicit `as_of`, or
-from `UNKNOWN_OBSERVED_AT` — all three inside the hooks. There is no `datetime.now()`, no
-`random`, no `uuid` and no set iteration on this path, because "two calls on identical inputs
-are byte-identical" is a frozen criterion and each of those four ends it quietly.
+**No clock, no RNG and no environment.** `observed_at` comes from the evidence, or from an
+explicit `as_of`, or from `UNKNOWN_OBSERVED_AT` — all three inside the hooks. There is no
+`datetime.now()`, no `random`, no `uuid`, no `os.environ` and no set iteration on this path,
+because "two calls on identical inputs are byte-identical" is a frozen criterion and each of
+those ends it quietly. That is also why the pitch's LLM client is *injected* by the composition
+root rather than resolved from `LLM_PROVIDER` here: an environment read on the bid path is an
+ambient input, whatever it is spelled.
 
 **One `ToolHooks` per auction.** Constructing the facade opens its first bid, so a runtime that
 builds one per auction is correct with no ceremony. A facade REUSED across auctions must have
@@ -48,6 +54,7 @@ from ..hooks import (
 )
 from .context import AuctionContext, as_number, assemble_context, satisfies
 from .decline import Decline, DeclineReason
+from .pitch import compose_pitch
 
 #: Stamped on every bid this runtime emits, and read downstream as "which advocate built this".
 #: Tracks the `proxyshop-store-agent` distribution version.
@@ -360,7 +367,9 @@ def _priced(list_price: float, depth: float) -> float:
     return list_price * (100.0 - depth) / 100.0
 
 
-def bid(request: Any, context: Any, *, hooks: Any | None = None) -> Bid | Decline:
+def bid(
+    request: Any, context: Any, *, hooks: Any | None = None, llm: Any | None = None
+) -> Bid | Decline:
     """Answer one `BidRequest` for one store: a `Bid`, or a :class:`Decline` carrying a reason.
 
     Args:
@@ -371,6 +380,14 @@ def bid(request: Any, context: Any, *, hooks: Any | None = None) -> Bid | Declin
             default: one facade per auction needs no `start_bid()` ceremony. Pass one to observe
             what the runtime asked for — `hooks.call_log` and `hooks.emitted_claims` are the S5
             audit trail — and, if you REUSE it, call `hooks.start_bid()` between auctions.
+        llm: the copywriter that writes this store's pitch onto `Bid.message` — the advocate a
+            shop buys by joining (D55). Anything exposing ``complete(prompt) -> str``.
+            **Injected, never resolved here**, because resolving one means reading `LLM_PROVIDER`
+            and this module may not touch the environment: the bid path is asserted clock-free,
+            RNG-free and environment-free by an AST scan over every file under `runtime/`. The
+            composition root owns the choice — see
+            :func:`store_agent.solicitation.copywriter.pitch_client` — and with none injected the
+            pitch is :func:`~.pitch.fallback_pitch`, which is deterministic and needs no model.
 
     The last step is the one this function exists to get right::
 
@@ -401,7 +418,7 @@ def bid(request: Any, context: Any, *, hooks: Any | None = None) -> Bid | Declin
     its own terms below — propagate.
     """
     try:
-        return _assemble(request, context, hooks)
+        return _assemble(request, context, hooks, llm)
     except _UNUSABLE_INPUT as exc:
         return _unanswerable(request, context, exc)
 
@@ -439,7 +456,9 @@ def _unanswerable(request: Any, context: Any, exc: Exception) -> Decline:
     )
 
 
-def _assemble(request: Any, context: Any, hooks: Any | None) -> Bid | Decline:
+def _assemble(
+    request: Any, context: Any, hooks: Any | None, llm: Any | None = None
+) -> Bid | Decline:
     """The bid path proper. See :func:`bid`, which is this function plus the input guard."""
     ctx = assemble_context(request, context)
     if hooks is None:
@@ -509,11 +528,20 @@ def _assemble(request: Any, context: Any, hooks: Any | None) -> Bid | Decline:
         # off-domain URL, never an absent one.
         checkout_url=ctx.checkout_url_for(chosen.product_ref, chosen.variant_ref),
     )
+    claims = [*chosen.facts, *chosen.live, action, *([grant] if grant is not None else [])]
     assembled = Bid(
         auction_id=ctx.auction_id,
         store_id=ctx.store_id,
         offer=offer,
-        claims=[*chosen.facts, *chosen.live, action, *([grant] if grant is not None else [])],
+        claims=claims,
+        # The advocate's own voice (D55). Composed from `claims` and the offer's `commitments` —
+        # the material this bid already carries and nothing else — so every sentence in the pitch
+        # has a provenance-tagged `Claim` beside it in the same bid for R18 to check against.
+        # `compose_pitch` cannot raise and never sees a price; see `runtime.pitch`. `None` is a
+        # perfectly good answer and leaves the bid exactly as it was before this feature existed.
+        message=compose_pitch(
+            ctx, [*claims, *offer.commitments], offer_ref=offer.bid_offer_id, llm=llm
+        ),
         agent_version=AGENT_VERSION,
         schema_version=SCHEMA_VERSION,
     )

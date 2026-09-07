@@ -3,7 +3,9 @@
 ``routes`` holds the door the exchange knocks on; ``serving`` holds the answer to "which store is
 this process advocating for"; ``advocate`` holds the one
 :class:`~store_agent.modes.AgentRunner` built from that store, which is what decides whether an
-answer leaves the building at all (R7). They are separate because the route is discovered by a
+answer leaves the building at all (R7); ``copywriter`` holds the model that writes the pitch that
+runner puts on `Bid.message` — the dedicated advocate a shop buys by joining (D55) — resolved
+here rather than on the bid path, which may read no environment. They are separate because the route is discovered by a
 filesystem glob in the frozen ``main.py`` and must therefore be importable with nothing
 configured, while the configuration is what a composition root reaches for by name.
 """
@@ -19,6 +21,14 @@ from .advocate import (
     agent_runner,
     configure_advocate,
     reset_advocate,
+)
+from .copywriter import (
+    PITCH_RECORDINGS_ENV,
+    PITCH_TIMEOUT_ENV,
+    PITCH_TIMEOUT_SECONDS,
+    PitchClient,
+    pitch_client,
+    resolve_pitch_timeout,
 )
 from .routes import (
     DECLINE_REASON_HEADER,
@@ -47,10 +57,14 @@ __all__ = [
     "MAX_CONTEXT_BYTES",
     "MAX_INTAKE_LOG_ENTRIES",
     "NOT_ACTIVATED_REASON",
+    "PITCH_RECORDINGS_ENV",
+    "PITCH_TIMEOUT_ENV",
+    "PITCH_TIMEOUT_SECONDS",
     "UNCONFIGURED_REASON",
     "UNDISCLOSED_REASON",
     "Advocate",
     "BoundedBidLog",
+    "PitchClient",
     "ResponseChannel",
     "StoreContextError",
     "advocate",
@@ -59,6 +73,8 @@ __all__ = [
     "configure_solicitation",
     "load_context_from_env",
     "no_submission_reason",
+    "pitch_client",
+    "resolve_pitch_timeout",
     "reset_advocate",
     "router",
     "store_context",

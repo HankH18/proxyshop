@@ -58,6 +58,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..modes import AgentRunner
+from .copywriter import pitch_client
 from .serving import store_context
 
 __all__ = [
@@ -217,5 +218,9 @@ def _advocate_for(context: Mapping[str, Any]) -> Advocate:
     """
     log = BoundedBidLog()
     channel = ResponseChannel()
-    runner = AgentRunner(context, sink=log, submitter=channel, mode=None)
+    # The copywriter is resolved HERE, once, and never on the bid path: `runtime/` may not read
+    # the environment (see `store_agent.solicitation.copywriter`). `None` — no model configured,
+    # or a misconfigured one — is an ordinary answer, and the bid then carries the deterministic
+    # fallback pitch rather than nothing.
+    runner = AgentRunner(context, sink=log, submitter=channel, mode=None, llm=pitch_client())
     return Advocate(runner=runner, log=log, channel=channel)
