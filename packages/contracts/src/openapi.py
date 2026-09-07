@@ -117,6 +117,23 @@ PINNED_ROUTES: tuple[Route, ...] = (
     Route("merchant", "get", "/install"),
     Route("merchant", "get", "/install/callback"),
     Route("merchant", "get", "/install/shops"),
+    # R9's dashboard, declared in the change that serves it — which is what the note further
+    # down this tuple asks for ("Re-pin either one in the change that serves it — with an
+    # identity parameter, and with the caller that reads it"). Both conditions are met here:
+    # the store is a path parameter on each, and the caller is `apps/merchant/app/dashboard`,
+    # the SPA the merchant service now serves at `/dashboard` from its own vite build.
+    #
+    # The read is ONE operation rather than five because the page needs the envelope, the
+    # losses, the trust snapshot, the trust payloads and the bid journal to render at all;
+    # five doors would mean five partial states in a browser and five places for a refusal to
+    # be swallowed into an empty chart.
+    #
+    # The bundle itself is NOT here and owes no contract: it is served by a `Mount`, which
+    # declares no operation. If that mount ever becomes an ASGI sub-application with routes of
+    # its own, those routes are served operations and belong in this tuple;
+    # `apps/merchant/svc/tests/test_dashboard.py` asserts it has none.
+    Route("merchant", "get", "/stores/{store_id}/dashboard"),
+    Route("merchant", "post", "/stores/{store_id}/bids/solicit"),
     # R13's receiving end: the door trust pushes one store's own trust delta through.
     # Reachable by anyone who can reach a hosted agent, so it is declared here for the
     # same reason the sixteen above are.

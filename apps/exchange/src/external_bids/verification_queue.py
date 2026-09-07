@@ -15,13 +15,16 @@ place the auction state machine keeps auctions. So this adds no dependency, no c
 key and nothing to any shipped artifact: a deployment that can run an auction can already queue
 a work item.
 
-**Nothing drains it yet, and that is said here rather than discovered later.** R18's verifier
-exists (``exchange.ranking.verification``) and R8 requires an admitted external bid to be
-"routed to claim extraction + verification"; the worker that dequeues this and performs that
-routing is not in this tree. What this module changes is that an admitted bid is *retained*,
-durably, outside the process that admitted it, where an operator reads it with ``LLEN`` /
-``LRANGE`` and a worker will read it with ``LPOP``. The alternative on the table was refusing
-every correctly signed bid, which is what the exchange did before.
+**It now HAS a consumer, and the paragraph that stood here said it did not.**
+:mod:`exchange.external_bids.draining` is it: an admitted submission's claims and its pitch
+prose are decomposed, graded against the exchange's own catalogue snapshot and announced to
+the ledger as ``claim_verified``, which is R8's "routed to claim extraction + verification
+(R18)" performed rather than promised. It runs on the door's own request path, because that
+is the only execution context this deployable has — no ``[project.scripts]``, no lifespan
+hook, one ``uvicorn`` process — and :meth:`RedisVerificationQueue.pop` below is the ``LPOP``
+that paragraph was waiting for. See :mod:`~.draining` for why a background worker and a new
+served route are both closed, and for the four rules that stop a drain from becoming a
+deletion.
 
 **It refuses rather than truncates.** ``LTRIM`` to a ceiling would silently drop the oldest
 admitted bids — work items for submissions whose nonce is already spent and which therefore
@@ -127,6 +130,31 @@ class RedisVerificationQueue:
         # which is a handful, and the alternative — a Lua script or a WATCH loop — buys
         # exactness on a ceiling that is a backlog alarm rather than a correctness boundary.
         client.rpush(self._key, payload)
+
+    def pop(self) -> Any | None:
+        """The oldest work item, removed, or ``None`` when the queue is empty.
+
+        ``LPOP`` against the ``RPUSH`` :meth:`enqueue` writes, so the order is the order the
+        exchange admitted them in — which matters because the ceiling refuses rather than
+        truncates, so the head of this list is the submission that has been waiting longest
+        and whose nonce has been spent for longest.
+
+        Returns the item DECODED, because that is what it was enqueued as: the caller stored a
+        JSON object and a caller reading back a string would have to re-implement half of
+        :func:`json.loads`' failure handling to use it. A stored entry that will not parse is
+        answered as ``None`` rather than raised — it is a row nothing in this tree could have
+        written (:meth:`enqueue` refuses non-finite numbers on the way in) and dropping one
+        such row is strictly better than a consumer that cannot get past it.
+        """
+        raw = self._redis().lpop(self._key)
+        if raw is None:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8", "replace")
+        try:
+            return json.loads(raw)
+        except (TypeError, ValueError):
+            return None
 
     def depth(self) -> int:
         """How many work items are waiting. For an operator, and for this module's own gates."""

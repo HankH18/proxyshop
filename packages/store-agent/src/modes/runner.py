@@ -49,6 +49,17 @@ from typing import Any
 
 from contracts import Bid, EnvelopeActivation, TrustDimension, TrustEventPayload
 
+from ..learning import (
+    Arm,
+    StoreLearningState,
+    available_commitments,
+    cold_arm,
+    outcome_row,
+    policy_for_auction,
+    sample_arm,
+    update,
+    verdict,
+)
 from ..runtime import Decline, bid
 
 #: The modes in which an answer leaves the building. Named once, so "which modes submit" is a
@@ -65,6 +76,13 @@ COLLABORATOR_METHODS = ("write", "append", "log", "record", "put", "enqueue", "s
 GUARDED = "guarded"
 REINFORCED = "reinforced"
 NEUTRAL = "neutral"
+
+#: How many auctions' arms one runner remembers so a later trust verdict can be credited to the
+#: arm that earned it. A ring with FIFO eviction, because this is a long-lived object on a served
+#: process and an unbounded map behind a request path is a leak. A verdict naming an auction
+#: older than this window is ingested into the posture and credited to nothing — which is the
+#: honest outcome, since the runner genuinely no longer knows what it played there.
+MAX_REMEMBERED_ARMS = 512
 
 
 def _field(source: Any, name: str, default: Any = None) -> Any:
@@ -282,6 +300,11 @@ class BidLogEntry:
     trust_posture: tuple[TrustSignal, ...] = ()
     #: The answer itself, verbatim — the `Bid` that would have been submitted, or the `Decline`.
     answer: Bid | Decline | None = None
+    #: The arm this store's own policy played (R17: pitch variant x commitment set x depth), or
+    #: `None` when this runner keeps no learning state. It is on the LOG and not only inside the
+    #: bid because a merchant reading a shadow run needs to see which policy produced which
+    #: answer, and because it is the half of the loop's join key the trust door cannot supply.
+    arm: Arm | None = None
 
 
 def _offer_clauses(answer: Bid) -> tuple[str, ...]:
@@ -352,7 +375,17 @@ class AgentRunner:
     :attr:`killed_by_envelope` for why that asymmetry points the only safe way.
     """
 
-    __slots__ = ("_context", "_deltas", "_llm", "_mode", "_sink", "_store_id", "_submitter")
+    __slots__ = (
+        "_context",
+        "_deltas",
+        "_learning",
+        "_llm",
+        "_mode",
+        "_played",
+        "_sink",
+        "_store_id",
+        "_submitter",
+    )
 
     def __init__(
         self,
@@ -362,6 +395,7 @@ class AgentRunner:
         submitter: Any = None,
         mode: Any = None,
         llm: Any = None,
+        learning: StoreLearningState | None = None,
     ) -> None:
         if sink is None:
             raise ValueError(
@@ -380,6 +414,13 @@ class AgentRunner:
         # so every existing caller of this constructor keeps behaving exactly as it did.
         self._llm = llm
         self._deltas: dict[TrustDimension, list[float]] = {}
+        # R17's loop. `None` — the default, and what every library caller that predates the loop
+        # gets — means this runner selects no arm, overlays no policy, and behaves exactly as it
+        # did: the bid is answered under whatever `learned_policy` the store context already
+        # carried, static file or nothing. A state makes this runner the store's own advocate in
+        # the R17 sense, and `store_agent.solicitation.advocate` gives every SERVED process one.
+        self._learning = learning
+        self._played: dict[str, Arm] = {}
         # Through the setter, so construction and a later flip enforce the same rules.
         self.mode = _envelope_states(context) if mode is None else mode
 
@@ -425,6 +466,104 @@ class AgentRunner:
     @property
     def store_id(self) -> str:
         return self._store_id
+
+    # -- R17: the store's own policy ----------------------------------------
+
+    @property
+    def learning(self) -> StoreLearningState | None:
+        """This store's learned state, or `None` when this runner keeps none.
+
+        Exposed read-only. It is replaced wholesale on every fold — `update` returns a new frozen
+        state and cannot do otherwise — so a caller holding this value holds a snapshot that no
+        later outcome can rewrite underneath it.
+        """
+        return self._learning
+
+    def arm_for(self, auction_id: str) -> Arm | None:
+        """The arm this runner played in `auction_id`, if it still remembers that auction.
+
+        The loop's join key. `AgentRunner` is the only object in the system that holds both
+        halves — the arm it chose when it answered, and the trust verdict that names that auction
+        later — because the exchange never tells a store which arm it saw and the trust service
+        never learns there was one.
+        """
+        return self._played.get(str(auction_id))
+
+    def _select_arm(self, request: Any) -> tuple[Arm | None, Any]:
+        """The arm to play, and the context to answer under. ``(None, context)`` with no loop.
+
+        Two decisions, and both fail closed:
+
+        * **An arm is chosen and remembered from the very first auction**, even a cold one, so
+          the first verdict has something to credit. A loop whose cold arm was anonymous would
+          never accumulate the first observation and would therefore never start.
+        * **The context is only OVERLAID once this store has a record in this cluster.** A store
+          that has run no auctions has learned nothing, so it is answered under exactly the
+          policy its context already stated — which makes a cold bid byte-identical to what this
+          agent served before the loop existed, and makes the shift a before/after rather than a
+          claim.
+        """
+        state = self._learning
+        context = self._context
+        if state is None or not isinstance(context, Mapping):
+            return None, context
+        intent = _field(request, "intent")
+        cluster_id = str(_field(intent, "cluster_id") or "")
+        auction_id = str(_field(request, "auction_id") or "")
+        if not cluster_id or not auction_id:
+            return None, context
+        # The seed is the AUCTION, so the draw is a pure function of (state, cluster, auction):
+        # two identical runs play identical arms, and the same auction re-solicited plays the
+        # same arm. There is no per-instance generator and no clock anywhere on this path.
+        arm = sample_arm(
+            state,
+            cluster_id,
+            auction_id,
+            commitments=available_commitments(context.get("envelope")),
+        )
+        if state.cluster(cluster_id) is None:
+            return cold_arm(cluster_id), context
+        return arm, {
+            **context,
+            "learned_policy": policy_for_auction(
+                state, cluster_id, arm, base=context.get("learned_policy")
+            ),
+        }
+
+    def _remember(self, auction_id: str, arm: Arm) -> None:
+        """Record the arm played, evicting the oldest when the ring is full. FIFO, so it is
+        deterministic: a dict preserves insertion order, and the oldest key is the first one."""
+        if not auction_id:
+            return
+        self._played[auction_id] = arm
+        while len(self._played) > MAX_REMEMBERED_ARMS:
+            self._played.pop(next(iter(self._played)))
+
+    def _credit(self, payload: TrustEventPayload) -> None:
+        """Fold ONE trust verdict into the arm that earned it. Silent when there is nothing to do.
+
+        Three ways this legitimately does nothing, and none of them is a failure:
+
+        * this runner keeps no learning state;
+        * the verdict names an auction this runner did not answer, or answered longer ago than
+          :data:`MAX_REMEMBERED_ARMS`;
+        * the delta is exactly zero, which moved no dimension and is therefore silence about the
+          arm rather than evidence against it (see :func:`store_agent.learning.outcomes.verdict`).
+
+        What it never does is invent an outcome. The store agent cannot observe award — see
+        :mod:`store_agent.learning.outcomes` for exactly why, and for what this signal is and is
+        not — so the only rows folded here are verdicts the platform actually pushed.
+        """
+        state = self._learning
+        if state is None:
+            return
+        arm = self._played.get(str(_field(payload.event, "auction_id", "") or ""))
+        if arm is None:
+            return
+        won = verdict(payload.delta)
+        if won is None:
+            return
+        self._learning = update(state, [outcome_row(arm, store_id=self._store_id, won=won)])
 
     # -- trust intake -------------------------------------------------------
 
@@ -484,6 +623,7 @@ class AgentRunner:
         """
         payload = self._accept(event)
         self._deltas.setdefault(payload.dim, []).append(float(payload.delta))
+        self._credit(payload)
         return payload
 
     def ingest_trust_events(self, events: Iterable[Any]) -> tuple[TrustEventPayload, ...]:
@@ -498,6 +638,7 @@ class AgentRunner:
         accepted = tuple(self._accept(event) for event in events)
         for payload in accepted:
             self._deltas.setdefault(payload.dim, []).append(float(payload.delta))
+            self._credit(payload)
         return accepted
 
     # -- the loop ------------------------------------------------------------
@@ -517,16 +658,25 @@ class AgentRunner:
         and not the mutable `Bid` behind it, and a submitter that adjusts a price in place would
         otherwise rewrite an audit row that had already been written.
         """
-        answer = bid(request, self._context, llm=self._llm)
+        arm, context = self._select_arm(request)
+        answer = bid(request, context, llm=self._llm)
+        auction_id = str(_field(answer, "auction_id", "") or "")
+        if arm is not None:
+            # Remembered off the ANSWER's auction id, not the request's: the entry is already
+            # read back off the answer so that it cannot claim to be about an auction the answer
+            # is not about, and an arm filed under a different id than the log entry would be an
+            # arm no verdict could ever find.
+            self._remember(auction_id, arm)
         posture = self.trust_posture
         entry = BidLogEntry(
-            auction_id=str(_field(answer, "auction_id", "") or ""),
+            auction_id=auction_id,
             store_id=str(_field(answer, "store_id", "") or self._store_id),
             mode=self._mode,
             submitting=self.submits,
             rationale=rationale_for(answer, posture),
             trust_posture=posture.signals,
             answer=answer,
+            arm=arm,
         )
         _emit(self._sink, entry, role="sink")
         if entry.submitting:
@@ -537,6 +687,7 @@ class AgentRunner:
 __all__ = [
     "COLLABORATOR_METHODS",
     "GUARDED",
+    "MAX_REMEMBERED_ARMS",
     "NEUTRAL",
     "REINFORCED",
     "SUBMITTING_MODES",

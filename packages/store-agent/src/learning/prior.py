@@ -297,7 +297,112 @@ def to_context_priors(prior: NetworkPrior) -> dict[str, dict[str, Any]]:
     }
 
 
+#: The ONLY keys :func:`from_context_priors` is permitted to read off a store context's rendered
+#: ``network_priors[cluster]``. The mirror of :data:`PRIOR_RECORD_FIELDS`, and the same mechanism:
+#: an allowlist checked at import for a discount name, with no "give me everything" counterpart.
+#:
+#: ``depth_buckets`` is deliberately absent even though :func:`to_context_priors` writes it. It
+#: is the constant grid, `initial_state` already starts every store on
+#: :data:`~store_agent.learning.grid.DEFAULT_DEPTH_BUCKETS`, and reading it back would be the one
+#: path by which a mapping handed to this process could reshape a store's own depth ladder from
+#: outside — which is a cross-store price signal wearing a constant's name.
+CONTEXT_PRIOR_FIELDS: tuple[str, ...] = (
+    "observations",
+    "wins",
+    "stores",
+    "value_props",
+    "pitch_claims",
+    "commitments",
+)
+
+reject_discount_fields(CONTEXT_PRIOR_FIELDS)
+
+
+def _int(value: Any) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return number if number >= 0 else 0
+
+
+def _tallies(rows: Any) -> tuple[Tally, ...]:
+    """``[{label, wins, observations}, ...]`` — the shape :func:`to_context_priors` renders."""
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        return ()
+    read: dict[str, Tally] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        label = str(row.get("label") or "")
+        if not label or label in read:
+            continue
+        read[label] = Tally(
+            label=label, wins=_int(row.get("wins")), observations=_int(row.get("observations"))
+        )
+    return tuple(read[label] for label in sorted(read))
+
+
+def scrub_context_prior(prior: Any) -> tuple[dict[str, Any], tuple[str, ...]]:
+    """One cluster's rendered prior with every discount-named key removed, and their names.
+
+    R17's wall applied where a *rendered* prior enters this process rather than where one is
+    built. :func:`build_network_prior` can be structurally blind because it reads its own
+    allowlist; a mapping handed to a hosted agent as configuration cannot be, because the hook
+    that publishes it (``ToolHooks.get_network_prior``) puts the value straight into a claim.
+
+    Dropping rather than raising: a context that smuggled a rival's elasticity is a platform bug
+    and the store must not learn from it, but refusing the whole prior would cost this store the
+    network's pitch evidence too — and turn somebody else's misconfiguration into this agent's
+    500. The dropped names are returned so the hook can log what it refused.
+    """
+    if not isinstance(prior, Mapping):
+        return {}, ()
+    dropped = tuple(sorted(str(k) for k in prior if DISCOUNT_MARKER in str(k).casefold()))
+    kept = {str(k): v for k, v in prior.items() if DISCOUNT_MARKER not in str(k).casefold()}
+    return kept, dropped
+
+
+def from_context_priors(priors: Any) -> NetworkPrior:
+    """Rebuild a :class:`NetworkPrior` from a store context's ``network_priors`` mapping.
+
+    This is how the platform's cross-store prior reaches a *hosted* agent: the merchant service
+    hands over a store context, the context carries ``network_priors`` in the shape
+    :func:`to_context_priors` renders, and until this function existed the only consumer was
+    ``ToolHooks.get_network_prior``, which copied it into a claim. The store's own loop — the
+    thing R17 says the prior *initialises* — never saw it.
+
+    Only :data:`CONTEXT_PRIOR_FIELDS` is read off a cluster, by name. So a context carrying a
+    rival's discount depth initialises a byte-identical prior to one that does not, and the
+    equality is the assertion rather than the comment.
+    """
+    if not isinstance(priors, Mapping):
+        return NetworkPrior(clusters=(), observations=0)
+    clusters: list[ClusterPrior] = []
+    total = 0
+    for cluster_id in sorted(str(k) for k in priors):
+        entry = priors.get(cluster_id)
+        if not isinstance(entry, Mapping):
+            continue
+        view = {name: entry.get(name) for name in CONTEXT_PRIOR_FIELDS}
+        observations = _int(view.get("observations"))
+        total += observations
+        clusters.append(
+            ClusterPrior(
+                cluster_id=cluster_id,
+                observations=observations,
+                wins=_int(view.get("wins")),
+                stores=_int(view.get("stores")),
+                value_props=_tallies(view.get("value_props")),
+                pitch_claims=_tallies(view.get("pitch_claims")),
+                commitments=_tallies(view.get("commitments")),
+            )
+        )
+    return NetworkPrior(clusters=tuple(clusters), observations=total)
+
+
 __all__ = [
+    "CONTEXT_PRIOR_FIELDS",
     "DISCOUNT_MARKER",
     "PRIOR_RECORD_FIELDS",
     "ClusterPrior",
@@ -307,7 +412,9 @@ __all__ = [
     "build_network_prior",
     "cluster_prior",
     "field",
+    "from_context_priors",
     "prior_view",
     "reject_discount_fields",
+    "scrub_context_prior",
     "to_context_priors",
 ]

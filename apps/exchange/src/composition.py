@@ -2651,6 +2651,28 @@ def configure_exchange(
         configure_auctions(app, solicitor=HttpBidSolicitor(endpoints))
         bound.append("bid_solicitor")
 
+    if unset("shop_roster"):
+        # D55's ORGANIC HALF, and the only seam in this service that reads the catalogue
+        # graph on a served request. Bound from the ENVIRONMENT rather than from the
+        # deployment document, and opt-in (`EXCHANGE_SHOP_ROSTER=graph`), for a reason that is
+        # a deployment fact rather than a preference: `apps/exchange/Dockerfile` ships
+        # `ingest.graph` but the `neo4j` DRIVER is imported lazily inside
+        # `ingest.graph.reembed.graph_driver`, so an image without that wheel resolves every
+        # module it imports and only this path would ever notice. Making the operator say
+        # "this deployment reads the graph" keeps the wheel and the wiring one decision.
+        #
+        # `graph_roster_from_env` answers `None` when unconfigured and CONNECTS TO NOTHING
+        # when it does answer — the driver is built on the first solicitation, so an exchange
+        # pointed at a Neo4j that is down still serves every caller who brings its own roster.
+        # Nothing is bound when it answers `None`, which leaves `auction/routes.py`'s
+        # `NoShopRoster` default: finds nobody, says so, changes no existing behaviour.
+        from .retrieval.roster import graph_roster_from_env  # noqa: PLC0415
+
+        graph_roster = graph_roster_from_env(env)
+        if graph_roster is not None:
+            configure_auctions(app, shop_roster=graph_roster)
+            bound.append("shop_roster")
+
     if deployment.intent_clusters is not None and unset("intent_clusters"):
         # `is not None`, not truthiness: a document that states `"intent_clusters": []` has
         # said "this exchange has no cluster vocabulary", and binding the empty catalogue

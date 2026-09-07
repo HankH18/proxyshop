@@ -46,11 +46,13 @@ un-wired service is **safe rather than convenient**:
 from __future__ import annotations
 
 import json
+import math
 import time
 import uuid
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Final
 
+from contracts.protocol import Shortlist
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -61,6 +63,7 @@ from pydantic import BaseModel, Field
 from .. import redact_addresses
 from ..eligibility import StaticSellerEligibility
 from ..orchestration import solicit_bids
+from ..ranking import rank
 from ..ranking.candidates import mint_bid_id
 from ..ranking.serving import (
     catalog_of,
@@ -68,15 +71,20 @@ from ..ranking.serving import (
     rank_auction,
     record_shown,
     registered_domains_of,
+    shortlist_commitments,
+    shortlist_price,
+    shortlist_product,
     shortlist_store,
     trust_snapshot_of,
     weights_of,
 )
+from ..ranking.verification import declared_attributes
 from ..reports.log import record_losses
 from ..reports.routes import loss_log_of
 from ..retrieval.clusters import assign_cluster, configure_clusters, intent_clusters_of
 from ..retrieval.criteria import MAX_CANDIDATE_LIMIT
 from ..retrieval.fit import FitLogError, annotate_bid_payload
+from ..retrieval.roster import NoShopRoster, ShopRoster
 from .fanout import parallel_fan_out
 from .state import AuctionStateMachine, UnknownAuction
 
@@ -623,8 +631,12 @@ class AuctionEntryOut(BaseModel):
     store_id: str
     tier: int
     fallback: bool
-    unit_price: float
-    total_price: float
+    #: What this store is offering to charge, or ``null`` when the offer states no price the
+    #: exchange can read. **``null``, never ``0.0``** — see :func:`_served_price` for the
+    #: measurement: zero is the cheapest number there is, so an absent price rendered as a
+    #: zero is a free item published in the auction's own report of what it collected.
+    unit_price: float | None
+    total_price: float | None
     fallback_reason: str | None = None
 
 
@@ -696,6 +708,15 @@ class CreateAuctionResponse(BaseModel):
     #: pinned two-field contract (``extra="forbid"``), and a reason that reached the buyer
     #: only through a schema change would not have reached them at all.
     relaxed_constraints: list[RelaxedConstraintOut] = Field(default_factory=list)
+    #: WHERE THIS AUCTION'S ROSTER CAME FROM, and — when the exchange found nobody — why.
+    #:
+    #: ``source`` is ``"request"`` when the body named the stores, and otherwise the name of
+    #: the source that was asked (``"neo4j"``, or ``"unwired"`` on an exchange with no
+    #: catalogue graph). It is published because an empty auction has two completely different
+    #: causes that look identical from outside — "the platform knows no shop that sells this"
+    #: and "nobody wired a graph into this exchange" — and a buyer's agent that cannot tell
+    #: them apart will retry the second one forever.
+    roster_source: dict[str, Any] = Field(default_factory=dict)
 
 
 def configure_auctions(
@@ -706,8 +727,15 @@ def configure_auctions(
     eligibility: Any | None = None,
     bids: Any | None = None,
     clusters: Any | None = None,
+    shop_roster: Any | None = None,
 ) -> None:
     """Wire an app's auction dependencies. Anything omitted keeps what is already there.
+
+    ``shop_roster`` is the source that answers "WHICH SHOPS" when a request states no roster
+    — D55's organic half, and the only thing in this service that reads the catalogue graph on
+    a served request. Omitting it leaves :class:`~..retrieval.roster.NoShopRoster`, which
+    finds nobody and says so, so an exchange with no graph serves exactly what it served
+    before. See :mod:`~..retrieval.roster`.
 
     ``bids`` is the same ``app.state.auction_bids`` book :func:`~..accept.routes.
     configure_accept` wires, named here as well because the auction is what WRITES it: this
@@ -731,6 +759,8 @@ def configure_auctions(
         app.state.auction_bids = bids
     if clusters is not None:
         configure_clusters(app, clusters)
+    if shop_roster is not None:
+        app.state.shop_roster = shop_roster
 
 
 def _machine(request: Request) -> AuctionStateMachine:
@@ -826,6 +856,237 @@ def _eligibility(request: Request) -> Any:
         eligibility = StaticSellerEligibility()
         request.app.state.seller_eligibility = eligibility
     return eligibility
+
+
+def _shop_roster(request: Request) -> Any:
+    """The source that answers "which shops" when the request body names none (D55).
+
+    Defaults to :class:`~..retrieval.roster.NoShopRoster`, which finds nobody and says so —
+    the same "an un-wired service is safe rather than convenient" rule the eligibility default
+    above follows. An exchange with no catalogue graph therefore behaves exactly as it did
+    before this seam existed: a caller who states a roster is served identically, and a caller
+    who states none is answered with an empty auction that names the reason.
+    """
+    roster = getattr(request.app.state, "shop_roster", None)
+    if roster is None:
+        roster = NoShopRoster()
+        request.app.state.shop_roster = roster
+    return roster
+
+
+def _found_roster(request: Request, intent: Any) -> ShopRoster:
+    """Ask the graph which shops to solicit. **Never raises, never returns ``None``.**
+
+    Called only when the request body names no store; see :func:`create_auction`. The
+    source's own contract is that every failure resolves to an empty roster carrying a
+    reason, and this wrapper re-states that guarantee for a source somebody else wired: a
+    third-party implementation that raises must not be able to fail an auction, because the
+    caller may not even be using it.
+    """
+    source = _shop_roster(request)
+    name = str(getattr(source, "name", type(source).__name__))
+    try:
+        found = source.solicit(intent, limit=MAX_ROSTER_ENTRIES)
+    except Exception as exc:  # noqa: BLE001 — a broken roster source is an empty roster
+        return ShopRoster(
+            source=name,
+            reason=(
+                f"the configured shop-roster source raised rather than answering: "
+                f"{type(exc).__name__}. The auction still runs; it has no shops of the "
+                f"exchange's own to solicit"
+            ),
+        )
+    if not isinstance(found, ShopRoster):
+        return ShopRoster(
+            source=name,
+            reason=(
+                f"the configured shop-roster source answered {type(found).__name__} rather "
+                f"than a ShopRoster, so this exchange cannot read who it named"
+            ),
+        )
+    return _bounded(found)
+
+
+def _bounded(found: ShopRoster) -> ShopRoster:
+    """The same roster with over-long identifiers dropped, and the count capped.
+
+    **The graph is not a trusted source of NAMES.** Every id on a roster row was written by
+    the crawler out of a scraped page, so a hostile site chooses it — and ``store_id`` and
+    ``product_ref`` are interpolated once per unsatisfied hard constraint into the exclusion
+    reasons this route serves back. That is the same O(roster x constraints) amplifier
+    :data:`MAX_IDENTIFIER_LENGTH` was measured against on the request body (``RosterEntry``
+    bounds both fields there), reached through a door that bypasses ``RosterEntry`` entirely,
+    which is exactly why the bound is re-applied rather than inherited.
+
+    A row is DROPPED rather than truncated: a truncated identifier names a different store,
+    and an auction addressed to a store that does not exist is worse than one shop short.
+    """
+    kept = tuple(
+        shop
+        for shop in found.shops
+        if len(shop.store_id) <= MAX_IDENTIFIER_LENGTH
+        and len(shop.product_ref) <= MAX_IDENTIFIER_LENGTH
+    )[:MAX_ROSTER_ENTRIES]
+    if len(kept) == len(found.shops):
+        return found
+    return ShopRoster(
+        shops=kept,
+        source=found.source,
+        considered=found.considered,
+        reason=found.reason
+        if kept
+        else (
+            f"every shop the catalogue graph named carries an identifier longer than "
+            f"{MAX_IDENTIFIER_LENGTH} characters, which this exchange will not serve back"
+        ),
+        elapsed_ms=found.elapsed_ms,
+        fit=found.fit,
+    )
+
+
+def _slot_offer_fields(offer: Any) -> dict[str, Any]:
+    """The three R2 fields an offer can support, with the ones it cannot left out.
+
+    Built from ``ranking.serving``'s three PUBLISHED readers rather than from its own private
+    helper, so this route reaches into nothing — and pinned against that helper by
+    ``test_graph_auction.py::test_the_refit_shortlist_is_the_object_rank_auction_would_have_built``,
+    which drives both over the same candidates and asserts they agree. Restating the three
+    keys without that pin is how the two doors would drift.
+    """
+    fields = {
+        "product": shortlist_product(offer),
+        "price": shortlist_price(offer),
+        "commitments": shortlist_commitments(offer),
+    }
+    return {key: value for key, value in fields.items() if value is not None}
+
+
+def _with_offer_fields(shortlist: Mapping[str, Any], candidates: Sequence[Any]) -> dict[str, Any]:
+    """``shortlist`` with each slot carrying its candidate's product, price and commitments.
+
+    The same additive join ``rank_auction`` applies to the shortlist it returns, re-applied
+    here because a re-ranked auction has a NEW shortlist and the join is keyed on ``bid_ref``.
+    Re-validated through the pinned ``Shortlist`` model for the reason ``ranking.serving``
+    documents at length: ``GET /auctions/{auction_id}/shortlist`` declares
+    ``response_model=Shortlist`` and serializes the MODEL, so a stored slot that is not
+    already a fixed point of ``Shortlist.model_validate(...).model_dump(mode="json")`` is
+    served in two different spellings by two routes that claim to serve the same object.
+    """
+    by_bid_id: dict[str, Any] = {}
+    for candidate in candidates:
+        bid_id = str(candidate.get("bid_id", "") or "") if isinstance(candidate, Mapping) else ""
+        if bid_id and bid_id not in by_bid_id:
+            by_bid_id[bid_id] = candidate
+
+    slots: list[dict[str, Any]] = []
+    for slot in shortlist.get("slots", ()) or ():
+        enriched = dict(slot)
+        candidate = by_bid_id.get(str(enriched.get("bid_ref", "")))
+        offer = candidate.get("offer") if isinstance(candidate, Mapping) else None
+        for key, value in _slot_offer_fields(offer).items():
+            if enriched.get(key) is None:
+                enriched[key] = value
+        slots.append(enriched)
+    return Shortlist.model_validate({**shortlist, "slots": slots}).model_dump(mode="json")
+
+
+def _with_graph_fit(
+    ranking: Mapping[str, Any],
+    *,
+    fit: Mapping[str, float],
+    intent: Any,
+    now: float,
+    auction_id: str,
+    trust_snapshot: Any,
+    weights: Any,
+    catalog: Any,
+    product_refs: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Re-score this auction with ``intent_match`` measured, instead of absent.
+
+    **What this closes.** ``intent_match`` carries ``w_m = 0.35``, the largest weight in the
+    published formula, and until a graph reached the auction route NOTHING produced it: every
+    candidate on every served auction took ``INTENT_MATCH_WHEN_ABSENT`` (0.5), so more than a
+    third of the score was a constant and the "best fit" shortlist slot — which
+    ``ranking/shortlist.py`` awards on exactly this feature — was decided by the tie-breaks.
+    ``ranking/candidates.py`` said so in a comment: "a served auction has no retrieval source".
+    Now one does, and this is where its answer enters the score.
+
+    **Why it is a re-score rather than an argument to** :func:`~..ranking.serving.rank_auction`.
+    That function builds its candidates internally from ``BidEntry`` objects through a
+    projection that NAMES its fields and deliberately copies no published feature — which is
+    the R11 property that stops a bidder writing ``intent_match: 1.0`` into its own reply — so
+    there is no seam on it through which a caller can supply the term. The right long-term
+    shape is a one-line ``intent_match`` argument on ``rank_auction`` itself; this lane's file
+    scope does not include ``apps/exchange/src/ranking/**``, so the term is applied here, to
+    the candidates that function already returns under ``projected``.
+
+    **What it costs, stated rather than hidden.** :func:`~..ranking.rank` runs a second time.
+    It is pure — no I/O, no ledger writes, no HTTP — and it is O(candidates x constraints),
+    both of which are already capped (:data:`MAX_ROSTER_ENTRIES`,
+    :data:`MAX_HARD_CONSTRAINTS`). The EXPENSIVE half of ``rank_auction``, the claim
+    attestation that runs a verifier over every candidate and writes ``claim_verified`` to the
+    ledger, is **not** repeated: it already ran, its verdicts are on ``projected``, and the
+    candidates handed here are those same attested records. So this adds no event, no
+    verification and no network call to the auction.
+
+    **It is a no-op unless a graph actually measured something.** ``fit`` is empty for every
+    auction whose roster came from the request body and for every deployment with no graph
+    wired, and then ``ranking`` is returned unchanged — byte-identical to what
+    ``rank_auction`` produced.
+
+    Args:
+        ranking: what :func:`~..ranking.serving.rank_auction` returned.
+        fit: ``{store_id: intent_match}``, the retrieval's per-shop measurement.
+        intent: the buyer's intent, as handed to the first ranking.
+        now: the auction's close instant — the SAME one, so the expiry filter cannot decide
+            differently on the second pass than it did on the first.
+        auction_id: this auction.
+        trust_snapshot: the published four-argument trust surface.
+        weights: the weight set this auction is ranked under.
+        catalog: this exchange's catalogue snapshots, for ``network_attributes``.
+        product_refs: ``{store_id: product_ref}`` off the roster.
+
+    Returns:
+        A ranking dict of the same shape, with ``ranked``, ``candidates``, ``shortlist``,
+        ``relaxed_constraints`` and ``projected`` all re-derived under the measured feature.
+    """
+    projected = list(ranking.get("projected") or ())
+    if not fit or not projected:
+        return dict(ranking)
+
+    refitted: list[Any] = []
+    for candidate in projected:
+        if not isinstance(candidate, Mapping):
+            refitted.append(candidate)
+            continue
+        measured = fit.get(str(candidate.get("store_id") or ""))
+        # A candidate the retrieval did not measure keeps the ABSENT term and reads its
+        # published neutral, exactly as it does today. Writing a number for it would be the
+        # fabrication `ranking/features.py` refuses on this feature's behalf; the store is on
+        # the roster (a request body may mix sources, and a fallback may be minted for a store
+        # the graph never scored), and "we did not measure this one" is a true thing to say.
+        refitted.append(
+            dict(candidate) if measured is None else {**candidate, "intent_match": measured}
+        )
+
+    reranked = rank(
+        refitted,
+        intent,
+        trust_snapshot,
+        {"now": float(now), "auction_id": auction_id},
+        weights=weights,
+        network_attributes=declared_attributes(
+            catalog,
+            [c.get("store_id") if isinstance(c, Mapping) else None for c in refitted],
+            product_refs=dict(product_refs),
+        ),
+    )
+    return {
+        **reranked,
+        "shortlist": _with_offer_fields(reranked["shortlist"], refitted),
+        "projected": refitted,
+    }
 
 
 def _bind_the_deployment(request: Request) -> None:
@@ -1177,6 +1438,7 @@ def record_bid_receipts(
     entries: Sequence[Any],
     *,
     auction_id: str,
+    assessments: Sequence[Any] = (),
 ) -> list[dict[str, Any]]:
     """Announce one ``bid_placed`` event per bid this auction collected.
 
@@ -1232,10 +1494,12 @@ def record_bid_receipts(
             "offer": {} if offer is None else offer,
         }
         try:
-            # No assessments: a served auction is handed a ROSTER and queries no index, so the
-            # fit block records `fit_unavailable` rather than a number nobody measured. Same
-            # reasoning as `ranking.features`' `intent_match`.
-            payload = annotate_bid_payload(payload, (), auction_id=auction_id)
+            # `assessments` are the retrieval's, joined to this bid by `offer.product_ref` —
+            # never by position, so reordering the fan-out cannot move a fit score onto another
+            # store. EMPTY is still the ordinary case and still records `fit_unavailable`
+            # rather than a number nobody measured: an auction whose roster came from the
+            # request body queried no index, which is what that field has always meant.
+            payload = annotate_bid_payload(payload, assessments, auction_id=auction_id)
         except FitLogError:
             # The annotation needs `offer.product_ref` to join an assessment to. A roster row
             # that named no product, or an offer too large to hold, has none — the receipt is
@@ -1252,6 +1516,39 @@ def record_bid_receipts(
     return events
 
 
+def _served_price(offer: Any, *keys: str) -> float | None:
+    """The first readable price among ``keys``, or ``None`` when the offer states none.
+
+    ``float(offer.get("unit_price", 0.0))`` — the read this replaces — answered **0.00** for an
+    offer stating no price at all, and 0.00 on a price is not a neutral default: it is the
+    cheapest number there is, so ``entries`` published a free item for a store that had quoted
+    nothing. ``BidEntry.unit_price`` closed exactly this one layer down (T-277: it answers
+    ``inf``, the same absence in the fail-CLOSED direction) and its own docstring records that
+    this function "reads the offer's own field rather than this property" — so the response
+    surface kept publishing the zero the collector had stopped producing.
+
+    It was unreachable through the request door, which is why it survived: ``RosterEntry.
+    list_price`` is ``Field(gt=0.0)``, so no stated roster row could mint a priceless fallback.
+    It is reachable now. A GRAPH-sourced roster row deliberately carries no ``list_price`` when
+    the platform never observed one (D55: ``lowest_price is None`` means "never checked", never
+    "free"), ``_list_price_bid`` mints an offer with no ``unit_price`` and no ``expires_at``
+    for it, and every downstream filter refuses that — but ``entries`` would have rendered it
+    as ``0.00`` and a buyer's agent reading ``entries`` would have seen the cheapest offer in
+    the auction. ``null`` is the honest spelling and the one the shortlist already uses for a
+    price it cannot read.
+    """
+    if not isinstance(offer, Mapping):
+        return None
+    for key in keys:
+        value = offer.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        number = float(value)
+        if math.isfinite(number):
+            return number
+    return None
+
+
 def _entries_out(entries: Sequence[Any]) -> list[AuctionEntryOut]:
     out: list[AuctionEntryOut] = []
     for entry in entries:
@@ -1261,8 +1558,8 @@ def _entries_out(entries: Sequence[Any]) -> list[AuctionEntryOut]:
                 store_id=entry.store_id,
                 tier=entry.tier,
                 fallback=entry.fallback,
-                unit_price=float(offer.get("unit_price", 0.0)),
-                total_price=float(offer.get("total_price", offer.get("unit_price", 0.0))),
+                unit_price=_served_price(offer, "unit_price"),
+                total_price=_served_price(offer, "total_price", "unit_price"),
                 fallback_reason=entry.fallback_reason,
             )
         )
@@ -1539,6 +1836,25 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
     auction_id = f"auction-{uuid.uuid4()}"
     roster = [entry.model_dump() for entry in body.roster]
 
+    # D55's ORGANIC HALF, and the one line that puts the graph on a served auction. A request
+    # that names no store is not an empty auction: it is a shopper asking the platform who
+    # sells this, and the platform answers from its own crawl — `(:Store)-[:SELLS]->(:Product)`
+    # and the offer walk, pivoted over the same vector+attribute retrieval the exchange has
+    # always owned and never called (`exchange/retrieval/` shipped with ZERO production call
+    # sites; `GraphCandidateSource`, this repo's only Neo4j reader, was called by nobody).
+    #
+    # A request that DOES name a roster is untouched — the graph is not consulted, not
+    # connected to, and cannot change the answer. That is what keeps this additive for every
+    # caller that already works, including every existing test and the whole e2e suite.
+    #
+    # `found` is always a `ShopRoster`, never an exception: an exchange whose graph is empty,
+    # down, or absent answers 201 with an empty auction naming the reason rather than 5xx. The
+    # reasoning is in `_found_roster` and in `retrieval/roster.py`'s header — "no shops" is a
+    # real outcome, and a failure here must not take down a door that needs no graph at all.
+    found = ShopRoster(source="request") if roster else _found_roster(request, intent)
+    if not roster:
+        roster = found.rows
+
     opened_at = time.time()
     # Taken next to `opened_at`, and for the same instant: this is the monotonic reading the
     # whole window is measured from. Everything between here and the fan-out (two ledger
@@ -1578,7 +1894,14 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
     # ledger reads in the order the auction happened. See `record_bid_receipts` for why the
     # exchange writing its own is what lets `retrieval.fit`'s `record_fit_scores` stop being
     # the only producer of the kind in the tree.
-    record_bid_receipts(machine.ledger, result.entries, auction_id=auction_id)
+    # `found.assessments()` is what turns the receipt's fit block from `fit_unavailable` into a
+    # measurement. `retrieval/fit.py` has always specified this shape — ANNOTATE the receipt
+    # the auction was going to write, never emit a second `bid_placed`, because that kind's
+    # count is load-bearing in two frozen criteria — and it is empty for a request-stated
+    # roster, which is exactly the `fit_unavailable` this used to record unconditionally.
+    record_bid_receipts(
+        machine.ledger, result.entries, auction_id=auction_id, assessments=found.assessments()
+    )
 
     # ONE clock reading, used for the close transition and for the ranking's `now`. Two
     # readings would let an offer expire between the auction closing and the ranking that
@@ -1587,29 +1910,49 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
     closed_at = time.time()
     record = machine.close(auction_id, now=closed_at)
 
+    trust_snapshot = trust_snapshot_of(request.app)
+    weights = weights_of(request.app)
+    catalog = catalog_of(request.app)
+    product_refs = {
+        str(entry.get("store_id") or ""): entry.get("product_ref")
+        for entry in roster
+        if entry.get("product_ref") is not None
+    }
     ranking = rank_auction(
         result.entries,
         auction_id=auction_id,
         intent=intent,
         now=closed_at,
-        trust_snapshot=trust_snapshot_of(request.app),
+        trust_snapshot=trust_snapshot,
         registered_domains=registered_domains_of(request.app),
-        weights=weights_of(request.app),
-        catalog=catalog_of(request.app),
+        weights=weights,
+        catalog=catalog,
         # Which product each store is bidding on is the ROSTER's answer, never the reply's:
         # a store that named a different product on its bid would otherwise choose which of
-        # its own catalogue entries its claims are graded against (ESC-020).
-        product_refs={
-            str(entry.get("store_id") or ""): entry.get("product_ref")
-            for entry in roster
-            if entry.get("product_ref") is not None
-        },
+        # its own catalogue entries its claims are graded against (ESC-020). On a graph-sourced
+        # roster the answer is the PLATFORM's own crawl, which is stronger still.
+        product_refs=product_refs,
         # The ranker's own audit trail. Every verdict it mints for this auction is announced
         # as `claim_verified` on the way through, instead of being consumed by the filters and
         # dropped when the request ends — see `ranking.verification.attest_candidate_claims`,
         # including for why an exchange with no `claim_dimensions` wired announces nothing.
         recorder=machine.ledger,
         claim_dimensions=claim_dimensions_of(request.app),
+    )
+    # `intent_match` — w_m = 0.35, the largest term in the published formula — stops being a
+    # constant here, and ONLY here, because this is the first place in the service's history
+    # that holds both a ranked auction and a retrieval measurement for it. A no-op whenever
+    # the roster came from the request body or no graph is wired; see `_with_graph_fit`.
+    ranking = _with_graph_fit(
+        ranking,
+        fit=found.intent_match_by_store,
+        intent=intent,
+        now=closed_at,
+        auction_id=auction_id,
+        trust_snapshot=trust_snapshot,
+        weights=weights,
+        catalog=catalog,
+        product_refs=product_refs,
     )
     shortlist = ranking["shortlist"]
     shortlist_store(request.app).put(auction_id, shortlist, now=closed_at)
@@ -1682,6 +2025,10 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
         excluded=_excluded_out(ranking["candidates"]),
         shortlist=shortlist,
         relaxed_constraints=_relaxed_out(ranking.get("relaxed_constraints") or ()),
+        # ``shops`` is the roster this auction actually ran, so it is the same number on both
+        # doors: for a graph-sourced roster ``roster is found.rows``, and for a stated one it
+        # is what the caller sent. Everything else on the payload is the source's own report.
+        roster_source={**found.as_payload(), "shops": len(roster)},
     )
 
 

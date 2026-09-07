@@ -57,6 +57,33 @@ RUN pip install --no-cache-dir \
       "redis[hiredis]==8.1.0" \
       "jsonschema[format]==4.26.0"
 
+# The exchange's OWN layer, after the byte-identical prologue above rather than inside it, so
+# the eight-image shared pip layer stays cache-identical (this is the same shape
+# `services/ingest/Dockerfile` uses for its four extras).
+#
+# ONE wheel, and it exists because D55 made the catalogue graph part of a SERVED request.
+# `exchange.retrieval.roster.graph_roster_from_env` opens a `neo4j.Driver` when the operator
+# sets `EXCHANGE_SHOP_ROSTER=graph`; that is how `POST /auctions` answers a request naming no
+# roster, which is the organic half of the market. DESIGN.md:23-24 already has EXC->NEO as an
+# independent edge, so this is the driver catching up with the architecture rather than a new
+# dependency direction.
+#
+# The import is LAZY (inside the factory, exactly as `ingest.graph.reembed.graph_driver`'s
+# is), so an import scan cannot see it and `test_artifact_copyset.py` counts it as an indented
+# site — which is precisely why the wheel has to be reasoned about here rather than derived.
+# Without it the image still builds, still boots and still serves every request that brings
+# its own roster; only the graph door fails, and it fails QUIETLY as an empty roster whose
+# reason names `ModuleNotFoundError: No module named 'neo4j'`. "Built, tested, and reachable
+# by nobody" is the failure this line exists to avoid.
+#
+# NOTE for the next reader of `apps/exchange/compose.yaml`: the healthcheck block there says
+# this image ships `ingest.graph` "but NOT the `neo4j` driver". That half of the sentence is
+# superseded by this layer. Its CONCLUSION still stands and should not be revisited on this
+# evidence alone — there is deliberately no `--neo4j` in the exchange's readiness probe,
+# because the graph roster is opt-in and an exchange that has not opted in must not be marked
+# unhealthy when Neo4j is down.
+RUN pip install --no-cache-dir "neo4j==5.28.5"
+
 # The repo layout is reproduced VERBATIM rather than flattened into /app, because
 # `contracts.registry` resolves its JSON bundle as
 # `Path(__file__).resolve().parent.parent / "schemas"`. `.resolve()` follows the `.pkgroot`

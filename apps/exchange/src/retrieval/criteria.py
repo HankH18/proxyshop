@@ -42,6 +42,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from contracts.ranking import preference_term_conflict
 from ingest.graph import AttributeFilter
 from ingest.graph.model import canonical_text, slug
 
@@ -54,6 +55,7 @@ __all__ = [
     "CriterionVerdict",
     "HardCriterion",
     "MalformedIntent",
+    "RefusedPreference",
     "RetrievalQuery",
     "SoftPreference",
     "UndecidableCriterion",
@@ -420,6 +422,44 @@ class SoftPreference:
 
 
 @dataclass(frozen=True)
+class RefusedPreference:
+    """A preference this module will not score, and the published term that already does.
+
+    ``contracts.ranking.PREFERENCE_FIELD_TERMS`` publishes the rule and this is where the
+    exchange obeys it: **``intent_match`` must refuse every field in that map.** A preference
+    on price is already scored by ``price_value``; one on delivery by ``delivery_fit``; one on
+    trust by ``trust``. Letting any of them back in here would score one quantity twice under
+    two published names and silently repartition the published weights, which contradicts
+    DESIGN's "this is the only rank formula in the system".
+
+    The hazard is measured rather than feared, and it is the reason this dataclass exists
+    instead of a silent ``continue``. S1's intent carries exactly ONE preference —
+    ``{price, minimize, 1.0}`` — and :func:`~exchange.retrieval.service._preference_alignments`
+    min-max normalises across the eligible set, so an ``intent_match`` wired naively over that
+    intent **is** normalised inverse price. Price's share of the published weight would go from
+    ``w_v = 0.15`` to ``w_v + w_m = 0.50``, and the market SPEC's core tenet rules out — an
+    allocation dominated by discount — would be the market this exchange runs.
+
+    Attributes:
+        field: the preference field as the buyer spelled it, kept verbatim so an operator
+            reading a report recognises their own wording.
+        term: the published feature that scores it instead.
+    """
+
+    field: str
+    term: str
+
+    @property
+    def reason(self) -> str:
+        """One sentence naming what took this preference, for a report or a response."""
+        return (
+            f"preference {self.field!r} is not scored by intent_match: the published term "
+            f"{self.term!r} already scores it, and scoring it twice would repartition the "
+            f"published weights"
+        )
+
+
+@dataclass(frozen=True)
 class RetrievalQuery:
     """Everything a candidate source needs, plus the rule the result is judged against."""
 
@@ -429,6 +469,10 @@ class RetrievalQuery:
     preferences: tuple[SoftPreference, ...]
     category: str | None
     limit: int
+    #: Preferences dropped by :func:`build_query` because a published term already scores
+    #: them. Reported rather than merely absent: a store operator asking why its price
+    #: preference moved nothing is owed the name of the term that took it.
+    refused_preferences: tuple[RefusedPreference, ...] = ()
 
     @property
     def attribute_filters(self) -> tuple[AttributeFilter, ...]:
@@ -469,6 +513,17 @@ def build_query(intent: Any, *, limit: int | None = None) -> RetrievalQuery:
         rather than at scoring time so a malformed intent fails once, loudly, before any
         candidate has been judged against it.
 
+        **A preference a published term already scores is REFUSED, not carried.** It lands on
+        :attr:`RetrievalQuery.refused_preferences` and never reaches ``preferences``, so it
+        cannot move the fit score and therefore cannot move ``intent_match``. The rule and the
+        map are ``contracts.ranking``'s (``PREFERENCE_FIELD_TERMS`` /
+        :func:`~contracts.ranking.preference_term_conflict`), whose own docstring says "a
+        producer of ``intent_match`` calls this and drops every preference it answers for" —
+        this is the producer, and this is the drop. It is enforced HERE rather than at the one
+        call site that needs it because every consumer of retrieval goes through this
+        function, and a repair that lives at one call site is one a second caller does not get.
+        See :class:`RefusedPreference` for the measured hazard.
+
     Raises:
         MalformedIntent: the intent carries neither query text nor any structured predicate
             (the same rule :func:`ingest.graph.candidate_products` enforces — matching
@@ -491,9 +546,18 @@ def build_query(intent: Any, *, limit: int | None = None) -> RetrievalQuery:
     criteria = tuple(
         HardCriterion.from_mapping(raw) for raw in (fields.get("hard_constraints") or ())
     )
-    preferences = tuple(
-        SoftPreference.from_mapping(raw) for raw in (fields.get("preferences") or ())
+    # Validate EVERY preference first, then drop the ones a published term already scores.
+    # In that order on purpose: a malformed `{price, sideways}` is still a malformed intent,
+    # and silently discarding it because its field is refused anyway would make this door
+    # more permissive for exactly the fields the rule exists to keep out.
+    stated = tuple(SoftPreference.from_mapping(raw) for raw in (fields.get("preferences") or ()))
+    refused = tuple(
+        RefusedPreference(preference.field, conflict)
+        for preference in stated
+        if (conflict := preference_term_conflict(preference.field)) is not None
     )
+    refused_fields = {row.field for row in refused}
+    preferences = tuple(row for row in stated if row.field not in refused_fields)
     raw_category = fields.get("category")
     category = None if raw_category is None else str(raw_category)
     query_text = str(fields.get("query") or "").strip()
@@ -512,4 +576,5 @@ def build_query(intent: Any, *, limit: int | None = None) -> RetrievalQuery:
         preferences=preferences,
         category=category,
         limit=resolved_limit,
+        refused_preferences=refused,
     )

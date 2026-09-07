@@ -57,6 +57,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from ..learning import from_context_priors, initial_state
 from ..modes import AgentRunner
 from .copywriter import pitch_client
 from .serving import store_context
@@ -222,5 +223,28 @@ def _advocate_for(context: Mapping[str, Any]) -> Advocate:
     # the environment (see `store_agent.solicitation.copywriter`). `None` — no model configured,
     # or a misconfigured one — is an ordinary answer, and the bid then carries the deterministic
     # fallback pitch rather than nothing.
-    runner = AgentRunner(context, sink=log, submitter=channel, mode=None, llm=pitch_client())
+    runner = AgentRunner(
+        context,
+        sink=log,
+        submitter=channel,
+        mode=None,
+        llm=pitch_client(),
+        # R17's loop, and the reason it is built HERE. `store_agent.learning` had no product
+        # importer at all: the served door went routes -> runner -> `bid()` and never touched it,
+        # so a store's own record could not reach the policy its own bids were answered under.
+        # The runner is the only long-lived object in this process — it is why the runner is
+        # cached on `app.state` at all — and it is the one object holding both halves of the
+        # loop's join, the arm it played in an auction and the trust verdict that names that
+        # auction later.
+        #
+        # Seeded from the store context's OWN `network_priors`, which is how the platform's
+        # cross-store prior reaches a hosted agent (R17: "initialized from network priors built
+        # from pitch/value-prop outcomes only"). `from_context_priors` reads an allowlist that is
+        # checked at import for a discount name, so a context carrying a rival's elasticity
+        # initialises a byte-identical prior to one that does not.
+        learning=initial_state(
+            from_context_priors(context.get("network_priors")),
+            store_id=context.get("store_id"),
+        ),
+    )
     return Advocate(runner=runner, log=log, channel=channel)

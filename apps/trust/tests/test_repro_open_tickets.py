@@ -4952,13 +4952,37 @@ def test_t302_the_ledger_kind_emitter_sweep_is_armed() -> None:
     wrong reason; a sweep that found something for every kind would make it green while the
     unemitted kinds stayed unemitted.
 
-    Every control kind below is produced OUTSIDE ``apps/trust`` — ``feedback`` in
-    ``apps/buyer``, ``code_created`` in ``apps/exchange``, ``refund`` in
-    ``services/shopify-stub`` — so this control is not grading a file this lane can edit.
-    ``reconciled`` was here and was removed for exactly that reason: its only producer is
-    ``apps/trust/src/reconcile/engine.py``.
+    Every control kind below is produced OUTSIDE ``apps/trust`` — ``bid_placed`` in
+    ``apps/exchange/src/auction/routes.py``, ``code_created`` in
+    ``apps/exchange/src/accept/offer.py``, ``shown`` in
+    ``apps/exchange/src/ranking/serving.py`` — so this control is not grading a file this
+    lane can edit. Three kinds, three files, and the second assertion is what keeps that
+    true rather than assumed.
+
+    THE LIST TURNS OVER, AND THAT IS THE MECHANISM WORKING, NOT A WEAKENING
+    -----------------------------------------------------------------------
+    A kind leaves this list the moment ``apps/trust`` starts NAMING it, because
+    :func:`_t302_kinds_named_in` is deliberately generous — "a module that declares a kind
+    constant counts even if it only ever CONSUMES that kind" — so an in-lane consumer is
+    indistinguishable here from an in-lane producer, and a control that graded a file this
+    lane can edit could be satisfied by editing it.
+
+    Three kinds have left so far, each for that reason and each recorded here rather than
+    quietly dropped:
+
+    * ``reconciled`` — its only producer is ``apps/trust/src/reconcile/engine.py``.
+    * ``feedback`` and ``refund`` — the trust service now names both, in
+      ``apps/trust/src/feedback/weighting.py`` and ``apps/trust/src/ledger/replay.py``,
+      because R14's fold-time weight is a function of exactly those two kinds: a buyer's
+      report, cross-checked against a return the chain already recorded. Neither module
+      EMITS either kind (the emitters are still ``apps/buyer`` and
+      ``services/shopify-stub``); they consume them, and the sweep cannot tell the
+      difference by design.
+
+    The rule for a replacement is the assertion below, not this prose: any kind the sweep
+    finds producers for, none of them under ``apps/trust/``.
     """
-    for kind in ("feedback", "code_created", "refund"):
+    for kind in ("bid_placed", "code_created", "shown"):
         producers = _t302_emitters(kind)
         assert producers, f"the sweep finds no producer for {kind!r}, which has one"
         assert not any(path.startswith("apps/trust/") for path in producers), (
@@ -4979,19 +5003,30 @@ def test_t302_the_ledger_kind_emitter_sweep_is_armed() -> None:
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "T-302: SIX frozen ledger kinds are reserved in every vocabulary and produced by no "
-        "product code — auction_closed, auction_opened, checkout_redirect, order_fulfilled, "
-        "policy_event and shown. The auction lifecycle accounts for three of them, so the "
+        "T-302: FOUR frozen ledger kinds are reserved in every vocabulary and named by no "
+        "product code — auction_closed, auction_opened, checkout_redirect and policy_event. "
+        "The auction lifecycle accounts for three of them, so the "
         "ledger cannot reconstruct an auction it ran; remove this marker with the fix"
     ),
 )
 def test_t302_every_frozen_ledger_kind_has_something_that_produces_it() -> None:
     """A vocabulary entry nothing can produce is a promise the system cannot keep.
 
-    SIX of the eighteen frozen kinds have no producer: ``auction_closed``,
-    ``auction_opened``, ``checkout_redirect``, ``order_fulfilled``, ``policy_event`` and
-    ``shown``. Three of those are the auction lifecycle, so the ledger cannot reconstruct an
-    auction the exchange actually ran — it can only see the bids.
+    FOUR of the eighteen frozen kinds are named by nothing: ``auction_closed``,
+    ``auction_opened``, ``checkout_redirect`` and ``policy_event``. Three of those are the
+    auction lifecycle, so the ledger cannot reconstruct an auction the exchange actually ran
+    — it can only see the bids.
+
+    It was SIX, and the two that left did NOT leave because they acquired emitters — the
+    generosity of the sweep is what moved them, and saying so is the difference between a
+    ledger of defects and a scoreboard:
+
+    * ``shown`` is named by ``apps/exchange/src/ranking/serving.py``'s ``SHOWN_KIND``; and
+    * ``order_fulfilled`` is named by ``apps/trust/src/reconcile/engine.py``'s
+      ``FULFILLED_KIND``, which READS delivery records to grade the ``shipped_on_time``
+      promise. Nothing appends one. The kind's real gap — no producer emits a fulfilment —
+      is unchanged, and this gate can no longer see it, which is the cost of the sweep
+      counting consumers.
 
     The published contract is worse than silent about this class: ``trust.openapi.json`` uses
     ``claim_verified`` as its example body, and until this branch nothing produced that one

@@ -36,6 +36,13 @@ from typing import Any
 
 from contracts import Claim, ClaimType, ProvenanceSource
 
+# R17's vocabulary and R17's wall, imported rather than re-spelled. `store_agent.learning` was
+# 955 lines with no product importer: the CONSUMER of a learned policy was served through this
+# facade and the PRODUCER was an island, so `learned_policy` could only ever come from a static
+# operator file and `network_priors` was copied into a claim unread. These two imports are the
+# seam that ends that — one closed variant vocabulary, one place a rendered prior is filtered.
+from ..learning.arms import DEFAULT_PITCH_VARIANT
+from ..learning.prior import scrub_context_prior
 from .provenance import UNKNOWN_OBSERVED_AT, claim_fingerprint, mint_claim, scoped_ref
 
 #: Slack allowed when comparing a requested discount against a wall. Percentages arrive as
@@ -799,6 +806,17 @@ class ToolHooks:
         is `policy_action`. A depth the envelope refuses fails closed to no discount and is
         recorded in the call log; the rest of the policy's choice stands, because only the depth
         is walled.
+
+        **The action names all three axes of R17's policy**, because SPEC R17 is "(pitch variant
+        x commitment set x discount depth)" and a bid that reported only the depth would make two
+        thirds of a store's own policy invisible to the exchange, to a merchant's dashboard and
+        to the verifier that checks a pitch against the bid beside it. `pitch_variant` is passed
+        through from the learned policy exactly as `commitment_keys` and `value_prop` are; it is
+        validated where it is USED — :mod:`store_agent.learning.arms` holds the closed
+        vocabulary and :mod:`store_agent.runtime.pitch` reads it through
+        :func:`~store_agent.learning.arms.variant_or_default` — so there is one validator rather
+        than one per reader. Unlike the depth it needs no wall: an emphasis reorders facts the
+        bid already carries and already proved, and can spend nothing.
         """
         ask = _as_mapping(context, "policy context")
         cluster_id = str(ask.get("cluster_id") or "")
@@ -815,13 +833,14 @@ class ToolHooks:
             "product_ref": product_ref,
             "discount_pct": 0.0,
             "commitment_keys": sorted(k for k in commitment_keys if k),
+            "pitch_variant": DEFAULT_PITCH_VARIANT,
         }
         walled = ""
         learned = self.learned_policy
         if isinstance(learned, Mapping):
             by_cluster = _as_mapping(learned.get("actions"), "learned policy actions")
             chosen = _as_mapping(by_cluster.get(cluster_id), "learned policy action")
-            for name in ("commitment_keys", "value_prop"):
+            for name in ("commitment_keys", "value_prop", "pitch_variant"):
                 if name in chosen:
                     action[name] = chosen[name]
             if "discount_pct" in chosen:
@@ -865,11 +884,26 @@ class ToolHooks:
         cited at a `#absent` ref. "The network has nothing to say here" is itself a network
         observation, and a cold cluster must be distinguishable from a rich one in the bid's
         evidence rather than silently absent from it.
+
+        **R17's wall, applied where a rendered prior enters this process.** This used to publish
+        ``network_priors[cluster]`` verbatim off the context dict, which made the criterion "the
+        prior never pools discount elasticity across stores" a property of the *builder*
+        upstream and of nothing on this side of the wire. The prior is now read through
+        :func:`store_agent.learning.prior.scrub_context_prior`, which drops every
+        discount-named key and reports what it dropped, so a context that smuggled a rival's
+        elasticity cannot put it in a claim this store emits. Dropping rather than raising: a
+        platform misconfiguration must not become this agent's 500, and the store must still get
+        the network's *pitch* evidence, which is the half R17 permits.
         """
         cluster = str(cluster_id)
-        prior = self.network_priors.get(cluster)
-        present = prior is not None
-        evidence = prior if isinstance(prior, Mapping) else None
+        raw = self.network_priors.get(cluster)
+        present = raw is not None
+        # A prior that is not a mapping has no keys to scrub and is published verbatim: filtering
+        # it to `{}` would silently turn "the network said something this hook could not parse"
+        # into "the network said nothing", which are different facts and only one of them is
+        # true.
+        prior, dropped = scrub_context_prior(raw) if isinstance(raw, Mapping) else (raw, ())
+        evidence = prior if isinstance(raw, Mapping) else None
         claim = mint_claim(
             key="network_prior",
             value=prior if present else {},
@@ -878,7 +912,13 @@ class ToolHooks:
             observed_at=self._observed_at(evidence),
         )
         emitted = self._emit([claim])
-        self._log("get_network_prior", cluster, "prior" if present else "absent", emitted)
+        self._log(
+            "get_network_prior",
+            cluster,
+            "prior" if present else "absent",
+            emitted,
+            detail=("dropped discount fields " + ", ".join(dropped)) if dropped else "",
+        )
         return emitted[0]
 
 

@@ -100,6 +100,12 @@ from typing import Any
 from contracts import ClaimType, ProvenanceSource
 from llm.prompting import CachedPrompt, assemble_prompt
 
+from ..learning.arms import (
+    DEFAULT_PITCH_VARIANT,
+    VARIANT_KIND,
+    commitment_keys,
+    variant_or_default,
+)
 from .context import AuctionContext, as_mapping, as_number, as_sequence
 
 # ==============================================================================================
@@ -427,6 +433,14 @@ class PitchMaterial:
         forbidden_tokens: every string the profile carried OUTSIDE the allowlist — the pseudonym,
             and anything a caller invented. None of them reached the prompt; the screen refuses
             any of them in the output as well (rule E).
+        variant: the pitch variant the store's own policy played for this auction (R17) — which
+            class of true fact to lead with. One of
+            :data:`~store_agent.learning.arms.PITCH_VARIANTS`, validated on the way in, so a
+            policy read off disk cannot introduce an emphasis this module does not implement.
+        lead_commitments: which of the merchant's approved standing commitments the advocate
+            stands behind first. It changes the ORDER of the pitch and never the OFFER — the
+            offer's commitments come from `hooks.get_owner_commitments`, and a learned policy
+            that could drop one of those would be a policy that can edit an envelope.
     """
 
     store_id: str
@@ -437,6 +451,8 @@ class PitchMaterial:
     preference_fields: tuple[str, ...] = ()
     buckets: tuple[tuple[str, str], ...] = ()
     forbidden_tokens: tuple[str, ...] = field(default=())
+    variant: str = DEFAULT_PITCH_VARIANT
+    lead_commitments: tuple[str, ...] = ()
 
     @property
     def leading(self) -> tuple[SupportedFact, ...]:
@@ -589,6 +605,34 @@ REGION_BONUS = 0.25
 #: overlap with everything and would rank every fact identically.
 MIN_MATCH_TOKEN = 4
 
+#: What the store's LEARNED emphasis is worth (R17's pitch-variant axis). Exactly
+#: :data:`PREFERENCE_BASE`, and the equality is the calibration: a store's learned lead is worth
+#: as much as a preference the shopper stated without weighting it, and never as much as one they
+#: weighted — so a shopper who says what they are optimising for still gets it first.
+#:
+#: It DOES outrank :data:`CONSTRAINT_BONUS`, and that is deliberate rather than an accident of
+#: the numbers. R19 makes a hard constraint an eligibility filter, so by the time a pitch exists
+#: the constraint is already satisfied and repeating it is confirmation; choosing what to lead
+#: with instead is emphasis, which is what D55 says a shop buys by joining. The constraint is
+#: still in the pitch — it is one line further down.
+VARIANT_LEAD_BONUS = 2.0
+
+#: What being named in the arm's COMMITMENT SET is worth, on top of the variant bonus. Small: it
+#: separates two promises the merchant approved, and it must never lift a promise above the
+#: catalogue fact the shopper actually asked for.
+#:
+#: **It applies only when the set is a PROPER, non-empty subset of the commitments this bid
+#: carries**, and that condition is the whole correctness of the field rather than a tuning
+#: choice. `hooks.choose_policy_action` fills `commitment_keys` with the envelope's FULL standing
+#: commitment list whenever the policy names none — the cold, un-learned case — so reading that
+#: list as a lead set gave every cold bid an emphasis it had not learned. Measured: the shipped
+#: cold pitch changed from *"You asked for material, and it is merino wool. Also: free returns:
+#: 30 days; ships within: 2 business days."* to *"Free returns: 30 days. Also: material: merino
+#: wool; ..."* — the advocate stopped leading with the thing the shopper's own hard constraint
+#: asked for. "Stand behind all of them" states no preference between them, so it must score
+#: like one.
+COMMITMENT_LEAD_BONUS = 0.75
+
 
 def _tokens(text: Any) -> frozenset[str]:
     return frozenset(t for t in (_token(w) for w in str(text).split()) if len(t) >= MIN_MATCH_TOKEN)
@@ -616,8 +660,18 @@ def rank(
     inventing anything, and D55 is explicit that emphasis, ordering and framing are most of
     persuasion and the honest part of it.
 
+    **Two emphases are composed here, and the order of the composition is the product.** The
+    buyer-conditional terms come first and are the bulk of the score — a pitch is written for
+    THIS shopper, and no policy may override what they said they wanted. On top of that sits the
+    store's own LEARNED emphasis (R17's pitch-variant axis): ``material.variant`` names a class
+    of fact this store's own record says converts, and ``material.lead_commitments`` names which
+    approved promises it stands behind first. Both only ever REORDER material that is already in
+    the bid and already proved, which is the whole of what a learned policy is permitted to move.
+
     Pure arithmetic over the material — no clock, no RNG, no set iteration in the sort — so two
-    runs on one shopper produce one order (S4).
+    runs on one shopper produce one order (S4). The variant arrives already chosen: sampling it
+    happens in ``store_agent.learning``, outside the bid path, precisely because this path is
+    under a static no-RNG scan.
     """
     query_tokens = _tokens(material.query)
     affinity_tokens = frozenset(
@@ -632,9 +686,17 @@ def rank(
         for label, value in material.buckets
     )
     regional = any(label == "region" and value for label, value in material.buckets)
+    led_kind = VARIANT_KIND.get(material.variant, "")
+    ranked = tuple(facts)
+    # A lead set that names every commitment in the bid expresses no preference between them —
+    # which is exactly the shape hook 5 produces for a store that has learned nothing — so it
+    # scores like the absence of a choice. See :data:`COMMITMENT_LEAD_BONUS`.
+    promised = frozenset(f.key for f in ranked if f.kind == "commitment")
+    asked = frozenset(material.lead_commitments) & promised
+    led_commitments = asked if asked and asked != promised else frozenset()
 
     scored: list[SupportedFact] = []
-    for fact in facts:
+    for fact in ranked:
         score = 0.0
         weight = weights.get(fact.key)
         if weight is not None:
@@ -653,6 +715,12 @@ def rank(
             score += FREQUENCY_BONUS
         if regional and _marked(fact.key, DISPATCH_MARKERS):
             score += REGION_BONUS
+        # R17's learned emphasis, last, so it is legible as an addition on top of the
+        # buyer-conditional score rather than mixed into it.
+        if led_kind and fact.kind == led_kind:
+            score += VARIANT_LEAD_BONUS
+        if fact.key in led_commitments:
+            score += COMMITMENT_LEAD_BONUS
         scored.append(SupportedFact(key=fact.key, value=fact.value, kind=fact.kind, score=score))
     return tuple(sorted(scored, key=lambda fact: fact.order))
 
@@ -720,11 +788,23 @@ def _preference_weights(intent: Mapping[str, Any]) -> dict[str, float]:
     return weights
 
 
-def material_for(ctx: AuctionContext, claims: Iterable[Any]) -> PitchMaterial:
+def material_for(
+    ctx: AuctionContext,
+    claims: Iterable[Any],
+    *,
+    variant: Any = None,
+    lead_commitments: Any = None,
+) -> PitchMaterial:
     """Everything the writer is given for one auction, ranked for this shopper.
 
     `claims` is the bid's own claim material. Nothing else is read: not the catalogue, not the
     envelope, not a hook.
+
+    ``variant`` and ``lead_commitments`` are the arm the store's own policy played (R17). They
+    arrive as raw values off a `policy_action` claim that has been round-tripped through JSON, so
+    both are normalised through :mod:`store_agent.learning.arms` — an unrecognised emphasis
+    becomes the neutral one rather than being carried on as data, and the default is exactly the
+    behaviour this function had before a policy existed.
     """
     weights = _preference_weights(ctx.intent)
     constraints = tuple(
@@ -740,6 +820,8 @@ def material_for(ctx: AuctionContext, claims: Iterable[Any]) -> PitchMaterial:
         preference_fields=tuple(weights),
         buckets=_profile_buckets(ctx.profile),
         forbidden_tokens=_forbidden_tokens(ctx.profile),
+        variant=variant_or_default(variant),
+        lead_commitments=commitment_keys(lead_commitments),
     )
     ranked = rank(supported_facts(claims), material, weights)[:MAX_PROMPT_FACTS]
     return PitchMaterial(
@@ -751,6 +833,8 @@ def material_for(ctx: AuctionContext, claims: Iterable[Any]) -> PitchMaterial:
         preference_fields=material.preference_fields,
         buckets=material.buckets,
         forbidden_tokens=material.forbidden_tokens,
+        variant=material.variant,
+        lead_commitments=material.lead_commitments,
     )
 
 
@@ -907,6 +991,8 @@ def compose_pitch(
     *,
     offer_ref: Any = None,
     llm: Any = None,
+    variant: Any = None,
+    lead_commitments: Any = None,
 ) -> str | None:
     """The pitch for one bid, or `None` when this store has nothing it may say.
 
@@ -917,6 +1003,11 @@ def compose_pitch(
         llm: a client exposing ``complete(prompt) -> str``. `None` means "no writer configured",
             and the deterministic fallback is served — which is what every library caller and
             every offline test gets unless it injects one.
+        variant: the pitch variant this store's own policy played (R17), off the bid's own
+            `policy_action` claim. `None` is the neutral arm and reproduces this function's
+            behaviour before the loop existed.
+        lead_commitments: the approved commitments the arm stands behind first. Order only; the
+            offer's commitments are the merchant's approval and are untouched by this.
 
     **This function never raises.** That is rule D and it is the reason for the outer guard: it
     is called from inside :func:`store_agent.runtime.bidding._assemble`, whose own `except`
@@ -933,20 +1024,37 @@ def compose_pitch(
     4. `None`.
     """
     try:
-        return _compose(ctx, claims, offer_ref=offer_ref, llm=llm)
+        return _compose(
+            ctx,
+            claims,
+            offer_ref=offer_ref,
+            llm=llm,
+            variant=variant,
+            lead_commitments=lead_commitments,
+        )
     except Exception:  # noqa: BLE001 - rule D: a copywriter must never cost the store its bid
         return None
 
 
-def _compose(ctx: AuctionContext, claims: Iterable[Any], *, offer_ref: Any, llm: Any) -> str | None:
+def _compose(
+    ctx: AuctionContext,
+    claims: Iterable[Any],
+    *,
+    offer_ref: Any,
+    llm: Any,
+    variant: Any = None,
+    lead_commitments: Any = None,
+) -> str | None:
     replayed = ctx.replayed_pitch(offer_ref)
     if replayed is not None:
         # Rule F: an artifact, not a function. The stored bytes are what was served, and R15/S3
         # promise a replay reproduces them; regenerating here would break that under a live model
-        # and would be invisible, because the new pitch would look just as plausible.
+        # and would be invisible, because the new pitch would look just as plausible. It also
+        # outranks the learned arm on purpose: a stored pitch is what a buyer was SHOWN, and an
+        # arm sampled later cannot retroactively change it.
         return replayed
 
-    material = material_for(ctx, claims)
+    material = material_for(ctx, claims, variant=variant, lead_commitments=lead_commitments)
     if not material.facts:
         return None
 
@@ -963,7 +1071,9 @@ def _compose(ctx: AuctionContext, claims: Iterable[Any], *, offer_ref: Any, llm:
 
 __all__ = [
     "AFFINITY_BONUS",
+    "COMMITMENT_LEAD_BONUS",
     "CONSTRAINT_BONUS",
+    "VARIANT_LEAD_BONUS",
     "DISPATCH_MARKERS",
     "FIRST_TIME_BONUS",
     "FORBIDDEN_CHARACTERS",

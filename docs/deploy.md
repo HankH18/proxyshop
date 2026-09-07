@@ -220,6 +220,244 @@ quietly restore the false green. `make verify` requires the stack; `make deps-up
 This is also what now catches the relocated-`.env` case above: a `.env` pointing the suite at
 a cluster that is not there trips this gate instead of showing up as 133 skips nobody reads.
 
+## Continuous integration — the machine that has the datastores
+
+The section above closes the false green *locally*: `make verify` now refuses to exit 0 when
+the datastore-backed checks did not run. That refusal is only worth as much as the number of
+machines that actually bring the stack up, and until now that number was "however many
+developers remembered to run `make deps-up`". This repository had **no CI at all** — no
+`.github/`, no `.gitlab-ci.yml`, no `.circleci` — so a green local run was the only signal
+anybody got, and an offline one proved nothing about database least-privilege.
+
+Two files now, one gate:
+
+| file | target | how it gets its datastores |
+|------|--------|----------------------------|
+| `.gitlab-ci.yml` | labs.gauntletai.com — the **submission** target | three CI `services:` |
+| `.github/workflows/verify.yml` | the GitHub mirror | `make deps-up`, this repo's own compose file |
+
+**Neither one re-spells the gate.** Both call `./scripts/bootstrap.sh` and then `make verify`,
+because `scripts/verify.sh` is where ruff, `ruff format --check`, import-linter, the
+banned-reset gate, eslint, mypy, `tsc -b`, the frozen acceptance suite in its own interpreter
+(with the three S8 release blockers asserted by id), the ~7,600-test pytest run, vitest, the
+datastore coverage gate and `scripts/check_verify_contracts.py` already live. A second copy in
+YAML would be free to drift from the copy the frozen `build_succeeds` metric reads. `Makefile`
+and `scripts/verify.sh` are hash-pinned in `.swarm-loop/manifest.json`; the pipeline calls
+them and does not touch them.
+
+### The runner has to be turned on — that part is the project owner's
+
+Nothing here can enable itself. On labs.gauntletai.com, **Settings → CI/CD → Runners** is
+where a runner is enabled for the project, and until one is, the file is inert and no
+pipeline appears. What it needs is modest: the **docker** executor, **not** privileged. That
+is the whole reason the GitLab job declares CI services instead of running `docker compose` —
+a GitLab docker-executor job reaches a service by its alias and never on its own `localhost`,
+so compose would mean docker-in-docker and a privileged runner.
+
+### What each job adds beyond `make verify`
+
+Two steps, and both close a hole `verify.sh` structurally cannot:
+
+```console
+$ .venv/bin/python scripts/ci_datastore_proof.py wait          # fail in seconds, by name
+$ .venv/bin/python scripts/ci_datastore_proof.py prove         # the class really EXECUTED
+$ .venv/bin/python scripts/ci_datastore_proof.py check-config  # CI still matches compose
+```
+
+`verify.sh`'s coverage gate proves the three endpoints were **reachable**. Reachability is
+necessary and it is not sufficient — a stripped marker, a fixture that skips for a reason
+that is not reachability, or a marker expression that deselects the class all leave three
+ports answering while the class evaporates. `prove` asserts the **outcome** instead: it runs
+`-m "docker and not needs_model"` with a JUnit report and refuses unless every member
+executed. Measured on this tree, worker 10, with the compose stack up:
+
+```console
+$ pytest -q -m "docker and not needs_model"
+309 passed, 7354 deselected in 88.53s
+```
+
+and the same command with Postgres pointed at a closed port:
+
+```console
+$ PROXYSHOP_PG_DSN_ADMIN=postgresql://nobody@127.0.0.1:1/postgres \
+    .venv/bin/python scripts/ci_datastore_proof.py prove
+151 passed, 163 skipped, 7462 deselected in 32.81s      # pytest exit 0 — the lie
+
+DATASTORE PROOF
+    collected         : 314
+    executed          : 151
+    skipped           : 163
+    pytest exit       : 0
+DATASTORE PROOF FAILED — the datastore-backed checks did not all execute.
+  * 163 datastore-backed tests SKIPPED. ...
+                                                        # script exit 1 — the refusal
+```
+
+### Three things measured the hard way, all of them now guarded
+
+1. **A `NEO4J_*` variable in GitLab's `variables:` kills the Neo4j service.** GitLab injects
+   a job's variables into its *service* containers, and the Neo4j image turns every `NEO4J_*`
+   environment variable into a `neo4j.conf` setting:
+
+   ```console
+   $ docker run -e NEO4J_AUTH=neo4j/proxyshop_dev_pw -e NEO4J_URI=bolt://neo4j:7687 \
+       neo4j:5.26-community
+   Failed to read config: Unrecognized setting. No declared setting with name: URI.
+   $ docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}}' <id>
+   exited exit=1
+   ```
+
+   Every variable the *test process* needs to find a datastore is therefore exported in
+   `before_script`, where no service container sees it. `check-config` fails the build if one
+   moves back into `variables:`.
+
+2. **`PROXYSHOP_PG_DSN_APP` must not be set.** Set to the password-free shape `.env.example`
+   ships, it fails two tests in `apps/buyer/svc/tests/test_auth_vault.py` with
+   `psycopg.OperationalError: ... fe_sendauth: no password supplied`, because `buyer_svc`
+   reads that variable directly instead of through `proxyshop_support.postgres.role_dsn`.
+   Bisected one variable at a time: `PROXYSHOP_PG_DSN_ADMIN` and `_VAULT` are harmless, `_APP`
+   is not. Left unset, `role_dsn` builds the DSN from `PGHOST`/`PG_PORT` and supplies the
+   password itself. `PROXYSHOP_PG_DSN_ADMIN` is the one that *must* be set on GitLab, because
+   `proxyshop_support.reachability` reads the Postgres endpoint from it and from nowhere else
+   — it does not consult `PGHOST`/`PG_PORT`, so without it the coverage gate would probe
+   `localhost:5432` on a job whose Postgres is at `postgres:5432`.
+
+3. **`db/init/00-roles.sql` does not need to be mounted in CI**, which is what makes the
+   services approach viable at all. Measured against a bare `postgres:16-alpine` with no
+   initdb hook and no `db/init` bind mount:
+
+   ```console
+   $ docker exec <pg> psql -U proxyshop -tAc \
+       "select rolname from pg_roles where rolname in ('exchange','trust_rw','buyer_vault','app')"
+                                                    # nothing — the hook never ran
+   $ pytest apps/trust/tests/test_schema_grants.py -q
+   58 passed in 14.38s
+   $ docker exec <pg> psql ... same query
+   app
+   buyer_vault
+   exchange
+   trust_rw
+   ```
+
+   `db/migrations/0001_schemas_roles_grants.sql` re-creates the four cluster-global roles
+   idempotently before it grants, so the C3/S7 least-privilege gate runs on a stock image.
+
+### The worker index is 12, and that is three constraints at once
+
+`PROXYSHOP_WORKER=12` in both files. Not 0: worker 0 is reserved for the frozen
+`build_succeeds` measurement, and `scripts/db_reclaim.py` protects `proxyshop_w0` under every
+flag. Under 16: a stock `redis:7-alpine` answers `CONFIG GET databases` with `16`, and
+`proxyshop_support.worker.redis_db_index` **refuses** an index at or above the running
+server's ceiling rather than silently sharing a logical DB. And clear of 1..10, the band the
+local build lanes use. `check-config` fails the build on all three.
+
+### No secrets, no network, no deploy
+
+Neither file reads a secret or a masked variable, and there is no deploy, push or publish
+step in either. `LLM_PROVIDER` is deliberately left unset so it keeps its default
+deterministic offline double, and the embedding provider keeps `lexical` (D56), so the suite
+makes no outbound call; `needs_model` is deselected by `make verify` for the same reason. The
+two credentials in `.gitlab-ci.yml` — `POSTGRES_PASSWORD` and `NEO4J_AUTH` — are the ephemeral
+dev defaults that already live in `docker-compose.yml`, for containers destroyed when the job
+ends, and `check-config` fails the build if either stops matching compose.
+
+### How far this was proven, and where it stops
+
+- `actionlint` and `check-jsonschema --builtin-schema vendor.github-workflows` both accept
+  `.github/workflows/verify.yml`, and both reject an unknown job key when one is introduced.
+- `check-jsonschema --builtin-schema vendor.gitlab-ci` accepts `.gitlab-ci.yml`. Its green is
+  weaker than actionlint's and the difference is worth stating: it rejects wrong types, bad
+  enums and wrong shapes (`stages: 5`, `when: banana`, `interruptible: "yes-please"`,
+  `services:` as a scalar, an integer in `rules:` — all refused) but **permits an unknown
+  job key**, because GitLab jobs legitimately carry extension keys.
+- GitLab's own CI Lint API is the authoritative validator and was **not** reachable: the
+  credential on this machine is repository-scoped, and `POST /api/v4/projects/:id/ci/lint`
+  answers `403 insufficient_scope`. That check is owed the first time a pipeline actually
+  runs.
+- **No runner has executed either file.** What has been executed, end to end and locally, is
+  the job's own command sequence — see below.
+
+### The job's command sequence, executed
+
+Run in a throwaway worktree at the committed `d4386a8` — a fresh checkout, the way a runner
+sees one, rather than the working tree with five lanes' uncommitted edits in it. This is the
+GitHub job's sequence verbatim; the GitLab job differs only in how the datastores arrive.
+
+```console
+$ ./scripts/bootstrap.sh
+    python 3.12.13 at .../proxyshop-worktrees/ci-w10/.venv
+    typescript 5.9.3
+    .pkgroot namespaces import from an unrelated cwd: .../.pkgroot/contracts/__init__.py
+OK: bootstrap                                                       # 6.0s, warm caches
+
+$ PROXYSHOP_WORKER=12 make deps-up
+ Container proxyshop-redis-1     Healthy
+ Container proxyshop-neo4j-1     Healthy
+ Container proxyshop-postgres-1  Healthy
+OK: database proxyshop_w12 exists (via postgresql://proxyshop:...@localhost:5432/postgres)
+
+$ .venv/bin/python scripts/ci_datastore_proof.py wait
+    up: postgres (localhost:5432)
+    up: neo4j-bolt (localhost:7687)
+    up: redis (localhost:6379)
+OK: all three datastores answered.
+
+$ PROXYSHOP_WORKER=12 make verify
+All checks passed!                                                  # ruff
+Contracts: 2 kept, 0 broken.                                        # import-linter
+ACCEPTANCE: 120/120 frozen criteria passing; S8 release blockers present: S8-1, S8-2, S8-3
+FAILED apps/exchange/tests/test_loss_reports_served.py::test_the_served_report_carries_no_rival_amount
+1 failed, 7596 passed, 1 deselected, 7 xfailed, 19 warnings in 565.55s (0:09:25)
+SELECTION: 1 deselected, 0 skipped  <-  pytest -q -m not needs_model
+
+$ ./scripts/verify.sh vitest
+ Test Files  20 passed (20)
+      Tests  1044 passed (1044)
+OK: vitest
+
+$ .venv/bin/python scripts/ci_datastore_proof.py prove
+301 passed, 7304 deselected in 85.07s (0:01:25)
+DATASTORE PROOF
+    collected         : 301
+    executed          : 301
+    skipped           : 0
+    failed / errored  : 0 / 0
+OK: all 301 datastore-backed tests executed and passed.             # exit 0
+
+$ .venv/bin/python scripts/ci_datastore_proof.py check-config
+OK: .gitlab-ci.yml and .github/workflows/verify.yml agree with docker-compose.yml.
+
+$ .venv/bin/python scripts/check_verify_contracts.py                # exit 0
+```
+
+**`SELECTION: 1 deselected, 0 skipped` is the line this whole page has been building toward.**
+The single deselection is the `needs_model` test; nothing else in 7,600 was passed over. The
+same run offline reports several hundred skips and still exits 0 on the pytest step, which is
+the false green `verify.sh`'s coverage gate and `prove` exist to refuse.
+
+**The one failure is not this pipeline's, and it is already fixed in flight.**
+`test_the_served_report_carries_no_rival_amount` is red at the commit and **passes on the
+working tree** with the exchange lane's uncommitted edits applied — checked both ways. It is
+recorded here rather than trimmed out, because a transcript that shows only the green half is
+the thing this page is against.
+
+The provisioning half was checked against the real CI base image rather than assumed:
+
+```console
+$ docker run --rm node:22-bookworm sh -lc 'node -v; npm -v; make --version | head -1; git --version'
+v22.23.2                                    # package.json needs >= 22.12 (D8)
+10.9.8
+GNU Make 4.3
+git version 2.39.5
+
+$ docker run --rm node:22-bookworm sh -lc '
+    curl -LsSf "https://astral.sh/uv/0.11.8/install.sh" | env UV_INSTALL_DIR=/usr/local/bin sh
+    uv --version'
+downloading uv 0.11.8 aarch64-unknown-linux-gnu
+installing to /usr/local/bin
+uv 0.11.8 (aarch64-unknown-linux-gnu)
+```
+
 ## Where each service is told about the others
 
 Nothing in this stack discovers a peer. Each service is *told*, out of its own environment,

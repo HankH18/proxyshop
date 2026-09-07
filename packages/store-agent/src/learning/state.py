@@ -37,6 +37,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from .arms import (
+    DEFAULT_PITCH_VARIANT,
+    PITCH_VARIANTS,
+    Arm,
+    is_variant,
+)
 from .grid import (
     DEFAULT_DEPTH_BUCKETS,
     as_fraction,
@@ -68,8 +74,20 @@ DEPTH_PERCENT_FIELDS: tuple[str, ...] = ("discount_pct",)
 #: the whole point of the loop. The wall is that these rows never cross a store boundary.
 OUTCOME_DEPTH_FIELDS: tuple[str, ...] = DEPTH_FRACTION_FIELDS + DEPTH_PERCENT_FIELDS
 
+#: Outcome-row fields naming the PITCH VARIANT the arm played, tried in order. Read through
+#: `arms.is_variant`, so a row naming something outside the closed vocabulary contributes no
+#: variant evidence rather than minting a fourth arm nobody can play.
+OUTCOME_VARIANT_FIELDS: tuple[str, ...] = ("pitch_variant",)
+
 #: Prefix of the policy version a rendered `learned_policy` reports.
 POLICY_VERSION_PREFIX = "learned"
+
+#: Seed-stream separators. Each coordinate of an arm is drawn from its OWN generator, so that a
+#: cluster whose depth record is rich cannot shift which pitch variant is sampled at a given
+#: seed. The empty salt reproduces :func:`sample_depth`'s original digest byte for byte, which is
+#: what keeps the frozen T-042 depth assertion measuring the same distribution it always did.
+VARIANT_SALT = "variant"
+COMMITMENT_SALT = "commitments"
 
 
 @dataclass(frozen=True)
@@ -92,13 +110,19 @@ class DepthTally:
 
 @dataclass(frozen=True)
 class ClusterLearning:
-    """What one store has learned about one cluster."""
+    """What one store has learned about one cluster, on all three axes of R17's policy.
+
+    ``variants`` carries a default so that a `ClusterLearning` built positionally before the
+    pitch axis existed still constructs; nothing in this package builds one that way any more,
+    and the default is the honest value — a store with no variant evidence.
+    """
 
     cluster_id: str
     depths: tuple[DepthTally, ...]
     commitments: tuple[Tally, ...]
     observations: int
     wins: int
+    variants: tuple[Tally, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -195,13 +219,22 @@ def _labels(value: Any) -> tuple[str, ...]:
 class _ClusterScratch:
     """Mutable accumulator, local to one :func:`update` call. Never escapes it."""
 
-    __slots__ = ("cluster_id", "wins", "losses", "commitments", "observations", "won_count")
+    __slots__ = (
+        "cluster_id",
+        "wins",
+        "losses",
+        "commitments",
+        "variants",
+        "observations",
+        "won_count",
+    )
 
     def __init__(self, cluster_id: str, rungs: int) -> None:
         self.cluster_id = cluster_id
         self.wins = [0] * rungs
         self.losses = [0] * rungs
         self.commitments: dict[str, list[int]] = {}
+        self.variants: dict[str, list[int]] = {}
         self.observations = 0
         self.won_count = 0
 
@@ -213,6 +246,8 @@ class _ClusterScratch:
         for index, rung in enumerate(learned.depths[:rungs]):
             scratch.wins[index] = rung.wins
             scratch.losses[index] = rung.losses
+        for variant in learned.variants:
+            scratch.variants[variant.label] = [variant.wins, variant.observations]
         # A DIFFERENT name, deliberately: `learned.depths` yields `DepthTally` (keyed by a
         # numeric `depth`) and `learned.commitments` yields `Tally` (keyed by a string `label`).
         # Reusing one loop variable for both bound the name to the first record type and made
@@ -237,6 +272,10 @@ class _ClusterScratch:
             ),
             observations=self.observations,
             wins=self.won_count,
+            variants=tuple(
+                Tally(label=label, wins=counts[0], observations=counts[1])
+                for label, counts in sorted(self.variants.items())
+            ),
         )
 
 
@@ -283,6 +322,20 @@ def update(state: StoreLearningState, records: Any) -> StoreLearningState:
             counts = slot.commitments.setdefault(label, [0, 0])
             counts[0] += 1 if won else 0
             counts[1] += 1
+        # The pitch axis. Only a row naming a variant from the closed vocabulary contributes:
+        # `arms.is_variant` rather than a truthiness test, so a row carrying `pitch_variant:
+        # "aggressive"` — an arm this agent can never actually play — cannot accumulate a record
+        # that then wins a Thompson draw against arms it can.
+        variant: str | None = None
+        for name in OUTCOME_VARIANT_FIELDS:
+            candidate = field(record, name)
+            if is_variant(candidate):
+                variant = str(candidate)
+                break
+        if variant is not None:
+            counts = slot.variants.setdefault(variant, [0, 0])
+            counts[0] += 1 if won else 0
+            counts[1] += 1
         applied += 1
 
     untouched = tuple(c for c in state.clusters if c.cluster_id not in scratch)
@@ -305,14 +358,20 @@ def depth_weights(state: StoreLearningState, cluster_id: str) -> tuple[float, ..
     return tuple(tally.posterior_mean for tally in learned.depths)
 
 
-def _seed_int(cluster_id: str, seed: Any) -> int:
-    """A stable integer seed from `(cluster_id, seed)`.
+def _seed_int(cluster_id: str, seed: Any, salt: str = "") -> int:
+    """A stable integer seed from `(cluster_id, seed[, salt])`.
 
     Hashed rather than combined arithmetically because Python's `hash()` of a str is salted per
     process: `random.Random(("cluster", 7))` reproduces within one run and silently does not
     across two, which is exactly the kind of determinism failure S4 exists to catch.
+
+    ``salt`` separates the three coordinates of an arm into three independent streams. It is
+    appended after a separator that cannot occur in a cluster id or a salt, and the empty salt
+    produces the ORIGINAL digest byte for byte — so `sample_depth` still draws exactly the
+    sequence the frozen T-042 depth assertion was measured against.
     """
-    digest = hashlib.blake2b(f"{cluster_id}\x1f{seed}".encode(), digest_size=8).digest()
+    material = f"{cluster_id}\x1f{seed}" + (f"\x1e{salt}" if salt else "")
+    digest = hashlib.blake2b(material.encode(), digest_size=8).digest()
     return int.from_bytes(digest, "big")
 
 
@@ -347,6 +406,117 @@ def sample_depth(state: StoreLearningState, cluster_id: str, seed: Any) -> float
     return float(buckets[best_index])
 
 
+def _tally(tallies: tuple[Tally, ...], label: str) -> tuple[int, int]:
+    """``(wins, losses)`` for one label. ``(0, 0)`` when this store has never played it."""
+    for tally in tallies:
+        if tally.label == label:
+            return tally.wins, max(tally.observations - tally.wins, 0)
+    return 0, 0
+
+
+def variant_weights(state: StoreLearningState, cluster_id: str) -> dict[str, float]:
+    """The Beta posterior mean per pitch variant. Flat 0.5s for a cluster with no record."""
+    learned = state.cluster(cluster_id)
+    tallies = () if learned is None else learned.variants
+    weights: dict[str, float] = {}
+    for variant in PITCH_VARIANTS:
+        wins, losses = _tally(tallies, variant)
+        weights[variant] = (wins + PRIOR_WINS) / (wins + losses + PRIOR_WINS + PRIOR_LOSSES)
+    return weights
+
+
+def sample_variant(state: StoreLearningState, cluster_id: str, seed: Any) -> str:
+    """Thompson-sample the pitch variant this store plays for `cluster_id` under `seed`.
+
+    The same estimator as :func:`sample_depth` on a different axis, and for the same reason: with
+    no evidence every arm is Beta(1, 1) and the draw is a uniform pick over
+    :data:`~store_agent.learning.arms.PITCH_VARIANTS`, so the loop explores before it has
+    anything to exploit; with a record it concentrates on the emphasis this store actually
+    converted at, while still occasionally trying the others.
+
+    Ties break on the vocabulary's own order, which is fixed, so the function is a pure function
+    of `(state`'s value`, cluster_id, seed)` and reproduces across processes (S4).
+    """
+    learned = state.cluster(cluster_id)
+    tallies = () if learned is None else learned.variants
+    rng = random.Random(_seed_int(str(cluster_id), seed, VARIANT_SALT))
+    best, best_draw = DEFAULT_PITCH_VARIANT, -1.0
+    for variant in PITCH_VARIANTS:
+        wins, losses = _tally(tallies, variant)
+        draw = rng.betavariate(wins + PRIOR_WINS, losses + PRIOR_LOSSES)
+        if draw > best_draw:
+            best, best_draw = variant, draw
+    return best
+
+
+def best_variant(state: StoreLearningState, cluster_id: str) -> str:
+    """The emphasis this store would exploit — the highest posterior mean, no randomness."""
+    weights = variant_weights(state, cluster_id)
+    return min(PITCH_VARIANTS, key=lambda variant: (-weights[variant], variant))
+
+
+def sample_commitment_set(
+    state: StoreLearningState, cluster_id: str, seed: Any, available: Sequence[str]
+) -> tuple[str, ...]:
+    """Thompson-sample WHICH approved commitments the advocate leads with.
+
+    Independent Bernoulli-Thompson per commitment: a label is led with when a draw from its own
+    Beta posterior beats a draw from the flat prior. With no evidence that is a coin flip, so the
+    loop explores every subset; with a record a label that keeps appearing in wins is led with
+    almost always and one that keeps appearing in losses almost never.
+
+    ``available`` is the merchant's own approved standing commitments and bounds the arm space
+    absolutely — this chooses among promises a human already approved and can never mint one.
+    The result is sorted, because it rides into a provenance-tagged claim value that two
+    identical runs must render byte-identically.
+    """
+    learned = state.cluster(cluster_id)
+    tallies = () if learned is None else learned.commitments
+    rng = random.Random(_seed_int(str(cluster_id), seed, COMMITMENT_SALT))
+    chosen: list[str] = []
+    for label in sorted({str(key) for key in available if str(key)}):
+        wins, losses = _tally(tallies, label)
+        if rng.betavariate(wins + PRIOR_WINS, losses + PRIOR_LOSSES) >= rng.betavariate(
+            PRIOR_WINS, PRIOR_LOSSES
+        ):
+            chosen.append(label)
+    return tuple(chosen)
+
+
+def sample_arm(
+    state: StoreLearningState,
+    cluster_id: str,
+    seed: Any,
+    *,
+    commitments: Sequence[str] = (),
+) -> Arm:
+    """The whole arm — pitch variant x commitment set x discount depth — for one auction.
+
+    A **factored** bandit: each coordinate is drawn from its own marginal posterior rather than
+    one posterior over the product space. That is deliberate and it is what makes S4's wording
+    measurable — "a store agent's *pitch-variant distribution* shifts in the direction of its own
+    win/loss record" is a statement about a marginal. It also learns at the rate a demo can show:
+    four variants x three commitment subsets x five rungs is sixty joint arms, and sixty Beta
+    posteriors updated one auction at a time say nothing for a very long time.
+
+    **The depth axis stays cold at zero until this store has a record in this cluster.** The
+    other two axes explore from the first auction because they cost nothing — which true facts
+    to lead with is free, and it is the thing a shop buys by joining (D55). Depth is the
+    merchant's money against an approved cap, and a cap is a wall rather than a mandate to spend
+    it, so a store with no evidence asks for nothing. `SPEC`'s own framing: "discount is one
+    saturating term among several, and clearing the band is a qualifier rather than a
+    differentiator."
+    """
+    cluster = str(cluster_id)
+    has_record = state.cluster(cluster) is not None
+    return Arm(
+        cluster_id=cluster,
+        pitch_variant=sample_variant(state, cluster, seed),
+        commitment_set=sample_commitment_set(state, cluster, seed, commitments),
+        depth=sample_depth(state, cluster, seed) if has_record else 0.0,
+    )
+
+
 def best_depth(state: StoreLearningState, cluster_id: str) -> float:
     """The rung this store would exploit — the highest posterior mean, no randomness."""
     buckets = state.depth_buckets
@@ -367,6 +537,11 @@ def _fingerprint(state: StoreLearningState) -> str:
         parts.append(learned.cluster_id)
         parts.extend(f"{t.depth:.6f}:{t.wins}:{t.losses}" for t in learned.depths)
         parts.extend(f"{t.label}:{t.wins}:{t.observations}" for t in learned.commitments)
+        # The pitch axis is in the digest too. A version that moved only when a DEPTH tally moved
+        # would report the same `learned_policy` version for two stores whose emphasis had
+        # diverged completely, and the version is what an operator and the bid's own
+        # `policy_action` claim cite when they say which policy produced a bid.
+        parts.extend(f"v:{t.label}:{t.wins}:{t.observations}" for t in learned.variants)
     blob = "\x1f".join(parts).encode()
     return hashlib.blake2b(blob, digest_size=6).hexdigest()
 
@@ -397,6 +572,7 @@ def to_learned_policy(state: StoreLearningState) -> dict[str, Any]:
         action: dict[str, Any] = {
             "discount_pct": as_percent(best_depth(state, cluster_id)),
             "commitment_keys": sorted({t.label for t in commitments}),
+            "pitch_variant": best_variant(state, cluster_id),
         }
         value_prop = best_label(from_network.value_props) if from_network is not None else None
         if value_prop:
@@ -410,20 +586,67 @@ def to_learned_policy(state: StoreLearningState) -> dict[str, Any]:
     }
 
 
+def policy_for_auction(
+    state: StoreLearningState,
+    cluster_id: str,
+    arm: Arm,
+    *,
+    base: Any = None,
+) -> dict[str, Any]:
+    """The `learned_policy` mapping a served bid should be answered under, for ONE auction.
+
+    :func:`to_learned_policy` renders what the store would *exploit* — the greedy read of its
+    record. This renders what it is actually going to *play*, which on any given auction is the
+    sampled arm, and it is what the bid path must see or the exploration half of the loop never
+    reaches a shopper.
+
+    ``base`` is the policy the store context already carried — an operator's static JSON file, or
+    nothing. The learned action is MERGED over it for this cluster only, so a policy file naming
+    three other clusters keeps naming them: the loop supersedes the operator's opinion where it
+    has evidence and nowhere else. Where the loop has no evidence it does not reach here at all;
+    see :class:`store_agent.modes.AgentRunner`.
+
+    The version reported is the state's own, so an operator reading a bid's `policy_action` claim
+    can tell a bid answered under the loop from one answered under a file. The depth is converted
+    once, by :func:`~store_agent.learning.grid.as_percent`, which is the only crossing in this
+    codebase between the fraction the loop learns in and the percent the envelope speaks.
+    """
+    rendered = to_learned_policy(state)
+    actions: dict[str, Any] = {}
+    if isinstance(base, Mapping):
+        existing = base.get("actions")
+        if isinstance(existing, Mapping):
+            actions = {str(k): v for k, v in existing.items()}
+    learned = rendered["actions"].get(str(cluster_id))
+    merged = dict(learned) if isinstance(learned, Mapping) else {}
+    merged.update(arm.as_action(discount_pct=as_percent(arm.depth)))
+    actions[str(cluster_id)] = merged
+    return {"version": rendered["version"], "store_id": state.store_id, "actions": actions}
+
+
 __all__ = [
+    "COMMITMENT_SALT",
     "DEPTH_FRACTION_FIELDS",
     "DEPTH_PERCENT_FIELDS",
     "OUTCOME_DEPTH_FIELDS",
+    "OUTCOME_VARIANT_FIELDS",
     "POLICY_VERSION_PREFIX",
     "PRIOR_LOSSES",
     "PRIOR_WINS",
+    "VARIANT_SALT",
     "ClusterLearning",
     "DepthTally",
     "StoreLearningState",
     "best_depth",
+    "best_variant",
     "depth_weights",
     "initial_state",
+    "policy_for_auction",
+    "sample_arm",
+    "sample_commitment_set",
     "sample_depth",
+    "sample_variant",
     "to_learned_policy",
     "update",
+    "variant_weights",
 ]

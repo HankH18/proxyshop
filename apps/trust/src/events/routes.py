@@ -414,6 +414,35 @@ def _announce(request: Request, store: Any, outcome: Any) -> None:
         )
 
 
+def _project(request: Request, store: Any, outcome: Any) -> int:
+    """Land the trust observation this event carries, and never fail the append over it.
+
+    The event is already sealed into the hash chain by the time this runs, so every failure
+    below is reported as ``observation_rows: 0`` rather than as a status: a 5xx here would
+    tell the producer that a durable, chained, verifiable event had been refused, which is
+    false and unrecoverable. :mod:`.observations` argues the same point from the other side.
+
+    The ``except`` is the second belt on the same trousers as ``persist_event_observations``'
+    own: it covers this function's argument-building and the connection resolution, which is
+    code that can be wrong too.
+    """
+    try:
+        from .observations import (  # noqa: PLC0415 - lazy, like every db-facing import here
+            observation_connection,
+            persist_event_observations,
+        )
+
+        with observation_connection(request, store) as connection:
+            return persist_event_observations(connection, outcome.seq, outcome.event)
+    except Exception:  # noqa: BLE001 - see the docstring
+        _log.warning(
+            "the trust observation for event %s was not written; the event is in the ledger",
+            str(outcome.event.get("event_id", "unknown")),
+            exc_info=True,
+        )
+        return 0
+
+
 def _refuse(exc: EventServiceError) -> HTTPException:
     """Map a service error to the status that tells the caller what to do about it."""
     if isinstance(exc, StoreUnavailable):
@@ -789,21 +818,42 @@ def post_event(
     except EventServiceError as exc:
         raise _refuse(exc) from exc
 
-    # R13: an event that moves a trust dimension is told to the affected store, and to no
-    # other. Inline rather than backgrounded, so the notification is bounded by the same
-    # request the event arrived on; `_announce` is what guarantees it cannot cost that
-    # request its 201.
-    _announce(request, store, outcome)
+    # R12: an event that carries a trust observation becomes a row in
+    # `ledger.trust_observations`, which is the table `GET /snapshot` reads and therefore the
+    # only thing `exchange.composition.HttpTrustSnapshot` can see. Before this, the ledger
+    # writer wrote `ledger.commerce_events` and nothing else, so a served buyer complaint
+    # moved the replayed score and left the exchange's eligibility read untouched.
+    #
+    # It runs on every request, not only on an insert. A duplicate `event_id` answers 200 off
+    # the stored row and appends nothing, but its observation row may still be missing -- a
+    # first attempt whose relational write failed is exactly that state -- and re-running the
+    # write is a no-op arbitrated on `event_seq`. That is the difference between this and
+    # `_announce` above, which must fire once because a second notification is a second
+    # penalty; a second INSERT of the same `event_seq` is not a second anything.
+    observation_rows = _project(request, store, outcome)
 
     response.status_code = 201 if outcome.inserted else 200
     response.headers["Idempotent-Replay"] = "false" if outcome.inserted else "true"
     response.headers["Location"] = f"/events/{outcome.event['event_id']}"
+
+    # R13: an event that moves a trust dimension is told to the affected store, and to no
+    # other. Inline rather than backgrounded, so the notification is bounded by the same
+    # request the event arrived on; `_announce` is what guarantees it cannot cost that
+    # request its 201. AFTER the projection, so an agent that reacts by reading
+    # `GET /snapshot` cannot beat its own observation into the table.
+    _announce(request, store, outcome)
+
     return {
         "inserted": outcome.inserted,
         "event": outcome.event,
         "head_hash": outcome.head_hash,
         "seq": outcome.seq,
         "length": outcome.length,
+        # What actually reached the door the exchange reads. Reported rather than assumed:
+        # the write is best effort by design (the chain already holds the event), so a
+        # deployment must be able to tell "no observation in this event" from "the
+        # observation did not land", and 0 against a `dim`-carrying payload is the second.
+        "observation_rows": observation_rows,
     }
 
 

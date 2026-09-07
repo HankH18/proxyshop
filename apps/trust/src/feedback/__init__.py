@@ -13,6 +13,7 @@ resolve to the same objects — see :mod:`trust._shared._binding`.
 :class:`StoreAgentSink`         the addressed, bounded, non-raising HTTP transport.
 :func:`accept_feedback`         the R14 routed-buyer gate, and the weight it earns.
 :func:`feedback_observation`    that verdict -> the weighted observation the scorer reads.
+:func:`fold_feedback`           R14's fold-time ``{type, weight}``, for the two projections.
 :func:`scrub`                   the recursive buyer-identity scrub the push applies.
 ==============================  ========================================================
 
@@ -83,6 +84,7 @@ from .scrub import (  # noqa: E402
     scrub,
     scrub_report,
 )
+from .weighting import RETURN_KIND, fold_feedback, order_identity  # noqa: E402
 
 __all__ = [
     "BASE_FEEDBACK_WEIGHT",
@@ -98,6 +100,7 @@ __all__ = [
     "MAX_UNDELIVERED_TRUST_EVENTS",
     "REDACTED",
     "RETURN_CONTRADICTION_FACTOR",
+    "RETURN_KIND",
     "TRUST_EVENT_PATH",
     "TRUST_EVENT_SCHEMA_VERSION",
     "TRUST_REPORT_KEY",
@@ -108,7 +111,9 @@ __all__ = [
     "announce_trust_event",
     "delta_for_event",
     "feedback_observation",
+    "fold_feedback",
     "observation_of",
+    "order_identity",
     "push_trust_event",
     "scrub",
     "scrub_report",

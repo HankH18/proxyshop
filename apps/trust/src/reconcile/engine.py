@@ -47,14 +47,17 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Iterable, Mapping, Sequence
+from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any
 
 __all__ = [
     "ACCEPTED_KIND",
     "CODE_BRIDGE_KINDS",
+    "DELIVERY_TOLERANCE_DAYS",
     "DISCOUNT_TOLERANCE",
     "DISHONORED_OBSERVATION_TYPE",
+    "FULFILLED_KIND",
     "HONORED_OBSERVATION_TYPE",
     "INCOMPARABLE_OBSERVATION_TYPE",
     "OBSERVATION_KIND",
@@ -72,7 +75,7 @@ __all__ = [
     "unjoinable_webhook",
 ]
 
-#: The three input kinds, and the one output kind. All four are already in the frozen
+#: The four input kinds, and the one output kind. All five are already in the frozen
 #: 18-kind ledger vocabulary (``trust.events.LEDGER_EVENT_KINDS`` / the
 #: ``commerce_events_kind_check`` constraint), so nothing here needs a migration or a
 #: vocabulary edit — which would be a two-file change spanning T-060's and T-011's scopes.
@@ -80,6 +83,30 @@ ACCEPTED_KIND = "accepted"
 PIXEL_KIND = "checkout_pixel"
 WEBHOOK_KIND = "order_paid"
 RECONCILED_KIND = "reconciled"
+
+#: The delivery record. Its frozen published body is ``(order_ref, fulfilled_at)``, and until
+#: it was read here **nothing in the tree compared it to anything**.
+#:
+#: THE PROMISE LEDGER, which is what this kind is doing in a reconciler
+#: -----------------------------------------------------------------------
+#: Everything else in this system rewards a store for making a CHECKABLE claim — but
+#: "checkable" meant checkable against a catalogue snapshot **the store itself authored**.
+#: Nothing audited the catalogue, so trust graded CONSISTENCY rather than honesty, and the
+#: two dimensions that graded honesty (``price_honored``, ``discount_honored``) did it only
+#: because a reconciliation compares a promise to an authoritative outcome.
+#:
+#: ``shipped_on_time`` is the third dimension of that kind and it had **no transaction
+#: producer at all**. Measured across the tree: the only mention of the dimension outside
+#: ``apps/trust/src/scoring/dimensions.py`` was the claim-type routing table
+#: (``delivery`` / ``shipping_speed`` / ``dispatch_window`` -> ``shipped_on_time``), which
+#: routes a *verification* of a delivery CLAIM. A store could therefore promise two-day
+#: dispatch, be verified as having said so, take three weeks, and its ``shipped_on_time``
+#: Beta would sit on the untouched neutral prior forever.
+#:
+#: The data to close it was already in the ledger and already joined: ``accepted`` carries
+#: the promise (``offer.delivery_estimate_days``), ``order_paid`` carries the authoritative
+#: instant the order was placed, and ``order_fulfilled`` carries ``fulfilled_at``.
+FULFILLED_KIND = "order_fulfilled"
 
 #: The kinds that are read for a join key and then thrown away: they are never graded, never
 #: emitted, and contribute nothing to a verdict. They exist here for one reason — they are the
@@ -98,6 +125,17 @@ PRICE_TOLERANCE = 0.005
 #: Discount comparison tolerance, in percentage points.
 DISCOUNT_TOLERANCE = 0.01
 
+#: Delivery comparison tolerance, in days. One hour.
+#:
+#: A MEASUREMENT tolerance and emphatically not a grace period, which is why it is an hour
+#: and not a day. The two instants being subtracted are stamped by two different parties —
+#: the ``orders/paid`` webhook by the merchant platform and ``fulfilled_at`` by the merchant's
+#: own fulfilment system — so a promise met exactly at the boundary must not be graded
+#: ``contradicted`` because two clocks disagree by seconds. Anything larger would be this
+#: module quietly deciding how late a store may be, which is a policy number and is not
+#: this module's to choose: the promise is whatever the store's own offer said.
+DELIVERY_TOLERANCE_DAYS = 1.0 / 24.0
+
 #: The kind the translated trust observations are emitted under. ``offer_integrity`` is
 #: already in the frozen 18-kind vocabulary and its published body is exactly what one of
 #: these carries — ``(bid_ref, field, promised, observed)`` — so no vocabulary edit, no
@@ -108,7 +146,15 @@ OBSERVATION_KIND = "offer_integrity"
 #: pairs are the approved ``claim_type -> dimension`` routing restated for the two fields a
 #: reconciliation actually decides; nothing here invents a dimension.
 RECONCILED_DIMENSIONS: Mapping[str, str] = MappingProxyType(
-    {"price": "price_honored", "discount": "discount_honored"}
+    {
+        "price": "price_honored",
+        "discount": "discount_honored",
+        # `delivery` is the approved table's own spelling for the claim type that routes to
+        # `shipped_on_time` (`trust.scoring.CLAIM_TYPE_DIMENSIONS`), so a delivery finding
+        # reached from a transaction and one reached from a verified claim land on the same
+        # dimension under the same name. R12's "one trust system, not two", again.
+        "delivery": "shipped_on_time",
+    }
 )
 
 #: A promise the webhook shows was kept. ``fulfilled``, the published positive for exactly
@@ -297,6 +343,42 @@ def _discount_percentage(payload: Mapping[str, Any]) -> float | None:
     return total
 
 
+def _instant(value: Any) -> datetime | None:
+    """One RFC-3339 timestamp as an aware UTC ``datetime``, or ``None``.
+
+    ``None`` for anything that is not a parseable instant, including a bare date and a
+    number. The alternative — reading an unparseable stamp as "now", or as the epoch — would
+    manufacture a delivery verdict out of a malformed field, which is the same failure
+    ``price_comparable`` exists to prevent one field over.
+
+    A naive value is read as UTC rather than refused: the ledger normalises every ``ts`` it
+    stores to UTC (``normalise_event``), so a stamp that arrives without an offset came from
+    a producer that had already decided, and refusing it would drop a real fulfilment over a
+    spelling.
+    """
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00").replace("z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
+def _elapsed_days(start: Any, end: Any) -> float | None:
+    """Days from ``start`` to ``end``, or ``None`` when either is not an instant."""
+    first, last = _instant(start), _instant(end)
+    if first is None or last is None:
+        return None
+    return (last - first).total_seconds() / 86_400.0
+
+
 def _promised(accepted: Any) -> dict[str, Any]:
     """The promise being graded, read off the ``accepted`` event's offer."""
     offer = _payload(accepted).get("offer")
@@ -313,6 +395,10 @@ def _promised(accepted: Any) -> dict[str, Any]:
         "unit_price": _number(offer.get("unit_price")),
         "total_price": _number(offer.get("total_price")),
         "discount_percentage": percentage,
+        # `Offer.delivery_estimate_days` — the published, optional delivery promise. Read
+        # through `_number` like every other promised quantity, so a string "3" from a JSON
+        # round-trip is a promise and `"soon"` is not one.
+        "delivery_estimate_days": _number(offer.get("delivery_estimate_days")),
     }
 
 
@@ -580,6 +666,36 @@ def _bridge_keys(event: Any) -> tuple[str, ...]:
     return _token_key(event)
 
 
+def _fulfilment_keys(event: Any) -> tuple[str, ...]:
+    """The join keys an ``order_fulfilled`` contributes: its ``order_ref``, and only that.
+
+    Restricted for the reason :func:`_bridge_keys` is restricted, measured one kind over: a
+    fulfilment is a statement ABOUT one order, not an identity of its own, and extra keys are
+    a sanctioned shape at every producing boundary in this repo ("extra keys are welcome").
+    A delivery notice carrying another checkout's ``checkout_token`` alongside its own
+    ``order_ref`` would MERGE two orders into one group, and a merge is the failure mode this
+    module treats as worse than a wrong verdict — a wrong verdict is visible in the output and
+    a vanished order is not.
+
+    The published body is ``(order_ref, fulfilled_at)``, so nothing legitimate is lost: a
+    fulfilment always has the one key it needs to find its order.
+
+    Composed exactly the way :func:`_join_keys` composes the same value — a bare escaped
+    component, not a namespaced one — because the whole point is that this key is
+    *byte-identical* to the one the ``order_paid`` webhook contributes for the same order.
+    A different spelling would put the fulfilment in a group of its own and grade nothing.
+    """
+    payload = _payload(event)
+    for candidate in (
+        _field(event, "order_ref"),
+        payload.get("order_ref"),
+        payload.get("order_id"),
+    ):
+        if candidate is not None and str(candidate).strip():
+            return (_key_component(str(candidate).strip()),)
+    return ()
+
+
 def _store_of(event: Any) -> str | None:
     store = _field(event, "store_id") or _payload(event).get("store_id")
     if store is None:
@@ -645,17 +761,26 @@ def reconciled_event(
     pixel: Any,
     ts: Any,
     bid_ref: Any = None,
+    fulfilment: Any = None,
 ) -> dict[str, Any]:
     """Build the one ``reconciled`` event for one order.
 
-    Every comparison in the payload derives from ``webhook``. ``pixel`` contributes only
+    Every money comparison in the payload derives from ``webhook``. ``pixel`` contributes only
     ``pixel_missing`` / ``pixel_price`` / ``pixel_agrees``, which describe the *integration*
     and never a promise.
 
-    The payload carries ``price_comparable`` / ``discount_comparable`` alongside the two
-    verdicts. Read them: a verdict of ``False`` on an *incomparable* field means "the webhook
-    did not say", not "the store overcharged", and turning the second into a ``contradicted``
-    observation would penalise a store for a malformed webhook.
+    ``fulfilment`` is the order's ``order_fulfilled`` record, and it is the one input that is
+    not the webhook and still grades a promise — because the webhook cannot possibly carry it.
+    ``fulfilled_at`` is stamped when the store actually shipped, which is after the order was
+    paid for; R4's "the webhook is authoritative" is a rule about *what was charged*, and it
+    was never a claim that ``orders/paid`` knows when the parcel left. It is authoritative
+    here too, for the half it does know: the instant the promise clock starts.
+
+    The payload carries ``price_comparable`` / ``discount_comparable`` /
+    ``delivery_comparable`` alongside the three verdicts. Read them: a verdict of ``False`` on
+    an *incomparable* field means "the record did not say", not "the store broke its promise",
+    and turning the second into a ``contradicted`` observation would penalise a store for a
+    malformed webhook or a fulfilment stamp it did not write.
     """
     observation = _payload(webhook)
     observed_price = _number(observation.get("total_price"))
@@ -710,6 +835,34 @@ def reconciled_event(
         and observed_discount >= promised_discount_pct - DISCOUNT_TOLERANCE
     )
 
+    # ---------------------------------------------------------------------------------
+    # The delivery promise. Same three-value discipline as the two above: a PROMISE, an
+    # OBSERVATION, and whether the two could be compared at all — kept apart, because
+    # "shipped late" and "we cannot tell when it shipped" are different findings and only
+    # one of them is the store's fault.
+    # ---------------------------------------------------------------------------------
+    promised_delivery_days = _number(promised.get("delivery_estimate_days"))
+    fulfilled_at = _payload(fulfilment).get("fulfilled_at") if fulfilment is not None else None
+    if fulfilled_at is None and fulfilment is not None:
+        # The published body names `fulfilled_at`; the event's own `ts` is the fallback for a
+        # producer that recorded the delivery and stamped only the envelope. Never a clock:
+        # a fulfilment with no readable instant stays incomparable rather than becoming "now",
+        # which would grade every late delivery as on time forever.
+        fulfilled_at = _field(fulfilment, "ts")
+    # The clock starts at the AUTHORITATIVE order instant. `ts` is the reconciled event's own
+    # timestamp and it is the webhook's, which is the merchant platform's signed record of
+    # when the order was placed — not the buyer's browser, and not this process.
+    observed_dispatch_days = _elapsed_days(ts, fulfilled_at)
+    delivery_comparable = promised_delivery_days is not None and observed_dispatch_days is not None
+    # One-sided, exactly as `price_honored` is: shipping EARLY is not a broken promise, and
+    # grading it as one would penalise a store for beating its own estimate.
+    shipped_on_time = bool(
+        delivery_comparable
+        and observed_dispatch_days is not None
+        and promised_delivery_days is not None
+        and observed_dispatch_days <= promised_delivery_days + DELIVERY_TOLERANCE_DAYS
+    )
+
     pixel_price = _number(_payload(pixel).get("total_price")) if pixel is not None else None
     pixel_agrees = (
         pixel_price is not None
@@ -746,6 +899,13 @@ def reconciled_event(
             "promised_price": promised_price,
             "promised_price_basis": promised_price_basis,
             "promised_discount_percentage": promised_discount,
+            # the promise ledger: what the offer said about delivery, and what happened
+            "shipped_on_time": bool(shipped_on_time),
+            "delivery_comparable": bool(delivery_comparable),
+            "promised_delivery_days": promised_delivery_days,
+            "observed_dispatch_days": observed_dispatch_days,
+            "fulfilled_at": fulfilled_at,
+            "fulfilment_missing": fulfilment is None,
             "authority": WEBHOOK_KIND,
             # the pixel, recorded and never consulted
             "pixel_missing": pixel is None,
@@ -762,8 +922,9 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
         events: ``accepted`` / ``checkout_pixel`` / ``order_paid`` records in any order,
             joined on ``checkout_token`` and ``order_ref``, plus the ``code_created`` /
             ``checkout_redirect`` records that bridge those two by the single-use discount
-            code. Other kinds are ignored — this function is handed whole ledger pages, not a
-            curated triple.
+            code, plus the ``order_fulfilled`` records that grade the delivery promise. Other
+            kinds are ignored — this function is handed whole ledger pages, not a curated
+            triple.
 
     **Why the discount code is here at all.** The two checkout tokens in a real Shopify
     checkout are not the same value and never were. ``CheckoutProvider.checkout`` mints its
@@ -815,7 +976,9 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
     for event in events:
         kind = str(_field(event, "kind", ""))
         reads_codes = kind in _CODE_BEARING_KINDS
-        if kind not in (ACCEPTED_KIND, PIXEL_KIND, WEBHOOK_KIND) and not reads_codes:
+        if kind not in (ACCEPTED_KIND, PIXEL_KIND, WEBHOOK_KIND, FULFILLED_KIND) and (
+            not reads_codes
+        ):
             continue
         # A BRIDGE contributes its checkout token and nothing else. It is not an order and
         # not an offer, so every other identifier on it is a claim about somebody else's
@@ -825,11 +988,12 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
         # carrying `checkout_token: T1` and `order_id: R2` — with no discount code on it at
         # all — merged two unrelated orders, and the second one's 500-against-50 overcharge
         # disappeared. Two reconciled events became one.
-        identifiers = (
-            _bridge_keys(event)
-            if kind in CODE_BRIDGE_KINDS
-            else _join_keys(event) + _token_key(event)
-        )
+        if kind in CODE_BRIDGE_KINDS:
+            identifiers = _bridge_keys(event)
+        elif kind == FULFILLED_KIND:
+            identifiers = _fulfilment_keys(event)
+        else:
+            identifiers = _join_keys(event) + _token_key(event)
         if not identifiers:
             if kind == WEBHOOK_KIND:
                 # Unchanged, and deliberately checked BEFORE any code is consulted. A code is
@@ -852,7 +1016,7 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
         # is not a blocker.
         codes = discount_codes_of(event) if reads_codes else ()
         store = _store_of(event)
-        if store is not None and kind not in CODE_BRIDGE_KINDS:
+        if store is not None and kind not in (*CODE_BRIDGE_KINDS, FULFILLED_KIND):
             # Identifier keys only, and never a bridge's. A code key here would let a THIRD
             # party's use of the same code string decide which store an unattributed event
             # belongs to: measured, an unattributed webhook that reconciled cleanly stopped
@@ -863,6 +1027,13 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
             # that shop's webhook unattributable, and a 900-against-100 overcharge stopped
             # being graded. Store attribution is an identity question, and neither a code nor
             # a redirect is an identity.
+            #
+            # A FULFILMENT does not vote either, for the same reason and with the same cost
+            # of zero: the `order_paid` webhook this fulfilment is about already votes for
+            # that order's `order_ref`, so excluding delivery notices removes no attribution
+            # that mattered — while a shop that shipped a parcel and named a RIVAL's
+            # `order_ref` would otherwise make that rival's webhook unattributable, and an
+            # unattributable webhook is an order that stops being graded at all.
             for key in identifiers:
                 key_stores.setdefault(key, set()).add(store)
         read.append((kind, event, identifiers, codes, store))
@@ -987,6 +1158,7 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
     members: dict[str, dict[str, Any]] = {}
     orders: dict[str, Any] = {}
     pixels: dict[str, Any] = {}
+    fulfilments: dict[str, Any] = {}
     group_pixels: dict[str, list[str]] = {}
     group_of_order: dict[str, str] = {}
     for (kind, event, keys, _codes, _scope), identity in zip(relevant, identity_root, strict=True):
@@ -999,6 +1171,19 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
         if kind == WEBHOOK_KIND:
             orders.setdefault(identity, event)
             group_of_order.setdefault(identity, root)
+        elif kind == FULFILLED_KIND:
+            # Filed by the ORDER's identity group and never by the wider group, and no
+            # group-level fallback of the kind the pixel gets. A pixel needs one because the
+            # two halves of a real checkout carry different tokens, so a beacon genuinely
+            # lands outside its order's identity group; a fulfilment carries the `order_ref`
+            # by its published shape, so it is always in the right group already. Falling
+            # back to "some fulfilment in this group" would let a code link grade one order's
+            # delivery promise against a different order's shipping date.
+            #
+            # `setdefault`, so two deliveries of one order grade the FIRST. That is the same
+            # rule the webhook takes, and it is the fail-closed direction for a split
+            # shipment: the promise was about when the buyer's order started arriving.
+            fulfilments.setdefault(identity, event)
         elif kind == PIXEL_KIND:
             # The pixel of an ORDER first, the group's only as a fallback. A code link can
             # pull in a bridge group holding a DIFFERENT checkout's beacon, and the pixel
@@ -1055,6 +1240,7 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
                 pixel=pixel,
                 ts=_field(webhook, "ts"),
                 bid_ref=_payload(accepted).get("bid_ref"),
+                fulfilment=fulfilments.get(identity),
             )
         )
     return emitted
@@ -1094,6 +1280,13 @@ def _graded_fields(payload: Mapping[str, Any]) -> list[tuple[str, str, str, Any,
       graded. The threshold is the comparison tolerance itself, not a number chosen here.
     * a missing promised PRICE is likewise not gradeable. ``unsupported`` there would
       penalise a store for an offer that carried no price rather than for anything it did.
+    * **an order with no fulfilment record yet is not graded on delivery at all** — not
+      ``unsupported``, which is a published 0.5 negative. An order that has been paid for and
+      not yet shipped is the ordinary state of every order for a while, and grading absence
+      would charge every store a small penalty on every order between payment and dispatch,
+      then charge it again when the delivery landed. A fulfilment that EXISTS and carries an
+      unreadable instant is a different thing and does grade ``unsupported``: the record was
+      made and it cannot be read.
 
     Numbers are read through :func:`_number`, which yields ``None`` for anything that is not
     one. This function is documented to accept a whole ledger page, and a payload read back
@@ -1129,6 +1322,21 @@ def _graded_fields(payload: Mapping[str, Any]) -> list[tuple[str, str, str, Any,
                 ),
                 promised_discount,
                 payload.get("observed_discount_percentage"),
+            )
+        )
+
+    promised_delivery = _number(payload.get("promised_delivery_days"))
+    if promised_delivery is not None and not bool(payload.get("fulfilment_missing", True)):
+        graded.append(
+            (
+                "delivery",
+                RECONCILED_DIMENSIONS["delivery"],
+                _verdict_observation_type(
+                    honored=payload.get("shipped_on_time"),
+                    comparable=payload.get("delivery_comparable"),
+                ),
+                promised_delivery,
+                payload.get("observed_dispatch_days"),
             )
         )
     return graded

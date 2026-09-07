@@ -1021,3 +1021,343 @@ def test_a_full_verification_queue_refuses_rather_than_displacing_an_admitted_bi
         )
     finally:
         redis.delete(key)
+
+
+# =====================================================================================
+# The queue's CONSUMER — R8/R18, and it did not exist
+# =====================================================================================
+#
+# Measured on this tree before this section: no ``LPOP``/``BRPOP`` call site anywhere in the
+# repository, no ``[project.scripts]`` in any member ``pyproject.toml``, no lifespan or startup
+# hook in ``exchange.main``, and one process in the exchange image (``uvicorn
+# exchange.main:app``). So an admitted Tier-2 bid queued durably and NOTHING performed R8's
+# "routed to claim extraction + verification"; at :data:`MAX_QUEUED_WORK_ITEMS` the whole
+# external channel starts refusing correctly signed bids.
+#
+# A background drainer cannot exist in that process model, and a NEW served route cannot be the
+# answer either: ``test_repro_open_tickets.py::test_t312_the_exchange_serves_exactly_the_
+# operations_its_contract_publishes`` requires the served surface and
+# ``packages/contracts/openapi/exchange.openapi.json`` to agree in BOTH directions, so a new
+# operation is a contracts change. What is left, and what these gates drive, is the one served
+# operation the exchange already publishes for this channel: the door itself drains a bounded
+# batch on the request path, after an ADMISSION (so the work is not anonymously triggerable),
+# and every verdict it reaches is announced to the exchange's ledger as ``claim_verified``.
+
+DRAIN_STORE = STORE
+DRAIN_PRODUCT = PRODUCT
+
+#: A pitch and its lie, differing in one word. What the door has to do with them is decompose,
+#: grade against the exchange's OWN snapshot, and record the answer.
+DRAIN_HONEST_PITCH = "A heat exchange boiler with a 9 bar pump and a two-year warranty."
+DRAIN_LIAR_PITCH = "A heat exchange boiler with a 9 bar pump and a five-year warranty."
+
+#: The routing that lets the exchange announce a verdict at all. ``claim_dimensions_of``
+#: defaults to ``None`` and announces nothing, deliberately (the table is human-approved ground
+#: truth the exchange's image does not ship), so a deployment that has not wired it drains
+#: NOTHING rather than consuming work items whose verdicts have nowhere to go.
+DRAIN_DIMENSIONS = {
+    "warranty": "catalog_claim_accuracy",
+    "specifications": "catalog_claim_accuracy",
+}
+
+
+class _DrainableQueue:
+    """An in-memory stand-in for :class:`RedisVerificationQueue`, list semantics and all."""
+
+    def __init__(self) -> None:
+        self.items: list[Any] = []
+
+    def enqueue(self, item: Any) -> None:
+        self.items.append(item)
+
+    def pop(self) -> Any | None:
+        return self.items.pop(0) if self.items else None
+
+    def depth(self) -> int:
+        return len(self.items)
+
+
+def _drain_snapshot(store_id: str) -> dict[str, Any]:
+    return {
+        "snapshot_id": f"snap-{store_id}",
+        "captured_at": "2026-01-01T00:00:00Z",
+        "store_id": store_id,
+        "products": [
+            {
+                "product_ref": DRAIN_PRODUCT,
+                "canonical_name": DRAIN_PRODUCT,
+                "evidence_ref": f"snap-{store_id}#{DRAIN_PRODUCT}",
+                "attributes": {
+                    "boiler_type": {"value": "heat exchange"},
+                    "pump_pressure_bar": {"value": 9},
+                    "warranty_months": {"value": 24},
+                },
+            }
+        ],
+    }
+
+
+def _drain_app(*, wire_catalog: bool = True, wire_dimensions: bool = True) -> Any:
+    """The door, wired the way a deployment that can actually check a claim is wired."""
+    from exchange.auction.ledger import InMemoryLedgerSink, LedgerRecorder
+    from exchange.ranking.verification import StaticCatalogSnapshots
+
+    future = time.time() + 300
+    app = _app(records={OPEN: _Record(roster=_roster(50.0), deadline=future)})
+    queue = _DrainableQueue()
+    configure_external_bids(app, queue=queue)
+    from store_agent.external.nonces import NonceStore  # noqa: PLC0415
+
+    configure_external_bids(app, nonces=NonceStore())
+    configure_ranking(
+        app,
+        catalog=(
+            StaticCatalogSnapshots({DRAIN_STORE: _drain_snapshot(DRAIN_STORE)})
+            if wire_catalog
+            else None
+        ),
+        claim_dimensions=DRAIN_DIMENSIONS if wire_dimensions else None,
+    )
+    sink = InMemoryLedgerSink()
+    app.state.auction_machine.ledger = LedgerRecorder(sink)
+    app.state.test_queue = queue
+    app.state.test_sink = sink
+    return app
+
+
+def _claim_verdicts(sink: Any) -> list[tuple[str, str, str]]:
+    return [
+        (
+            str(event["store_id"]),
+            str(event["payload"]["claim_type"]),
+            str(event["payload"]["status"]),
+        )
+        for event in sink.events
+        if event.get("kind") == "claim_verified"
+    ]
+
+
+def test_an_admitted_external_bid_is_verified_inside_the_request_that_admitted_it() -> None:
+    """R8's "routed to claim extraction + verification", performed rather than promised.
+
+    RED before this change on two counts: the queue had no ``pop`` and the door had no drain,
+    so ``queue.depth()`` only ever grew and no ``claim_verified`` event was ever produced from
+    this channel. The pitch text is the witness — ``warranty_months`` appears in NO claim the
+    seller submitted; the exchange read it out of the prose and graded it against its own
+    catalogue.
+    """
+    app = _drain_app()
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = _submit(
+        client,
+        OPEN,
+        _payload(OPEN, nonce="drain-1", message=DRAIN_HONEST_PITCH),
+    )
+    assert response.status_code == 202, response.text[:400]
+
+    verdicts = _claim_verdicts(app.state.test_sink)
+    assert ("store-external-1", "warranty", "verified") in verdicts, verdicts
+    assert app.state.test_queue.depth() == 0, "the work item was queued and never consumed"
+
+
+def test_a_lie_in_an_admitted_pitch_is_recorded_as_contradicted() -> None:
+    """The same request, the same store, one word changed in the prose."""
+    app = _drain_app()
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = _submit(client, OPEN, _payload(OPEN, nonce="drain-2", message=DRAIN_LIAR_PITCH))
+    assert response.status_code == 202, response.text[:400]
+
+    verdicts = _claim_verdicts(app.state.test_sink)
+    assert ("store-external-1", "warranty", "contradicted") in verdicts, verdicts
+    # Charged for the sentence it lied in, not for its pitch.
+    assert ("store-external-1", "specifications", "verified") in verdicts, verdicts
+
+
+def test_nothing_is_drained_when_a_verdict_would_have_nowhere_to_go() -> None:
+    """A drain that cannot RECORD is not a drain, it is deletion.
+
+    ``claim_dimensions_of`` defaults to ``None`` — the exchange announces nothing until a
+    deployment hands it the approved routing — so a deployment in that state must leave the
+    backlog alone rather than consume admitted bids into silence.
+    """
+    app = _drain_app(wire_dimensions=False)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = _submit(client, OPEN, _payload(OPEN, nonce="drain-3", message=DRAIN_HONEST_PITCH))
+    assert response.status_code == 202, response.text[:400]
+    assert _claim_verdicts(app.state.test_sink) == []
+    assert app.state.test_queue.depth() == 1, "an unrecordable verdict consumed the work item"
+
+
+def test_the_drain_is_bounded_and_a_backlog_shrinks_rather_than_grows() -> None:
+    """One request adds one item and consumes up to :data:`DRAIN_BATCH_SIZE` of them."""
+    from exchange.external_bids.draining import DRAIN_BATCH_SIZE
+
+    app = _drain_app()
+    queue = app.state.test_queue
+    client = TestClient(app, raise_server_exceptions=False)
+
+    backlog = 3 * DRAIN_BATCH_SIZE
+    for n in range(backlog):
+        queue.enqueue(
+            {
+                "kind": "external_bid_verification",
+                "auction_id": OPEN,
+                "store_id": DRAIN_STORE,
+                "nonce": f"old-{n}",
+                "submission": {
+                    "store_id": DRAIN_STORE,
+                    "offer": {"product_ref": DRAIN_PRODUCT},
+                    "claims": [],
+                    "message": DRAIN_HONEST_PITCH,
+                },
+            }
+        )
+
+    before = queue.depth()
+    response = _submit(client, OPEN, _payload(OPEN, nonce="drain-4", message=DRAIN_HONEST_PITCH))
+    assert response.status_code == 202, response.text[:400]
+    after = queue.depth()
+
+    assert after < before, "the backlog did not shrink"
+    # +1 for the submission this request admitted, -DRAIN_BATCH_SIZE for what it consumed.
+    assert after == before + 1 - DRAIN_BATCH_SIZE, (before, after, DRAIN_BATCH_SIZE)
+    assert DRAIN_BATCH_SIZE > 1, "a batch of one can never overtake its own producer"
+
+
+def test_a_queue_that_cannot_be_read_never_fails_the_submission() -> None:
+    """The audit trail must not be able to refuse a bid the door already admitted."""
+
+    class _Hostile(_DrainableQueue):
+        def pop(self) -> Any:
+            raise RuntimeError("redis is down")
+
+    app = _drain_app()
+    hostile = _Hostile()
+    configure_external_bids(app, queue=hostile)
+    app.state.test_queue = hostile
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = _submit(client, OPEN, _payload(OPEN, nonce="drain-5", message=DRAIN_HONEST_PITCH))
+    assert response.status_code == 202, response.text[:400]
+    assert response.json()["accepted"] is True
+
+
+def test_a_refused_submission_drains_nothing() -> None:
+    """The drain is work, so it hangs off an ADMISSION rather than off a request.
+
+    A door that drained before judging would let an anonymous caller with a junk signature
+    spend the exchange's CPU on the backlog, once per request, for free.
+    """
+    app = _drain_app()
+    queue = app.state.test_queue
+    queue.enqueue(
+        {
+            "kind": "external_bid_verification",
+            "auction_id": OPEN,
+            "store_id": DRAIN_STORE,
+            "nonce": "old-refused",
+            "submission": {
+                "store_id": DRAIN_STORE,
+                "offer": {"product_ref": DRAIN_PRODUCT},
+                "claims": [],
+                "message": DRAIN_HONEST_PITCH,
+            },
+        }
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.post(
+        f"/v1/auctions/{OPEN}/bids",
+        json=_payload(OPEN, nonce="drain-6"),
+        headers={"X-ProxyShop-Signature": "00" * 32},
+    )
+    assert response.status_code == 400, response.text[:300]
+    assert queue.depth() == 1, "a refused submission drained the backlog"
+    assert _claim_verdicts(app.state.test_sink) == []
+
+
+def test_the_door_drains_a_real_redis_queue_and_verifies_what_it_pops() -> None:
+    """The whole channel over the real datastore: ``RPUSH`` in, ``LPOP`` out, verdicts recorded.
+
+    Every other gate in this section drives an in-memory stand-in, which grades the drain's
+    LOGIC and cannot grade the thing that was actually missing: there was no ``LPOP`` call site
+    anywhere in this repository, so ``RedisVerificationQueue`` was a producer with no consumer
+    and the class that would have to grow one had never been asked to. A duck-typed double
+    would have kept that true — this node is the one that pops out of Redis.
+
+    It also grades the DECODING, which the stand-in cannot: :meth:`enqueue` writes JSON and a
+    consumer that handed the verifier a string would have found no ``submission`` on it and
+    verified nothing, silently and greenly.
+    """
+    from exchange.auction.ledger import InMemoryLedgerSink, LedgerRecorder
+    from exchange.external_bids.verification_queue import RedisVerificationQueue
+    from exchange.ranking.verification import StaticCatalogSnapshots
+
+    from proxyshop_support.redis_client import worker_redis
+
+    key = "exchange:external-bid-verification:test-drain"
+    redis = worker_redis()
+    redis.delete(key)
+    queue = RedisVerificationQueue(key)
+    future = time.time() + 300
+    app = _app(records={OPEN: _Record(roster=_roster(50.0), deadline=future)})
+    configure_external_bids(app, queue=queue)
+    from store_agent.external.nonces import NonceStore  # noqa: PLC0415
+
+    configure_external_bids(app, nonces=NonceStore())
+    configure_ranking(
+        app,
+        catalog=StaticCatalogSnapshots({DRAIN_STORE: _drain_snapshot(DRAIN_STORE)}),
+        claim_dimensions=DRAIN_DIMENSIONS,
+    )
+    sink = InMemoryLedgerSink()
+    app.state.auction_machine.ledger = LedgerRecorder(sink)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    try:
+        response = _submit(
+            client, OPEN, _payload(OPEN, nonce="redis-drain-1", message=DRAIN_LIAR_PITCH)
+        )
+        assert response.status_code == 202, response.text[:400]
+
+        assert queue.depth() == 0, "the real queue was written to and never read"
+        verdicts = _claim_verdicts(sink)
+        assert ("store-external-1", "warranty", "contradicted") in verdicts, verdicts
+    finally:
+        redis.delete(key)
+
+
+def test_the_real_queue_round_trips_a_work_item_as_an_object_not_a_string() -> None:
+    """``pop`` is the other half of ``enqueue``, and it must give back what was put in."""
+    from exchange.external_bids.verification_queue import RedisVerificationQueue
+
+    from proxyshop_support.redis_client import worker_redis
+
+    key = "exchange:external-bid-verification:test-roundtrip"
+    redis = worker_redis()
+    redis.delete(key)
+    queue = RedisVerificationQueue(key)
+    try:
+        assert queue.pop() is None, "an empty queue must answer None, not raise or block"
+        first = {"kind": "external_bid_verification", "nonce": "a", "submission": {"claims": []}}
+        second = {"kind": "external_bid_verification", "nonce": "b", "submission": {"claims": []}}
+        queue.enqueue(first)
+        queue.enqueue(second)
+
+        # FIFO: `RPUSH` in, `LPOP` out. The head is the submission that has been waiting
+        # longest, and its nonce has been spent for longest.
+        assert queue.pop() == first
+        assert queue.pop() == second
+        assert queue.pop() is None
+        assert queue.depth() == 0
+
+        # A row nothing in this tree could have written is dropped rather than blocking every
+        # consumer behind it.
+        redis.rpush(key, "{not json")
+        assert queue.pop() is None
+        assert queue.depth() == 0
+    finally:
+        redis.delete(key)

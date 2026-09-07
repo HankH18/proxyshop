@@ -88,12 +88,14 @@ from fastapi.responses import JSONResponse
 from store_agent.external.door import DEFAULT_FRESHNESS_WINDOW_SECONDS, receive_bid
 
 from .. import redact_addresses
-from ..ranking.serving import trust_snapshot_of
+from ..ranking.serving import catalog_of, claim_dimensions_of, trust_snapshot_of
+from .draining import DRAIN_BATCH_SIZE, drain_verification_queue
 
 __all__ = [
     "MAX_SUBMISSION_BYTES",
     "SIGNATURE_HEADER",
     "configure_external_bids",
+    "drain_after_admission",
     "identifier_ceiling",
     "router",
 ]
@@ -636,10 +638,14 @@ async def submit_external_bid(
     )
 
     if not getattr(receipt, "accepted", False):
+        # NOTHING is drained on a refusal, and that ordering is a defence rather than a tidy-up:
+        # draining is work, and a door that did it before judging would let an anonymous caller
+        # with a junk signature spend the exchange's CPU on the backlog once per request.
         return _rejected(
             [str(reason) for reason in getattr(receipt, "reasons", ()) or ()],
             indexes=[int(i) for i in getattr(receipt, "unverified_claim_indexes", ()) or ()],
         )
+    drain_after_admission(request)
     return JSONResponse(
         status_code=202,
         content={
@@ -650,6 +656,41 @@ async def submit_external_bid(
             "bid_ref": _renderable_ref(_bid_ref_of(payload)),
         },
     )
+
+
+def drain_after_admission(request: Request) -> Any:
+    """Perform R8's "routed to claim extraction + verification" for a bounded batch.
+
+    **This is the queue's only consumer, and it runs here because there is nowhere else.** The
+    exchange deployable runs one command — ``uvicorn exchange.main:app`` — and declares no
+    console script and no lifespan hook, so a background drainer would be a module nothing
+    starts; and a NEW served route would put the exchange's surface out of agreement with
+    ``packages/contracts/openapi/exchange.openapi.json``, which
+    ``test_t312_the_exchange_serves_exactly_the_operations_its_contract_publishes`` refuses in
+    both directions. See :mod:`.draining` for the full argument and for the four rules that
+    keep a drain from becoming a deletion.
+
+    Called only after an ADMISSION. One request adds one work item and consumes up to
+    :data:`~.draining.DRAIN_BATCH_SIZE`, so the backlog shrinks under load instead of walking
+    towards :data:`~.verification_queue.MAX_QUEUED_WORK_ITEMS`, where this channel starts
+    refusing correctly signed bids.
+
+    Never raises, and never changes the receipt: the seller has already been judged, and an
+    audit trail able to turn a 202 into a 500 would be worse than no audit trail. The collected
+    :class:`~.draining.DrainReport` is returned for a caller that wants it (this route's own
+    gates do) and is ignored by the response.
+    """
+    try:
+        machine = getattr(request.app.state, "auction_machine", None)
+        return drain_verification_queue(
+            getattr(request.app.state, "external_bid_queue", None),
+            catalog=catalog_of(request.app),
+            recorder=getattr(machine, "ledger", None),
+            dimensions=claim_dimensions_of(request.app),
+            max_items=DRAIN_BATCH_SIZE,
+        )
+    except Exception:  # noqa: BLE001 - the audit trail must not be able to fail an admitted bid
+        return None
 
 
 def _freshness(request: Request) -> float:

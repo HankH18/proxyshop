@@ -79,6 +79,12 @@ export const PINNED_ROUTES: readonly Route[] = [
   {domain: "merchant", method: "get", path: "/install"},
   {domain: "merchant", method: "get", path: "/install/callback"},
   {domain: "merchant", method: "get", path: "/install/shops"},
+  // R9's dashboard, declared in the change that serves it. The store is a path parameter on
+  // each, and the caller is `apps/merchant/app/dashboard` — the SPA the merchant service now
+  // serves at `/dashboard` from its own vite build. The bundle itself is a `Mount`, which
+  // declares no operation and owes no contract; only these two JSON reads are surface.
+  {domain: "merchant", method: "get", path: "/stores/{store_id}/dashboard"},
+  {domain: "merchant", method: "post", path: "/stores/{store_id}/bids/solicit"},
   // R13's receiving end: the door trust pushes one store's own trust delta through.
   {domain: "store-agent", method: "post", path: "/v1/trust-events"},
   // R9's merchant-facing report door. Deliberately in neither block above: DESIGN §Interfaces

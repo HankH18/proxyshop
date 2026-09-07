@@ -1,0 +1,208 @@
+# ProxyShop CI — the submission target (labs.gauntletai.com).
+#
+# THIS FILE RE-SPELLS NOTHING. The gate is `scripts/verify.sh`, reached through `make
+# verify`, and this pipeline's job is to give that script a machine that HAS the datastores.
+# Every check it runs — ruff check, ruff format --check, import-linter, the banned-reset
+# gate, eslint, mypy, tsc -b, the frozen acceptance suite in its own interpreter (with the
+# three S8 release blockers asserted by id), the ~7,600-test pytest suite, vitest, the
+# datastore coverage gate and scripts/check_verify_contracts.py — is defined there. A second
+# copy here would be free to drift from the copy the frozen `build_succeeds` metric reads.
+#
+# Makefile and scripts/verify.sh are HASH-PINNED in .swarm-loop/manifest.json, so this
+# pipeline calls them and does not touch them.
+#
+# WHY IT EXISTS. There was no CI in this repository, and a green local run was the only
+# signal anybody got. Two gate-credibility defects were found in a single evening, and the
+# second is the one this pipeline answers: the ~36 live-Postgres least-privilege checks for
+# C3/S7 are docker-gated, so an offline run reported `22 passed, 36 skipped, exit 0` — a
+# green build that proved nothing about database grants. A pipeline that runs those checks
+# on a machine with the datastores is what makes them mean something.
+#
+# ---------------------------------------------------------------------------------------
+# RUNNER REQUIREMENT — the project owner's to satisfy, not this file's
+# ---------------------------------------------------------------------------------------
+# This needs a runner enabled on the project with the **docker** executor. Nothing here
+# needs a PRIVILEGED runner: the three datastores are declared as CI services rather than
+# brought up with `docker compose`, precisely so an ordinary shared runner can run it.
+# Settings > CI/CD > Runners on labs.gauntletai.com is where that is turned on.
+#
+# THE COST OF THAT CHOICE, AND HOW IT IS PAID. A GitLab docker-executor job cannot reach a
+# compose stack on its own `localhost` — services answer on their alias — so using the
+# repository's own docker-compose.yml would mean docker-in-docker and a privileged runner.
+# Declaring services instead means the image tags and the two dev credentials exist in two
+# places. `scripts/ci_datastore_proof.py check-config` compares them against
+# docker-compose.yml on every run, so the duplication is checked rather than silently drifting.
+# (`.github/workflows/verify.yml`, the mirror, has no such copy: a GitHub runner publishes
+# compose's ports on its own localhost, so it runs `make deps-up` verbatim.)
+#
+# ---------------------------------------------------------------------------------------
+# NO SECRETS. NO NETWORK. NO DEPLOY.
+# ---------------------------------------------------------------------------------------
+# There is no API key here and no masked variable is read. `LLM_PROVIDER` is deliberately
+# left unset so it keeps its default — the deterministic offline double — and the embedding
+# provider keeps its `lexical` default (D56), so the whole suite runs with no outbound
+# network. `needs_model` is deselected by `make verify` for the same reason. Nothing in this
+# file pushes, publishes or deploys; the two credentials below are the ephemeral dev
+# defaults that already live in docker-compose.yml, for containers that are destroyed when
+# the job ends.
+
+# One pipeline per change, not two: without this, a branch that also has an open merge
+# request gets a branch pipeline AND a merge-request pipeline for the same commit, and the
+# suite is expensive enough that running it twice is a real cost.
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
+stages:
+  - verify
+
+verify:
+  stage: verify
+  # node:22-bookworm rather than a python image: package.json pins node >= 22.12 (D8), the
+  # image is Debian-based so `make`, `git` and `curl` are already there, and uv provisions
+  # the interpreter itself — .python-version pins 3.12.13 and `uv sync --locked` fetches
+  # exactly that. One toolchain to install instead of two.
+  image: node:22-bookworm
+  timeout: 1h
+  interruptible: true
+
+  # -------------------------------------------------------------------------------------
+  # WHAT MAY AND MAY NOT LIVE IN `variables:`
+  # -------------------------------------------------------------------------------------
+  # GitLab injects the job's variables into the SERVICE containers as well as the job, and
+  # the Neo4j image turns every `NEO4J_*` environment variable into a neo4j.conf setting.
+  # MEASURED, on neo4j:5.26-community:
+  #
+  #     docker run -e NEO4J_AUTH=... -e NEO4J_URI=bolt://neo4j:7687 neo4j:5.26-community
+  #     -> Failed to read config: Unrecognized setting. No declared setting with name: URI.
+  #     -> container exits 1
+  #
+  # So NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD here would KILL the neo4j service, and the
+  # graph half of the suite would skip with the stack "healthy". Every variable the TEST
+  # PROCESS needs to find a datastore is therefore exported in `before_script` instead,
+  # where no service container can see it. The rule is simple: `variables:` is for things
+  # the services need; `before_script` is for things the tests need.
+  variables:
+    # NOT 0 — worker 0 is reserved for the frozen build_succeeds measurement and
+    # scripts/db_reclaim.py protects proxyshop_w0 under every flag. Under 16 — a stock
+    # redis image reports `databases 16` (measured), and worker.redis_db_index REFUSES an
+    # index at or above the server's ceiling rather than silently sharing a logical DB.
+    # 12 is clear of the 1..10 band the local build lanes use.
+    PROXYSHOP_WORKER: "12"
+    GIT_DEPTH: "20"
+    # Pinned so a bad upstream release cannot change what this pipeline installs.
+    UV_VERSION: "0.11.8"
+    FF_NETWORK_PER_BUILD: "true"
+
+  services:
+    # Every image tag and credential below is compared against docker-compose.yml by
+    # `check-config` at the end of the job. Change one there and this fails until it is
+    # changed here too.
+    - name: postgres:16-alpine
+      alias: postgres
+      variables:
+        POSTGRES_USER: proxyshop
+        POSTGRES_PASSWORD: proxyshop_dev_pw
+        POSTGRES_DB: proxyshop_template
+      # compose's durability trade, for the same reason: this is a throwaway test cluster.
+      # `db/init/00-roles.sql` is NOT mounted, and does not need to be — MEASURED against a
+      # bare postgres:16-alpine with no initdb hook, all 58 tests in
+      # apps/trust/tests/test_schema_grants.py pass, because
+      # db/migrations/0001_schemas_roles_grants.sql re-creates the four cluster-global roles
+      # idempotently before it grants. That measurement is what makes the services approach
+      # viable at all.
+      command:
+        ["postgres", "-c", "fsync=off", "-c", "synchronous_commit=off",
+         "-c", "full_page_writes=off", "-c", "max_connections=200"]
+
+    - name: redis:7-alpine
+      alias: redis
+      # --databases 64 mirrors compose. PROXYSHOP_WORKER is under 16 so the job does not
+      # depend on it, but a future worker index above 15 would need it, and matching compose
+      # keeps the two stacks from behaving differently.
+      command:
+        ["redis-server", "--save", "", "--appendonly", "no",
+         "--maxmemory", "256mb", "--maxmemory-policy", "noeviction", "--databases", "64"]
+
+    - name: neo4j:5.26-community
+      alias: neo4j
+      variables:
+        # 5.x rejects passwords under 8 characters. conftest.py defaults NEO4J_USER and
+        # NEO4J_PASSWORD to this pair, so the job sets neither — see the `variables:` note.
+        NEO4J_AUTH: neo4j/proxyshop_dev_pw
+        NEO4J_server_memory_heap_max__size: 1g
+        NEO4J_server_memory_pagecache_size: 512m
+
+  cache:
+    # Download caches only. The installed trees (.venv, node_modules) are deliberately NOT
+    # cached: bootstrap.sh's `uv sync --locked` and `npm ci` are the assertions that the
+    # lockfiles are honest, and a restored tree would let a stale environment answer for them.
+    key:
+      files:
+        - uv.lock
+        - package-lock.json
+    paths:
+      - .uv-cache/
+      - .npm-cache/
+
+  before_script:
+    - node --version
+    - curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | env UV_INSTALL_DIR=/usr/local/bin sh
+    - uv --version
+    - export UV_CACHE_DIR="${CI_PROJECT_DIR}/.uv-cache" npm_config_cache="${CI_PROJECT_DIR}/.npm-cache"
+    # Where the tests look for the datastores. Exported here, NOT declared in `variables:`,
+    # so the neo4j service never sees a NEO4J_* name it would try to parse as configuration.
+    #
+    # PGHOST/PG_PORT are what proxyshop_support.postgres._default_dsn builds every role's DSN
+    # from. The four role DSN variables (PROXYSHOP_PG_DSN_EXCHANGE / _TRUST_RW / _VAULT /
+    # _APP) are deliberately NOT set: MEASURED, setting PROXYSHOP_PG_DSN_APP to the
+    # password-free shape .env.example ships fails two tests in
+    # apps/buyer/svc/tests/test_auth_vault.py with `fe_sendauth: no password supplied`,
+    # because buyer_svc reads that variable directly rather than through role_dsn. Left
+    # unset, role_dsn supplies the password and everything passes.
+    #
+    # PROXYSHOP_PG_DSN_ADMIN is the one exception and is required: proxyshop_support.
+    # reachability reads the Postgres endpoint from it and from nowhere else — it does not
+    # consult PGHOST/PG_PORT — so without it verify.sh's coverage gate probes localhost:5432
+    # on a job whose Postgres is at postgres:5432. The database component is advisory;
+    # role_dsn rewrites it to proxyshop_w$PROXYSHOP_WORKER on every connection.
+    - export PGHOST=postgres PG_PORT=5432
+    - export PROXYSHOP_PG_DSN_ADMIN="postgresql://proxyshop@postgres:5432/proxyshop_template"
+    - export NEO4J_URI="bolt://neo4j:7687"
+    - export REDIS_URL="redis://redis:6379/0"
+    - ./scripts/bootstrap.sh
+
+  script:
+    # 1. Refuse early and by name if a datastore is not answering where the tests will look.
+    #    Seconds, not the eight minutes it would otherwise take to discover it as skips.
+    - .venv/bin/python scripts/ci_datastore_proof.py wait
+    # 2. This worker's Postgres database (D38). `make deps-up` would also run `docker
+    #    compose up`, which is not how this job's datastores arrive, so the db-init half is
+    #    called on its own.
+    - make db-init
+    # 3. THE GATE. Everything the project checks, exactly as a developer runs it.
+    - make verify
+    # 4. The claim `make verify` cannot make. Its coverage gate proves the three datastores
+    #    were REACHABLE; this proves the 309 docker-marked tests actually EXECUTED — zero
+    #    skipped, zero failed, and the class still the size it was measured at. Reachability
+    #    is not execution, and the difference is the whole reason this pipeline exists.
+    - .venv/bin/python scripts/ci_datastore_proof.py prove
+    # 5. This file and the GitHub mirror must still agree with docker-compose.yml.
+    - .venv/bin/python scripts/ci_datastore_proof.py check-config
+
+  after_script:
+    # What this DOES show: the alias-to-IP table GitLab wrote for the three services. A
+    # service that failed to start still gets a line here, so this is the alias check and
+    # not a health check — read it when `wait` refused and you need to know whether the job
+    # was even looking at the right address.
+    #
+    # What it does NOT show, said plainly rather than implied: the SERVICE CONTAINERS' OWN
+    # LOGS. GitLab does not put those in the trace unless the project sets the CI_DEBUG_SERVICES
+    # variable to "true" (Settings > CI/CD > Variables). A neo4j that died on a bad setting is
+    # silent here until that is turned on — see the `variables:` note above for the way that
+    # actually happens.
+    - echo "--- service aliases GitLab resolved for this job ---"
+    - cat /etc/hosts

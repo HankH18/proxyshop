@@ -29,7 +29,14 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-__all__ = ["SCORING_MODULES", "observations_from_events", "replay"]
+__all__ = [
+    "CLAIM_VERIFIED_KIND",
+    "FEEDBACK_KIND",
+    "RETURN_KIND",
+    "SCORING_MODULES",
+    "observations_from_events",
+    "replay",
+]
 
 #: Where the scorer is looked for, in order. Both spellings resolve to the same file: the
 #: repo root is on ``sys.path`` (which is how the frozen suite imports
@@ -51,20 +58,96 @@ OBSERVATION_FIELDS = ("store_id", "dim", "type", "observed_at", "weight")
 #: two spellings cannot drift apart unnoticed.
 OBSERVATION_WEIGHT_FIELD = "weight"
 
+#: The kind whose published body spells its observation type ``status`` rather than ``type``.
+#:
+#: ``contracts.LEDGER_PAYLOAD_SHAPES["claim_verified"]`` is ``(claim_ref, status, dim)`` --
+#: the frozen shape names a ``dim`` and NO ``type``, so every ``claim_verified`` event in the
+#: chain projected to nothing at all. Measured on this tree before the fallback below: a
+#: served ``POST /events`` of a ``contradicted`` ``catalog_claim_accuracy`` verdict answered
+#: ``201`` and ``GET /events/replay?snapshots=true`` came back ``{}``. That is a whole
+#: producer -- ``apps/exchange/src/ranking/verification.py``, which announces one
+#: ``claim_verified`` per counted claim on the served auction path -- reaching no Beta.
+#:
+#: ``status`` IS the observation type for this kind: the four verification statuses
+#: (``verified`` / ``contradicted`` / ``unsupported`` / ``ambiguous``) are four of the seven
+#: published observation types, spelled identically. The fallback is gated on the kind rather
+#: than applied to any event carrying a ``status``, so a vendor body that happens to have one
+#: cannot mint an observation out of it.
+CLAIM_VERIFIED_KIND = "claim_verified"
 
-def observations_from_events(events: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+#: The two kinds R14's fold-time weight is a function of; see :func:`_feedback_fold`.
+FEEDBACK_KIND = "feedback"
+RETURN_KIND = "refund"
+
+#: Where the R14 weighting rule is looked for, in order -- the same two-spelling arrangement
+#: as :data:`SCORING_MODULES`, and imported lazily for the same reason.
+FEEDBACK_MODULES = ("trust.feedback.weighting", "apps.trust.src.feedback.weighting")
+
+
+def _feedback_fold(event: Mapping[str, Any], *, returned: bool) -> dict[str, Any] | None:
+    """R14's ``{type, weight}`` for one ``feedback`` event, or ``None``.
+
+    **No number is decided here, and that is the rule this module lives by.** The weight is
+    computed by ``trust.feedback.weighting.fold_feedback``, which owns
+    ``RETURN_CONTRADICTION_FACTOR`` and calls ``accept_feedback`` -- exactly as every score in
+    this file is computed by ``trust.scoring`` and merely moved through. What this function
+    contributes is the *lookup*, which is a ledger concern: which module, imported when.
+
+    Lazily imported for the same reason :func:`replay` imports the scorer lazily -- this
+    package must stay importable when the rest of ``apps/trust`` is not -- and ``None`` on an
+    ``ImportError`` because a projection that raised would turn a missing sibling package into
+    a ``500`` on ``POST /events``, whose poison screen runs this projection over every
+    arriving event. That branch is unreachable in a real build: ``trust.feedback`` imports
+    ``trust.scoring``, so a checkout that cannot import the first cannot score at all.
+    """
+    import importlib
+
+    for name in FEEDBACK_MODULES:
+        try:
+            module = importlib.import_module(name)
+        except ImportError:
+            continue
+        folder = getattr(module, "fold_feedback", None)
+        if folder is not None:
+            result = folder(event, returned=returned)
+            return dict(result) if isinstance(result, Mapping) else None
+    return None  # pragma: no cover - see the docstring
+
+
+def observations_from_events(
+    events: Iterable[Mapping[str, Any]],
+    *,
+    returned_orders: Iterable[tuple[str, str]] = (),
+) -> list[dict[str, Any]]:
     """Project a ledger stream onto the trust observations it carries.
 
-    An event contributes an observation when its ``payload`` names both a ``dim`` and a
-    ``type``; every other event -- ``accepted``, ``order_paid``, ``auction_opened`` -- passes
-    through untouched, because turning those into observations is a *scoring* decision and
-    lives in T-062.
+    An event contributes an observation when its ``payload`` names a ``dim`` and a ``type``;
+    every other event -- ``accepted``, ``order_paid``, ``auction_opened`` -- passes through
+    untouched, because turning those into observations is a *scoring* decision and lives in
+    T-062.
+
+    Two kinds name their type under a different key, because the FROZEN payload shape says
+    so, and both were silently invisible until they were read here:
+
+    * ``claim_verified`` spells it ``status`` (:data:`CLAIM_VERIFIED_KIND`); and
+    * ``feedback`` may spell it not at all -- the published body is
+      ``(matched_pitch, reason)`` -- in which case R14's own rule derives it from the
+      buyer's answer.
+
+    Neither is a general fallback. Both are gated on the event's ``kind``, so a vendor body
+    that happens to carry a ``status`` or a ``matched_pitch`` cannot mint an observation.
 
     Args:
         events: the stream, in order. Order is preserved in the output, which matters: decay
             is a function of recorded timestamps and the sequence they arrived in, and the
             S3 replay assertion compares against a served snapshot built from the same
-            sequence.
+            sequence. Order matters for a second reason now: a ``refund`` seen EARLIER in
+            the stream is what discounts a later positive report about that order.
+        returned_orders: ``(store_id, order_ref)`` pairs already known to have been returned
+            before this stream begins. The stream's own ``refund`` events are added to them
+            as it is walked, so a caller folding one appended event (``POST /events``, which
+            has the chain behind it but not in hand) gets the same answer as a caller
+            replaying the whole chain.
 
     Returns:
         ``[{"store_id", "dim", "type", "observed_at"[, "weight"]}, ...]``. ``store_id`` is
@@ -88,20 +171,49 @@ def observations_from_events(events: Iterable[Mapping[str, Any]]) -> list[dict[s
         shape rather than carrying an explicit ``None``, because the scorer already reads an
         absent weight as exactly 1.0 and S3's assertion is an ``==`` over these values.
 
+        R14's fold-time weight is the one weight the event does not carry, and it is still
+        not decided here: a ``feedback`` event whose order the chain has already recorded a
+        ``refund`` for is handed to ``trust.feedback.weighting.fold_feedback``, which owns
+        the factor and the rule. It is applied only when the payload names no ``weight`` of
+        its own -- a producer that computed one is not overruled by a second opinion -- and
+        the resulting ``weight`` is attached only when it is not exactly 1.0, so a report
+        nothing contradicts projects byte-identically to the way it always has.
+
         An event naming a ``dim`` and a ``type`` but **no** ``store_id`` is skipped: a trust
         observation is a statement about a store, and there is no honest store to attribute
         it to. That is a silent drop, and the reason it is tolerable is that the writer's own
         chain guard cannot produce such an event through any path this package owns.
     """
     observations: list[dict[str, Any]] = []
+    returned: set[tuple[str, str]] = {(str(store), str(order)) for store, order in returned_orders}
     for event in events:
         payload = event.get("payload") or {}
         if not isinstance(payload, Mapping):
             continue
+        kind = str(event.get("kind") or "")
+        store_id = event.get("store_id") or payload.get("store_id")
+        order_ref = event.get("order_ref") or payload.get("order_ref")
+        if kind == RETURN_KIND and store_id is not None and order_ref is not None:
+            # Recorded BEFORE the projection below, and only for events already walked past,
+            # so "was this order returned when the report landed?" is a question about the
+            # stream's prefix. A return that arrives later cannot reach backwards and rewrite
+            # a sealed observation -- see `trust.feedback.weighting` on why that limit is
+            # forced by the append-only chain rather than chosen.
+            returned.add((str(store_id), str(order_ref)))
         dim, observation_type = payload.get("dim"), payload.get("type")
+        fold: dict[str, Any] | None = None
+        if kind == FEEDBACK_KIND:
+            fold = _feedback_fold(
+                event,
+                returned=(str(store_id), str(order_ref)) in returned,
+            )
+        if observation_type is None:
+            if kind == CLAIM_VERIFIED_KIND:
+                observation_type = payload.get("status")
+            elif fold is not None:
+                observation_type = fold.get("type")
         if dim is None or observation_type is None:
             continue
-        store_id = event.get("store_id") or payload.get("store_id")
         if store_id is None:
             continue
         observation = {
@@ -124,6 +236,10 @@ def observations_from_events(events: Iterable[Mapping[str, Any]]) -> list[dict[s
         # report decided nothing", and `payload.get("weight") or default` would quietly
         # restore it to full strength.
         weight = payload.get(OBSERVATION_WEIGHT_FIELD)
+        if weight is None and fold is not None and fold.get(OBSERVATION_WEIGHT_FIELD) != 1.0:
+            # R14 applied at the fold, and ONLY when it changes something. `!= 1.0` rather
+            # than a truthiness test for the reason above: 0.0 is an admissible weight.
+            weight = fold.get(OBSERVATION_WEIGHT_FIELD)
         if weight is not None:
             observation[OBSERVATION_WEIGHT_FIELD] = weight
         observations.append(observation)

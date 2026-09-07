@@ -282,6 +282,21 @@ def _requested_depth(ctx: AuctionContext, action: Claim) -> float:
     return depth if depth is not None and depth > 0.0 else 0.0
 
 
+def _played_arm(action: Claim) -> tuple[Any, Any]:
+    """The pitch half of the arm — ``(pitch_variant, commitment_keys)`` — off hook 5's claim.
+
+    Read off the **claim**, exactly as :func:`_requested_depth` reads the depth off the claim, and
+    for the same reason: the arm a store played must be evidence in the bid rather than a private
+    decision the runtime reached into the context for. Both values are raw here — normalising
+    them is :mod:`.pitch`'s job, through the closed vocabulary in
+    :mod:`store_agent.learning.arms`, so there is one validator rather than two.
+    """
+    value = action.value
+    if not isinstance(value, dict):
+        return None, None
+    return value.get("pitch_variant"), value.get("commitment_keys")
+
+
 def _authorized(
     hooks: Any, store_id: str, product_ref: str, requested: float
 ) -> tuple[float, Claim | None]:
@@ -498,6 +513,7 @@ def _assemble(
     action = hooks.choose_policy_action(
         {"cluster_id": ctx.cluster_id, "product_ref": chosen.product_ref}
     )
+    _played_variant, _played_commitments = _played_arm(action)
     depth, grant = _authorized(
         hooks, ctx.store_id, chosen.product_ref, _requested_depth(ctx, action)
     )
@@ -539,8 +555,19 @@ def _assemble(
         # has a provenance-tagged `Claim` beside it in the same bid for R18 to check against.
         # `compose_pitch` cannot raise and never sees a price; see `runtime.pitch`. `None` is a
         # perfectly good answer and leaves the bid exactly as it was before this feature existed.
+        #
+        # The arm rides in as ORDERING ONLY (R17): `pitch_variant` says which class of already-
+        # proved fact leads, `commitment_keys` which approved promises are stood behind first.
+        # Neither can add a fact — the material is still `claims` and nothing else — and neither
+        # touches the offer, whose commitments came from `get_owner_commitments` above and are
+        # the merchant's approval rather than the loop's choice.
         message=compose_pitch(
-            ctx, [*claims, *offer.commitments], offer_ref=offer.bid_offer_id, llm=llm
+            ctx,
+            [*claims, *offer.commitments],
+            offer_ref=offer.bid_offer_id,
+            llm=llm,
+            variant=_played_variant,
+            lead_commitments=_played_commitments,
         ),
         agent_version=AGENT_VERSION,
         schema_version=SCHEMA_VERSION,

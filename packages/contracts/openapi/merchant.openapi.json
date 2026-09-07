@@ -1021,6 +1021,717 @@
           }
         }
       }
+    },
+    "/stores/{store_id}/dashboard": {
+      "get": {
+        "operationId": "readMerchantDashboard",
+        "summary": "R9's whole merchant page for one store, in one read.",
+        "description": "Everything R9 names, assembled server-side: the versioned envelope and the bidding decision derived from it, the exchange's win/loss report aggregated by intent cluster with reason categories only, this store's trust snapshot with its per-dimension breakdown, the trust event payloads behind it, and the log of solicitations this dashboard has made against the store's own agent. NO RIVAL AMOUNTS AND NO RIVAL IDENTITIES: the loss report's suppression is the exchange's own projection, and the trust snapshot is narrowed to the calling store HERE, on the server, because `GET /snapshot` answers every store at once and narrowing in a browser means the rival's rows were already served to it. The exchange's report bearer is held by this service and never reaches the browser: at the exchange that token IS the store's identity.",
+        "security": [
+          {
+            "adminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "store_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "start",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number"
+            },
+            "description": "Loss window start, epoch seconds. Defaults to 30 days ago, echoed back."
+          },
+          {
+            "name": "end",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number"
+            },
+            "description": "Loss window end, epoch seconds. Defaults to now, echoed back."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The page. Every region is a panel carrying its own state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "store_id",
+                    "generated_at",
+                    "envelope",
+                    "losses",
+                    "trust",
+                    "trust_events",
+                    "bids"
+                  ],
+                  "properties": {
+                    "store_id": {
+                      "type": "string"
+                    },
+                    "generated_at": {
+                      "type": "string"
+                    },
+                    "envelope": {
+                      "type": "object",
+                      "required": [
+                        "state",
+                        "detail"
+                      ],
+                      "description": "One region of the page. `state` is `ok`, `absent`, `not_configured` (with `missing` naming the environment variables to set), `unauthorized`, `unreachable` or `upstream_refused`. Rows are present ONLY in `ok`: a refusal never renders as an empty result, because an empty loss list reads as 'you lost nothing'.",
+                      "properties": {
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "ok",
+                            "absent",
+                            "not_configured",
+                            "unauthorized",
+                            "unreachable",
+                            "upstream_refused"
+                          ]
+                        },
+                        "detail": {
+                          "type": "string"
+                        },
+                        "missing": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "additionalProperties": true
+                    },
+                    "losses": {
+                      "type": "object",
+                      "required": [
+                        "state",
+                        "detail"
+                      ],
+                      "description": "One region of the page. `state` is `ok`, `absent`, `not_configured` (with `missing` naming the environment variables to set), `unauthorized`, `unreachable` or `upstream_refused`. Rows are present ONLY in `ok`: a refusal never renders as an empty result, because an empty loss list reads as 'you lost nothing'.",
+                      "properties": {
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "ok",
+                            "absent",
+                            "not_configured",
+                            "unauthorized",
+                            "unreachable",
+                            "upstream_refused"
+                          ]
+                        },
+                        "detail": {
+                          "type": "string"
+                        },
+                        "missing": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "additionalProperties": true
+                    },
+                    "trust": {
+                      "type": "object",
+                      "required": [
+                        "state",
+                        "detail"
+                      ],
+                      "description": "One region of the page. `state` is `ok`, `absent`, `not_configured` (with `missing` naming the environment variables to set), `unauthorized`, `unreachable` or `upstream_refused`. Rows are present ONLY in `ok`: a refusal never renders as an empty result, because an empty loss list reads as 'you lost nothing'.",
+                      "properties": {
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "ok",
+                            "absent",
+                            "not_configured",
+                            "unauthorized",
+                            "unreachable",
+                            "upstream_refused"
+                          ]
+                        },
+                        "detail": {
+                          "type": "string"
+                        },
+                        "missing": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "additionalProperties": true
+                    },
+                    "trust_events": {
+                      "type": "object",
+                      "required": [
+                        "state",
+                        "detail"
+                      ],
+                      "description": "One region of the page. `state` is `ok`, `absent`, `not_configured` (with `missing` naming the environment variables to set), `unauthorized`, `unreachable` or `upstream_refused`. Rows are present ONLY in `ok`: a refusal never renders as an empty result, because an empty loss list reads as 'you lost nothing'.",
+                      "properties": {
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "ok",
+                            "absent",
+                            "not_configured",
+                            "unauthorized",
+                            "unreachable",
+                            "upstream_refused"
+                          ]
+                        },
+                        "detail": {
+                          "type": "string"
+                        },
+                        "missing": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "additionalProperties": true
+                    },
+                    "bids": {
+                      "type": "object",
+                      "required": [
+                        "state",
+                        "detail"
+                      ],
+                      "description": "One region of the page. `state` is `ok`, `absent`, `not_configured` (with `missing` naming the environment variables to set), `unauthorized`, `unreachable` or `upstream_refused`. Rows are present ONLY in `ok`: a refusal never renders as an empty result, because an empty loss list reads as 'you lost nothing'.",
+                      "properties": {
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "ok",
+                            "absent",
+                            "not_configured",
+                            "unauthorized",
+                            "unreachable",
+                            "upstream_refused"
+                          ]
+                        },
+                        "detail": {
+                          "type": "string"
+                        },
+                        "missing": {
+                          "type": "array",
+                          "items": {
+                            "type": "string"
+                          }
+                        }
+                      },
+                      "additionalProperties": true
+                    }
+                  }
+                },
+                "example": {
+                  "store_id": "store-alpha",
+                  "generated_at": "2026-01-01T00:00:00+00:00",
+                  "envelope": {
+                    "state": "ok",
+                    "detail": "",
+                    "activation": "active",
+                    "may_bid": true,
+                    "reason": "the store's current envelope is active",
+                    "versions": [
+                      {
+                        "version": 1,
+                        "activation": "shadow",
+                        "approved_by": null,
+                        "approved_at": null
+                      },
+                      {
+                        "version": 2,
+                        "activation": "active",
+                        "approved_by": "owner@store-alpha.example",
+                        "approved_at": "2026-01-01T00:00:00+00:00"
+                      }
+                    ],
+                    "current": {
+                      "store_id": "store-alpha",
+                      "version": 2,
+                      "floors": [
+                        {
+                          "product_ref": "prod-floor",
+                          "min_price": 95.0
+                        }
+                      ],
+                      "max_discount_pct": 20.0,
+                      "budget_cap": 500.0,
+                      "pursue_clusters": [
+                        "cluster-warm-layers"
+                      ],
+                      "standing_commitments": [],
+                      "activation": "active"
+                    }
+                  },
+                  "losses": {
+                    "state": "ok",
+                    "detail": "",
+                    "store_id": "store-alpha",
+                    "window": {
+                      "start": 0.0,
+                      "end": 4.0
+                    },
+                    "by_cluster": [
+                      {
+                        "cluster_id": "cluster-warm-layers",
+                        "lost": 3,
+                        "reasons": {
+                          "fit": 1,
+                          "price": 1,
+                          "commitments": 1,
+                          "trust": 0
+                        },
+                        "unmet_criteria": [
+                          "material = merino wool"
+                        ]
+                      }
+                    ]
+                  },
+                  "trust": {
+                    "state": "ok",
+                    "detail": "",
+                    "snapshot": {
+                      "store_id": "store-alpha",
+                      "score": 0.72,
+                      "confidence": 0.31,
+                      "score_version": "trust-score-1.0.0",
+                      "snapshot_version": "trust-snapshot-1.0.0",
+                      "low_data": false,
+                      "dims": {
+                        "price_honored": {
+                          "alpha": 8.0,
+                          "beta": 2.0,
+                          "decayed_at": "2026-09-07T19:19:29.680Z"
+                        }
+                      },
+                      "blacklisted": false
+                    }
+                  },
+                  "trust_events": {
+                    "state": "ok",
+                    "detail": "a projection of the chained ledger, not the chain",
+                    "events": [
+                      {
+                        "seq": 7,
+                        "store_id": "store-alpha",
+                        "kind": "feedback",
+                        "payload": {
+                          "matched_pitch": false,
+                          "reason": "arrived late"
+                        }
+                      }
+                    ],
+                    "count": 1,
+                    "truncated": false
+                  },
+                  "bids": {
+                    "state": "ok",
+                    "detail": "solicitations made from this dashboard against the store's own agent",
+                    "entries": [
+                      {
+                        "recorded_at": "2026-01-01T00:00:00+00:00",
+                        "origin": "dashboard",
+                        "store_id": "store-alpha",
+                        "auction_id": "dashboard-rehearsal-0000",
+                        "outcome": "declined",
+                        "activation": "killed",
+                        "may_bid": false,
+                        "claims": 0,
+                        "contradiction": false,
+                        "decline_reason": "store_killed"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No bearer token, or the wrong one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unauthorized"
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "error": "unauthorized"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No admin token, or a named report-token table that cannot be read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "admin-api-not-configured",
+                        "report-tokens-unreadable"
+                      ]
+                    },
+                    "missing": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "detail": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "error": "admin-api-not-configured",
+                  "missing": [
+                    "MERCHANT_ADMIN_TOKEN"
+                  ],
+                  "detail": "the dashboard refuses every caller until a token is configured"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/stores/{store_id}/bids/solicit": {
+      "post": {
+        "operationId": "solicitStoreAgentBid",
+        "summary": "Ask this store's own agent for a bid, and record what it answered.",
+        "description": "This is how R9's kill switch becomes OBSERVABLE. The merchant service posts a real `BidRequest` to the store agent's published `POST /v1/bid-requests` - the same door the exchange solicits through - and records the answer verbatim: a `Bid`, or the contract's 204 decline whose reason travels in `x-proxyshop-decline-reason` (`store_killed`, `envelope_not_activated`, ...). Kill the store, solicit again, and the row that comes back is the proof. It is a REHEARSAL and every row says so (`origin: dashboard`); it is not the live auction log, whose per-auction rationale lives in the agent's own in-process shadow log and has no served route. The body is optional: anything omitted is defaulted from the store's own envelope, the cluster from `pursue_clusters`, so a rehearsal is not answered `cluster_not_pursued` for a cluster the merchant never asked to pursue. The pseudonym is a fixed synthetic value and never a buyer's (R5).",
+        "security": [
+          {
+            "adminBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "store_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "cluster_id": {
+                    "type": "string"
+                  },
+                  "query": {
+                    "type": "string"
+                  },
+                  "category": {
+                    "type": "string"
+                  },
+                  "ship_to": {
+                    "type": "string"
+                  },
+                  "currency": {
+                    "type": "string"
+                  },
+                  "budget_band": {
+                    "type": "string"
+                  },
+                  "hard_constraints": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  },
+                  "preferences": {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  }
+                },
+                "additionalProperties": false
+              },
+              "example": {
+                "cluster_id": "cluster-warm-layers",
+                "query": "a warm mid-layer for cold commutes",
+                "hard_constraints": [
+                  {
+                    "field": "material",
+                    "op": "eq",
+                    "value": "merino wool"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The agent answered. A decline is a 200: the solicitation succeeded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "recorded_at",
+                    "origin",
+                    "store_id",
+                    "auction_id",
+                    "outcome",
+                    "activation",
+                    "may_bid",
+                    "claims",
+                    "contradiction"
+                  ],
+                  "properties": {
+                    "recorded_at": {
+                      "type": "string"
+                    },
+                    "origin": {
+                      "type": "string",
+                      "enum": [
+                        "dashboard"
+                      ]
+                    },
+                    "store_id": {
+                      "type": "string"
+                    },
+                    "auction_id": {
+                      "type": "string"
+                    },
+                    "outcome": {
+                      "type": "string",
+                      "enum": [
+                        "bid",
+                        "declined"
+                      ]
+                    },
+                    "activation": {
+                      "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/EnvelopeActivation"
+                    },
+                    "may_bid": {
+                      "type": "boolean"
+                    },
+                    "claims": {
+                      "type": "integer"
+                    },
+                    "contradiction": {
+                      "type": "boolean",
+                      "description": "The merchant stopped this store and its agent bid anyway. Reachable today: the merchant service holds the authoritative envelope and nothing delivers it to a separately deployed agent, which reads its own STORE_AGENT_CONTEXT once at start-up."
+                    },
+                    "decline_reason": {
+                      "type": "string"
+                    },
+                    "offer": {
+                      "type": "object"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "detail": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "example": {
+                  "recorded_at": "2026-01-01T00:00:00+00:00",
+                  "origin": "dashboard",
+                  "store_id": "store-alpha",
+                  "auction_id": "dashboard-rehearsal-0000",
+                  "outcome": "declined",
+                  "activation": "killed",
+                  "may_bid": false,
+                  "claims": 0,
+                  "contradiction": false,
+                  "decline_reason": "store_killed",
+                  "detail": "the agent answered the contract's decline; the reason is in its header."
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The body was present and is not a JSON object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unparseable-body",
+                        "not-a-solicitation"
+                      ]
+                    },
+                    "detail": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "error": "unparseable-body"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No bearer token, or the wrong one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "unauthorized"
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "error": "unauthorized"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body exceeded this service's cap.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "body-too-large"
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "error": "body-too-large"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The store agent's address is configured and nothing answered it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "store-agent-unreachable"
+                      ]
+                    },
+                    "detail": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "error": "store-agent-unreachable",
+                  "detail": "the store agent at store-agent:8085 did not answer: All connection attempts failed. The address is configured; the service is not up."
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No admin token, or no address for the store's own agent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "enum": [
+                        "admin-api-not-configured",
+                        "store-agent-not-configured"
+                      ]
+                    },
+                    "missing": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "detail": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "error": "store-agent-not-configured",
+                  "missing": [
+                    "STORE_AGENT_URL"
+                  ],
+                  "detail": "this deployment states no address for the store's own agent"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {

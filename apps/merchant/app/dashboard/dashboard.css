@@ -1,0 +1,114 @@
+/* The merchant dashboard's whole stylesheet. One file, no framework: the 17 npm dependencies
+   this package declares (polaris, app-bridge, react-router) are imported by nothing, and this
+   ticket is about a dashboard that exists rather than one that pulls a design system in. */
+
+:root {
+  --ink: #e7ebf3;
+  --ink-dim: #97a0b5;
+  --bg: #0d1017;
+  --panel: #161b26;
+  --line: #242c3c;
+  --accent: #6fb3ff;
+  --warn: #ffcf70;
+  --bad: #ff8080;
+  --good: #7ee0a8;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.shell { max-width: 78rem; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+
+.masthead {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 1rem; flex-wrap: wrap; border-bottom: 1px solid var(--line); padding-bottom: 1rem;
+}
+.masthead h1 { font-size: 1.5rem; margin: .1rem 0 0; }
+.masthead__eyebrow { margin: 0; color: var(--ink-dim); letter-spacing: .08em;
+  text-transform: uppercase; font-size: .7rem; }
+.masthead__stamp { margin: 0; color: var(--ink-dim); font-size: .8rem; }
+
+.toolbar { display: flex; gap: .75rem; align-items: center; margin: 1rem 0; }
+
+.columns { display: grid; gap: 1.25rem; grid-template-columns: repeat(auto-fit, minmax(23rem, 1fr)); }
+
+.card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: 1.1rem 1.2rem 1.3rem;
+}
+.card__head { display: flex; align-items: baseline; justify-content: space-between; gap: .75rem; }
+.card h2 { font-size: 1.05rem; margin: 0 0 .6rem; }
+.card h3 { font-size: .9rem; margin: 1.2rem 0 .4rem; color: var(--ink-dim);
+  text-transform: uppercase; letter-spacing: .06em; }
+.card__req { color: var(--ink-dim); font-size: .72rem; white-space: nowrap; }
+
+.muted { color: var(--ink-dim); font-size: .84rem; }
+.error { color: var(--bad); font-size: .85rem; }
+.status-line { margin: .2rem 0 .4rem; }
+
+.notice { border-left: 3px solid var(--warn); background: #1d2130; padding: .7rem .9rem;
+  border-radius: 0 6px 6px 0; margin: .4rem 0 .9rem; }
+.notice--unauthorized, .notice--upstream_refused { border-left-color: var(--bad); }
+.notice--absent { border-left-color: var(--ink-dim); }
+.notice__heading { margin: 0 0 .25rem; font-weight: 600; font-size: .88rem; }
+.notice__missing, .notice__detail { margin: .2rem 0 0; color: var(--ink-dim); font-size: .82rem; }
+
+code, .code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82em; }
+code { background: #1f2534; padding: .1rem .35rem; border-radius: 4px; color: #a9d3ff; }
+pre.code { background: #10141d; border: 1px solid var(--line); border-radius: 6px;
+  padding: .7rem; overflow-x: auto; max-height: 22rem; }
+textarea.code { width: 100%; background: #10141d; color: var(--ink); border: 1px solid var(--line);
+  border-radius: 6px; padding: .6rem; }
+
+.grid { width: 100%; border-collapse: collapse; margin: .6rem 0; font-size: .85rem; }
+.grid th, .grid td { text-align: left; padding: .35rem .5rem; border-bottom: 1px solid var(--line); }
+.grid th { color: var(--ink-dim); font-weight: 500; font-size: .74rem; text-transform: uppercase; }
+.grid tr.is-head td { background: #1b2231; }
+.grid td.hot { color: var(--warn); font-weight: 600; }
+
+.pill { display: inline-block; padding: .05rem .45rem; border-radius: 999px; font-size: .72rem;
+  border: 1px solid var(--line); }
+.pill--active, .pill--bid { color: var(--good); border-color: #2c4b3a; }
+.pill--killed, .pill--declined { color: var(--bad); border-color: #4b2c2c; }
+.pill--shadow { color: var(--warn); border-color: #4b432c; }
+
+.score { display: flex; align-items: baseline; gap: .6rem; margin: .2rem 0 .5rem; }
+.score__value { font-size: 2rem; font-weight: 600; }
+.bar-cell { width: 40%; }
+.bar { display: block; height: .5rem; background: var(--accent); border-radius: 999px; min-width: 2px; }
+
+.events { list-style: none; margin: 0; padding: 0; }
+.events li { border-bottom: 1px solid var(--line); padding: .3rem 0; }
+summary { cursor: pointer; }
+
+.bids { list-style: none; margin: .6rem 0 0; padding: 0; }
+.bid { border: 1px solid var(--line); border-radius: 8px; padding: .6rem .75rem; margin-bottom: .6rem; }
+.bid__head { margin: 0 0 .35rem; display: flex; gap: .45rem; align-items: center; flex-wrap: wrap; }
+.bid--contradiction { border-color: var(--bad); background: #241a1c; }
+.bid__alarm { margin: 0 0 .4rem; color: var(--bad); font-size: .84rem; }
+.bid__reason { margin: 0; }
+.bid__message { margin: .4rem 0 0; font-style: italic; color: var(--ink-dim); }
+.bid__offer { display: grid; grid-template-columns: max-content 1fr; gap: .1rem .8rem; margin: 0; }
+.bid__offer dt { color: var(--ink-dim); font-size: .78rem; }
+.bid__offer dd { margin: 0; font-size: .85rem; }
+
+.stack { display: flex; flex-direction: column; gap: .4rem; margin-top: .8rem; }
+.row { display: flex; gap: .5rem; flex-wrap: wrap; margin: .8rem 0; }
+.row input { flex: 1 1 12rem; }
+label { color: var(--ink-dim); font-size: .78rem; }
+input, textarea { background: #10141d; color: var(--ink); border: 1px solid var(--line);
+  border-radius: 6px; padding: .45rem .6rem; font: inherit; }
+
+button { background: var(--accent); color: #0b1220; border: 0; border-radius: 6px;
+  padding: .45rem .9rem; font: inherit; font-weight: 600; cursor: pointer; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button.danger { background: var(--bad); }
+button.link { background: none; color: var(--ink-dim); font-weight: 400; padding: .45rem 0; }
+
+ul.tight { margin: 0; padding-left: 1rem; }

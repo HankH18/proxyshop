@@ -47,6 +47,12 @@ from copy import deepcopy
 from typing import Any
 
 from claim_verification import attribute_value, verify
+from claim_verification.pitch import (
+    MAX_PITCH_CHARS,
+    MAX_PITCH_CLAIMS,
+    decompose_pitch,
+    pitch_ref_for,
+)
 
 # `catalog_keys` comes from the SUBMODULE rather than from the package root, which is where its
 # two siblings above come from. `claim_verification/__init__.py` re-exports a fixed list and is
@@ -63,6 +69,7 @@ __all__ = [
     "DEFAULT_VERIFIER_VERSION",
     "MAX_CATALOG_PRODUCTS",
     "NoCatalogSnapshots",
+    "PITCH_FIELD",
     "StaticCatalogSnapshots",
     "STORE_SUPPLIED_FIELDS_DROPPED",
     "UNDECIDABLE_KEY_REASON",
@@ -73,6 +80,8 @@ __all__ = [
     "claim_ref_for",
     "claim_verdict_payload",
     "declared_attributes",
+    "pitch_claims_of",
+    "pitch_text_of",
     "snapshot_for",
 ]
 
@@ -554,6 +563,88 @@ def claim_ref_for(store_id: Any, index: int) -> str:
     return f"{store_id}#{int(index)}"
 
 
+#: The field on a ``Bid`` that carries the seller's purchased message (``Bid.message``).
+#:
+#: **This is the artefact D55 is about, and until R18 it was checked by nothing.** A scraped
+#: shop gets the ORGANIC result — a pitch the platform writes from its own crawl, verifiable by
+#: construction because the platform authored it out of data it already held. An in-network
+#: shop gets the SPONSORED result: a dedicated advocate that writes for THIS shopper, in the
+#: store's own voice. That second one carries the seller's motive, which is exactly why the
+#: spec singles it out for adversarial checking — and this module used to hand
+#: :func:`claim_verification.verify` a hardcoded ``"text": ""``, so a bidder was graded only on
+#: the structured claims it had selected for itself. Choosing what to be graded on is not being
+#: graded.
+#:
+#: **Known gap, stated here rather than left to be discovered.**
+#: ``exchange.ranking.candidates.candidate_from_entry`` projects a ``BidEntry`` onto the five
+#: keys ``CANDIDATE_FIELDS`` names and ``message`` is not among them, so on the ``POST
+#: /auctions`` path the pitch is dropped one frame ABOVE this module. Everything below is live
+#: the moment that projection carries the field, and ``attest_candidates`` also accepts the
+#: text directly (``messages=``) for a caller that holds the entries. The evidence that the
+#: pointer survived while the document did not is already in the tree: every ``Claim`` on a bid
+#: carries a ``source_span`` indexing into a pitch nothing kept.
+PITCH_FIELD = "message"
+
+
+def pitch_text_of(
+    record: Any, messages: Mapping[str, Any] | None = None, store_id: str = ""
+) -> str | None:
+    """The pitch this candidate is graded on, or ``None``.
+
+    ``messages`` is ``{store_id: pitch}`` from the caller that holds the auction's bid entries
+    and it WINS over whatever the candidate record carries, for the same reason ``product_refs``
+    wins over the offer's own ``product_ref`` in :func:`attest_candidates`: what a store said is
+    the exchange's record of the reply, not a field a downstream projection is free to rewrite.
+    """
+    if messages:
+        stated = messages.get(str(store_id))
+        if stated is not None:
+            return stated if isinstance(stated, str) else None
+    text = read(record, PITCH_FIELD, None)
+    return text if isinstance(text, str) else None
+
+
+def pitch_claims_of(
+    message: Any,
+    *,
+    store_id: str,
+    auction_id: str = "",
+    vocabulary: Any = (),
+    observed_at: Any = None,
+) -> list[dict[str, Any]]:
+    """The claims a seller's prose asserts, decomposed and stamped ``seller_asserted``.
+
+    A thin, total wrapper around :func:`claim_verification.decompose_pitch`, and "total" is the
+    load-bearing word: this runs inside ``POST /auctions``, on a document a third-party store
+    agent wrote, and a decomposer that raised would take the whole auction down for every
+    OTHER store in it. A pitch this exchange cannot read is a pitch that asserted nothing.
+
+    The vocabulary handed over is :func:`claim_verification.verifier.catalog_keys` over THIS
+    exchange's snapshot, so which catalogue field a sentence is graded against is the
+    platform's decision and not the seller's — the same lever
+    :data:`STORE_SUPPLIED_FIELDS_DROPPED` closes one field over for ``product_ref``. A reading
+    that lands on no key this catalogue carries comes back ``ambiguous``
+    (:data:`UNDECIDABLE_KEY_REASON`), which is worth exactly what silence is worth.
+    """
+    if not isinstance(message, str) or not message.strip():
+        return []
+    try:
+        return decompose_pitch(
+            message,
+            store_id=store_id,
+            auction_id=auction_id,
+            pitch_ref=pitch_ref_for(store_id, auction_id),
+            vocabulary=vocabulary,
+            observed_at=observed_at,
+            max_claims=MAX_PITCH_CLAIMS,
+            max_chars=MAX_PITCH_CHARS,
+        )
+    except Exception:
+        # A decomposition that could not run has decomposed nothing. Never a partial list: a
+        # half-read pitch is the guessed claim this whole path refuses to mint.
+        return []
+
+
 def _pitch_claims(claims: Iterable[Any], store_id: str) -> list[dict[str, Any]]:
     """The store's claims as the verifier's input, with the fields it must not read removed.
 
@@ -580,6 +671,8 @@ def attest_candidate_claims(
     recorder: Any = None,
     auction_id: str = "",
     dimensions: Any = None,
+    message: Any = None,
+    pitch_observed_at: Any = None,
 ) -> list[dict[str, Any]]:
     """One candidate's claims, each carrying this exchange's attested verdict.
 
@@ -630,17 +723,46 @@ def attest_candidate_claims(
     auction.
     """
     presented = list(claims or ())
+    text = message if isinstance(message, str) and message.strip() else None
+    if not presented and text is None:
+        # Nothing asserted and nothing said. Checked BEFORE the catalog is consulted, so R10's
+        # silent-store fallback still costs no snapshot lookup — it carries neither.
+        return []
+    snapshot = _narrowed_to(snapshot_for(catalog, store_id, product_ref), product_ref)
+    # The keys this snapshot can decide a claim on AT ALL, resolved once per candidate for the
+    # same reason `catalog_units` is: it walks the product row, and how many claims a bid
+    # carries is the bidder's choice. Empty when no snapshot resolved, which changes nothing —
+    # every claim is already `ambiguous` on that branch. Hoisted ABOVE the decomposition
+    # because it is also the vocabulary a pitch's readings are resolved against.
+    decidable = catalog_keys(snapshot, product_ref) if snapshot is not None else frozenset()
+    # The pitch's own claims, appended AFTER the ones the bidder selected for itself. Appended
+    # rather than merged: `claim_ref_for` is positional and the verifier answers one result per
+    # claim in input order, so a stable order is what keeps the zip honest. The two lists are
+    # then indistinguishable to everything downstream, which is the point — a claim read out of
+    # prose earns and costs exactly what an asserted one does.
+    presented.extend(
+        pitch_claims_of(
+            text,
+            store_id=store_id,
+            auction_id=auction_id,
+            vocabulary=decidable,
+            observed_at=pitch_observed_at,
+        )
+    )
     if not presented:
         return []
     pitch_claims = _pitch_claims(presented, store_id)
-    snapshot = _narrowed_to(snapshot_for(catalog, store_id, product_ref), product_ref)
     results: list[Any] = []
     if snapshot is not None:
         pitch = {
             "pitch_id": f"auction-pitch:{store_id}",
             "store_id": store_id,
             "product_ref": None if product_ref is None else str(product_ref),
-            "text": "",
+            # The real prose, and it changes no verdict: `verify` reads `claims` and never
+            # `text` (C10). It is carried because a VerificationResult that records the pitch
+            # it was reached on is one an auditor can re-derive, and because the field being a
+            # hardcoded `""` was the visible half of the defect this change closes.
+            "text": text or "",
             "claims": pitch_claims,
         }
         try:
@@ -666,11 +788,6 @@ def attest_candidate_claims(
     unchecked_reason = (
         "the exchange holds no catalog snapshot for this store, so its claims could not be checked"
     )
-    # The keys this snapshot can decide a claim on AT ALL, resolved once per candidate for the
-    # same reason `catalog_units` is: it walks the product row, and how many claims a bid
-    # carries is the bidder's choice. Empty when no snapshot resolved, which changes nothing —
-    # every claim is already `ambiguous` on that branch.
-    decidable = catalog_keys(snapshot, product_ref) if snapshot is not None else frozenset()
     # A recorder is one thing: something with `record`. Checked once rather than per claim,
     # and the emission below calls `recorder.record(CLAIM_VERIFIED_KIND, ...)` in full rather
     # than through a local alias — the S1 suite's producer search reads this call shape, and a
@@ -778,6 +895,8 @@ def attest_candidates(
     recorder: Any = None,
     auction_id: str = "",
     dimensions: Any = None,
+    messages: Mapping[str, Any] | None = None,
+    pitch_observed_at: Any = None,
 ) -> list[dict[str, Any]]:
     """Every candidate of one auction, with its claims replaced by attested ones.
 
@@ -793,8 +912,15 @@ def attest_candidates(
     The offer's own ``product_ref`` remains the fallback, because a caller that named none
     leaves nothing else to resolve against, and a claim that resolves against nothing comes
     back ``unsupported`` rather than verified.
+
+    ``messages`` is ``{store_id: pitch}`` and is the same kind of statement: the pitch a caller
+    holding the auction's bid entries knows this store sent, which outranks the
+    :data:`PITCH_FIELD` on the candidate record. Either way the prose is decomposed, stamped
+    ``seller_asserted`` and graded exactly like an asserted claim — see :func:`pitch_claims_of`
+    and :data:`PITCH_FIELD` for the gap on the ``POST /auctions`` projection.
     """
     product_refs = dict(product_refs or {})
+    stated = dict(messages or {})
     out: list[dict[str, Any]] = []
     for candidate in candidates or ():
         record = dict(candidate) if isinstance(candidate, Mapping) else candidate
@@ -813,6 +939,8 @@ def attest_candidates(
             recorder=recorder,
             auction_id=auction_id,
             dimensions=dimensions,
+            message=pitch_text_of(record, stated, store_id),
+            pitch_observed_at=pitch_observed_at,
         )
         out.append(record)
     return out

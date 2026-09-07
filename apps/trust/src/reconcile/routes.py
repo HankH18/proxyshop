@@ -9,6 +9,9 @@ Mounted by the frozen entrypoint ``apps/trust/src/main.py``, which globs
 ``POST /reconcile``              the same fold, landed: the ``reconciled`` verdicts and
                                  the ``offer_integrity`` observations are appended to the
                                  chain and written into ``ledger.trust_observations``.
+                                 THREE promises are graded now: price, discount, and —
+                                 since the promise ledger landed — delivery, which is the
+                                 only transaction producer ``shipped_on_time`` has.
 ===============================  =====================================================
 
 Why this file exists at all
@@ -130,6 +133,7 @@ from ..events.store import append
 from .engine import (
     ACCEPTED_KIND,
     CODE_BRIDGE_KINDS,
+    FULFILLED_KIND,
     OBSERVATION_KIND,
     PIXEL_KIND,
     RECONCILED_KIND,
@@ -160,7 +164,13 @@ router = APIRouter(tags=["reconcile"])
 
 #: The kinds the fold reads. Everything else in the chain — auction transitions, claim
 #: verifications, delistings — is walked past, so this door can be handed a whole ledger.
-INPUT_KINDS: tuple[str, ...] = (ACCEPTED_KIND, PIXEL_KIND, WEBHOOK_KIND, *CODE_BRIDGE_KINDS)
+INPUT_KINDS: tuple[str, ...] = (
+    ACCEPTED_KIND,
+    PIXEL_KIND,
+    WEBHOOK_KIND,
+    FULFILLED_KIND,
+    *CODE_BRIDGE_KINDS,
+)
 
 #: The most checkout events one fold will hold at once before refusing.
 #:
@@ -168,7 +178,7 @@ INPUT_KINDS: tuple[str, ...] = (ACCEPTED_KIND, PIXEL_KIND, WEBHOOK_KIND, *CODE_B
 #: this service serves, for exactly this reason: a projection that holds an observation per
 #: event cannot be paged. This fold is strictly heavier — a union-find over every checkout
 #: event, plus the events themselves retained for the second pass — so the ceiling is lower.
-#: Only the FIVE kinds above count towards it, so a ledger dominated by auction transitions
+#: Only the SIX kinds above count towards it, so a ledger dominated by auction transitions
 #: is not refused for events this fold never looks at.
 MAX_RECONCILE_INPUT_EVENTS = 50_000
 
