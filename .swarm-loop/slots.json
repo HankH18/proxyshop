@@ -9,42 +9,6 @@
       "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/c21-contracts",
       "branch": "task/c21-contracts"
     },
-    "2": {
-      "claimed_at": "2026-09-07T03:35:51",
-      "agent_ref": "p1-spine"
-    },
-    "3": {
-      "claimed_at": "2026-09-07T03:35:51",
-      "agent_ref": "p1-screen"
-    },
-    "4": {
-      "claimed_at": "2026-09-07T03:35:52",
-      "agent_ref": "p1-gates"
-    },
-    "5": {
-      "claimed_at": "2026-09-07T04:04:33",
-      "agent_ref": "pixel-last-hop"
-    },
-    "6": {
-      "claimed_at": "2026-09-07T04:08:34",
-      "agent_ref": "graph-roster"
-    },
-    "7": {
-      "claimed_at": "2026-09-07T04:08:34",
-      "agent_ref": "trust-contract"
-    },
-    "8": {
-      "claimed_at": "2026-09-07T04:26:06",
-      "agent_ref": "pitch-generation"
-    },
-    "9": {
-      "claimed_at": "2026-09-07T04:39:25",
-      "agent_ref": "exchange-boundary"
-    },
-    "10": {
-      "claimed_at": "2026-09-07T04:39:25",
-      "agent_ref": "buyer-feedback"
-    },
     "11": {
       "claimed_at": "2026-09-07T04:48:01",
       "agent_ref": "lexical-embedding"
@@ -52,6 +16,10 @@
     "12": {
       "claimed_at": "2026-09-07T05:51:04",
       "agent_ref": "publish-reports"
+    },
+    "2": {
+      "claimed_at": "2026-09-07T06:10:42",
+      "agent_ref": "phase2-mechanism"
     }
   }
 }
