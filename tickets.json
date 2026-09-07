@@ -275,7 +275,7 @@
       ],
       "parallel_safe": true,
       "status": "open",
-      "status_evidence": "NEVER BUILT. verify path services/ingest/tests/test_entity_resolution.py does not exist (confirmed by scripts/check_verify_contracts.py at HEAD); services/ingest/src/er/ contains only a 0-byte __init__.py; zero commits on main mention T-022."
+      "status_evidence": "measured at 4b0eddf: services/ingest/tests/test_entity_resolution.py EXISTS (34856 bytes, 781 lines); services/ingest/src/er/ holds 6 files totalling 66741 bytes, not a 0-byte __init__.py; and 3 commits reachable from HEAD name T-022, not zero. All three clauses of the old evidence are false. What this does NOT establish is whether T-022's acceptance is met -- code and a test file existing is not a passing gate, and no gate was run here. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT. verify path services/ingest/tests/test_entity_resolution.py does not exist (confirmed by scripts/check_verify_contracts.py at HEAD); services/ingest/src/er/ contains only a 0-byte __init__.py; zero commits on main mention T-022.\""
     },
     {
       "id": "T-023",
@@ -303,7 +303,7 @@
       ],
       "parallel_safe": true,
       "status": "open",
-      "status_evidence": "NEVER BUILT. verify path services/ingest/tests/test_catalog_mcp.py does not exist; zero commits on main mention T-023."
+      "status_evidence": "measured at 4b0eddf: services/ingest/tests/test_catalog_mcp.py EXISTS (35655 bytes, 834 lines) and 11 commits reachable from HEAD name T-023, not zero. Both clauses of the old evidence are false. Whether the ticket's acceptance is met was not measured here. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT. verify path services/ingest/tests/test_catalog_mcp.py does not exist; zero commits on main mention T-023.\""
     },
     {
       "id": "T-024",
@@ -332,7 +332,7 @@
       ],
       "parallel_safe": false,
       "status": "open",
-      "status_evidence": "NEVER BUILT and blocked. verify path services/ingest/tests/test_refresh.py does not exist; services/ingest/src/scheduler/ is a 0-byte __init__.py; depends on T-023 which is itself open."
+      "status_evidence": "measured at 4b0eddf: services/ingest/tests/test_refresh.py EXISTS (38402 bytes, 910 lines); services/ingest/src/scheduler/ holds 6 files totalling 89628 bytes, not a 0-byte __init__.py; 9 commits name T-024. The 'NEVER BUILT' framing is false. The dependency clause is separate and still holds: T-023 is recorded open at this head. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT and blocked. verify path services/ingest/tests/test_refresh.py does not exist; services/ingest/src/scheduler/ is a 0-byte __init__.py; depends on T-023 which is itself open.\""
     },
     {
       "id": "T-030",
@@ -435,7 +435,7 @@
       ],
       "parallel_safe": false,
       "status": "open",
-      "status_evidence": "NEVER BUILT. verify path apps/exchange/tests/test_ranking.py does not exist; apps/exchange/src/ranking/ is a 0-byte __init__.py. It carries 11 frozen acceptance tests and is the largest single unblocker in the graph."
+      "status_evidence": "measured at 4b0eddf: apps/exchange/tests/test_ranking.py EXISTS (61381 bytes, 1472 lines); apps/exchange/src/ranking/ holds 11 files totalling 156408 bytes, not a 0-byte __init__.py; 17 commits name T-032. 'NEVER BUILT' is false. Whether its 11 frozen acceptance tests pass was not measured here. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT. verify path apps/exchange/tests/test_ranking.py does not exist; apps/exchange/src/ranking/ is a 0-byte __init__.py. It carries 11 frozen acceptance tests and is the largest single unblocker in the graph.\""
     },
     {
       "id": "T-033",
@@ -502,7 +502,7 @@
       ],
       "parallel_safe": false,
       "status": "open",
-      "status_evidence": "NEVER BUILT and blocked. verify path apps/exchange/tests/test_bandit.py does not exist; depends on T-032, which is open."
+      "status_evidence": "measured at 4b0eddf: apps/exchange/tests/test_bandit.py EXISTS (28175 bytes, 628 lines) and 9 commits name T-034. 'NEVER BUILT' is false. The dependency clause still holds: T-032 is recorded open at this head. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT and blocked. verify path apps/exchange/tests/test_bandit.py does not exist; depends on T-032, which is open.\""
     },
     {
       "id": "T-035",
@@ -529,7 +529,7 @@
       ],
       "parallel_safe": true,
       "status": "open",
-      "status_evidence": "NEVER BUILT and blocked. verify path apps/exchange/tests/test_loss_reports.py does not exist; apps/exchange/src/reports/ is a 0-byte __init__.py; zero commits mention T-035; depends on T-032."
+      "status_evidence": "measured at 4b0eddf: apps/exchange/tests/test_loss_reports.py EXISTS (21264 bytes, 488 lines); apps/exchange/src/reports/ holds 2 files totalling 20060 bytes, not a 0-byte __init__.py; and 6 commits name T-035, not zero. All three clauses are false. T-032 is still recorded open. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT and blocked. verify path apps/exchange/tests/test_loss_reports.py does not exist; apps/exchange/src/reports/ is a 0-byte __init__.py; zero commits mention T-035; depends on T-032.\""
     },
     {
       "id": "T-036",
@@ -650,7 +650,7 @@
       ],
       "parallel_safe": true,
       "status": "open",
-      "status_evidence": "NEVER BUILT and blocked. verify path packages/store-agent/tests/test_learning.py does not exist; packages/store-agent/src/learning/ is a 0-byte __init__.py; depends on T-041 (now closed) so it is READY."
+      "status_evidence": "measured at 4b0eddf: packages/store-agent/tests/test_learning.py EXISTS (25427 bytes, 567 lines); packages/store-agent/src/learning/ holds 4 files totalling 37109 bytes, not a 0-byte __init__.py; 9 commits name T-042. 'NEVER BUILT' is false. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT and blocked. verify path packages/store-agent/tests/test_learning.py does not exist; packages/store-agent/src/learning/ is a 0-byte __init__.py; depends on T-041 (now closed) so it is READY.\""
     },
     {
       "id": "T-043",
@@ -679,7 +679,7 @@
       ],
       "parallel_safe": true,
       "status": "open",
-      "status_evidence": "NEVER BUILT. verify path packages/store-agent/tests/test_shadow_trust.py does not exist; packages/store-agent/src/modes/ is a 0-byte __init__.py; depends on T-041 (now closed) so it is READY."
+      "status_evidence": "measured at 4b0eddf: MIXED, and the half that is still true is stated first. packages/store-agent/tests/test_shadow_trust.py genuinely does NOT exist at this head -- no blob, no commit has ever touched that path. But packages/store-agent/src/modes/ is NOT a 0-byte __init__.py: it holds 2 files totalling 30734 bytes, and 10 commits name T-043. The ticket has code with no test file at the recorded verify path, which is a different (and worse) shape than 'never built'. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT. verify path packages/store-agent/tests/test_shadow_trust.py does not exist; packages/store-agent/src/modes/ is a 0-byte __init__.py; depends on T-041 (now closed) so it is READY.\""
     },
     {
       "id": "T-044",
@@ -716,7 +716,7 @@
       ],
       "parallel_safe": true,
       "status": "open",
-      "status_evidence": "NEVER BUILT. verify path packages/store-agent/tests/test_external_bids.py does not exist; packages/store-agent/src/external/ is a 0-byte __init__.py. Carries 8 frozen acceptance tests."
+      "status_evidence": "measured at 4b0eddf: packages/store-agent/tests/test_external_bids.py EXISTS (31593 bytes, 716 lines); packages/store-agent/src/external/ holds 4 files totalling 71680 bytes, not a 0-byte __init__.py; 11 commits name T-044. 'NEVER BUILT' is false. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT. verify path packages/store-agent/tests/test_external_bids.py does not exist; packages/store-agent/src/external/ is a 0-byte __init__.py. Carries 8 frozen acceptance tests.\""
     },
     {
       "id": "T-045",
@@ -746,7 +746,7 @@
       ],
       "parallel_safe": true,
       "status": "open",
-      "status_evidence": "NEVER BUILT. Its verify target apps/seller-reference contains only tests/test_scaffold_smoke.py and a 0-byte src/__init__.py \u2014 the verify command `pytest apps/seller-reference -q` passes VACUOUSLY on the scaffold. Depends on T-044, which is open."
+      "status_evidence": "measured at 4b0eddf: apps/seller-reference is no longer a bare scaffold. It holds src/__init__.py AND src/personas/__init__.py (2 files, 23114 bytes) plus tests/__init__.py, tests/conftest.py, tests/test_personas.py and tests/test_scaffold_smoke.py (4 files, 21028 bytes), and 11 commits name T-045. The old evidence's central claim -- that `pytest apps/seller-reference -q` passes VACUOUSLY because the only test is the scaffold smoke test -- is therefore false: test_personas.py is a second, non-scaffold test file in the same target. Whether that gate is SUFFICIENT for T-045's acceptance was not measured here; only that it is not empty. T-044 is still recorded open. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT. Its verify target apps/seller-reference contains only tests/test_scaffold_smoke.py and a 0-byte src/__init__.py \u2014 the verify command `pytest apps/seller-reference -q` passes VACUOUSLY on the scaffold. Depends on T-044, which is open.\""
     },
     {
       "id": "T-050",
@@ -803,7 +803,7 @@
       ],
       "parallel_safe": false,
       "status": "open",
-      "status_evidence": "NEVER BUILT. verify path apps/merchant/svc/tests/test_collector.py does not exist; pixel/src is completely empty (0 files). apps/merchant/svc/src/collector has 17KB of code but no test file and no pixel half."
+      "status_evidence": "measured at 4b0eddf: apps/merchant/svc/tests/test_collector.py EXISTS (33643 bytes, 697 lines), and pixel/src is NOT empty -- it holds beacon.ts, index.ts, pixel.ts, settings.ts and transport.ts alongside .gitkeep (6 entries, 20719 bytes). 6 commits name T-051, and HEAD itself (4b0eddf, 'close(T-051,T-303b,T-084,T-083,T-024): the buyer journey works') names it. Both the missing-test clause and the empty-pixel clause are false. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT. verify path apps/merchant/svc/tests/test_collector.py does not exist; pixel/src is completely empty (0 files). apps/merchant/svc/src/collector has 17KB of code but no test file and no pixel half.\""
     },
     {
       "id": "T-052",
@@ -834,7 +834,7 @@
       ],
       "parallel_safe": false,
       "status": "open",
-      "status_evidence": "NEVER BUILT. verify path apps/merchant/svc/tests/test_codes.py does not exist; apps/merchant/svc/src/codes/ is a 0-byte __init__.py. T-203 records a binding requirement on it."
+      "status_evidence": "measured at 4b0eddf: MIXED. apps/merchant/svc/tests/test_codes.py genuinely does NOT exist -- no blob at that path and no commit has ever touched it. But apps/merchant/svc/src/codes/ is NOT a 0-byte __init__.py: it holds 10 files totalling 113918 bytes (its own __init__.py alone is 4528 bytes), and 14 commits name T-052, including a33cca4 'wip(T-052): discount-code minting, combinesWith pre-check'. Code without a test file at the recorded verify path, not 'never built'. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT. verify path apps/merchant/svc/tests/test_codes.py does not exist; apps/merchant/svc/src/codes/ is a 0-byte __init__.py. T-203 records a binding requirement on it.\""
     },
     {
       "id": "T-053",
@@ -866,7 +866,7 @@
       ],
       "parallel_safe": true,
       "status": "open",
-      "status_evidence": "NEVER BUILT. verify path apps/merchant/svc/tests/test_onboarding.py does not exist; apps/merchant/svc/src/onboarding/ and src/envelope/ are both 0-byte __init__.py."
+      "status_evidence": "measured at 4b0eddf: MIXED. apps/merchant/svc/tests/test_onboarding.py genuinely does NOT exist. But NEITHER named source directory is a 0-byte __init__.py: apps/merchant/svc/src/onboarding/ holds 5 files totalling 45933 bytes and apps/merchant/svc/src/envelope/ holds 8 files totalling 77824 bytes. 11 commits name T-053. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT. verify path apps/merchant/svc/tests/test_onboarding.py does not exist; apps/merchant/svc/src/onboarding/ and src/envelope/ are both 0-byte __init__.py.\""
     },
     {
       "id": "T-054",
@@ -896,7 +896,7 @@
       ],
       "parallel_safe": false,
       "status": "open",
-      "status_evidence": "NEVER BUILT. Its verify target apps/merchant/app/dashboard contains only a .gitkeep \u2014 no test files at all, so `npx vitest run apps/merchant/app/dashboard` grades nothing. Zero commits mention T-054."
+      "status_evidence": "measured at 4b0eddf: MIXED, and the half that is still true is the substantive one. apps/merchant/app/dashboard genuinely still contains ONLY .gitkeep -- one entry, zero bytes -- so `npx vitest run apps/merchant/app/dashboard` still grades nothing. The false clause is the last one: 2 commits reachable from HEAD name T-054, not zero. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT. Its verify target apps/merchant/app/dashboard contains only a .gitkeep \u2014 no test files at all, so `npx vitest run apps/merchant/app/dashboard` grades nothing. Zero commits mention T-054.\""
     },
     {
       "id": "T-060",
@@ -1141,7 +1141,7 @@
       ],
       "parallel_safe": false,
       "status": "open",
-      "status_evidence": "NEVER BUILT. verify path apps/buyer/svc/tests/test_intent.py does not exist; apps/buyer/svc/src/intent/ is a 0-byte __init__.py. Carries 3 frozen acceptance tests and unblocks 5 tickets."
+      "status_evidence": "measured at 4b0eddf: MIXED. apps/buyer/svc/tests/test_intent.py genuinely does NOT exist -- no blob, no commit has touched that path. But apps/buyer/svc/src/intent/ is NOT a 0-byte __init__.py: it holds 9 files totalling 152416 bytes, and 13 commits name T-071. The ticket has substantial code and no test file at its recorded verify path. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT. verify path apps/buyer/svc/tests/test_intent.py does not exist; apps/buyer/svc/src/intent/ is a 0-byte __init__.py. Carries 3 frozen acceptance tests and unblocks 5 tickets.\""
     },
     {
       "id": "T-072",
@@ -1171,7 +1171,7 @@
       ],
       "parallel_safe": false,
       "status": "open",
-      "status_evidence": "NEVER BUILT and blocked. verify path apps/buyer/svc/tests/test_accept_flow.py does not exist; apps/buyer/svc/src/accept/ is a 0-byte __init__.py; zero commits mention T-072; depends on T-071."
+      "status_evidence": "measured at 4b0eddf: apps/buyer/svc/tests/test_accept_flow.py EXISTS (10936 bytes, 286 lines); apps/buyer/svc/src/accept/ holds 8 files totalling 65217 bytes, not a 0-byte __init__.py; and 9 commits name T-072, not zero. All three clauses are false. T-071 is still recorded open. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT and blocked. verify path apps/buyer/svc/tests/test_accept_flow.py does not exist; apps/buyer/svc/src/accept/ is a 0-byte __init__.py; zero commits mention T-072; depends on T-071.\""
     },
     {
       "id": "T-073",
@@ -1200,7 +1200,7 @@
       ],
       "parallel_safe": true,
       "status": "open",
-      "status_evidence": "NEVER BUILT and blocked. verify path apps/buyer/svc/tests/test_feedback.py does not exist; apps/buyer/svc/src/feedback/ is a 0-byte __init__.py; depends on T-072."
+      "status_evidence": "measured at 4b0eddf: MIXED. apps/buyer/svc/tests/test_feedback.py genuinely does NOT exist. But apps/buyer/svc/src/feedback/ is NOT a 0-byte __init__.py: it holds 8 files totalling 89839 bytes, and 12 commits name T-073. T-072 is still recorded open. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT and blocked. verify path apps/buyer/svc/tests/test_feedback.py does not exist; apps/buyer/svc/src/feedback/ is a 0-byte __init__.py; depends on T-072.\""
     },
     {
       "id": "T-080",
@@ -1270,7 +1270,7 @@
       ],
       "parallel_safe": false,
       "status": "open",
-      "status_evidence": "NEVER BUILT. Its verify target services/sim contains only tests/test_scaffold_smoke.py and a 0-byte src/__init__.py \u2014 `pytest services/sim -q` passes VACUOUSLY. Depends on T-051, which is open."
+      "status_evidence": "measured at 4b0eddf: services/sim is no longer a scaffold. src/ holds __init__.py, __main__.py, dishonest.py and runner.py (4 files, 60217 bytes) and tests/ holds 7 files totalling 86128 bytes including test_simulation.py, test_dishonest.py and test_repro_open_tickets.py -- so `pytest services/sim -q` does not pass vacuously on a smoke test. 15 commits name T-081. Whether the gate is sufficient for T-081's acceptance was not measured here. T-051 is still recorded open. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT. Its verify target services/sim contains only tests/test_scaffold_smoke.py and a 0-byte src/__init__.py \u2014 `pytest services/sim -q` passes VACUOUSLY. Depends on T-051, which is open.\""
     },
     {
       "id": "T-082",
@@ -1302,7 +1302,7 @@
       ],
       "parallel_safe": false,
       "status": "open",
-      "status_evidence": "NEVER BUILT and blocked. verify path e2e/test_s1_flow.py does not exist; depends on T-072, T-081, T-032, T-041 \u2014 three of the four are open."
+      "status_evidence": "measured at 4b0eddf: e2e/test_s1_flow.py EXISTS (49242 bytes, 934 lines) and 19 commits name T-082. 'NEVER BUILT' is false. The dependency clause is separately checkable and still partly holds: T-072, T-081 and T-032 are recorded open at this head, T-041 closed. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT and blocked. verify path e2e/test_s1_flow.py does not exist; depends on T-072, T-081, T-032, T-041 \u2014 three of the four are open.\""
     },
     {
       "id": "T-083",
@@ -1333,7 +1333,7 @@
       ],
       "parallel_safe": false,
       "status": "open",
-      "status_evidence": "NEVER BUILT and blocked. verify path e2e/test_learning.py does not exist; depends on T-034, T-042, T-081, all open."
+      "status_evidence": "measured at 4b0eddf: e2e/test_learning.py EXISTS (20268 bytes, 406 lines) -- it is T-083's own recorded verify path and it is a real file, committed by 4b0eddf itself ('close(T-051,T-303b,T-084,T-083,T-024)'). 'verify path e2e/test_learning.py does not exist' is false. NOTE FOR THE READER OF THIS LEDGER: T-083 was carried on a hand-supplied list of 'accurate, do not touch' evidence as recently as this restatement's own briefing; it was measured rather than taken on trust, and the measurement contradicts the list. Whether the gate passes was not measured here. Its dependencies T-034, T-042 and T-081 are all still recorded open. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT and blocked. verify path e2e/test_learning.py does not exist; depends on T-034, T-042, T-081, all open.\""
     },
     {
       "id": "T-084",
@@ -1361,7 +1361,7 @@
       ],
       "parallel_safe": false,
       "status": "open",
-      "status_evidence": "NEVER BUILT and blocked. verify path e2e/test_dishonest.py does not exist; depends on T-083, which is open."
+      "status_evidence": "measured at 4b0eddf: e2e/test_dishonest.py EXISTS (24469 bytes, 511 lines) -- T-084's own recorded verify path, committed by 4b0eddf itself. 'verify path e2e/test_dishonest.py does not exist' is false. Same caveat as T-083: this entry was on the 'accurate, do not touch' list and the measurement contradicts it. T-083 is still recorded open. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NEVER BUILT and blocked. verify path e2e/test_dishonest.py does not exist; depends on T-083, which is open.\""
     },
     {
       "id": "T-085",
@@ -2622,7 +2622,7 @@
       "finding_id": "beaddb94fcb3a85224c9b9604a7e0ae380187f47f9e963111df5d971038acbab",
       "reproduction": "codegraph explore 'publish_profile callers' -> 'publish_profile (apps/buyer/svc/src/profile/__init__.py:492) \u2014 1 caller; tests: apps/buyer/svc/tests/test_auth_vault.py'. grep -rn 'BuyerProfile|buyer_accounts' over apps/packages/db/services/e2e (excluding generated/): the only non-buyer hits are apps/trust/tests/* listing the table name in a schema-grant fixture.",
       "status": "open",
-      "status_evidence": "REFUTED by the cycle-10 triage: 'apps/buyer/svc/src/profile/__init__.py:492 \u2014 publish_profile as dead code'; the triage also records that the finding's location was wrong regardless."
+      "status_evidence": "measured at 4b0eddf: false, and it contradicts this ticket's own recorded status of `open`. The cited coordinate is dead: apps/buyer/svc/src/profile/__init__.py:492 reads `#:` -- a bare comment marker -- at this head, and publish_profile is defined at :1718 with TWO production callers, apps/buyer/svc/src/auth/routes.py:784 and :806. So 'publish_profile as dead code' is not the live shape. But the REFUTED verdict is false in the other direction too, and that is measured rather than inferred: T-142's own recorded verify, run at this head as `PROXYSHOP_WORKER=4 .venv/bin/python -m pytest apps/buyer/svc/tests/test_repro_open_tickets.py -q --runxfail -k t142`, reports '1 failed, 1 passed, 10 deselected' -- test_t142_the_production_login_path_publishes_every_buyer_profile_to_the_store_table FAILS while its companion armer PASSES, which is what distinguishes a reproducing defect from a gate that measures nothing. Recorded here because freeze-log amendment 42 moved this ticket closed -> open on that same measurement and explicitly could not correct this string, status_evidence being outside esc-029. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"REFUTED by the cycle-10 triage: 'apps/buyer/svc/src/profile/__init__.py:492 \u2014 publish_profile as dead code'; the triage also records that the finding's location was wrong regardless.\""
     },
     {
       "id": "T-143",
@@ -2826,7 +2826,7 @@
       "finding_id": "8839686827cae7e2ae56604411c8f4576f80989c2b221ffcbfc9b7490d918da4",
       "reproduction": "Read apps/trust/tests/_fixtures_events.py:42 and compare with proxyshop_support.postgres.ROLES and apps/trust/compose.yaml. Then run apps/trust tests and observe the connected principal is 'app' while the service ships as 'trust_rw'. Reported by the T-151 lane, which added the only test covering the real principal.",
       "status": "open",
-      "status_evidence": "apps/trust/tests/_fixtures_events.py has zero commits since e0ffd1a and line 42 still reads EVENTS_ROLE = \"app\" with its 'deliberately not trust_rw' comment, while the shipped writer T-151 landed is trust_rw."
+      "status_evidence": "measured at 4b0eddf: BOTH clauses are false, and the second is the dangerous kind. apps/trust/tests/_fixtures_events.py has 1 commit since e0ffd1a -- ced150f, 'fix(T-154): the trust fixtures connect as the role the writer ships as' -- so it is not untouched. And line 42 does NOT read `EVENTS_ROLE = \"app\"`: at this head line 42 is inside a comment block (lines 38-46) that says 'This used to read ``app`` ... the shipped writer resolves ``trust_rw``', and the live assignment is at line 54 reading `EVENTS_ROLE = \"trust_rw\"`. The old evidence cited the prose describing the repair as though it were the defect. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"apps/trust/tests/_fixtures_events.py has zero commits since e0ffd1a and line 42 still reads EVENTS_ROLE = \"app\" with its 'deliberately not trust_rw' comment, while the shipped writer T-151 landed is trust_rw.\""
     },
     {
       "id": "T-155",
@@ -2860,7 +2860,7 @@
       "finding_id": "1096f78cc52da904315c756c6858dceb18657a18d2bd083aa8afb36f3ae50686",
       "reproduction": "Construct an Offer with unit_price=80.0 and total_price=1.0 and pass it through enforce_bid_provenance: admitted.",
       "status": "open",
-      "status_evidence": "no commit names it. e1a66b5 added a total/unit relation at the contracts boundary but its own docstring scopes it to a NON-ZERO declared depth, so the ticket's own example (unit 80.00, total 1.00, no discount) is still admitted; the named location, provenance.py's _price_reconciliation_refusal, is unchanged."
+      "status_evidence": "measured at 4b0eddf: 'no commit names it' is false -- 20 commits reachable from HEAD name T-156. The substantive clause was NOT re-measured: whether provenance.py's _price_reconciliation_refusal still admits the ticket's own example (unit 80.00, total 1.00, no discount) at zero declared depth is NOT DETERMINED here. What is measured is that the function still exists (packages/store-agent/src/hooks/provenance.py:1047) and that the no-commit clause is wrong. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"no commit names it. e1a66b5 added a total/unit relation at the contracts boundary but its own docstring scopes it to a NON-ZERO declared depth, so the ticket's own example (unit 80.00, total 1.00, no discount) is still admitted; the named location, provenance.py's _price_reconciliation_refusal, is unchanged.\""
     },
     {
       "id": "T-157",
@@ -2877,7 +2877,7 @@
       "finding_id": "988147bfae9b113330152cf1b212e487cbd7a98a3dda948cce39c49211690469",
       "reproduction": "See test_a_merchant_that_answers_off_domain_leaves_a_code_this_layer_cannot_record in apps/exchange/tests/test_accept.py on branch task/T-033.",
       "status": "open",
-      "status_evidence": "CONTRADICTED FIX. 4d170af claims 'everything after mint now carries the minted code out on OrphanedCheckoutCode.orphan', but apps/exchange/src/accept/ has zero commits since e0ffd1a and offer.py:389 still catches bare `except Exception as exc:` and returns _refused(...) without ever reading exc.orphan. T-202 ('fixed at the port and still open end to end') and T-215 ('T-202 CONFIRMED OPEN AND UNDERSTATED') say the same."
+      "status_evidence": "measured at 4b0eddf: both clauses are false. apps/exchange/src/accept/ has 32 commits since e0ffd1a, not zero (most recently f2160a5, 'fix(T-283,T-308b): a buyer's minted code survives a bad audit'). And offer.py:389 does not catch anything: at this head lines 385-395 are MODULE DOCSTRING PROSE describing the orphan-carrying repair ('the orphan machinery exists to record. Measured: ...'), so the cited line reads as confirmation of the defect while being part of its write-up. The live `except Exception as exc:` occurrences in that file are at :895, :948 and :1020. Whether T-157's end-to-end defect survives is NOT DETERMINED by this restatement -- the line citation is simply no longer evidence of anything. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"CONTRADICTED FIX. 4d170af claims 'everything after mint now carries the minted code out on OrphanedCheckoutCode.orphan', but apps/exchange/src/accept/ has zero commits since e0ffd1a and offer.py:389 still catches bare `except Exception as exc:` and returns _refused(...) without ever reading exc.orphan. T-202 ('fixed at the port and still open end to end') and T-215 ('T-202 CONFIRMED OPEN AND UNDERSTATED') say the same.\""
     },
     {
       "id": "T-158",
@@ -2894,7 +2894,7 @@
       "finding_id": "6c6e8e16d09a3cae7e73a4d346f494655796680c216f345bb77062cc06fda633",
       "reproduction": "Load an AuctionRecord from RedisAuctionStore, call accept(), discard the object without saving; the next accept on a freshly loaded record passes the guard and mints a second code.",
       "status": "open",
-      "status_evidence": "apps/exchange/src/accept/ untouched since e0ffd1a; no commit or dispatch note mentions T-158 or the AuctionStateMachine ACCEPTED transition it names."
+      "status_evidence": "measured at 4b0eddf: both clauses are false. apps/exchange/src/accept/ has 32 commits since e0ffd1a, and 28 commits reachable from HEAD name T-158 -- the second-highest naming count in the graph. 'no commit or dispatch note mentions T-158' was the load-bearing half of this evidence and it is wrong by 28. Whether the AuctionStateMachine ACCEPTED transition the ticket names is now correct was NOT measured here. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"apps/exchange/src/accept/ untouched since e0ffd1a; no commit or dispatch note mentions T-158 or the AuctionStateMachine ACCEPTED transition it names.\""
     },
     {
       "id": "T-159",
@@ -2911,7 +2911,7 @@
       "finding_id": "6f077a3bc3ab2f21765b33d17c8a1cb289e1c72e6e42f5235748fa1ed0f78dc6",
       "reproduction": "git grep -n 'except ImportError' -- '*test*' and check each for an assertion that only runs when the import succeeds. Compare with the T-111/T-123 red-check output: 'VACUOUS \u2014 EXITS 0 with nothing implemented'.",
       "status": "open",
-      "status_evidence": "PARTIALLY discharged only. The task/C11-checkout dispatch close says 'Test deletion is the except-ImportError vacuity removal, discharging PART of T-159'; T-205 records a second live instance at conftest.py:417 and `git grep -l 'except ImportError' -- '*test*.py'` still returns four files."
+      "status_evidence": "measured at 4b0eddf: the count is false and the citation is stale. `git grep -l 'except ImportError' -- '*test*.py'` returns SEVEN files at this head, not four: .swarm-loop/acceptance/conftest.py, apps/exchange/tests/test_checkout_provider.py, docs/tests/test_runbook_executability.py, fixtures/tests/test_seed.py, packages/llm/tests/test_pkgroot_fallback.py, proxyshop_support/tests/test_artifact_copyset.py and services/shopify-stub/tests/test_repro_open_tickets.py. The T-205 citation it leans on ('a second live instance at conftest.py:417') no longer holds either -- see T-205's own restatement: that skip was removed by cd0604c and 4b5658a. Whether the remaining seven are vacuity swallows or legitimate optional-dependency guards was NOT determined here, and that distinction is the whole ticket. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"PARTIALLY discharged only. The task/C11-checkout dispatch close says 'Test deletion is the except-ImportError vacuity removal, discharging PART of T-159'; T-205 records a second live instance at conftest.py:417 and `git grep -l 'except ImportError' -- '*test*.py'` still returns four files.\""
     },
     {
       "id": "T-160",
@@ -2928,7 +2928,7 @@
       "finding_id": "0569559a8a667e914fbc6bf39f46837c573642def982011bf2eeebc9a22dfe75",
       "reproduction": "python3 <skill>/scripts/swarmloop.py red-check --ticket T-109,T-111,T-123 \u2014 reports VACUOUS for T-111 and T-123 and WEAK for T-109.",
       "status": "open",
-      "status_evidence": "tickets.json still holds the three vacuous verify strings verbatim: T-109 'pytest apps/trust -q && pytest proxyshop_support -q', T-111 './scripts/bootstrap.sh && ./scripts/verify.sh check', T-123 'bootstrap.sh && pytest packages/llm && python -c import contracts, llm, trust'."
+      "status_evidence": "measured at 4b0eddf: the three verify strings are NOT held verbatim any more. At this head T-109's verify is `export PROXYSHOP_WORKER=${{PROXYSHOP_GATE_WORKER:-11}} && uv run python -m pytest apps/trust -q && uv run python -m pytest proxyshop_support -q`, T-111's runs ./scripts/bootstrap.sh followed by proxyshop_support/tests/test_bootstrap_provi... and T-123's runs ./scripts/bootstrap.sh followed by proxyshop_support/tests/test_bootstrap_pro... -- all three were rewritten (T-111 and T-123 now name a specific test module rather than the `pytest packages/llm && python -c import contracts, llm, trust` the ticket quotes). Whether the rewritten commands are still vacuous in T-160's sense is NOT DETERMINED here; what is measured is that the quoted strings are no longer the strings in the file. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"tickets.json still holds the three vacuous verify strings verbatim: T-109 'pytest apps/trust -q && pytest proxyshop_support -q', T-111 './scripts/bootstrap.sh && ./scripts/verify.sh check', T-123 'bootstrap.sh && pytest packages/llm && python -c import contracts, llm, trust'.\""
     },
     {
       "id": "T-161",
@@ -2945,7 +2945,7 @@
       "finding_id": "e727bef2c0ccb13958b0bc304f248ebfc580edfb2743860d07f238c2e781ff85",
       "reproduction": "make_bid(claims=[{\"key\":\"x\",\"value\":{\"provenance\": seller_asserted}, \"provenance\": hook}]) -> hosted ok=True",
       "status": "open",
-      "status_evidence": "_source_verdict at packages/contracts/src/boundary.py still reads only _get(holder, 'provenance') and never descends into a claim's opaque `value`; no commit names T-161."
+      "status_evidence": "measured at 4b0eddf: both clauses are false. 11 commits name T-161. And _source_verdict does descend into the claim's opaque `value` at this head: it is defined at packages/contracts/src/boundary.py:948 with a `value_walk` keyword parameter, and at :989-991 it computes `value_walk = _walk_claim_value(_get(holder, \"value\"), label)` when the caller did not supply one, unpacking nested_sources from it. The caller at :1044-1046 passes the same walk in. Whether that descent is COMPLETE in T-161's sense was not measured here. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"_source_verdict at packages/contracts/src/boundary.py still reads only _get(holder, 'provenance') and never descends into a claim's opaque `value`; no commit names T-161.\""
     },
     {
       "id": "T-162",
@@ -2962,7 +2962,7 @@
       "finding_id": "490b1df94ad94951abda03b0b23e7489924b89d1bf01b45cd17a9f02affbcad5",
       "reproduction": "Pass the payload above through validate_bid on the external path and observe ok=True with no authorisation check.",
       "status": "open",
-      "status_evidence": "no commit names it; e1a66b5's own docstring states 'The boundary holds no hook ledger, no envelope and no catalog, and does not pretend to' \u2014 the new wall reconciles a DECLARED depth against price, it does not check that the discount authorisation is real."
+      "status_evidence": "measured at 4b0eddf: 'no commit names it' is false -- 9 commits name T-162. The substantive clause (that the contracts boundary reconciles a DECLARED depth against price and does not check the discount authorisation is real) was NOT re-measured, and e1a66b5's docstring sentence is quoted history rather than a claim about this head. NOT DETERMINED. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"no commit names it; e1a66b5's own docstring states 'The boundary holds no hook ledger, no envelope and no catalog, and does not pretend to' \u2014 the new wall reconciles a DECLARED depth against price, it does not check that the discount authorisation is real.\""
     },
     {
       "id": "T-163",
@@ -2979,7 +2979,7 @@
       "finding_id": "b0b80d2fb935cc33fe4e4c8cf9a77c78161338d1a6f47a10b3fc8826ffe8c045",
       "reproduction": "Call SessionStore.open() with an arbitrary string beginning 'psn-' that the vault never issued; a session opens.",
       "status": "open",
-      "status_evidence": "apps/buyer/svc/src/auth/ has zero commits since e0ffd1a; sessions.py:157-172 still refuses only on the PSEUDONYM_PREFIX and the module contains no vault reference. This is T-133's deliberately deferred item (c)."
+      "status_evidence": "measured at 4b0eddf: both clauses are false. apps/buyer/svc/src/auth/ has 7 commits since e0ffd1a (most recently 4b63fde, 'close(T-308): every service configures logging; wire the priva...'). And sessions.py is not vault-free: its module docstring at lines 5-33 turns on the vault throughout -- ':meth:`buyer_svc.vault.PseudonymVault.resolve`', ':meth:`SessionStore.bind_vault`', ':meth:`~buyer_svc.vault.PseudonymVault.active`' -- and describes a store WITHOUT a bound vault as the one that 'keeps the older format-only guard'. Whether T-133's deferred item (c) is fully discharged was NOT measured here; the 'module contains no vault reference' claim is simply wrong. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"apps/buyer/svc/src/auth/ has zero commits since e0ffd1a; sessions.py:157-172 still refuses only on the PSEUDONYM_PREFIX and the module contains no vault reference. This is T-133's deliberately deferred item (c).\""
     },
     {
       "id": "T-164",
@@ -2996,7 +2996,7 @@
       "finding_id": "ea39753b7bc41f8025971c9793d6b8932709715e6214f60d495a22572d6a10db",
       "reproduction": "Call build_buckets() directly on the Dana account fixture: buckets are returned with no IdentityLeak raised.",
       "status": "open",
-      "status_evidence": "build_buckets at apps/buyer/svc/src/profile/__init__.py:700 still returns ProfileBuckets(...) with no identity_leaks call; the only two call sites of the leak check remain inside build_profile/build_profiles."
+      "status_evidence": "measured at 4b0eddf: the citation is stale and the call-site count is wrong. build_buckets is at apps/buyer/svc/src/profile/__init__.py:829, not :700 (line 700 at this head is `if tokens & set(_TAXONOMY_TOKENS.get(label, ())):`, in an unrelated helper). identity_leaks now has THREE production call sites in that module, not two: :824 inside `_refuse_if_leaking` (:817), plus :1666 and :1711. The substantive claim was re-checked and still appears to hold -- build_buckets' own body (:829 onward) makes no identity_leaks call -- but whether _refuse_if_leaking now stands between build_buckets and any served response was NOT determined here, and that is precisely the question the ticket turns on. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"build_buckets at apps/buyer/svc/src/profile/__init__.py:700 still returns ProfileBuckets(...) with no identity_leaks call; the only two call sites of the leak check remain inside build_profile/build_profiles.\""
     },
     {
       "id": "T-165",
@@ -3013,7 +3013,7 @@
       "finding_id": "729ef7fc5a9ff9d82c14406ddb2395b3028b714fa68463503386194f2bc886f4",
       "reproduction": "Issue unlimited POSTs to /buyer/auth/magic-link; nothing throttles them. Inspect routes.py:57 for the process-local marker.",
       "status": "open",
-      "status_evidence": "apps/buyer/svc/src/auth/routes.py untouched since e0ffd1a; ProcessLocalStateUnsafe still at :66 and no rate-limit symbol exists anywhere in the file."
+      "status_evidence": "measured at 4b0eddf: both clauses are false. apps/buyer/svc/src/auth/routes.py has 5 commits since e0ffd1a. And rate-limit symbols DO exist in that file: its __all__ exports 'MagicLinkRateLimited', 'MagicLinkRateLimiter', 'build_rate_limiter', 'get_rate_limiter' and 'rate_limit_subject' (lines 71-82), with `class MagicLinkRateLimiter` and `class MagicLinkRateLimited` defined at :258 and :262. ProcessLocalStateUnsafe is still present but at :258-ish in the same export block, not at :66. Whether the limiter is WIRED into the served route was NOT measured here -- that is exactly the island question this ledger keeps getting wrong, so it is left open rather than guessed. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"apps/buyer/svc/src/auth/routes.py untouched since e0ffd1a; ProcessLocalStateUnsafe still at :66 and no rate-limit symbol exists anywhere in the file.\""
     },
     {
       "id": "T-166",
@@ -3030,7 +3030,7 @@
       "finding_id": "4a5767fb021b228f055588bfb58e4879798b0418169f265ba748abd285bdaeff",
       "reproduction": "Run apps/trust/tests/test_events.py::test_replay_with_snapshots_names_the_missing_scorer with the T-062 scoring package present and observe the 503 branch is never taken.",
       "status": "open",
-      "status_evidence": "apps/trust/tests/test_events.py untouched since e0ffd1a; the dead `if response.status_code == 503:` branch is still at line 1174."
+      "status_evidence": "measured at 4b0eddf: both clauses are false, and the line citation is the sharp kind. apps/trust/tests/test_events.py has 1 commit since e0ffd1a -- 7bf464d, 'fix(T-166,T-207,T-212): three trust gates, each proved red-wit...'. And the dead branch is not at line 1174: at this head `if response.status_code == 503:` is at line 1169, and lines 1170-1178 are a DOCSTRING that quotes the arm as removed ('*What the removed arm encoded*: \"while the scorer package does not exist ...\"'). The cited line is prose about a deletion, not the deletion's subject. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"apps/trust/tests/test_events.py untouched since e0ffd1a; the dead `if response.status_code == 503:` branch is still at line 1174.\""
     },
     {
       "id": "T-167",
@@ -3047,7 +3047,7 @@
       "finding_id": "f9e821b8355be85f89705a49ddabfa01c508b1570889d34e96ade65728f40033",
       "reproduction": "md5 apps/trust/src/*/_binding.py \u2014 four identical digests, four separate files, no test asserting they agree.",
       "status": "open",
-      "status_evidence": "all four _binding.py copies still exist and all four still hash md5 56d63d332af0fc3eb7d5bb5baf058f6c \u2014 the exact digest the ticket cites \u2014 with nothing enforcing their agreement."
+      "status_evidence": "measured at 4b0eddf: false. There are not four _binding.py copies -- `git ls-tree -r HEAD` returns exactly ONE file whose basename is _binding.py, apps/trust/src/_shared/_binding.py, and its md5 at this head is 4e1ace8995285ac0e8d035c503832b62, not the 56d63d332af0fc3eb7d5bb5baf058f6c the ticket cites. The premise of the ticket (four copies that must agree with nothing enforcing it) does not describe this tree. Whether that consolidation was deliberate and complete was NOT measured here. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"all four _binding.py copies still exist and all four still hash md5 56d63d332af0fc3eb7d5bb5baf058f6c \u2014 the exact digest the ticket cites \u2014 with nothing enforcing their agreement.\""
     },
     {
       "id": "T-168",
@@ -3064,7 +3064,7 @@
       "finding_id": "9cdac94772958acc299322a2fb3d0d76392418b25160cf4e20de466ecc0fdad7",
       "reproduction": "Add a real bid_placed producer alongside record_fit_scores and run the T-082 and T-086 acceptance tests: both fail, one on doubled counts and one on shadow-mode absence.",
       "status": "open",
-      "status_evidence": "NOT CLOSABLE BY A FIX \u2014 the ticket says so itself ('CROSS-TICKET SCHEDULING CONSTRAINT, not a defect in the landed code'). apps/exchange/src/retrieval/ is untouched since e0ffd1a, record_fit_scores and annotate_bid_payload are both still present, and the T-030 trigger that would discharge the constraint has not fired. It stays binding on whoever schedules T-030 next."
+      "status_evidence": "measured at 4b0eddf: 'apps/exchange/src/retrieval/ is untouched since e0ffd1a' is false -- 6 commits since then, most recently 569138a 'fix(T-270): nothing a caller can write may make the exchange a...'. record_fit_scores and annotate_bid_payload were NOT re-checked, and whether the T-030 trigger has since fired is NOT DETERMINED here. The ticket's own statement that it is a scheduling constraint rather than a code defect is unaffected by this correction. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"NOT CLOSABLE BY A FIX \u2014 the ticket says so itself ('CROSS-TICKET SCHEDULING CONSTRAINT, not a defect in the landed code'). apps/exchange/src/retrieval/ is untouched since e0ffd1a, record_fit_scores and annotate_bid_payload are both still present, and the T-030 trigger that would discharge the constraint has not fired. It stays binding on whoever schedules T-030 next.\""
     },
     {
       "id": "T-169",
@@ -3081,7 +3081,7 @@
       "finding_id": "81bee586b58b96156b0f597f23a90959d65078e6365d118e37e1816369a97ed1",
       "reproduction": "Boot exchange.main:app; print exchange.accept.offer._platform_domains -> None. Then: import apps.exchange.src.accept as A, exchange.accept as B; os.path.realpath equal and st_ino equal, but (A is B) is False and (A.accept is B.accept) is False; checkout.registry._REGISTRY are two distinct dicts. git grep use_registered_domains outside tests returns only its own definition.",
       "status": "open",
-      "status_evidence": "apps/exchange/src/accept/ untouched since e0ffd1a. T-176's orchestrator adjudication explicitly refuses to downgrade it: 'T-169 is NOT downgraded and stands as HIGH, because it fails the discriminator: the frozen S8-3 release blocker PASSES today by comparing the permalink host against bid[store_domain], a BIDDER-CONTROLLED field.'"
+      "status_evidence": "measured at 4b0eddf: 'apps/exchange/src/accept/ untouched since e0ffd1a' is false -- 32 commits since then, and 12 commits name T-169. The T-176 adjudication quoted after it is historical record and is not corrected here. Whether the frozen S8-3 release blocker still passes by comparing the permalink host against the bidder-controlled bid[store_domain] was NOT re-measured -- NOT DETERMINED. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"apps/exchange/src/accept/ untouched since e0ffd1a. T-176's orchestrator adjudication explicitly refuses to downgrade it: 'T-169 is NOT downgraded and stands as HIGH, because it fails the discriminator: the frozen S8-3 release blocker PASSES today by comparing the permalink host against bid[store_domain], a BIDDER-CONTROLLED field.'\""
     },
     {
       "id": "T-170",
@@ -3115,7 +3115,7 @@
       "finding_id": "9ffe9d38379dbaccb9789e7bae8f998197390464911966c3a06fe5adba9c25e8",
       "reproduction": "Run two pytest sessions that both need Neo4j from different worktrees; the loser dies on pytest-timeout at 300s rather than reaching the lock's own 600s Neo4jLockTimeout.",
       "status": "open",
-      "status_evidence": "HALF FIXED. 8f0659a lowered the timeout 600->240 and named Neo4jLockTimeout, but the machine-global half is untouched and got worse: T-214 measures 'EVERY LANE RUNS check, so concurrent lanes now serialise on a machine-global lock and the loser fails red for a machine reason' (196s of a 222s session), and e5a406b on main records the finding as 'accepted but NOT fixed here'."
+      "status_evidence": "measured at 4b0eddf: partly false. The 600->240 clause is right. The 'machine-global half is untouched and got worse' clause is not: a8ce72e 'fix(T-214): hold the D37 Neo4j flock per test, not for the whole session' and 1c4c6da 'fix(T-171): clip the Neo4j lock wait to the deadline the item is already under' both land after, and at this head conftest.py:414 defines neo4j_driver as function-scoped over a session-scoped _neo4j_connection (:325) with reset_graph per acquisition. The T-214 measurement quoted as showing it getting worse is itself superseded: T-214's recorded evidence says it was fixed at e478ff4. Whether the machine-global residual T-171 names survives was NOT measured here. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"HALF FIXED. 8f0659a lowered the timeout 600->240 and named Neo4jLockTimeout, but the machine-global half is untouched and got worse: T-214 measures 'EVERY LANE RUNS check, so concurrent lanes now serialise on a machine-global lock and the loser fails red for a machine reason' (196s of a 222s session), and e5a406b on main records the finding as 'accepted but NOT fixed here'.\""
     },
     {
       "id": "T-172",
@@ -3132,7 +3132,7 @@
       "finding_id": "5f32b05f5654ed2a6c15dfc7ae58fe962446b164d22ccd2f11cbdd91f773847e",
       "reproduction": "With Redis down, run -m docker and observe the 8 items skip at exit 0: 5 in test_schema_grants.py, 2 in test_role_password_end_to_end.py, 1 at test_events_hardening.py:146.",
       "status": "open",
-      "status_evidence": "proxyshop_support/service_markers.py has zero commits since e0ffd1a and the `if not named: return reachability.SERVICES` whole-stack fallback is intact. cacb783 (T-180) states plainly 'service_markers.py itself is unchanged; the map was already complete. The check is the fix.'"
+      "status_evidence": "measured at 4b0eddf: both clauses are false. proxyshop_support/service_markers.py has 2 commits since e0ffd1a, including 3eae637 'fix(T-172): an undeclared docker test is refused, not widened'. And the whole-stack fallback is GONE: at this head the second `if not named:` (line 102) raises ValueError -- 'this @pytest.mark.docker item declares no compose service' -- rather than returning reachability.SERVICES. The quoted cacb783 sentence remains accurate as history about cacb783; it is no longer a description of the file. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"proxyshop_support/service_markers.py has zero commits since e0ffd1a and the `if not named: return reachability.SERVICES` whole-stack fallback is intact. cacb783 (T-180) states plainly 'service_markers.py itself is unchanged; the map was already complete. The check is the fix.'\""
     },
     {
       "id": "T-173",
@@ -3183,7 +3183,7 @@
       "finding_id": "70d2208a3364796f11379d3969a8f84bb4520b51e1014b76de0b7944cfa14bfc",
       "reproduction": "Construct an Offer with an honest unit_price and total_price=1.0; it is admitted by both walls.",
       "status": "open",
-      "status_evidence": "packages/store-agent/src/hooks/provenance.py:142 still reads PRICE_FIELD = 'unit_price' and :895 still documents '`unit_price` only'; the contracts boundary's new total/unit relation is gated on depth > 0.0, so an honest unit price with an arbitrary total at zero declared depth is still admitted."
+      "status_evidence": "measured at 4b0eddf: the citations are stale. PRICE_FIELD = 'unit_price' is at packages/store-agent/src/hooks/provenance.py:234, not :142 (line 142 at this head is a comment about NESTED_OBJECT_FIELDS), and the file now also defines TOTAL_PRICE_FIELD = 'total_price' at :246 with a comment at :239 insisting it 'is NOT a second `PRICE_FIELD` and must not become one'. Both fields are read together at :679. The file has 3 commits since 05cf86c including d4c571b 'close(T-175,T-209,T-218,T-220,T-280)'. Whether an honest unit price with an arbitrary total at zero declared depth is still admitted was NOT re-measured -- NOT DETERMINED. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"packages/store-agent/src/hooks/provenance.py:142 still reads PRICE_FIELD = 'unit_price' and :895 still documents '`unit_price` only'; the contracts boundary's new total/unit relation is gated on depth > 0.0, so an honest unit price with an arbitrary total at zero declared depth is still admitted.\""
     },
     {
       "id": "T-176",
@@ -3217,7 +3217,7 @@
       "finding_id": "82d6390836d2429be9f0f1a87600f7c1659379fbef843f82a417fa38009ad030",
       "reproduction": "On clean main: build a hosted bid with a real 20% grant, declared 20%, unit_price 15.00 against list_price 100.00; call contracts.boundary.validate_bid(bid, path='hosted') -> ok=True, reasons=[]. Compare with enforce_bid_provenance on the same bid -> refused.",
       "status": "closed",
-      "status_evidence": "e1a66b5 'fix(contracts): put the price wall on the validating door, close the prototype hole, tighten the generated model': 'T-177 (CRITICAL) ... validate_bid / validateBid now reconcile what the bid ITSELF asserts, on two independent relations'; _price_reasons is present at packages/contracts/src/boundary.py:486-560 at HEAD."
+      "status_evidence": "measured at 4b0eddf: the line citation is false. `_price_reasons` is defined at packages/contracts/src/boundary.py:1398, not at :486-560 -- line 486 at this head is prose about falsy values ('fail-closed one of the two -- only `false`, `0`, `NaN`, `\"\"`, `null`/`undefined` are falsy'), and the name appears at :27, :103 and :311 only as references in comments. The function does exist, so the closure this evidence supports is not undermined by the correction; the coordinates simply no longer locate it. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"e1a66b5 'fix(contracts): put the price wall on the validating door, close the prototype hole, tighten the generated model': 'T-177 (CRITICAL) ... validate_bid / validateBid now reconcile what the bid ITSELF asserts, on two independent relations'; _price_reasons is present at packages/contracts/src/boundary.py:486-560 at HEAD.\""
     },
     {
       "id": "T-178",
@@ -3285,7 +3285,7 @@
       "finding_id": "c9ba0b6e4bad48480b2771bf64e0fb95ff5a21168f11d07273a653b8e3d1a9be",
       "reproduction": "Reorder DEFAULT_DSN_ENV so PROXYSHOP_PG_DSN_APP precedes PROXYSHOP_PG_DSN_TRUST_RW; exactly one test of 327 fails.",
       "status": "open",
-      "status_evidence": "apps/trust/tests/test_events_hardening.py has zero commits since e0ffd1a; it still carries only the two `outranks` tests at :583/:616 plus the source-text assertion at :610 that the ticket says is not doing the work. No live-layer DSN-precedence assertion was ever added."
+      "status_evidence": "measured at 4b0eddf: false on both counts. apps/trust/tests/test_events_hardening.py has 6 commits since e0ffd1a. And it is not 'only the two outranks tests at :583/:616': at this head the file defines test_the_ledger_writer_resolves_the_per_role_dsn_variable_d5_grants_it (:557), test_the_per_role_ledger_dsn_outranks_the_generic_app_dsn (:588), test_an_explicit_ledger_dsn_override_still_outranks_the_per_role_variable (:621), test_a_deployment_that_sets_only_the_generic_app_dsn_keeps_working (:642) and test_the_writer_connects_as_trust_rw_when_both_dsn_variables_are_set (:767). Whether any of those is the LIVE-LAYER assertion T-181 asks for (as opposed to another source-text one) was NOT determined here -- the node names suggest it, and a name is not a measurement. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"apps/trust/tests/test_events_hardening.py has zero commits since e0ffd1a; it still carries only the two `outranks` tests at :583/:616 plus the source-text assertion at :610 that the ticket says is not doing the work. No live-layer DSN-precedence assertion was ever added.\""
     },
     {
       "id": "T-182",
@@ -3455,7 +3455,7 @@
       "finding_id": "7448d098acaac8334c9a84936351f7de85f51faba3dbbbed663d4ece9fac17cd",
       "reproduction": "Run two Neo4j-needing pytest sessions concurrently from different worktrees; the loser dies on pytest-timeout at 300s inside fixture setup, never reaching Neo4jLockTimeout at 600s.",
       "status": "open",
-      "status_evidence": "8f0659a landed the 600->240 timeout, but the mechanism the ticket exists to stop is recorded as still live by the same lane: e5a406b says the finding is 'accepted but NOT fixed here ... a Neo4jLockTimeout is still a non-zero make verify and so still records build_succeeds 0 for a machine condition', and T-210 repeats it."
+      "status_evidence": "measured at 4b0eddf: false. 'the mechanism the ticket exists to stop is recorded as still live' rests on an e5a406b quotation and on T-210, and both are stale at this head: a8ce72e 'fix(T-214)' made the Neo4j flock per-test, 1c4c6da 'fix(T-171)' clipped the wait to the item's own deadline, and 46aabbc is titled 'close(T-210,...)'. proxyshop_support/neo4j_lock.py has 4 commits since 05cf86c. Whether a Neo4jLockTimeout can still record build_succeeds 0 for a machine condition was NOT measured here -- that needs a run under contention, not a git log. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"8f0659a landed the 600->240 timeout, but the mechanism the ticket exists to stop is recorded as still live by the same lane: e5a406b says the finding is 'accepted but NOT fixed here ... a Neo4jLockTimeout is still a non-zero make verify and so still records build_succeeds 0 for a machine condition', and T-210 repeats it.\""
     },
     {
       "id": "T-192",
@@ -3472,7 +3472,7 @@
       "finding_id": "6a8d7ac761579a45aa24c410f047ef50018ce2746cbebbdd083a3e11fb31323e",
       "reproduction": "Apply the 19 mutations listed by the rung-2 e6 lens and count which leave --count-passing --epic E6 at 26.",
       "status": "open",
-      "status_evidence": "no commit or dispatch note addresses it, and .swarm-loop/acceptance/ is explicitly untouched by every cycle-11/12 commit that could have moved it (05cf86c states 'goals.json and .swarm-loop/acceptance/ are untouched by this amend'). The E6 instrument is unchanged. It is also a PROTECTED path."
+      "status_evidence": "measured at 4b0eddf: the claim that .swarm-loop/acceptance/ is untouched by every cycle-11/12 commit is false at this head -- 6 commits have modified that directory since e0ffd1a, including c8a2832 'amend(35 wip): arm the one direct receive_bid call site E4 bypassed via _present', c5bdeb9 'amend(34): arm the E1/E4 frozen fixtures with an honest roster', e218d97 'amend(27): ESC-020 -- the frozen fixtures stop writing their own verdict' and 21d1cba 'amendment 21 (ESC-019)'. The E6 instrument specifically was NOT separately re-measured here, so whether T-192's own defect survives those amendments is NOT DETERMINED by this restatement. The path is still protected, which remains true. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"no commit or dispatch note addresses it, and .swarm-loop/acceptance/ is explicitly untouched by every cycle-11/12 commit that could have moved it (05cf86c states 'goals.json and .swarm-loop/acceptance/ are untouched by this amend'). The E6 instrument is unchanged. It is also a PROTECTED path.\""
     },
     {
       "id": "T-193",
@@ -3489,7 +3489,7 @@
       "finding_id": "11e4f43dbb73ce38e3d89fd0a8586f74a256ff6c2a57069b6d93f8cc9fa0a8c3",
       "reproduction": "Build a tree containing only apps/trust/Dockerfile's COPY set and import trust.verification: ModuleNotFoundError.",
       "status": "open",
-      "status_evidence": "apps/trust/Dockerfile has zero commits since e0ffd1a; its COPY set is contracts, proxyshop_support and apps/trust/src only \u2014 packages/verification, which T-065's code imports, is still absent, so T-065 crashes in the deployed image."
+      "status_evidence": "measured at 4b0eddf: both clauses are false. apps/trust/Dockerfile has 1 commit since e0ffd1a -- a94077c, 'fix(T-193): the trust image can resolve the claim verifier'. And its COPY set is not 'contracts, proxyshop_support and apps/trust/src only': lines 70-71 read `COPY packages/verification/__init__.py /app/packages/verification/__init__.py` and `COPY packages/verification/src/ /app/packages/verification/src/`. packages/verification itself has 3 commits since e0ffd1a. Whether the image actually starts and resolves the verifier was NOT measured here -- the Dockerfile text is not a built image. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"apps/trust/Dockerfile has zero commits since e0ffd1a; its COPY set is contracts, proxyshop_support and apps/trust/src only \u2014 packages/verification, which T-065's code imports, is still absent, so T-065 crashes in the deployed image.\""
     },
     {
       "id": "T-194",
@@ -3506,7 +3506,7 @@
       "finding_id": "f391dd836f08712de7a17b33b12e0c65e6a9ad76150f1e794213a57714247113",
       "reproduction": "Feed a bid with a malformed date-time to both boundaries; feed blacklisted: [] to both. Compare ok.",
       "status": "open",
-      "status_evidence": "only the `blacklisted: []` half closed (e1a66b5's _js_truthy). The date-time half is live in source: packages/contracts/generated/python/protocol.py types all eight format:date-time fields as bare str (observed_at, expires_at, issued_at, created_at, decayed_at...) while packages/contracts/src/ts/schemas.ts:17,59 runs ajv WITH addFormats. No commit names T-194."
+      "status_evidence": "measured at 4b0eddf: the last clause is false -- 8 commits name T-194, not none. The SUBSTANTIVE clause survives re-measurement and is restated so it is not lost: packages/contracts/generated/python/protocol.py still types its date-time fields as bare str (e.g. `observed_at: str = Field(..., min_length=1)` at :217, `expires_at: str | None = None` at :297, `issued_at: str = Field(` at :370), while packages/contracts/src/ts/schemas.ts:17 still imports addFormats. The asymmetry the ticket names is live at this head; only the no-commit clause was wrong. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"only the `blacklisted: []` half closed (e1a66b5's _js_truthy). The date-time half is live in source: packages/contracts/generated/python/protocol.py types all eight format:date-time fields as bare str (observed_at, expires_at, issued_at, created_at, decayed_at...) while packages/contracts/src/ts/schemas.ts:17,59 runs ajv WITH addFormats. No commit names T-194.\""
     },
     {
       "id": "T-195",
@@ -3557,7 +3557,7 @@
       "finding_id": "47a526ade3c861b3bb0474b0fa5161579c67e0aa5f42ece21d67a62e28130f20",
       "reproduction": "Build a profile for {'first_name':'Ann','last_name':'Lee'} with an order category of 'ann lee gear': published, leaks == [].",
       "status": "open",
-      "status_evidence": "minted at 05cf86c; _MIN_LEAKABLE = 4 is still at apps/buyer/svc/src/profile/__init__.py:436 at HEAD and no commit after 05cf86c touches apps/buyer."
+      "status_evidence": "measured at 4b0eddf: false on both counts. apps/buyer/svc/src/profile/__init__.py has 5 commits since 05cf86c and apps/buyer has 51. And `_MIN_LEAKABLE = 4` is not at :436: at this head line 503 reads `_MIN_LEAKABLE = 3`, line 526 adds `_MIN_LEAKABLE_BY_BUCKET: dict[str, int] = {\"region\": 4}`, and the comment at :500 says the old value 'was attached to the wrong thing'. The cited line is stale and the cited value is stale in the opposite direction from what the ticket assumes. Whether the per-bucket floor answers T-197's finding was NOT determined here. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"minted at 05cf86c; _MIN_LEAKABLE = 4 is still at apps/buyer/svc/src/profile/__init__.py:436 at HEAD and no commit after 05cf86c touches apps/buyer.\""
     },
     {
       "id": "T-198",
@@ -3574,7 +3574,7 @@
       "finding_id": "db1191ae81cafd831f4a8716d5e2ea6829663cf97871a1ef6c765cb3b0b3542a",
       "reproduction": "Both cases above, run through build_profile on the current tree.",
       "status": "open",
-      "status_evidence": "minted at 05cf86c; apps/buyer/svc/src/profile/__init__.py does not appear in `git diff 05cf86c HEAD`."
+      "status_evidence": "measured at 4b0eddf: false. apps/buyer/svc/src/profile/__init__.py DOES appear in `git diff 05cf86c HEAD` -- 5 commits touch it in that range, most recently 4b63fde. Whether T-198's own finding survives those 5 commits was NOT measured; the file-untouched premise the evidence rested on is simply gone. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"minted at 05cf86c; apps/buyer/svc/src/profile/__init__.py does not appear in `git diff 05cf86c HEAD`.\""
     },
     {
       "id": "T-199",
@@ -3591,7 +3591,7 @@
       "finding_id": "0b17fc7ae23d6510139c6f82788dc69117f8309a9e9d7cbc768e7ccdb7c489cc",
       "reproduction": "Build a profile for {'last_name':'Home'} with an order category of 'home': published, leaks == [].",
       "status": "open",
-      "status_evidence": "minted at 05cf86c; same file untouched since."
+      "status_evidence": "measured at 4b0eddf: false. 'same file untouched since' is wrong -- apps/buyer/svc/src/profile/__init__.py has 5 commits since 05cf86c. NOT DETERMINED whether T-199's finding survives them. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"minted at 05cf86c; same file untouched since.\""
     },
     {
       "id": "T-200",
@@ -3608,7 +3608,7 @@
       "finding_id": "90ec72a25047d5eea268b255f3c7f531594618b38bb1b60c9868a9ba3c7c4eb6",
       "reproduction": "Unpack ClaimMaterial positionally with four names against the current definition.",
       "status": "open",
-      "status_evidence": "ADVISORY, NOT A REPAIRABLE DEFECT \u2014 it is an integrator's notice that ClaimMaterial grew a fifth field and positional unpacking will break for out-of-tree consumers. Minted at 05cf86c; provenance.py is absent from `git diff --stat 05cf86c HEAD`."
+      "status_evidence": "measured at 4b0eddf: false. packages/store-agent/src/hooks/provenance.py is NOT absent from `git diff --stat 05cf86c HEAD` -- 3 commits touch it in that range, including d4c571b 'close(T-175,T-209,T-218,T-220,T-280): five store-agent gates l...'. The ticket's ADVISORY character (an integrator's notice about ClaimMaterial's fifth field and positional unpacking) is unchanged by this correction; only the untouched-file premise was wrong. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"ADVISORY, NOT A REPAIRABLE DEFECT \u2014 it is an integrator's notice that ClaimMaterial grew a fifth field and positional unpacking will break for out-of-tree consumers. Minted at 05cf86c; provenance.py is absent from `git diff --stat 05cf86c HEAD`.\""
     },
     {
       "id": "T-201",
@@ -3642,7 +3642,7 @@
       "finding_id": "2952de7986a274bcddd6c37ad32ee9d36659d6beb7b5636637e48cba1c6dd361",
       "reproduction": "Drive ShopifyCheckoutProvider with an R10 fallback offer (no checkout_url) and a merchant returning an off-domain permalink; the port raises OrphanedCheckoutCode carrying .orphan, and accept() swallows it at :390.",
       "status": "open",
-      "status_evidence": "minted at 05cf86c; re-confirmed a cycle later by T-215 at 3927afd ('T-202 CONFIRMED OPEN AND UNDERSTATED'); the broad `except Exception` is still at apps/exchange/src/accept/offer.py:390 at HEAD."
+      "status_evidence": "measured at 4b0eddf: false. apps/exchange/src/accept/offer.py has 19 commits since 05cf86c (and 19 since 3927afd), and the broad `except Exception` is NOT at :390 -- at this head line 390 is module docstring prose ('``code_created`` key the producers do not write, an ordinary post-mint domain refusal'). The live `except Exception as exc:` sites in that file are :895, :948 and :1020, and a bare `except Exception:` is at :360. Whether T-202's defect survives was NOT measured; the citation no longer points at code. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"minted at 05cf86c; re-confirmed a cycle later by T-215 at 3927afd ('T-202 CONFIRMED OPEN AND UNDERSTATED'); the broad `except Exception` is still at apps/exchange/src/accept/offer.py:390 at HEAD.\""
     },
     {
       "id": "T-203",
@@ -3659,7 +3659,7 @@
       "finding_id": "b2a1a15403401bba75832ded04472f77e8cf1c5ff2e72327310f77d127d6aa0f",
       "reproduction": "git grep shopify_discount_percentage -- apps/ services/ returns only the converter and its tests.",
       "status": "open",
-      "status_evidence": "BINDING REQUIREMENT ON UNBUILT T-052, not a defect. Minted at 05cf86c; apps/merchant/svc/src/codes/__init__.py is still 0 bytes at HEAD and `git grep shopify_discount_percentage` hits only apps/exchange/src/checkout/** and its tests."
+      "status_evidence": "measured at 4b0eddf: apps/merchant/svc/src/codes/__init__.py is 4528 bytes / 143 lines, not 0 bytes; the directory around it holds 10 files totalling 113918 bytes; and `git grep shopify_discount_percentage` at this head hits apps/merchant/svc/src/codes/offer.py and apps/merchant/Dockerfile as well as apps/exchange/src/checkout/**, so the 'only checkout' clause is false too. The ticket's own framing as a BINDING REQUIREMENT ON UNBUILT T-052 is the part that no longer describes the tree: T-052 has code. Whether the requirement is SATISFIED was not measured here. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"BINDING REQUIREMENT ON UNBUILT T-052, not a defect. Minted at 05cf86c; apps/merchant/svc/src/codes/__init__.py is still 0 bytes at HEAD and `git grep shopify_discount_percentage` hits only apps/exchange/src/checkout/** and its tests.\""
     },
     {
       "id": "T-204",
@@ -3676,7 +3676,7 @@
       "finding_id": "0ffe76797ceab1a0e9254de7561e5c5b6aecb3309c0702e5848b19fdaacda7b6",
       "reproduction": "git grep denial_reason across the repo: no test pins any value; exchange.openapi.json:169 declares it a bare string.",
       "status": "open",
-      "status_evidence": "minted at 05cf86c; neither apps/exchange/src/accept/offer.py nor packages/contracts/openapi/exchange.openapi.json appears in `git diff --stat 05cf86c HEAD`, and T-215 still cites the denial_reason vocabulary as live."
+      "status_evidence": "measured at 4b0eddf: false. Both named artifacts appear in `git diff --stat 05cf86c HEAD`: apps/exchange/src/accept/offer.py has 19 commits in that range and packages/contracts/openapi/exchange.openapi.json has 4, the most recent being HEAD itself (4b0eddf). Whether the denial_reason vocabulary divergence T-215 cites is still live was NOT measured here. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"minted at 05cf86c; neither apps/exchange/src/accept/offer.py nor packages/contracts/openapi/exchange.openapi.json appears in `git diff --stat 05cf86c HEAD`, and T-215 still cites the denial_reason vocabulary as live.\""
     },
     {
       "id": "T-205",
@@ -3693,7 +3693,7 @@
       "finding_id": "535d15d1a1ba3a58e428df4f1bf912bb6798339ba447fda6c40cf53eb2c951ed",
       "reproduction": "Break any transitive import of shopify_stub.app and observe the module skip rather than fail.",
       "status": "open",
-      "status_evidence": "minted at 05cf86c; the skip is present at HEAD \u2014 conftest.py:417-421, `except (ImportError, AttributeError): pytest.skip(...)` in the shopify_stub_url fixture, able to turn 219 stub tests green by skipping."
+      "status_evidence": "measured at 4b0eddf: false, and this one is measurably closed at the source rather than merely stale. The skip is GONE: the shopify_stub_url fixture lives at the repo-root conftest.py:485, not at conftest.py:417-421, it contains NO try/except at all, and its docstring names this ticket -- '**T-205**: this used to ``pytest.skip`` on exactly those two exceptions ... A skip is scored like a pass, so the pinned entry point could break and report green.' Two commits in the 05cf86c..HEAD range do the work: cd0604c 'fix(T-205): a broken shopify_stub entry point errors instead of silently passing' and 4b5658a 'fix(T-205): guard the AttributeError arm too'. At this head `except (ImportError, AttributeError)` survives in the repo only inside services/shopify-stub/tests/test_repro_open_tickets.py, where :89, :118 and :223 describe the removed swallow and :161 is the guard's own raise path. NOT asserting closure here -- closure is the gate's to grant -- but the evidence as written is false. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"minted at 05cf86c; the skip is present at HEAD \u2014 conftest.py:417-421, `except (ImportError, AttributeError): pytest.skip(...)` in the shopify_stub_url fixture, able to turn 219 stub tests green by skipping.\""
     },
     {
       "id": "T-206",
@@ -3710,7 +3710,7 @@
       "finding_id": "cf7a5fe9aaabc56ae8a0191d4f4eaf5d389143f2853a9da9fac0e5757635be2d",
       "reproduction": "Build a weighted feedback observation, score it in memory, then append + replay it from the ledger and score again: alpha 2.25 vs 3.0.",
       "status": "open",
-      "status_evidence": "minted at 05cf86c; apps/trust/src/ledger/replay.py last changed 2026-09-01 and observations_from_events at HEAD still returns only {store_id, dim, type, observed_at} \u2014 the new weight is dropped on replay, so the same observation scores 2.25 in memory and 3.0 after replay."
+      "status_evidence": "measured at 4b0eddf: false. apps/trust/src/ledger/replay.py has 1 commit since 05cf86c -- dc07c57, 'fix(T-206): carry the per-observation weight through the ledge...' -- and observations_from_events no longer returns only four keys: at this head `OBSERVATION_FIELDS = (\"store_id\", \"dim\", \"type\", \"observed_at\", \"weight\")` at :44, with OBSERVATION_WEIGHT_FIELD at :52 and the docstring at :70-81 describing weight as carried through. Whether replay determinism is actually restored was NOT measured here. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"minted at 05cf86c; apps/trust/src/ledger/replay.py last changed 2026-09-01 and observations_from_events at HEAD still returns only {store_id, dim, type, observed_at} \u2014 the new weight is dropped on replay, so the same observation scores 2.25 in memory and 3.0 after replay.\""
     },
     {
       "id": "T-207",
@@ -3727,7 +3727,7 @@
       "finding_id": "7206b0c6b762b63320e243d99449bb4252f7d79911bcd0b6fdddf4f73e050b18",
       "reproduction": "Compare the mismatch_return comment in scoring/engine.py against the manifest's observation_weights block and its pitch_delivery_mismatch behaviour.",
       "status": "open",
-      "status_evidence": "minted at 05cf86c; apps/trust/src/scoring/engine.py:28 still glosses mismatch_return as 'the buyer said it matched and then returned it', and ESC-006's manifest edit changed only expected_trust_trajectory and the approval block, not observation_weights."
+      "status_evidence": "measured at 4b0eddf: partly false. apps/trust/src/scoring/engine.py has 2 commits since 05cf86c, including 7bf464d 'fix(T-166,T-207,T-212)'. The quoted gloss is no longer what line 28 says: at this head line 28 reads '``mismatch_return``     1.5       the buyer reports a mismatch and returns the item', not 'the buyer said it matched and then returned it'. The second clause -- that ESC-006's manifest edit changed only expected_trust_trajectory and the approval block, not observation_weights -- was re-measured and HOLDS: fixtures/manifest.json observation_weights is byte-identical between 05cf86c and this head (seven keys plus the comment, mismatch_return 1.5). SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"minted at 05cf86c; apps/trust/src/scoring/engine.py:28 still glosses mismatch_return as 'the buyer said it matched and then returned it', and ESC-006's manifest edit changed only expected_trust_trajectory and the approval block, not observation_weights.\""
     },
     {
       "id": "T-208",
@@ -3761,7 +3761,7 @@
       "finding_id": "f92ec0433b88b45dc668f32551825ce471d7c679179ad7c42cf29ed8092cbc47",
       "reproduction": "Build a dict-shaped bid with offer.commitments = None and pass it to enforce_bid_provenance: the commitments walk skips it. The same payload through contracts.validate_bid is now refused as schema_invalid.",
       "status": "open",
-      "status_evidence": "minted at 05cf86c; re-confirmed by T-218 at 3927afd ('T-209 CONFIRMED BUT UNDERSTATED'); `if node is None: return` still at packages/store-agent/src/hooks/provenance.py:523."
+      "status_evidence": "measured at 4b0eddf: false. packages/store-agent/src/hooks/provenance.py has 3 commits since 05cf86c and since 3927afd, including d4c571b 'close(T-175,T-209,T-218,T-220,T-280)'. `if node is None: return` is NOT at :523 -- at this head :523 reads `if isinstance(node, Mapping):` inside a name-collection helper. The nearest live `if node is None:` is at :652, and :667 is a COMMENT recording that 'the ... statement of this function WAS `if node is None: return`', i.e. the cited text now survives mainly as prose about its own removal. Whether T-209's finding is discharged was NOT measured here. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"minted at 05cf86c; re-confirmed by T-218 at 3927afd ('T-209 CONFIRMED BUT UNDERSTATED'); `if node is None: return` still at packages/store-agent/src/hooks/provenance.py:523.\""
     },
     {
       "id": "T-210",
@@ -3778,7 +3778,7 @@
       "finding_id": "0fef146337c05404b6e34941d1fe35123474c0c5f8f7880d5aaa6fa38a7f4452",
       "reproduction": "Open the chflags window and run pytest inside it: passes. Hold the Neo4j lock and run `make verify`: non-zero exit, build_succeeds records 0.",
       "status": "open",
-      "status_evidence": "the ticket itself says 'The real cause stands and is NOT fixed'. Minted at 05cf86c; no scheduler or quiesce change landed after it, and T-214 measures the lock contention getting materially worse."
+      "status_evidence": "measured at 4b0eddf: false. 'no scheduler or quiesce change landed after it' is wrong -- in the 05cf86c..HEAD range a8ce72e 'fix(T-214): hold the D37 Neo4j flock per test, not for the whole session', 1c4c6da 'fix(T-171): clip the Neo4j lock wait to the deadline the item is already under', d305dc8 and 7f953e0 all land on the lock, and 46aabbc is titled 'close(T-210,T-272,T-273,T-276,T-277,T-282,T-334)'. The structure at this head is function-scoped: conftest.py:414 `def neo4j_driver(_neo4j_guard: bool, _neo4j_connection: Any)` over a session-scoped _neo4j_connection (:325), with reset_graph per acquisition (:427-429). The 'T-214 measures the contention getting materially worse' clause is stale in the opposite direction: T-214's own recorded evidence says it was fixed at e478ff4. Whether T-210's own residual survives was NOT measured here. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"the ticket itself says 'The real cause stands and is NOT fixed'. Minted at 05cf86c; no scheduler or quiesce change landed after it, and T-214 measures the lock contention getting materially worse.\""
     },
     {
       "id": "T-211",
@@ -3795,7 +3795,7 @@
       "finding_id": "3f901fdb8eb202e7cb868de2804071419fd949b38eb3a56599f496375bcddbb3",
       "reproduction": "Read conftest.py:307 against proxyshop_support/neo4j_lock.py's DEFAULT_TIMEOUT.",
       "status": "open",
-      "status_evidence": "minted at 05cf86c; conftest.py:306 still documents the Neo4j lock's '600 s timeout' while proxyshop_support/neo4j_lock.py:56 is DEFAULT_TIMEOUT = 240.0 at HEAD."
+      "status_evidence": "measured at 4b0eddf: false on both halves of the mismatch it alleges. proxyshop_support/neo4j_lock.py has 4 commits since 05cf86c, and DEFAULT_TIMEOUT = 240.0 sits at line 122, not :56 (line 56 is docstring prose). The other side of the alleged mismatch is gone: `git grep '600'` across conftest.py and every */conftest.py at this head returns no line documenting a '600 s timeout'. The documentation drift the ticket exists to record is not visible at the cited coordinates. NOT asserting the ticket is discharged. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"minted at 05cf86c; conftest.py:306 still documents the Neo4j lock's '600 s timeout' while proxyshop_support/neo4j_lock.py:56 is DEFAULT_TIMEOUT = 240.0 at HEAD.\""
     },
     {
       "id": "T-212",
@@ -3863,7 +3863,7 @@
       "finding_id": "879b6977d2acea39b9a2987270564679796dab8241c7ab4058ac41bdafff6616",
       "reproduction": "Drive the R10 fallback offer + off-domain merchant permalink path and read the emitted policy_event payload: the discount code appears inside denial_reason.",
       "status": "open",
-      "status_evidence": "minted at 3927afd; nothing but the cycle-12 measurement commit e9849f7 landed after it."
+      "status_evidence": "measured at 4b0eddf: false. 'nothing but the cycle-12 measurement commit e9849f7 landed after it' is wrong by three orders of magnitude -- 674 commits are reachable from HEAD but not from 3927afd (673 after e9849f7), and 17 of them name T-215. Whether T-215's own finding survives those commits was NOT measured here; only that the 'nothing landed' premise is false. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"minted at 3927afd; nothing but the cycle-12 measurement commit e9849f7 landed after it.\""
     },
     {
       "id": "T-216",
@@ -3880,7 +3880,7 @@
       "finding_id": "ef17dbe416835df5c1933c289579de1d4999d35687f9cf7e7080cef32a24d2d0",
       "reproduction": "Run a session that builds ledger_migrated alongside one that reads the ledger schema without requesting it; the drop-and-recreate window is the failure.",
       "status": "open",
-      "status_evidence": "minted at 3927afd; apps/trust/tests/_fixtures_ledger_schema.py untouched. This is the surviving, ratified diagnosis of the InvalidSchemaName flake that T-196/T-201/T-212 all sighted."
+      "status_evidence": "measured at 4b0eddf: false. apps/trust/tests/_fixtures_ledger_schema.py is NOT untouched -- 3 commits since 3927afd, including 13a4110 'fix(T-216): bound the gate's own drop, and stop it dropping th...'. The ticket's standing as the surviving ratified diagnosis of the InvalidSchemaName flake (over T-196/T-201/T-212) is historical record and is not disturbed here. Whether the flake still reproduces was NOT measured. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"minted at 3927afd; apps/trust/tests/_fixtures_ledger_schema.py untouched. This is the surviving, ratified diagnosis of the InvalidSchemaName flake that T-196/T-201/T-212 all sighted.\""
     },
     {
       "id": "T-217",
@@ -3914,7 +3914,7 @@
       "finding_id": "4e8d5b3042b3384ce13aa1a28afeec5e066c401a0f8fddd4f66ef220b351f46a",
       "reproduction": "Feed each of the six now-non-nullable fields as explicit null through both doors and compare ok.",
       "status": "open",
-      "status_evidence": "minted at 3927afd; nothing but e9849f7 landed after it."
+      "status_evidence": "measured at 4b0eddf: false. 674 commits are reachable from HEAD but not from 3927afd, 673 after e9849f7, and 5 of them name T-218 -- including d4c571b 'close(T-175,T-209,T-218,T-220,T-280)'. NOT DETERMINED whether T-218's finding survives them. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"minted at 3927afd; nothing but e9849f7 landed after it.\""
     },
     {
       "id": "T-219",
@@ -3931,7 +3931,7 @@
       "finding_id": "8ff73176e7a19920f9a8529776caff89766a40e5a7501f13dc98f9670a0cdc72",
       "reproduction": "The PYTEST_ADDOPTS invocation above: exit 0, build_succeeds would record 1.",
       "status": "open",
-      "status_evidence": "minted at 3927afd; nothing but e9849f7 landed after it. NOT DISPATCHABLE by an ordinary lane \u2014 the fix needs scripts/verify.sh and/or .swarm-loop/goals.json, both in state.json protected_paths."
+      "status_evidence": "measured at 4b0eddf: false. scripts/verify.sh HAS changed since 3927afd -- 1 commit, 48240c7 'amend(29): close the fail-open on build_succeeds' TypeScript h...' -- so 'nothing but e9849f7 landed after it' is wrong, as is the implication that the protected file is frozen beyond reach: it moved under an amendment. The dispatchability clause remains true as written: scripts/verify.sh and .swarm-loop/goals.json are both still in state.json protected_paths, so an ordinary lane still cannot fix this without an amendment. Whether 48240c7 addressed T-219's own defect was NOT measured. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"minted at 3927afd; nothing but e9849f7 landed after it. NOT DISPATCHABLE by an ordinary lane \u2014 the fix needs scripts/verify.sh and/or .swarm-loop/goals.json, both in state.json protected_paths.\""
     },
     {
       "id": "T-220",
@@ -3948,7 +3948,7 @@
       "finding_id": "7132a711b7c984f9020ff3f894f0d501d25e9d91f4e771cff7513d919b4e8ef8",
       "reproduction": "Re-introduce a depth bound of 65 in _walk and run the suite: green.",
       "status": "open",
-      "status_evidence": "minted at 3927afd; packages/store-agent/tests/test_price_reconciliation.py:492 and :523 still carry the [1, 11, 13, 14, 64] parametrizations chosen around the OLD bound of 12, so a re-introduced bound at 65+ stays invisible."
+      "status_evidence": "measured at 4b0eddf: false, and this is the exact hazard the class exists for -- the cited line is now the comment describing the FIX. packages/store-agent/tests/test_price_reconciliation.py has 1 commit since 3927afd (d4c571b, 'close(T-175,T-209,T-218,T-220,T-280)'). At this head line 492 reads '#: Depths both properties below are graded at. ADDITIVE: `[1, 11, 13, 14, 64]` is every value' and :493 continues 'this parametrization already carried, kept verbatim, with `65, 128, 256` appended (T-220).' The live parametrization is at :506, `_DEPTHS = [1, 11, 13, 14, 64, 65, 128, 256]`. So the values the old evidence quotes as proof of the gap appear at the cited line only inside the sentence explaining that they were extended past it. NOT asserting closure -- the gate is the authority on that. SUPERSEDES the undated claim recorded before it, kept verbatim so nothing is lost: \"minted at 3927afd; packages/store-agent/tests/test_price_reconciliation.py:492 and :523 still carry the [1, 11, 13, 14, 64] parametrizations chosen around the OLD bound of 12, so a re-introduced bound at 65+ stays invisible.\""
     },
     {
       "id": "T-221",

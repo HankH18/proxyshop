@@ -53,6 +53,10 @@
       "claimed_at": "2026-09-06T01:22:09",
       "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/c21-misc",
       "branch": "task/c21-misc"
+    },
+    "11": {
+      "claimed_at": "2026-09-06T21:33:19",
+      "agent_ref": "proxyshop-4e-gate-verify"
     }
   }
 }
