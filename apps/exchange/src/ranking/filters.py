@@ -6,7 +6,7 @@ a candidate that the filters cannot positively clear is excluded *before* the pu
 formula runs, so no `rank_score` exists for it at all. A number that existed but was ignored
 would be a number some later reader could sort by; there is no such number here.
 
-The four filters, and why each one denies rather than discounts:
+The five filters, and why each one denies rather than discounts:
 
 * **Blacklist (R12).** A blacklisted store may not participate at any price. A store whose
   status cannot be read — no row in the snapshot, or a flag that is not a boolean — is
@@ -22,6 +22,14 @@ The four filters, and why each one denies rather than discounts:
   by nothing else. Ambiguous, unsupported and contradicted evidence are all *absent*
   evidence as far as this filter is concerned — they are dropped before the constraint is
   decided, so an unproven claim can never carry a candidate through.
+
+* **The buyer's budget.** A ``price_usd`` bound (``lte``/``gte``) is decided against the
+  OFFER'S OWN PRICE by :func:`budget_reasons`, and is the one filter here that is not about
+  evidence at all. See its docstring for why it cannot be an R19 hard constraint: a verified
+  ``price_usd`` claim describes the store's CATALOGUE, and measured through ``POST /auctions``
+  a store whose catalogue price of 40.00 verified bid **180.00 under a 50.00 ceiling and was
+  shortlisted**. An offer's price is asserted by the bidder and nothing could verify it, so it
+  is decided structurally and never counts towards ``verified_hard_fit_count``.
 
 Deciding the constraint itself is delegated to
 :class:`~exchange.retrieval.criteria.HardCriterion`, which is where the op vocabulary and
@@ -52,6 +60,8 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+from ingest.graph.model import slug
+
 from ..checkout.codes import UnusableOffer, expiry_epoch
 from ..checkout.domain import is_on_domain
 from ..retrieval.criteria import HardCriterion, MalformedIntent
@@ -64,6 +74,8 @@ from .reasons import (
     REASON_HARD_CONSTRAINT,
     REASON_MALFORMED,
     REASON_OFF_DOMAIN,
+    REASON_OVER_BUDGET,
+    REASON_PRICE_UNREADABLE,
     REASON_UNDECIDABLE_INTENT,
     REASON_UNEVIDENCED_CONSTRAINT,
 )
@@ -411,11 +423,22 @@ def hard_constraint_reasons(
     counted here rather than recomputed by the sorter — and why the evidence behind it has to
     be the exchange's own (ESC-020): a tie-break a bidder can set is a tie-break a bidder
     wins.
+
+    **A price BOUND is not decided here**, and that is the same rule stated once more rather
+    than an exception to it. A verified `price_usd` claim is evidence about the store's
+    CATALOGUE, and the buyer's ceiling is about the BID — so deciding the bound on the claim
+    answered a question nobody asked, and a store whose catalogue price of 40.00 verified bid
+    180.00 under a 50.00 ceiling and was shortlisted for it. :func:`budget_reasons` decides
+    the bound against the offer instead, and skipping it here is what keeps it out of
+    `verified_hard_fit_count`: the price a bidder names is a number the bidder chose, and D13's
+    first tie-break may not be one of those.
     """
     attributes = verified_attributes(claims, store_id=store_id)
     reasons: list[str] = []
     satisfied = 0
     for criterion in criteria:
+        if is_budget_bound(criterion):
+            continue
         verdict = criterion.decide(attributes)
         if verdict.satisfied:
             satisfied += 1
@@ -425,6 +448,144 @@ def hard_constraint_reasons(
             f"satisfies a hard constraint (R19)"
         )
     return reasons, satisfied
+
+
+# ---------------------------------------------------------------------------------
+# The buyer's budget, decided against the price BID
+# ---------------------------------------------------------------------------------
+#: The constraint fields that state the buyer's budget in money, folded through the same
+#: :func:`slug` that :attr:`HardCriterion.canonical_field` folds with — so ``price_usd``,
+#: ``Price USD`` and ``price-usd`` are one field here and not three.
+#:
+#: ``budget_band`` is deliberately absent, and it is the obvious wrong answer. The band is a
+#: LOSSY PROJECTION minted *from* the parsed number
+#: (``apps/buyer/svc/src/intent/extraction.py`` turns a ceiling into one of a handful of
+#: buckets), so binding the wall to it would judge a bid against a bucket the shopper never
+#: said — and against a bound the buyer service, not the buyer, chose.
+BUDGET_FIELDS: frozenset[str] = frozenset({slug("price_usd")})
+
+#: The ops that state a money BOUND. ``eq``, ``in`` and ``contains`` on a price field are not
+#: budgets — "exactly $40" is a description of a product, not a ceiling — and they keep
+#: whatever meaning they already had, decided against claims like any other constraint.
+BUDGET_OPS: tuple[str, ...] = ("lte", "gte")
+
+
+def is_budget_bound(criterion: HardCriterion) -> bool:
+    """Is this criterion the buyer's stated budget, rather than a claim about a product?"""
+    return criterion.canonical_field in BUDGET_FIELDS and criterion.op in BUDGET_OPS
+
+
+def offer_price(offer: Any) -> float | None:
+    """What this offer would actually cost, or `None` when there is not a finite number.
+
+    Total before unit, because the total is what the buyer pays and the two differ whenever a
+    bid is for more than one of something. There is no quantity field to reconcile them with —
+    the published `Offer` forbids one (`additionalProperties: false`) — so the total is read
+    as given rather than reconstructed.
+
+    ``total_price`` is ALREADY POST-DISCOUNT: a `Discount` is known at BID time and the accept
+    path only mints the redemption code against it (`checkout/protocol.py`), so there is no
+    later reduction to thread through here.
+
+    A non-finite price is not a price. It is `None` to both callers, and they disagree about
+    nothing: the price tie-break sorts an unreadable price LAST, and :func:`budget_reasons`
+    refuses it outright.
+    """
+    for name in ("total_price", "unit_price", "price"):
+        raw = read(offer, name, None)
+        if raw is None or isinstance(raw, bool):
+            continue
+        try:
+            price = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(price):
+            return price
+    return None
+
+
+def _bound_text(criterion: HardCriterion) -> str:
+    return f"{criterion.field!r} {criterion.op} {criterion.value!r}"
+
+
+def budget_reasons(offer: Any, criteria: Sequence[HardCriterion]) -> list[str]:
+    """Why this offer's own price fails the buyer's budget, if it does.
+
+    **The defect this closes, measured over ``POST /auctions``.** With ``price_usd`` declared
+    in this exchange's catalogue snapshot — so the constraint was *decided* rather than set
+    aside — a store whose catalogue price is 40.00, claiming ``price_usd: 40`` and carrying
+    this exchange's own attestation on that claim, **bid 180.00 under a ``price_usd lte 50``
+    ceiling and took a shortlist slot**. R19 was satisfied and the answer was still wrong,
+    because a verified claim describes the CATALOGUE and the ceiling is about the BID. The
+    shipped demo has the same shape: ``apps/buyer/devstack/demo-market.json`` states
+    ``price_usd lte 80`` against a catalogue price of 78.00, and the bid could be anything.
+
+    **Why this is a structural filter and not a hard constraint.** A bid-asserted price is not
+    a verified supporting fact and *nothing could verify it* — there is no catalogue entry for
+    "what I will charge you today". So the bound is decided here, from the offer this exchange
+    holds, and :func:`hard_constraint_reasons` no longer grades it against claims at all.
+    Grading it there was the confusion; leaving it there as well would ALSO feed
+    ``verified_hard_fit_count``, which is D13's first published tie-break, and a tie-break a
+    bidder can set is a tie-break a bidder wins.
+
+    **No readable price DENIES.** The alternative — admitting a bid whose price cannot be
+    compared — would make "my price is unreadable" the cheapest bid in the auction, and R12
+    already settled which way an unreadable answer fails.
+
+    **Currency is reported and not gated on**, and neither is the criterion's ``unit``.
+    ``Offer.currency`` is optional and bidder-set, so refusing a mismatch would refuse every
+    honest bid that omits it, and *accepting* a mismatch costs a bidder nothing it could
+    exploit: the comparison is numeric either way, so relabelling a 180.00 offer as ``JPY``
+    does not get it under a 50.00 ceiling. Converting between currencies is a different
+    capability with a rate source behind it, and this exchange has neither.
+
+    Returns:
+        One reason per bound this offer misses, or a single unreadable-price reason naming
+        every bound it could not be judged against. Empty when the buyer stated no budget.
+    """
+    bounds = [criterion for criterion in criteria if is_budget_bound(criterion)]
+    if not bounds:
+        return []
+
+    price = offer_price(offer)
+    if price is None:
+        stated = ", ".join(_bound_text(criterion) for criterion in bounds)
+        return [
+            f"{REASON_PRICE_UNREADABLE}: the buyer stated {stated} and this offer carries no "
+            f"readable price — total_price {read(offer, 'total_price', None)!r}, unit_price "
+            f"{read(offer, 'unit_price', None)!r} — so the bound could not be applied to it; a "
+            f"bid whose price cannot be compared does not pass a price filter by being "
+            f"uncomparable"
+        ]
+
+    currency = read(offer, "currency", None)
+    priced = f"{price} {currency}" if currency else f"{price}"
+    reasons: list[str] = []
+    for criterion in bounds:
+        bound = float(criterion.value)
+        if not math.isfinite(bound):
+            # `HardCriterion` requires a NUMERIC bound for lte/gte and NaN is a number, so
+            # `price_usd lte NaN` is constructible — and `price > nan` is False, which would
+            # make an unreadable ceiling the one ceiling every bid clears. JSON's own parser
+            # accepts the literal, so this is reachable from the door rather than theoretical.
+            reasons.append(
+                f"{REASON_PRICE_UNREADABLE}: the buyer's bound {_bound_text(criterion)} is not a "
+                f"finite amount, so no price could be compared against it; an undecidable bound "
+                f"excludes rather than admitting everybody (R19)"
+            )
+            continue
+        if criterion.op == "lte" and price > bound:
+            side = f"above the buyer's ceiling ({_bound_text(criterion)})"
+        elif criterion.op == "gte" and price < bound:
+            side = f"below the buyer's floor ({_bound_text(criterion)})"
+        else:
+            continue
+        reasons.append(
+            f"{REASON_OVER_BUDGET}: this bid's own price of {priced} is {side} — a price bound "
+            f"is decided against the PRICE BID, not against the catalogue price a store claims "
+            f"for itself, and a bid the buyer cannot afford is not a shortlist answer"
+        )
+    return reasons
 
 
 # ---------------------------------------------------------------------------------
@@ -471,6 +632,22 @@ def unanswerable_criteria(
     ``roast_level`` are all declared by ``fixtures/catalog/coffee.json`` and all produced 0
     slots, exactly as the ``brew_method`` it refused did.
 
+    A PRICE BOUND IS NEVER NAMED HERE, whatever the catalogue and the claims say, and that is
+    the third fact rather than a fourth exception. Answerability asks "could this exchange
+    decide the constraint for anybody?", and for a ``price_usd`` ceiling the answer is always
+    yes: the exchange is holding every bid, and :func:`budget_reasons` decides the bound
+    against the offer's own price without consulting a catalogue or a claim at all. Reading
+    answerability off the catalogue for it would be reading the wrong evidence — and the cost
+    of that is not academic. An auction where EVERY bid is over budget leaves nothing eligible,
+    which is precisely the input :func:`~exchange.ranking.rank`'s relaxation path acts on; a
+    ceiling named here would then be set aside and **every bid just excluded would be
+    re-admitted**, in exactly the case the budget filter exists for. Driven in
+    ``apps/exchange/tests/test_ranking_budget_ceiling.py``.
+
+    The relaxation itself is untouched: a constraint the exchange really cannot decide for
+    anybody — no catalogue declares it, no store claimed it — is still named and still set
+    aside, price bound beside it or not.
+
     This function only NAMES them. Whether naming one changes an outcome is
     :func:`~exchange.ranking.rank`'s decision, and it makes it only when the shortlist would
     otherwise be empty.
@@ -480,7 +657,11 @@ def unanswerable_criteria(
     seen: list[Mapping[str, Any]] = list(network_attributes)
     for candidate in candidates:
         seen.extend(claimed_attributes(read(candidate, "claims", None)))
-    return [criterion for criterion in criteria if not criterion.is_evidenced_by(seen)]
+    return [
+        criterion
+        for criterion in criteria
+        if not is_budget_bound(criterion) and not criterion.is_evidenced_by(seen)
+    ]
 
 
 def unanswerable_reason(criterion: HardCriterion) -> str:
@@ -545,6 +726,10 @@ def exclusion_reasons(
         domain = domain_reason(candidate, offer)
         if domain is not None:
             reasons.append(domain)
+        # The buyer's budget, beside the two other offer-based filters and before scoring. It
+        # takes `criteria` as well as the offer because it is the one filter that needs both,
+        # and this gate is the only place that holds them together.
+        reasons.extend(budget_reasons(offer, criteria))
 
     if intent_reason is not None:
         reasons.append(intent_reason)
@@ -558,14 +743,19 @@ def exclusion_reasons(
 
 
 __all__ = [
+    "BUDGET_FIELDS",
+    "BUDGET_OPS",
     "VERIFIED",
     "blacklist_reason",
+    "budget_reasons",
     "domain_reason",
     "eligibility_source_reason",
     "exclusion_reasons",
     "expiry_reason",
     "hard_constraint_reasons",
+    "is_budget_bound",
     "claimed_attributes",
+    "offer_price",
     "read",
     "read_criteria",
     "trust_row",

@@ -253,11 +253,31 @@ def test_an_explicitly_wired_runner_is_used_instead_of_one_built_from_the_contex
 
 
 def test_the_runner_never_submits_and_therefore_never_looks_live() -> None:
-    """It has no submitter, so it is built `shadow`: an activated runner bidding nowhere is the
-    one state ``AgentRunner.mode`` refuses to be constructed in."""
+    """store-alpha's approved envelope says `shadow`, so its runner submits nothing.
+
+    The reason changed and the property did not. This used to hold because the process had no
+    submitter at all and was therefore built `shadow` whatever the envelope said — which is
+    also why R7 was unobservable from outside the process. The runner is now built in the mode
+    its envelope states and its submitter is the bid door's response channel, and
+    ``fixtures/envelopes/store-alpha.approved.json`` states ``"activation": "shadow"``. So the
+    same two assertions hold, and they now mean what they say: this store has not been
+    activated. ``store-beta``'s shipped envelope says `active`, and the case below is its
+    control.
+    """
     runner = agent_runner(_app("store-alpha"))
     assert runner.submits is False
     assert str(runner.mode) in {"EnvelopeActivation.shadow", "shadow"}
+
+
+def test_a_shipped_envelope_that_states_active_builds_a_submitting_runner() -> None:
+    """The control for the case above: `shadow` is read off the envelope, not hard-coded.
+
+    Without this, a runner pinned to `shadow` for any reason at all would satisfy the
+    assertion above, and R7's activation half would be ungraded in this file.
+    """
+    runner = agent_runner(_app("store-beta"))
+    assert runner.submits is True
+    assert str(runner.mode) in {"EnvelopeActivation.active", "active"}
 
 
 def test_the_bid_door_still_answers_after_the_trust_door_was_mounted() -> None:

@@ -453,6 +453,38 @@ def test_the_shopify_adapter_is_a_normal_provider_behind_the_same_port() -> None
     assert ShopifyCheckoutProvider.checkout is CheckoutProvider.checkout
 
 
+def test_a_provider_that_mints_elsewhere_declares_that_it_needs_the_merchant_client() -> None:
+    """R3: the composition root asks the REGISTRY whether a mode needs a merchant, not a list.
+
+    ``exchange.composition.bind_code_creator`` refuses to compose a deployment whose mode mints
+    on the merchant with no address configured — which requires knowing, before any request
+    exists, whether the selected provider reaches outside this process. Answering that from a
+    set of mode SPELLINGS kept in the composition root would be a second registry, and it would
+    stop agreeing with this one the first time a deployment calls ``register_provider``: a mode
+    the composition root had never heard of would compose with no creator and refuse every
+    accept it served, which is the exact defect the wiring exists to close.
+
+    So the provider declares it, where it is registered.
+    """
+    assert resolve_provider("redirect").requires_code_creator is False, (
+        "the simulated provider mints locally (D45) — declaring otherwise would make the "
+        "starting slice unreachable without a merchant"
+    )
+    for mode in ("shopify", "shopify_stub"):
+        assert resolve_provider(mode).requires_code_creator is True, mode
+
+    # It is a DECLARATION, not a branch: C11 forbids anything downstream behaving differently
+    # per provider, and the port does not read this at all.
+    assert "requires_code_creator" not in CheckoutProvider.checkout.__code__.co_names
+
+    # And the default is the safe one for a provider that says nothing, because a provider that
+    # mints locally needs no wiring while one that does not would be refused a deployment.
+    class Local(CheckoutProvider):
+        name = "local-only"
+
+    assert Local.requires_code_creator is False
+
+
 # =====================================================================================
 # The trusted half of the host comparison must not come from the untrusted half's author
 # =====================================================================================

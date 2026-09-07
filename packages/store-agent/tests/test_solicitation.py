@@ -79,8 +79,29 @@ def _fixture() -> dict[str, Any]:
     return json.loads(ENVELOPE_FIXTURE.read_text(encoding="utf-8"))
 
 
-def context(*, domain: Any = STORE_DOMAIN, variant: bool = False, **overrides: Any) -> dict:
-    """A store context in the shape the merchant service hands over."""
+def context(
+    *,
+    domain: Any = STORE_DOMAIN,
+    variant: bool = False,
+    activation: str = "active",
+    **overrides: Any,
+) -> dict:
+    """A store context in the shape the merchant service hands over, for an ACTIVATED store.
+
+    ``activation`` is overlaid on the fixture's envelope, and it defaults to `active` because
+    every test below is about what a store bids — not about whether its merchant switched the
+    agent on. The shipped artifact ``store-alpha.approved.json`` states ``"activation":
+    "shadow"``, and since T-3xx wired ``POST /v1/bid-requests`` through
+    ``store_agent.modes.AgentRunner`` that is no longer decoration: R7 says an un-activated
+    envelope submits nothing, so the served door answers a shadow store ``204
+    envelope_not_activated``. Building the context from the fixture verbatim would therefore
+    hand every door test below an un-activated store and grade the transport on a store that
+    is not allowed to bid.
+
+    The overlay is on the CONTEXT the merchant service hands over, never on the file: the
+    fixture is an approved artifact, and its `shadow` is exactly what makes it the honest
+    source for R7's un-activated case in ``test_repro_kill_switch.py``.
+    """
     fixture = _fixture()
     catalog = fixture["catalog"]
     if variant:
@@ -90,7 +111,7 @@ def context(*, domain: Any = STORE_DOMAIN, variant: bool = False, **overrides: A
         }
     built: dict[str, Any] = {
         "store_id": STORE_ID,
-        "envelope": fixture["envelope"],
+        "envelope": {**fixture["envelope"], "activation": activation},
         "catalog": catalog,
         "live_state": {
             "prod-cap": {"in_stock": True, "units_left": 7},

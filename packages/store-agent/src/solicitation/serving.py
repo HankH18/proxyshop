@@ -94,8 +94,22 @@ class StoreContextError(RuntimeError):
 
 
 def configure_solicitation(app: Any, *, context: Mapping[str, Any] | None) -> None:
-    """Give ``app`` the store context its bid route will answer from. ``None`` clears it."""
+    """Give ``app`` the store context its served doors answer from. ``None`` clears it.
+
+    The advocate resolved from any earlier context is discarded, so "which store does this app
+    bid for" and "which store does its `AgentRunner` advocate for" can never disagree. The
+    runner holds a REFERENCE to the context it was built from — that is what makes the kill
+    switch live — so a runner left over from a previous call would keep bidding from a mapping
+    this app no longer has, in a mode a replaced envelope no longer states.
+
+    Imported inside the function because :mod:`store_agent.solicitation.advocate` imports this
+    module (it reads :func:`store_context`), and because this module is deliberately importable
+    by tooling that has not put ``.pkgroot`` on the path yet — see :func:`_states_a_domain`.
+    """
+    from .advocate import reset_advocate  # noqa: PLC0415 - see the docstring
+
     setattr(app.state, STATE_ATTR, dict(context) if context is not None else None)
+    reset_advocate(app)
 
 
 def store_context(app: Any) -> dict[str, Any] | None:

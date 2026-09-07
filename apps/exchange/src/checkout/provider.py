@@ -722,6 +722,24 @@ class CheckoutProvider:
     #: branch on, because nothing downstream may behave differently per provider (C11).
     name: ClassVar[str] = "checkout-provider"
 
+    #: Whether this provider mints somewhere else and therefore needs an injected client.
+    #:
+    #: **Not a branch on the provider, and it must never become one.** C11 forbids anything
+    #: downstream behaving differently per provider, and nothing here does: the port's
+    #: sequence, its domain check and its orphan handling are identical whatever this says.
+    #: What it lets a COMPOSITION ROOT ask — before a request exists — is whether the mode it
+    #: is about to serve reaches a door outside this process. ``SimulatedRedirectProvider``
+    #: mints locally and answers ``False``; :class:`~.providers.ShopifyCheckoutProvider`
+    #: delegates to the merchant's ``POST /codes`` and answers ``True``.
+    #:
+    #: It exists because the alternative was a list of mode SPELLINGS in the composition root
+    #: (``{"shopify", "shopify_stub"}``), which is a second registry that stops agreeing with
+    #: this one the first time somebody calls :func:`~.registry.register_provider` — and the
+    #: failure it produces is the silent one: an exchange composed with no creator, refusing
+    #: every accept it serves with ``checkout_refused``. A provider that needs the client says
+    #: so here, where it is registered, and the deployment is refused at wiring time instead.
+    requires_code_creator: ClassVar[bool] = False
+
     #: Methods the port performs on every provider's behalf. Overriding one would let an
     #: implementation opt out of a guarantee the port makes, so it is refused.
     _FINAL_METHODS: ClassVar[frozenset[str]] = frozenset({"checkout", "_mint_recording_orphans"})

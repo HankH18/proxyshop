@@ -75,6 +75,7 @@ from contracts.ranking import DEFAULT_RANKING_WEIGHTS, RankingWeights
 from . import shortlist as _shortlist
 from .filters import (
     exclusion_reasons,
+    offer_price,
     read,
     read_criteria,
     trust_row,
@@ -143,20 +144,12 @@ def _auction_id(candidates: Sequence[Any], intent: Any, config: Any) -> str:
     return FALLBACK_AUCTION_ID
 
 
-def _price_of(offer: Any) -> float | None:
-    """The offer's price for the published price tie-break, or `None` when there is not a
-    finite one. A NaN price would make the tie-break comparator inconsistent."""
-    for name in ("total_price", "unit_price", "price"):
-        raw = read(offer, name, None)
-        if raw is None or isinstance(raw, bool):
-            continue
-        try:
-            price = float(raw)
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(price):
-            return price
-    return None
+#: The offer's price for the published price tie-break. It lives in :mod:`.filters` now
+#: because the budget filter decides the buyer's ceiling against the same number, and a price
+#: this module read one way and the gate read another would be two prices — the one a
+#: candidate is refused on and the one it is ordered by. Kept under the old private name so
+#: nothing that already reads it has to learn a second one.
+_price_of = offer_price
 
 
 def _sort_key(row: Mapping[str, Any], tie_breakers: Sequence[str]) -> tuple:

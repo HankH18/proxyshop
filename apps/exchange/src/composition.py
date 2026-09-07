@@ -134,7 +134,9 @@ The document
       },
       "external_bid_keyring_file": "/run/secrets/exchange-external-bid-keyring.json",
       "checkout_mode": "redirect",
-      "trust_url": "http://trust:8084"
+      "trust_url": "http://trust:8084",
+      "merchant_url": "http://merchant-svc:8082",
+      "merchant_admin_token_file": "/run/secrets/exchange-merchant-admin-token"
     }
 
 ``sellers``
@@ -238,6 +240,56 @@ The document
     effect when the process next boots.
 ``checkout_mode``
     Optional; ``CHECKOUT_MODE`` still works and this overrides it for this app.
+``merchant_url``
+    The BASE address of the merchant service, whose published ``POST /codes`` mints the real,
+    spendable single-use discount on the store (R3). Optional, and it is the key R3 was
+    missing: ``accept()`` takes a ``code_creator`` and ``configure_accept`` binds one, and
+    **no composition root in this repository ever called that seam** — so a deployment that
+    stated ``"checkout_mode": "shopify"`` (a mode this very module validates as registered)
+    served, measured on this tree over a real socket::
+
+        POST /auctions/{id}/accept -> 409
+        {"accepted": false, "denial_reason": "checkout_refused: CheckoutCreatorError:
+          shopify checkout needs an injected code creator (the merchant POST /codes client);
+          accept() was called without one"}
+
+    — every accept, for every buyer, in every shipped deployment. The consequence beyond the
+    missing code is that ``apps/merchant/svc/src/codes/combines.py``, the ONLY place a
+    discount's ``combinesWith`` is checked against the shop's running automatic discounts,
+    was unreachable from any composed exchange.
+
+    ``MERCHANT_URL`` is the environment fallback, and there is **no built-in default** —
+    which is the one place this key deliberately differs from ``trust_url``. The audit trail
+    must be written whether or not anybody configured it, so ``trust_url`` defaults to the
+    compose service name. A code creator is the opposite: an address nobody chose is an
+    address at which some *other* shop's real discounts might be minted, and the failure mode
+    of a wrong guess is invisible — a connection error per accept, dressed as a refusal of the
+    buyer. So an exchange whose checkout mode needs a merchant and names none is refused at
+    wiring time, with a **503 naming this key**, exactly as an unregistered ``checkout_mode``
+    is. See :func:`bind_code_creator` for the whole ladder, including why "mint locally
+    instead" is not on the table: a code this exchange invents is one the store has never
+    heard of, so the buyer is redirected to a checkout that rejects it.
+
+    The mode decides whether this is needed at all, and the PROVIDER decides that rather than
+    a list of spellings here (:attr:`~exchange.checkout.provider.CheckoutProvider
+    .requires_code_creator`). ``redirect`` — D45's required starting implementation — mints
+    locally and needs no merchant, which is why the starting-slice demo runs with neither this
+    key nor the Shopify install lane.
+``merchant_admin_token_file``
+    **A PATH, never the token.** ``POST /codes`` creates real spendable discounts, so it sits
+    behind the same bearer token the merchant's other administrative routes do, and an unset
+    ``MERCHANT_ADMIN_TOKEN`` makes that route refuse *every* caller with
+    ``503 admin-api-not-configured`` by design. This document therefore names a file holding
+    the token and nothing else — the same separation ``external_bid_keyring_file`` keeps, for
+    the same reason: a deployment document is a plain JSON file that gets pasted into tickets.
+    Writing the token INLINE under ``merchant_admin_token`` is refused outright rather than
+    ignored.
+
+    ``MERCHANT_ADMIN_TOKEN`` in this exchange's own environment is the fallback, and it is the
+    same variable name the merchant reads, so one value configures both sides. A merchant
+    address stated with no token available either way is refused at wiring time as well: a
+    creator that can only ever be answered ``401`` is a seam that looks bound and mints
+    nothing, which is the shape of defect this module exists to end.
 ``trust_url``
     The BASE address of the trust service — both of its doors: the ``POST /events`` every
     auction transition is appended to (T-150) and the ``GET /snapshot`` R12 is read from
@@ -319,7 +371,12 @@ from .auction.collect import (
     refusal_reason,
 )
 from .auction.ledger import InMemoryLedgerSink
-from .checkout.registry import registered_modes
+from .checkout.registry import (
+    DEFAULT_CHECKOUT_MODE,
+    UnknownCheckoutMode,
+    registered_modes,
+    resolve_provider,
+)
 from .checkout.sellers import StaticRegisteredDomains
 from .eligibility import ELIGIBILITY_STATUSES, StaticSellerEligibility
 from .eligibility.layered import LayeredSellerEligibility
@@ -345,16 +402,20 @@ __all__ = [
     "ANONYMOUS_PSEUDONYM_PREFIX",
     "DECLINE_REASON_HEADER",
     "DEFAULT_LEDGER_TIMEOUT_SECONDS",
+    "DEFAULT_MERCHANT_TIMEOUT_SECONDS",
     "DEFAULT_SOLICIT_TIMEOUT_SECONDS",
     "DEFAULT_TRUST_SNAPSHOT_TIMEOUT_SECONDS",
     "DEFAULT_TRUST_URL",
     "ENV_DEPLOYMENT",
     "ENV_DEPLOYMENT_JSON",
     "ELIGIBILITY_WORDS",
+    "ENV_MERCHANT_ADMIN_TOKEN",
+    "ENV_MERCHANT_URL",
     "ENV_TRUST_URL",
     "Deployment",
     "DeploymentConfigurationError",
     "HttpBidSolicitor",
+    "HttpMerchantCodeCreator",
     "HttpTrustLedgerSink",
     "HttpTrustSnapshot",
     "KEYRING_FILE_KEY",
@@ -365,8 +426,15 @@ __all__ = [
     "MAX_DEPLOYMENT_BYTES",
     "MAX_DEPLOYMENT_SELLERS",
     "MAX_KEYRING_BYTES",
+    "MAX_MERCHANT_REPLY_BYTES",
+    "MAX_MERCHANT_TOKEN_BYTES",
     "MAX_SOLICIT_WALL_CLOCK_SECONDS",
     "MAX_UNDELIVERED_LEDGER_EVENTS",
+    "MERCHANT_CODES_PATH",
+    "MERCHANT_TOKEN_FILE_KEY",
+    "MERCHANT_TOKEN_INLINE_KEY",
+    "MERCHANT_URL_KEY",
+    "MerchantCodeCreationRefused",
     "SellerRow",
     "TRUST_EVENTS_PATH",
     "TRUST_SNAPSHOT_PATH",
@@ -375,15 +443,20 @@ __all__ = [
     "TRUST_DEFERRED_ELIGIBILITY",
     "TrustBackedSellerEligibility",
     "TrustLedgerPublisher",
+    "bind_code_creator",
     "bind_ledger_sink",
     "bind_seller_eligibility",
     "bind_trust_snapshot_reader",
     "configure_exchange",
     "default_ledger_sink",
     "default_seller_eligibility",
+    "effective_checkout_mode",
     "ensure_configured",
+    "merchant_admin_token",
+    "merchant_codes_endpoint",
     "read_deployment",
     "read_external_bid_keyring",
+    "read_merchant_admin_token",
     "solicitation_profile",
     "trust_events_url",
     "trust_snapshot_endpoint",
@@ -466,6 +539,59 @@ KEYRING_INLINE_KEY = "external_bid_keyring"
 #: :func:`ensure_configured`), so a document naming a large unusable file is re-read on every
 #: request until it is fixed, and that is the case this ceiling is really about.
 MAX_KEYRING_BYTES = 1024 * 1024
+
+#: The merchant service's published code door, and the document/environment keys naming it.
+#:
+#: ``apps/merchant/svc/src/codes/routes.py`` serves ``POST /codes`` and
+#: ``packages/contracts/openapi/merchant.openapi.json`` pins the path; spelled once, here,
+#: because the exchange does not import the merchant's package (its image does not contain
+#: it) — the same arrangement every other cross-service constant in this module has.
+MERCHANT_CODES_PATH = "/codes"
+MERCHANT_URL_KEY = "merchant_url"
+ENV_MERCHANT_URL = "MERCHANT_URL"
+
+#: The document key naming the merchant bearer token's FILE, and the key that is refused.
+#:
+#: Two names, one suffix apart, for the reason :data:`KEYRING_INLINE_KEY` is refused beside
+#: :data:`KEYRING_FILE_KEY`: an operator's first instinct is to type the token into the
+#: document, and a composition root that silently ignored it would leave them believing the
+#: merchant was configured while every mint was answered ``401``.
+MERCHANT_TOKEN_FILE_KEY = "merchant_admin_token_file"
+MERCHANT_TOKEN_INLINE_KEY = "merchant_admin_token"
+
+#: The environment fallback for that token — the SAME variable the merchant itself reads
+#: (``apps/merchant/svc/src/install/routes.py``'s ``ADMIN_TOKEN_ENV``), so one value
+#: configures both sides of the door and the two can never hold different opinions about it.
+ENV_MERCHANT_ADMIN_TOKEN = "MERCHANT_ADMIN_TOKEN"
+
+#: How long ONE ``POST /codes`` may hold the accept request open.
+#:
+#: Longer than the trust reads because this call is not a lookup: the merchant reads the
+#: shop's live automatic-discount configuration from the Shopify Admin API and then issues the
+#: discount, so two round trips to Shopify sit inside it. Finite because a buyer is waiting,
+#: and because a merchant that has not answered in ten seconds is not going to.
+#:
+#: **What a timeout here cannot tell you**, said plainly rather than glossed: the merchant may
+#: already have minted. The exchange refuses the accept with no code, which is the right
+#: answer for the buyer, and the record of any live discount is on the merchant's own side —
+#: ``CodeLedger``'s ``code_created`` — which is where a reconciliation looks for orphans.
+DEFAULT_MERCHANT_TIMEOUT_SECONDS = 10.0
+
+#: The most bytes the merchant's ``POST /codes`` reply may occupy.
+#:
+#: The reply is the pinned contract's three keys — ``{code, permalink_url, expires_at}`` — so
+#: unlike the trust snapshot (whose size legitimately grows with the marketplace, which is why
+#: it is uncapped) this one has a fixed small shape that cannot grow with anything. A cap is
+#: therefore free of the "the day the marketplace outgrows it" hazard, and it bounds a read
+#: that happens on the unauthenticated accept path inside a 256 MiB container.
+MAX_MERCHANT_REPLY_BYTES = 64 * 1024
+
+#: The most bytes the merchant bearer token's file may occupy. Read once per process.
+#:
+#: A guard against a path pointing at something else — a log, a key bundle, a database dump —
+#: rather than against an adversary, in the same house style as :data:`MAX_KEYRING_BYTES`. A
+#: bearer token is tens of characters; four kilobytes is a very generous ceiling for one.
+MAX_MERCHANT_TOKEN_BYTES = 4096
 
 #: The wall-clock ceiling on ONE store's solicitation, from the request leaving to its last
 #: byte arriving.
@@ -578,6 +704,18 @@ class Deployment:
     #: two it does name for this module are the two deployment keys — so the document is the
     #: only knob that reaches the shipped container today.
     trust_url: str | None = None
+    #: Where this deployment's MERCHANT answers — the BASE url, not the ``/codes`` path.
+    #: ``None`` leaves :func:`merchant_codes_endpoint` to fall back to :data:`ENV_MERCHANT_URL`
+    #: and then to nothing at all: unlike :attr:`trust_url` there is no built-in default, so an
+    #: exchange whose checkout mode mints on the merchant and names none is refused rather than
+    #: pointed at a guess. See :func:`bind_code_creator`.
+    merchant_url: str | None = None
+    #: Path to the file holding the merchant's administrative bearer token, or ``None``.
+    #: A PATH and never the token, for the reason :attr:`external_bid_keyring_file` is one.
+    #: Read by :func:`read_merchant_admin_token` at bind time rather than here — a parsed
+    #: document is a description of a deployment, and reading a secret while validating one
+    #: would put it in the hands of every caller that only wanted to check the syntax.
+    merchant_admin_token_file: str | None = None
     #: Path to the file holding the external bid door's ``{signer_id: {key_id: secret}}``
     #: keyring, or ``None`` when this deployment states none and the door therefore admits
     #: nobody. A PATH and never the keys: this record carries no secret material, which is what
@@ -834,6 +972,20 @@ def parse_deployment(document: Any, *, source: str) -> Deployment:
                 f"emit, because that failure is swallowed by design and would be invisible"
             )
 
+    merchant_url = body.get(MERCHANT_URL_KEY)
+    if merchant_url is not None:
+        merchant_url = str(merchant_url).strip() or None
+        if merchant_url is not None and not merchant_url.lower().startswith(
+            ("http://", "https://")
+        ):
+            raise DeploymentConfigurationError(
+                f"{source}: {MERCHANT_URL_KEY} {merchant_url!r} is not an http(s) URL; this is "
+                f"the base address of the merchant service, whose {MERCHANT_CODES_PATH} door "
+                f"mints the single-use discount on the store (R3). Refused here rather than at "
+                f"the first accept, because that failure reaches the buyer as a refusal of the "
+                f"purchase rather than as a misconfiguration"
+            )
+
     return Deployment(
         source=source,
         sellers=sellers,
@@ -842,8 +994,42 @@ def parse_deployment(document: Any, *, source: str) -> Deployment:
         intent_clusters=_intent_clusters(body.get("intent_clusters"), source),
         catalog=_catalog(body.get("catalog"), source),
         trust_url=trust_url,
+        merchant_url=merchant_url,
+        merchant_admin_token_file=_merchant_token_file(body, source),
         external_bid_keyring_file=_keyring_file(body, source),
     )
+
+
+def _merchant_token_file(body: Mapping[str, Any], source: str) -> str | None:
+    """The path this document names the merchant's bearer token at, or ``None``.
+
+    Refuses an INLINE token first, and that refusal is the more important half — the same
+    shape, and the same reasoning, as :func:`_keyring_file`'s. A document carrying
+    ``{"merchant_admin_token": "..."}`` is an operator who has just typed a live administrative
+    credential into the file this module's header describes as the one that gets pasted around;
+    ignoring the key (the default for anything this parser does not read) would leave them
+    believing the merchant was configured while every mint came back ``401``.
+
+    The message quotes the key NAME and never the value.
+    """
+    if body.get(MERCHANT_TOKEN_INLINE_KEY) is not None:
+        raise DeploymentConfigurationError(
+            f"{source}: {MERCHANT_TOKEN_INLINE_KEY!r} is not a key this document may carry — a "
+            f"deployment document holds no secret material, because it is a plain JSON file "
+            f"that gets pasted around. State {MERCHANT_TOKEN_FILE_KEY!r} instead, naming a file "
+            f"that holds the bearer token and that only this service can read, or set "
+            f"{ENV_MERCHANT_ADMIN_TOKEN} in this exchange's environment"
+        )
+    stated = body.get(MERCHANT_TOKEN_FILE_KEY)
+    if stated is None:
+        return None
+    if not isinstance(stated, str) or not stated.strip():
+        raise DeploymentConfigurationError(
+            f"{source}: {MERCHANT_TOKEN_FILE_KEY} must be a non-empty path to the file holding "
+            f"this exchange's merchant bearer token, got {type(stated).__name__}. Omit the key "
+            f"entirely to take the token from {ENV_MERCHANT_ADMIN_TOKEN} instead"
+        )
+    return stated.strip()
 
 
 def _keyring_file(body: Mapping[str, Any], source: str) -> str | None:
@@ -1744,6 +1930,402 @@ def default_seller_eligibility(
 
 
 # =====================================================================================
+# The MERCHANT seam — R3's `POST /codes`, the door that mints on the STORE
+# =====================================================================================
+class MerchantCodeCreationRefused(RuntimeError):
+    """The merchant's ``POST /codes`` did not mint a code for this offer.
+
+    Raised by :class:`HttpMerchantCodeCreator` and caught by nothing in this module: it travels
+    out through :meth:`~exchange.checkout.providers.ShopifyCheckoutProvider.mint` and becomes
+    the accept's ``denial_reason``, which is the right place for it — the buyer is told the
+    checkout was refused, and the sentence names the merchant rather than the store.
+    """
+
+
+def merchant_codes_endpoint(
+    base_url: str | None = None, env: Mapping[str, str] | None = None
+) -> tuple[str | None, str]:
+    """``(url, source)`` for the merchant's code door, or ``(None, "")`` when none is known.
+
+    The precedence mirrors :func:`trust_snapshot_endpoint`'s — the document's
+    :data:`MERCHANT_URL_KEY`, then :data:`ENV_MERCHANT_URL` — and then **stops**. There is no
+    third rung, and the missing default is a decision rather than an omission: see the
+    ``merchant_url`` entry in the module header. An address nobody chose would turn a
+    deployment mistake into a per-accept connection error, which reaches the buyer as a
+    refusal of their purchase and reaches the operator as nothing at all.
+
+    A base url that already ends in :data:`MERCHANT_CODES_PATH` is accepted and not doubled,
+    because "the merchant's address" and "the merchant's code door" are the same string to
+    everyone except this function.
+    """
+    environ = os.environ if env is None else env
+
+    stated = str(base_url or "").strip()
+    source = SOURCE_STATED
+    if not stated:
+        stated = str(environ.get(ENV_MERCHANT_URL) or "").strip()
+        source = SOURCE_ENVIRONMENT
+    if not stated:
+        return None, ""
+
+    if not stated.lower().startswith(("http://", "https://")):
+        raise DeploymentConfigurationError(
+            f"the {ENV_MERCHANT_URL} environment variable is {stated!r}, which is not an "
+            f"http(s) URL; this is the base address of the merchant service, whose "
+            f"{MERCHANT_CODES_PATH} door mints the single-use discount on the store (R3)"
+        )
+
+    base = stated.rstrip("/")
+    if base.endswith(MERCHANT_CODES_PATH):
+        base = base[: -len(MERCHANT_CODES_PATH)]
+    return f"{base}{MERCHANT_CODES_PATH}", source
+
+
+def read_merchant_admin_token(path: str, *, source: str) -> str:
+    """The merchant bearer token ``path`` holds. Raises rather than degrading.
+
+    **Nothing here ever quotes the token** — not in a refusal, not in a length, not in an
+    exception's ``__str__``. The file's PATH and the failure's type are the whole diagnostic,
+    and they are what an operator can act on; the one value in this file is the one value that
+    must never reach a log or a 503 body.
+
+    A named-but-unusable token file is refused for the reason a named-but-unusable keyring is:
+    every tolerated failure here has the same symptom, and that symptom is the merchant
+    answering ``401`` to a correctly composed exchange — a sentence that names the deployment
+    nowhere. Trailing whitespace is stripped, because a token file written by ``echo`` ends in
+    a newline and a bearer header carrying one is a token that matches nothing.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DeploymentConfigurationError(
+            f"{source}: the merchant bearer token at {path} could not be read "
+            f"({exc.__class__.__name__}: {exc}). A named-but-unreadable token is a "
+            f"misconfiguration, not an exchange that mints nowhere, so it is refused rather "
+            f"than answered `401` by the merchant on every accept"
+        ) from exc
+
+    if len(text) > MAX_MERCHANT_TOKEN_BYTES:
+        raise DeploymentConfigurationError(
+            f"{source}: the merchant bearer token file at {path} is {len(text)} bytes; this "
+            f"exchange reads at most {MAX_MERCHANT_TOKEN_BYTES}. A bearer token is tens of "
+            f"characters, so a file this size is a path pointing at something else"
+        )
+
+    token = text.strip()
+    if not token:
+        raise DeploymentConfigurationError(
+            f"{source}: the merchant bearer token file at {path} is empty. An empty token is "
+            f"not 'no token configured' — it is a file somebody meant to fill in, and the "
+            f"merchant would refuse every mint it was sent"
+        )
+    return token
+
+
+def merchant_admin_token(
+    deployment: Deployment | None, env: Mapping[str, str] | None = None
+) -> str | None:
+    """The bearer token this exchange presents to the merchant, or ``None`` when it has none.
+
+    The document's :data:`MERCHANT_TOKEN_FILE_KEY` outranks :data:`ENV_MERCHANT_ADMIN_TOKEN`,
+    for the reason every other key in this module outranks its environment fallback: the
+    document is the deployment's own statement and the variable is the shipped default.
+    """
+    environ = os.environ if env is None else env
+    stated = None if deployment is None else deployment.merchant_admin_token_file
+    if stated:
+        source = "the deployment document" if deployment is None else deployment.source
+        return read_merchant_admin_token(stated, source=source)
+    return str(environ.get(ENV_MERCHANT_ADMIN_TOKEN) or "").strip() or None
+
+
+class HttpMerchantCodeCreator:
+    """The exchange's client for the merchant's published ``POST /codes`` (R3).
+
+    This is the outbound half of the join R3 names, and it lives here for the reason
+    :class:`HttpBidSolicitor` and :class:`HttpTrustSnapshot` do: this module is where this
+    service's outbound clients live, and ``apps/exchange/src/checkout/`` must stay
+    transport-free and merchant-free — ``test_the_checkout_package_imports_nothing_shopify_or_
+    merchant_shaped`` is that property, and it is what makes D45's simulated path reachable
+    with no Shopify install lane in the tree at all.
+
+    It exposes exactly ``create_code(store_id, offer)``, which is the call shape
+    :class:`~exchange.checkout.providers.ShopifyCheckoutProvider` prefers, and it returns the
+    merchant's reply **unflattened** — the adapter reads ``code`` and ``permalink_url`` off it
+    and the contracts boundary judges the code, so inventing a shape here would put a second
+    reading between the merchant's answer and the one that is graded.
+
+    Failures are :class:`MerchantCodeCreationRefused`, and every message is built from three
+    things and nothing else: the door's url, the store id, and the merchant's own
+    machine-readable ``error`` slug. **The merchant's ``detail`` is deliberately dropped.**
+    That field is ``str(exc)`` from the merchant's own refusals, those refusals are raised from
+    inside its mint, and this sentence becomes the accept's ``denial_reason`` — republished in
+    the 409 and persisted in the refusal event. A live discount code has no business in either,
+    and "probably no code is in that string" is not the standard a publication path is held to.
+    """
+
+    def __init__(
+        self,
+        url: str,
+        token: str,
+        *,
+        timeout: float = DEFAULT_MERCHANT_TIMEOUT_SECONDS,
+        client: Any | None = None,
+    ) -> None:
+        self.url = str(url)
+        self._token = str(token)
+        self._timeout = float(timeout)
+        self._client = client
+
+    def __repr__(self) -> str:
+        # Never the token: this object hangs off `app.state`, and `app.state` is rendered by
+        # more debug surfaces than anyone can enumerate.
+        return f"{type(self).__name__}({self.url!r})"
+
+    def create_code(self, store_id: str, offer: Any) -> Mapping[str, Any]:
+        """Ask the merchant to mint one single-use discount on ``store_id``'s own shop.
+
+        Returns the merchant's 201 body — the pinned ``{code, permalink_url, expires_at}``.
+
+        Raises:
+            MerchantCodeCreationRefused: the merchant could not be reached, answered anything
+                but ``201``, or answered a ``201`` this exchange cannot read as a record.
+        """
+        payload = {
+            "store_id": str(store_id),
+            "offer": dict(offer) if isinstance(offer, Mapping) else offer,
+        }
+        headers = {
+            "authorization": f"Bearer {self._token}",
+            "accept": "application/json",
+        }
+
+        try:
+            with self._http_client().stream(
+                "POST", self.url, json=payload, headers=headers, timeout=self._timeout
+            ) as response:
+                status = int(response.status_code)
+                body = bytearray()
+                for chunk in response.iter_bytes():
+                    body.extend(chunk)
+                    if len(body) > MAX_MERCHANT_REPLY_BYTES:
+                        # Stop READING, not merely stop using. Leaving the block closes the
+                        # connection; a reply this large is not the pinned three-key record,
+                        # whatever else it is.
+                        raise MerchantCodeCreationRefused(
+                            f"the merchant at {self.url} answered more than "
+                            f"{MAX_MERCHANT_REPLY_BYTES} bytes for store {str(store_id)!r}; "
+                            f"POST {MERCHANT_CODES_PATH} answers a three-key record, so this "
+                            f"is not one and no code can be read out of it"
+                        )
+        except MerchantCodeCreationRefused:
+            raise
+        except Exception as exc:
+            # `describe_exception` rather than `{exc}`: a transport failure's message carries
+            # addresses and default reprs (T-264), and this sentence is published to the buyer.
+            raise MerchantCodeCreationRefused(
+                f"the merchant at {self.url} could not be reached to mint a code for store "
+                f"{str(store_id)!r} ({describe_exception(exc)}); no permalink is returned. If "
+                f"the merchant had already minted, its own code_created ledger record is where "
+                f"that discount is recoverable from — this exchange never saw it"
+            ) from exc
+
+        if status != 201:
+            raise MerchantCodeCreationRefused(
+                f"the merchant at {self.url} answered HTTP {status} "
+                f"({self._error_slug(bytes(body))}) for store {str(store_id)!r}; no code was "
+                f"created. The merchant's own detail is deliberately not repeated here — it is "
+                f"written by the mint and this sentence is published to the buyer"
+            )
+
+        try:
+            document = json.loads(bytes(body))
+        except Exception as exc:  # noqa: BLE001 - RecursionError is not a ValueError
+            raise MerchantCodeCreationRefused(
+                f"the merchant at {self.url} answered a 201 that is not valid JSON "
+                f"({type(exc).__name__}) for store {str(store_id)!r}"
+            ) from exc
+        if not isinstance(document, Mapping):
+            raise MerchantCodeCreationRefused(
+                f"the merchant at {self.url} answered a 201 carrying a "
+                f"{type(document).__name__} rather than a code record, for store "
+                f"{str(store_id)!r}"
+            )
+        return dict(document)
+
+    @staticmethod
+    def _error_slug(body: bytes) -> str:
+        """The merchant's machine-readable ``error`` word, and nothing else it said.
+
+        A short kebab-case slug — ``combines-with-conflict``, ``shop-not-installed``,
+        ``unauthorized``, ``admin-api-not-configured`` — is the half of a merchant refusal an
+        operator acts on, it is drawn from a fixed vocabulary in
+        ``apps/merchant/svc/src/codes/routes.py``, and it carries no offer field and no code.
+        Anything that is not such a word is reported as absent rather than quoted.
+        """
+        try:
+            document = json.loads(body)
+            slug = document.get("error") if isinstance(document, Mapping) else None
+        except Exception:  # noqa: BLE001 - an unreadable body is simply not a slug
+            return "no machine-readable reason"
+        if not isinstance(slug, str) or not slug.strip():
+            return "no machine-readable reason"
+        word = slug.strip()
+        if len(word) > 64 or not word.replace("-", "").replace("_", "").isalnum():
+            return "no machine-readable reason"
+        return word
+
+    def _http_client(self) -> Any:
+        """One pooled client for this creator, built on first use.
+
+        Deferred for the reason :meth:`HttpBidSolicitor._http_client`'s is: constructing a
+        creator — which a config check or a test does — must open no sockets.
+        """
+        if self._client is None:
+            import httpx  # noqa: PLC0415 — see the docstring
+
+            self._client = httpx.Client(timeout=self._timeout)
+        return self._client
+
+
+def effective_checkout_mode(
+    app: Any, deployment: Deployment | None, env: Mapping[str, str] | None = None
+) -> str:
+    """The mode this app will actually resolve a provider for, in the route's own precedence.
+
+    ``app.state.checkout_mode`` first (what :func:`configure_accept` bound), then the
+    document's ``checkout_mode``, then :data:`CHECKOUT_MODE_ENV`, then
+    :data:`~exchange.checkout.registry.DEFAULT_CHECKOUT_MODE`. That is exactly
+    ``accept/routes.py::_checkout_mode`` plus the one rung this module owns, and it is spelled
+    against the route's own constant rather than a second ``"CHECKOUT_MODE"`` literal — two
+    spellings of "which mode is this exchange in" is how the composition root ends up refusing
+    a deployment the route would have served, or composing one it would not.
+    """
+    from .accept.routes import CHECKOUT_MODE_ENV  # noqa: PLC0415 — see the import note
+
+    environ = os.environ if env is None else env
+    configured = getattr(app.state, "checkout_mode", None)
+    if configured:
+        return str(configured)
+    if deployment is not None and deployment.checkout_mode:
+        return str(deployment.checkout_mode)
+    return str(environ.get(CHECKOUT_MODE_ENV) or DEFAULT_CHECKOUT_MODE)
+
+
+def _mode_mints_on_the_merchant(mode: str) -> bool:
+    """Whether the provider for ``mode`` needs the injected merchant client.
+
+    Asked of the REGISTRY rather than of a list of spellings kept here. A second list would
+    stop agreeing with :func:`~exchange.checkout.registry.register_provider` the first time a
+    deployment adds a provider, and the disagreement is silent in the dangerous direction: a
+    mode this module has never heard of would compose with no creator and refuse every accept.
+
+    An unregistered mode answers ``False``, because it is not this function's refusal to make:
+    the document's ``checkout_mode`` is refused at parse, and an unregistered
+    ``CHECKOUT_MODE`` variable is a 503 from the accept route's own
+    :class:`~exchange.checkout.registry.UnknownCheckoutMode` handler, which names the
+    registered modes. Raising a second, differently worded refusal here would only hide that.
+    """
+    try:
+        provider = resolve_provider(mode)
+    except UnknownCheckoutMode:
+        return False
+    return bool(getattr(provider, "requires_code_creator", False))
+
+
+def bind_code_creator(
+    app: Any, deployment: Deployment | None, env: Mapping[str, str] | None = None
+) -> bool:
+    """Bind the merchant ``POST /codes`` client unless this app already has one (R3).
+
+    **This is the seam R3 was missing.** ``accept()`` has always taken a ``code_creator`` and
+    :func:`~exchange.accept.routes.configure_accept` has always bound one — and nothing in this
+    repository ever called it, so ``app.state.code_creator`` was ``None`` in every shipped
+    deployment. The measured consequence is in the module header: a deployment stating
+    ``"checkout_mode": "shopify"`` refused every accept it served, and the merchant's
+    ``combinesWith`` check was unreachable from any composed exchange.
+
+    The ladder, and what each rung refuses:
+
+    1. **Something already bound one** — a test, or a deployment that called
+       ``configure_accept`` itself. Kept, untouched; this module never overwrites wiring.
+    2. **An address is known** (:func:`merchant_codes_endpoint`) — bind. The token must then
+       resolve (:func:`merchant_admin_token`) or this **raises**: the merchant refuses a
+       tokenless caller by design, so a creator bound without one is a seam that looks wired
+       and mints nothing, which is the exact shape of defect this module exists to end.
+    3. **No address, and this app's mode mints locally** (``redirect`` — D45's required
+       starting implementation) — bind nothing and return ``False``. That is the starting
+       slice, and it must keep running with no merchant, no Shopify and no network.
+    4. **No address, and this app's mode mints on the merchant** — **raise**, so both served
+       routes answer a 503 naming :data:`MERCHANT_URL_KEY`.
+
+    Rung 4 is the one worth being explicit about, because there is a tempting third option and
+    it is the worst of the three. Falling back to a local mint would let the accept SUCCEED:
+    the buyer would be handed a real-looking ``PSX-`` code and a permalink, and the store — who
+    was never asked and holds no such discount — would reject it at the till. A refusal costs
+    that buyer the purchase; a silent local mint costs them the purchase *and* tells them it
+    worked, and tells the operator nothing at all.
+
+    Returns whether it bound.
+    """
+    from .accept.routes import configure_accept  # noqa: PLC0415 — see the import note
+
+    if getattr(app.state, "code_creator", None) is not None:
+        return False
+
+    stated = "the deployment document" if deployment is None else deployment.source
+    url, source = merchant_codes_endpoint(
+        None if deployment is None else deployment.merchant_url, env
+    )
+
+    if url is None:
+        mode = effective_checkout_mode(app, deployment, env)
+        if not _mode_mints_on_the_merchant(mode):
+            return False
+        raise DeploymentConfigurationError(
+            f"{stated}: checkout_mode {mode!r} mints the discount code on the merchant's own "
+            f"store, through its POST {MERCHANT_CODES_PATH} door, and this exchange has been "
+            f"given no address for it — so every accept it serves is refused "
+            f"`checkout_refused`. State {MERCHANT_URL_KEY!r} in the deployment document (or "
+            f"set {ENV_MERCHANT_URL}), and give it the merchant's bearer token through "
+            f"{MERCHANT_TOKEN_FILE_KEY!r} (or {ENV_MERCHANT_ADMIN_TOKEN}). Refused rather than "
+            f"minted locally: a code this exchange invents is one the store has never heard "
+            f"of, so the buyer would be redirected to a checkout that rejects it"
+        )
+
+    token = merchant_admin_token(deployment, env)
+    if not token:
+        raise DeploymentConfigurationError(
+            f"{stated}: this exchange is pointed at the merchant's POST {MERCHANT_CODES_PATH} "
+            f"door at {url} and has no bearer token for it. That door creates real spendable "
+            f"discounts, so it refuses every caller who presents none — an exchange bound "
+            f"without one is a seam that looks wired and mints nothing. State "
+            f"{MERCHANT_TOKEN_FILE_KEY!r} (a file holding the token, never the token itself), "
+            f"or set {ENV_MERCHANT_ADMIN_TOKEN} in this exchange's environment"
+        )
+
+    configure_accept(app, code_creator=HttpMerchantCodeCreator(url, token))
+    _log.info(
+        "exchange checkout: discount codes will be created on the store by the merchant at %s "
+        "(from %s). A merchant that refuses or cannot be reached refuses the accept; no code "
+        "is ever minted locally in a mode that mints on the merchant",
+        url,
+        _MERCHANT_SOURCES.get(source, source),
+    )
+    return True
+
+
+#: How the wiring-time line names where the merchant's address came from. The twin of
+#: :data:`_ENDPOINT_SOURCES`, and separate from it because that one names ``trust_url`` in as
+#: many words — one mapping for two doors would print the wrong key at exactly the moment an
+#: operator is reading the line to find out which key to set.
+_MERCHANT_SOURCES: Mapping[str, str] = {
+    SOURCE_STATED: f"the deployment document's {MERCHANT_URL_KEY}",
+    SOURCE_ENVIRONMENT: f"the {ENV_MERCHANT_URL} environment variable",
+}
+
+
+# =====================================================================================
 # Binding
 # =====================================================================================
 def bind_eligibility(
@@ -1978,6 +2560,14 @@ def configure_exchange(
         configure_accept(app, checkout_mode=deployment.checkout_mode)
         bound.append("checkout_mode")
 
+    # R3's missing wire, and it runs AFTER the mode is on `app.state` on purpose:
+    # `effective_checkout_mode` reads that key first, so binding the mode above is what lets
+    # this decide whether the deployment needs a merchant at all. Nothing is bound in the
+    # starting slice (`redirect` mints locally, D45); a mode that mints on the merchant with no
+    # address configured raises here and both routes answer 503.
+    if bind_code_creator(app, deployment, env):
+        bound.append("code_creator")
+
     if unset("external_bid_queue"):
         # The signed external door's verification queue (R8/R18). Bound with NO document key
         # required, for the reason the ledger sink above is: the door refuses
@@ -2043,6 +2633,15 @@ def ensure_configured(app: Any, env: Mapping[str, str] | None = None) -> tuple[s
         # and a denial now names the trust service instead of the double. `bind_eligibility` is
         # idempotent, so this costs one bind and not one per request.
         bind_eligibility(app, None, env)
+        # And an exchange nobody configured still MINTS WHERE IT SAYS IT DOES. `CHECKOUT_MODE`
+        # is a plain environment variable that `accept/routes.py` reads per request, so an
+        # exchange with no document at all can still be running a mode that mints on the
+        # merchant — and `MERCHANT_URL`/`MERCHANT_ADMIN_TOKEN` are enough to compose one. With
+        # neither, this raises and both routes answer a 503 naming the key, instead of the
+        # per-accept `checkout_refused` a buyer used to be handed. `bind_code_creator` is
+        # idempotent and returns immediately once something is bound, so this costs one bind
+        # and not one per request.
+        bind_code_creator(app, None, env)
         # Deliberately NOT cached. "No deployment configured" is two `os.environ` lookups to
         # re-establish, and caching it meant a document that appeared after the first request
         # was ignored for the life of the process — a real trap for an operator who starts the

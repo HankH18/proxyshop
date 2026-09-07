@@ -232,6 +232,13 @@ class ShopifyCheckoutProvider(CheckoutProvider):
 
     name = "shopify"
 
+    #: This adapter mints on the MERCHANT's side, so a deployment that selects it and wires no
+    #: client refuses every accept it serves. Declared here rather than inferred from the mode
+    #: spelling, so :func:`exchange.composition.bind_code_creator` refuses that deployment at
+    #: wiring time with a sentence naming what to set — see :attr:`CheckoutProvider
+    #: .requires_code_creator`, and :meth:`mint` below for the refusal it replaces.
+    requires_code_creator = True
+
     def mint(self, request: CheckoutRequest) -> MintedCheckout:
         creator = request.code_creator
         if creator is None:

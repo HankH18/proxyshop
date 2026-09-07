@@ -67,6 +67,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -850,9 +851,16 @@ def test_the_real_store_agent_and_the_real_exchange_complete_a_purchase(
             / "store-alpha.approved.json"
         ).read_text(encoding="utf-8")
     )
+    # R7: the shipped fixture's envelope is `activation: "shadow"`, and since the kill switch
+    # was wired a shadow store correctly answers 204 and serves no bid. This test asserts that
+    # an ACTIVATED store completes a purchase, so it activates its own copy rather than reading
+    # the merchant's approval as if it were something else. The fixture is left alone: other
+    # tests read it precisely BECAUSE it is shadow, and a store agent that bids without an
+    # activated envelope is the defect R7 exists to prevent.
+    envelope = {**envelope_fixture["envelope"], "activation": "active"}
     context = {
         "store_id": REAL_STORE_ID,
-        "envelope": envelope_fixture["envelope"],
+        "envelope": envelope,
         "catalog": envelope_fixture["catalog"],
         "live_state": {REAL_PRODUCT: {"in_stock": True, "units_left": 7}},
         "learned_policy": None,
@@ -2498,3 +2506,543 @@ def test_the_reference_sellers_own_pitch_is_admitted_and_queued_as_unverified(
     assert len(item["submission"]["claims"]) == len(claims), item["submission"]["claims"]
     assert item["unverified_claim_indexes"] == list(range(len(claims))), item
     assert item["verified"] is False and item["verification_status"] == "unverified", item
+
+
+# =====================================================================================
+# R3 — the wire from a COMPOSED exchange to the merchant's code-creation door
+#
+# R3 says the system creates a single-use discount code **on that store**. The exchange has
+# always been able to: `accept()` takes a `code_creator`, `configure_accept` binds one, and
+# `ShopifyCheckoutProvider` delegates to it. Nothing in this repository ever called that
+# seam. So `app.state.code_creator` was `None` in every shipped deployment, and a document
+# stating `"checkout_mode": "shopify"` — a mode `parse_deployment` validates as registered —
+# served, measured on this tree over a real socket before the fix:
+#
+#     POST /auctions/{id}/accept -> 409
+#     {"accepted": false, "denial_reason": "checkout_refused: CheckoutCreatorError: shopify
+#       checkout needs an injected code creator (the merchant POST /codes client); accept()
+#       was called without one"}
+#
+# The consequence beyond the missing code is that `apps/merchant/svc/src/codes/combines.py`
+# — the ONLY place a discount's `combinesWith` is checked against the shop's live automatic
+# discounts — was unreachable from any composed exchange. The first test below reaches it.
+#
+# Everything here is real except Shopify, which does not exist: a real `merchant_svc` app on
+# its own loopback port, its real `POST /codes` route, its real bearer-token gate, its real
+# mint, its real ledger. The Admin GraphQL client is the one substitution, and it is the one
+# that cannot be anything else.
+# =====================================================================================
+
+#: The store this section trades with. The merchant derives the shop host from the STORE id
+#: (`shop_domain_for`), so a store the merchant can mint on is one whose registered domain is
+#: `<store_id>.myshopify.com` — which is also what its bid's `checkout_url` must be on, or the
+#: exchange's own C10 domain check refuses the permalink before the merchant is ever asked.
+MERCHANT_STORE = "s1"
+MERCHANT_SHOP = f"{MERCHANT_STORE}.myshopify.com"
+
+#: The bearer token both sides of `POST /codes` hold. A dev value; it is never asserted on,
+#: only presented — what is asserted is that a caller without one mints nothing.
+MERCHANT_TOKEN = "a-merchant-admin-token-for-this-test"
+
+#: A shop whose automatic discounts combine with everything, and one whose combine with
+#: nothing. The second is what makes `combines.py` observable from this side.
+PERMISSIVE_SHOP: dict[str, Any] = {
+    "combinesWith": {"orderDiscounts": True, "productDiscounts": True, "shippingDiscounts": True}
+}
+CONFLICTING_SHOP: dict[str, Any] = {
+    "combinesWith": {
+        "orderDiscounts": False,
+        "productDiscounts": False,
+        "shippingDiscounts": False,
+    },
+    "hasActiveAutomaticDiscount": True,
+    "automaticDiscounts": [{"id": "gid://shopify/DiscountAutomaticNode/9", "title": "sitewide"}],
+}
+
+
+class ShopifyAdminDouble:
+    """The Shopify Admin GraphQL API, which is the one thing in this section that cannot be real.
+
+    It answers only what a real Admin API answers — the shop's active automatic discounts, and
+    the `discountCodeBasicCreate` mutation — so the merchant's own readers, its combine check
+    and its mint all run unchanged. Every mutation it is sent is recorded, and that recording
+    is the merchant-side proof: a code in `basic_inputs()` is a code the merchant asked Shopify
+    to create, not one the exchange minted for itself and reported.
+    """
+
+    def __init__(self, shop: dict[str, Any] | None = None) -> None:
+        self.shop = PERMISSIVE_SHOP if shop is None else shop
+        self.calls: list[tuple[str, Any]] = []
+
+    def execute(self, document: str, variables: Any = None) -> dict[str, Any]:
+        self.calls.append((document, variables))
+        if "ShopDiscountConfiguration" in document:
+            return {"data": dict(self.shop)}
+        if "discountCodeBasicCreate" in document:
+            return {
+                "data": {
+                    "discountCodeBasicCreate": {
+                        "codeDiscountNode": {"id": "gid://shopify/DiscountCodeNode/1"},
+                        "userErrors": [],
+                    }
+                }
+            }
+        return {"data": {}}
+
+    def basic_inputs(self) -> list[dict[str, Any]]:
+        """The `basicCodeDiscount` input of every mutation, in order — the codes Shopify saw."""
+        return [
+            dict(variables["basicCodeDiscount"])
+            for document, variables in self.calls
+            if "discountCodeBasicCreate" in document
+        ]
+
+
+def _merchant_store_agent() -> FastAPI:
+    """A real store agent for the one myshopify store, bidding an offer the merchant can mint.
+
+    The offer carries the two fields the merchant's mint needs and `_store_agent_app`'s does
+    not: a `discount` (the merchant refuses an offer that promises none — a discount code that
+    discounts nothing is not worth minting) and a `variant_ref` (a cart permalink is
+    variant-scoped, D25). Both are published `Offer` fields and both survive the exchange's own
+    `RECORDED_OFFER_FIELDS` whitelist, which is what lets them reach `POST /codes` at all.
+    """
+    app = FastAPI(title="store-agent-myshopify")
+
+    @app.post(f"/{MERCHANT_STORE}/v1/bid-requests")
+    def door(body: dict[str, Any]) -> JSONResponse:
+        return JSONResponse(
+            status_code=200,
+            content={
+                "auction_id": str(body.get("auction_id") or ""),
+                "store_id": MERCHANT_STORE,
+                "offer": {
+                    "product_ref": "gid://shopify/Product/9",
+                    "variant_ref": "gid://shopify/ProductVariant/1001",
+                    "unit_price": 90.0,
+                    "currency": "USD",
+                    "discount": {"type": "percentage", "value": 10.0},
+                    "commitments": [],
+                    "total_price": 90.0,
+                    "expires_at": "2999-01-01T00:00:00Z",
+                    "checkout_url": f"https://{MERCHANT_SHOP}/cart/1001:1",
+                },
+                "claims": [],
+                "message": None,
+                "agent_version": "store-agent-double/1.0.0",
+                "signature": None,
+                "schema_version": "1.0.0",
+            },
+        )
+
+    return app
+
+
+@contextmanager
+def _served_merchant(
+    monkeypatch: pytest.MonkeyPatch, *, shop: dict[str, Any] | None = None
+) -> Iterator[tuple[str, ShopifyAdminDouble, Any]]:
+    """The REAL merchant service on its own loopback port, one Shopify short of production.
+
+    What is real: `merchant_svc.main.create_app()`, its `POST /codes` route, the bearer-token
+    gate that refuses every caller until `MERCHANT_ADMIN_TOKEN` is set, the offline-token store
+    that decides whether this app is installed on the shop, `create_code`, `combines.py` and
+    the `CodeLedger` a merchant-side auditor reads.
+
+    What is not: the Shopify Admin API. `admin_client_for` is substituted, which is the single
+    seam between this test and a live myshopify.com account.
+
+    Yields ``(base_url, admin_double, code_ledger)``.
+    """
+    from merchant_svc.codes import routes as codes_routes  # noqa: PLC0415
+    from merchant_svc.codes.ledger import CODE_LEDGER  # noqa: PLC0415
+    from merchant_svc.codes.redemption import REDEMPTIONS  # noqa: PLC0415
+    from merchant_svc.install.routes import ADMIN_TOKEN_ENV  # noqa: PLC0415
+    from merchant_svc.install.tokens import TOKENS  # noqa: PLC0415
+    from merchant_svc.main import create_app as create_merchant  # noqa: PLC0415
+
+    admin = ShopifyAdminDouble(shop)
+    monkeypatch.setenv(ADMIN_TOKEN_ENV, MERCHANT_TOKEN)
+    monkeypatch.setattr(
+        codes_routes, "admin_client_for", lambda store_id, offer, **kwargs: admin, raising=True
+    )
+    TOKENS.save(MERCHANT_SHOP, "shpat-offline-token-for-this-test")
+    REDEMPTIONS.clear()
+    CODE_LEDGER.clear()
+    try:
+        with serve(create_merchant()) as url:
+            yield url, admin, CODE_LEDGER
+    finally:
+        # Process-wide state, emptied afterwards as well as before: a test that leaves a code
+        # in the register changes what the NEXT test measures.
+        TOKENS.forget(MERCHANT_SHOP)
+        REDEMPTIONS.clear()
+        CODE_LEDGER.clear()
+
+
+def _merchant_deployment(
+    agent_url: str,
+    *,
+    merchant_url: str | None,
+    token_file: Path | None,
+    checkout_mode: str = "shopify",
+) -> dict[str, Any]:
+    """The document a person writes to deploy an exchange that mints on the merchant."""
+    document: dict[str, Any] = {
+        "sellers": [
+            {
+                "store_id": MERCHANT_STORE,
+                "eligibility": "eligible",
+                "registered_domain": MERCHANT_SHOP,
+                "bid_endpoint": f"{agent_url}/{MERCHANT_STORE}/v1/bid-requests",
+            }
+        ],
+        "trust_snapshot": {
+            "stores": {
+                MERCHANT_STORE: {"store_id": MERCHANT_STORE, "blacklisted": False, "score": 0.8}
+            }
+        },
+        "checkout_mode": checkout_mode,
+    }
+    if merchant_url is not None:
+        document["merchant_url"] = merchant_url
+    if token_file is not None:
+        document["merchant_admin_token_file"] = str(token_file)
+    return document
+
+
+def _token_file(tmp_path: Path) -> Path:
+    """The mounted secret: the bearer token, and nothing else.
+
+    Written with a trailing newline on purpose — that is what `echo > token` produces, and a
+    bearer header carrying one matches nothing.
+    """
+    path = tmp_path / "merchant-admin-token"
+    path.write_text(f"{MERCHANT_TOKEN}\n", encoding="utf-8")
+    return path
+
+
+@contextmanager
+def _exchange_on(document: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """`served_exchange()` configured by `document`. Nothing else is done to the app."""
+    path = tmp_path / "deployment.json"
+    path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+    monkeypatch.setenv(ENV_DEPLOYMENT, str(path))
+    monkeypatch.delenv(ENV_DEPLOYMENT_JSON, raising=False)
+    with served_exchange() as client:
+        yield client
+
+
+@pytest.fixture(scope="module")
+def merchant_agent_url() -> Iterator[str]:
+    """The myshopify store's agent, on a real loopback port (D40)."""
+    with serve(_merchant_store_agent()) as url:
+        yield url
+
+
+def _win_one_auction(client: httpx.Client) -> tuple[str, str]:
+    """Open an auction the one rostered store bids in, and return `(auction_id, bid_ref)`."""
+    opened = client.post(
+        "/auctions",
+        json={
+            "intent": INTENT,
+            "profile": {"pseudonym": "psn-r3-merchant", "buckets": {}},
+            "roster": [
+                {
+                    "store_id": MERCHANT_STORE,
+                    "tier": 1,
+                    "product_ref": "gid://shopify/Product/9",
+                    "list_price": 100.0,
+                    "max_discount_pct": 20.0,
+                }
+            ],
+        },
+    )
+    assert opened.status_code == 201, f"POST /auctions -> {opened.status_code}: {opened.text}"
+    body = opened.json()
+    slots = body.get("shortlist", {}).get("slots", [])
+    assert slots, f"the configured exchange shortlisted nobody: {body}"
+    return str(body["auction_id"]), str(slots[0]["bid_ref"])
+
+
+def test_a_composed_exchange_creates_the_discount_code_on_the_real_merchant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None, merchant_agent_url: str
+) -> None:
+    """R3, end to end and over real sockets: the store's own account holds the code.
+
+    The assertion that matters is the merchant-side one. An exchange that returned a code and
+    a permalink would satisfy a test written against its own response while the store had
+    never heard of the discount — which is exactly the state this repository was in, and which
+    a buyer discovers at the till. So the proof is `basic_inputs()`: the
+    `discountCodeBasicCreate` the MERCHANT sent for that code, with the single-use limit R3
+    requires, plus the merchant's own `code_created` ledger record.
+    """
+    with _served_merchant(monkeypatch) as (merchant_url, admin, ledger):
+        document = _merchant_deployment(
+            merchant_agent_url, merchant_url=merchant_url, token_file=_token_file(tmp_path)
+        )
+        with _exchange_on(document, tmp_path, monkeypatch) as client:
+            auction_id, bid_ref = _win_one_auction(client)
+            accepted = client.post(f"/auctions/{auction_id}/accept", json={"bid_ref": bid_ref})
+
+        assert accepted.status_code == 200, (
+            f"POST /auctions/{{id}}/accept -> {accepted.status_code}: {accepted.text}"
+        )
+        body = accepted.json()
+        code = str(body["code"])
+
+        minted = admin.basic_inputs()
+        assert len(minted) == 1, (
+            f"the merchant asked Shopify to create {len(minted)} discount(s) for one accept; "
+            f"R3 is one single-use code per accepted offer: {minted}"
+        )
+        assert minted[0]["code"] == code, (
+            f"the exchange returned {code!r} and the merchant created {minted[0]['code']!r}. A "
+            f"code the store never heard of is a redirect to a checkout that rejects it"
+        )
+        assert minted[0]["usageLimit"] == 1, minted[0]
+
+        kinds = [event.kind.value for event in ledger.events()]
+        assert kinds == ["code_created"], (
+            f"the merchant's own ledger holds {kinds} for this accept; a discount with no "
+            f"code_created record is one nobody can revoke"
+        )
+        assert ledger.events()[0].payload["code"] == code
+
+        # ...and the buyer is sent to the store's registered host carrying that code (D22/C10).
+        permalink = str(body["permalink_url"])
+        assert urlsplit(permalink).hostname == MERCHANT_SHOP, permalink
+        assert code in permalink, permalink
+
+
+def test_a_shop_whose_discounts_refuse_to_combine_mints_nothing_and_says_which(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None, merchant_agent_url: str
+) -> None:
+    """`combines.py` was unreachable from every composed exchange; this drives it over a socket.
+
+    R3 names `combinesWith` validation in the same breath as creating the code, and the check
+    exists — `apps/merchant/svc/src/codes/combines.py`. It had no caller a deployment could
+    reach, because no composed exchange ever called `POST /codes` at all. The shop below runs a
+    sitewide automatic discount that combines with nothing, which is a real and recurring
+    property of a real store's configuration.
+
+    The refusal must arrive with **nothing minted**: a conflict discovered after the mutation
+    is a live discount the shopper cannot combine and the merchant did not agree to.
+    """
+    with _served_merchant(monkeypatch, shop=CONFLICTING_SHOP) as (merchant_url, admin, ledger):
+        document = _merchant_deployment(
+            merchant_agent_url, merchant_url=merchant_url, token_file=_token_file(tmp_path)
+        )
+        with _exchange_on(document, tmp_path, monkeypatch) as client:
+            auction_id, bid_ref = _win_one_auction(client)
+            refused = client.post(f"/auctions/{auction_id}/accept", json={"bid_ref": bid_ref})
+
+        assert refused.status_code == 409, (
+            f"a shop-configuration conflict is a decision about this offer, so it is a denial "
+            f"rather than a 503; got {refused.status_code}: {refused.text}"
+        )
+        reason = str(refused.json()["denial_reason"])
+        assert "combines-with-conflict" in reason, (
+            f"the denial does not name the merchant's own machine-readable reason: {reason!r}"
+        )
+        assert admin.basic_inputs() == [], (
+            f"a discount was created for an offer the shop's own configuration refuses: "
+            f"{admin.basic_inputs()}"
+        )
+        # The conflict IS recorded, on the merchant's side, as the published `offer_integrity`
+        # event — a refusal nobody records is a refusal nobody can count.
+        assert [event.kind.value for event in ledger.events()] == ["offer_integrity"], [
+            event.kind.value for event in ledger.events()
+        ]
+
+
+def test_the_starting_slice_still_mints_locally_and_never_asks_the_merchant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None, merchant_agent_url: str
+) -> None:
+    """The positive control, and the D45 guarantee this ticket was forbidden to regress.
+
+    `redirect` is the REQUIRED starting implementation: it mints locally so the whole accept
+    path runs with no Shopify, no merchant app and no injected client. This deployment names a
+    merchant anyway — the operator has one — and the accept must still complete without asking
+    it for anything. A fix that made `redirect` call `POST /codes` would close R3's hole and
+    break every demonstration in the repository, which run exactly this mode with no merchant.
+    """
+    with _served_merchant(monkeypatch) as (merchant_url, admin, ledger):
+        document = _merchant_deployment(
+            merchant_agent_url,
+            merchant_url=merchant_url,
+            token_file=_token_file(tmp_path),
+            checkout_mode="redirect",
+        )
+        with _exchange_on(document, tmp_path, monkeypatch) as client:
+            auction_id, bid_ref = _win_one_auction(client)
+            accepted = client.post(f"/auctions/{auction_id}/accept", json={"bid_ref": bid_ref})
+
+        assert accepted.status_code == 200, accepted.text
+        assert accepted.json()["code"], accepted.text
+        assert admin.basic_inputs() == [], (
+            f"the simulated provider reached the merchant: {admin.basic_inputs()}"
+        )
+        assert list(ledger.events()) == [], "the simulated provider wrote to the merchant's ledger"
+
+
+def test_a_deployment_that_mints_on_the_merchant_and_names_none_is_a_503_naming_the_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None, merchant_agent_url: str
+) -> None:
+    """The refusal, and why it is a 503 rather than a quiet local mint.
+
+    Before this ticket the answer was a 409 per accept — `checkout_refused`, which reads as a
+    decision about the buyer and is not one. The two alternatives to refusing are both worse:
+    minting locally hands the shopper a code the store has never heard of, and defaulting the
+    address to a compose service name turns the mistake into a connection error nobody sees.
+
+    The 503 has to name what to set, or it is the same dead end with a different status.
+    """
+    document = _merchant_deployment(merchant_agent_url, merchant_url=None, token_file=None)
+    with _exchange_on(document, tmp_path, monkeypatch) as client:
+        response = client.post(
+            "/auctions",
+            json={
+                "intent": INTENT,
+                "roster": [{"store_id": MERCHANT_STORE, "tier": 1, "list_price": 100.0}],
+            },
+        )
+        # The ACCEPT door is the one R3 is about, and it takes the same wiring hook — so it
+        # refuses the same way, before it looks the auction up. A composition failure that
+        # only surfaced on one of the two routes would let a buyer be shortlisted and then
+        # told, at the till, that their purchase was refused.
+        accepted = client.post("/auctions/auction-nothing/accept", json={"bid_ref": "bid-a"})
+
+    for route, answer in (("POST /auctions", response), ("POST .../accept", accepted)):
+        assert answer.status_code == 503, f"{route} -> {answer.status_code}: {answer.text}"
+        detail = str(answer.json().get("detail", ""))
+        assert "merchant_url" in detail and "MERCHANT_URL" in detail, detail
+        assert "MERCHANT_ADMIN_TOKEN" in detail, detail
+        assert "shopify" in detail, detail
+
+
+def test_a_merchant_address_with_no_bearer_token_is_refused_rather_than_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None, merchant_agent_url: str
+) -> None:
+    """`POST /codes` refuses every tokenless caller by design, so binding one is not "wired".
+
+    A creator that can only ever be answered `401` is the seam this whole module exists to
+    remove, wearing a bound object. The refusal names the two ways to supply the token and
+    never quotes one.
+    """
+    from exchange.composition import ENV_MERCHANT_ADMIN_TOKEN  # noqa: PLC0415
+
+    monkeypatch.delenv(ENV_MERCHANT_ADMIN_TOKEN, raising=False)
+    document = _merchant_deployment(
+        merchant_agent_url, merchant_url="http://merchant-svc:8082", token_file=None
+    )
+    with _exchange_on(document, tmp_path, monkeypatch) as client:
+        response = client.post(
+            "/auctions",
+            json={
+                "intent": INTENT,
+                "roster": [{"store_id": MERCHANT_STORE, "tier": 1, "list_price": 100.0}],
+            },
+        )
+
+    assert response.status_code == 503, f"{response.status_code}: {response.text}"
+    detail = str(response.json().get("detail", ""))
+    assert "merchant_admin_token_file" in detail and "MERCHANT_ADMIN_TOKEN" in detail, detail
+
+
+def test_a_deployment_document_may_not_carry_the_merchant_token_inline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None, merchant_agent_url: str
+) -> None:
+    """The document is a plain JSON file that gets pasted around; it holds no credential.
+
+    Refused rather than ignored, for the reason an inline external-bid keyring is: ignoring the
+    key would leave an operator believing the merchant was configured while every mint came
+    back `401`, and the credential would still be in the file.
+    """
+    document = _merchant_deployment(
+        merchant_agent_url, merchant_url="http://merchant-svc:8082", token_file=None
+    )
+    document["merchant_admin_token"] = "a-token-that-must-not-be-echoed"
+    with _exchange_on(document, tmp_path, monkeypatch) as client:
+        response = client.post(
+            "/auctions",
+            json={
+                "intent": INTENT,
+                "roster": [{"store_id": MERCHANT_STORE, "tier": 1, "list_price": 100.0}],
+            },
+        )
+
+    assert response.status_code == 503, f"{response.status_code}: {response.text}"
+    detail = str(response.json().get("detail", ""))
+    assert "merchant_admin_token_file" in detail, detail
+    assert "a-token-that-must-not-be-echoed" not in response.text, (
+        "the refusal echoed the credential it was refusing"
+    )
+
+
+@pytest.mark.parametrize("stated", ["merchant-svc:8082", "/codes", "ftp://merchant/codes"])
+def test_a_merchant_url_that_is_not_an_http_url_is_refused_by_the_document(
+    stated: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None
+) -> None:
+    """Refused at parse, where the operator is, rather than at the first accept.
+
+    An unusable address reaches the buyer as a refused purchase and reaches the operator as
+    nothing at all, which is the shape every other validation rule in this document has.
+    """
+    from exchange.composition import DeploymentConfigurationError, parse_deployment  # noqa: PLC0415
+
+    with pytest.raises(DeploymentConfigurationError) as raised:
+        parse_deployment({"merchant_url": stated}, source="a test document")
+    assert "merchant_url" in str(raised.value) and stated in str(raised.value)
+
+
+def test_the_merchant_endpoint_takes_the_document_over_the_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The precedence, and the deliberate absence of a third rung.
+
+    `trust_url` falls back to a built-in default because an audit trail must be written whether
+    or not anybody configured one. A code creator may not: the door it reaches mints real,
+    spendable discounts on somebody's shop, so an address nobody chose is refused rather than
+    guessed. That is what `(None, "")` here means, and `bind_code_creator` turns it into a 503.
+    """
+    from exchange.composition import ENV_MERCHANT_URL, merchant_codes_endpoint  # noqa: PLC0415
+
+    monkeypatch.setenv(ENV_MERCHANT_URL, "http://from-the-environment:8082")
+    stated, _source = merchant_codes_endpoint("http://from-the-document:8082")
+    assert stated == "http://from-the-document:8082/codes"
+
+    inherited, _source = merchant_codes_endpoint(None)
+    assert inherited == "http://from-the-environment:8082/codes"
+
+    # An address already naming the door is not doubled: "the merchant" and "the merchant's
+    # code door" are the same string to everyone but this function.
+    named, _source = merchant_codes_endpoint("http://merchant-svc:8082/codes")
+    assert named == "http://merchant-svc:8082/codes"
+
+    monkeypatch.delenv(ENV_MERCHANT_URL, raising=False)
+    assert merchant_codes_endpoint(None) == (None, "")
+
+
+def test_the_bearer_token_file_is_read_once_and_never_quoted_in_a_refusal(
+    tmp_path: Path,
+) -> None:
+    """The token is the one value in this deployment that must not reach a log or a 503 body."""
+    from exchange.composition import (  # noqa: PLC0415
+        DeploymentConfigurationError,
+        read_merchant_admin_token,
+    )
+
+    good = tmp_path / "token"
+    good.write_text(f"  {MERCHANT_TOKEN}\n", encoding="utf-8")
+    assert read_merchant_admin_token(str(good), source="doc") == MERCHANT_TOKEN
+
+    blank = tmp_path / "blank"
+    blank.write_text("   \n", encoding="utf-8")
+    with pytest.raises(DeploymentConfigurationError) as raised:
+        read_merchant_admin_token(str(blank), source="doc")
+    assert "empty" in str(raised.value)
+
+    with pytest.raises(DeploymentConfigurationError) as missing:
+        read_merchant_admin_token(str(tmp_path / "nowhere"), source="doc")
+    assert "could not be read" in str(missing.value)
