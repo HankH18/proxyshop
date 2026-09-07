@@ -1240,6 +1240,15 @@ degree:
 * Trust observations decay toward the prior (30-day half-life, D17), so the admissibility floor is
   also a staleness gate: a store whose only dispatches are long past falls back under it and its
   promise stops being admitted. An old record is not a current promise.
+* **This ruling stands on `shipped_on_time` being able to move at all, and until `f1bff27` it could
+  not.** `CheckoutProvider._events` projected the accepted offer down to
+  `{product_ref, unit_price, total_price, discount}` when it wrote the `accepted` ledger event, and
+  `trust.reconcile` reads the dispatch promise off precisely that event — so
+  `promised_delivery_days` was always `None`, `delivery_comparable` always `False`, and every store
+  graded identically on the one dimension this feed consumes. A `delivery_fit` fed from that
+  dimension would have read its neutral for every store forever while looking fully wired, which is
+  the same defect class as the one D57 closes wearing the opposite face. Both halves are required
+  and both are in the tree; neither is sufficient alone.
 * **The one thing this cannot do**, written here rather than discovered later: a quote of exactly
   0.0 is the fixed point of any scale-free map, so a store with the worst possible record still
   reads 0.0 effective days if it claims same-day dispatch. That follows from scale-freedom rather
