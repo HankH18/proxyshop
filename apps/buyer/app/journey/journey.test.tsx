@@ -36,12 +36,21 @@
  * not carry — same as `intent/intent-confirm.test.tsx` and `shortlist/shortlist.test.tsx`.
  */
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
+import {
+  MAGIC_LINK_PATH,
+  PROFILE_PATH,
+  SESSION_HEADER,
+  SESSION_PATH,
+} from '../chat/session'
 import { CLARIFY_PATH, CONFIRM_PATH, type Intent } from '../intent/intent'
 import { ACCEPT_PATH } from '../shortlist/shortlist'
 import { Journey } from './Journey'
 import { UNRECOGNISED_GLOSS, explainFallbackReason, glossedReasons } from './WhyEmpty'
+// The whole module, so a test can assert what it does NOT export. `mintPseudonym` was
+// deleted with this change and a re-added one must fail a test rather than a review.
+import * as wireModule from './wire'
 import {
   FALLBACK_REASON_FAMILIES,
   HttpFailure,
@@ -61,7 +70,6 @@ import {
   fallbackReasonFamily,
   instrumentFetcher,
   loadAuction,
-  mintPseudonym,
   permalinkHost,
   rankedForSlot,
   renderShortlist,
@@ -73,6 +81,66 @@ import {
 // `@testing-library/react` registers its own cleanup only when the runner exposes
 // `afterEach` globally, and this workspace's vitest projects do not set `globals: true`.
 afterEach(cleanup)
+
+/**
+ * The token out of the mailed link, and the two things the service answers with.
+ *
+ * `VAULT_PSEUDONYM` is thirty-two hex characters because that is what
+ * `buyer_svc.vault.pseudonyms.default_pseudonym` mints — `psn-` + `secrets.token_hex(16)` —
+ * and the shape is the assertion rather than decoration: the handle this page used to mint
+ * in the browser was `psn-` + TEN hex characters, so a page that had quietly gone on minting
+ * its own could not produce this value. `signed-in-pseudonym` is checked against the regex
+ * below wherever it matters.
+ */
+const TOKEN = 'tok-out-of-the-mailbox'
+const SESSION_ID = 'sess-demo-1'
+const VAULT_PSEUDONYM = 'psn-3f9c1d47b20a8e56c4d1f0ab7e93d258'
+const VAULT_PSEUDONYM_SHAPE = /^psn-[0-9a-f]{32}$/
+
+/**
+ * The buckets `GET /buyer/profile` really answers with: the five facets
+ * `buyer_svc.profile.BUCKET_KEYS` pins and nothing else, which is exactly the field set
+ * `contracts.ProfileBuckets` allows (it is `extra="forbid"`, so a sixth key would earn a 422
+ * from every store agent). Values here are plausible rather than measured; the KEY SET is
+ * the part a store's contract cares about.
+ */
+const BUCKETS = {
+  budget_band: '100-250',
+  category_affinity: ['apparel'],
+  frequency_tier: 'new',
+  region: null,
+  first_time: true,
+}
+
+/** The address a buyer types, and everything about them that must never reach a store. */
+const BUYER_EMAIL = 'dana.reyes@example.com'
+const IDENTITY = ['dana', 'reyes', 'example.com', TOKEN, SESSION_ID]
+
+/**
+ * Every render starts the way a browser really arrives after a buyer clicks their emailed
+ * link: at this origin with the single-use token in the query string. Tests that need the
+ * signed-out page call `signedOut()` to take it away again.
+ */
+beforeEach(arrivingFromTheMailbox)
+
+afterEach(signedOut)
+
+/**
+ * The address bar a browser really has after the buyer clicks their emailed link.
+ *
+ * Called again between renders inside one test, because the page takes the token OUT of the
+ * address bar as soon as it has read it — a single-use bearer credential must not sit in the
+ * history entry — so a second `render` in the same test is a second VISIT and needs a second
+ * link, exactly as a buyer would.
+ */
+function arrivingFromTheMailbox(): void {
+  window.history.replaceState({}, '', `/?token=${TOKEN}`)
+}
+
+/** No token in the address bar: a first-time visitor who has not signed in. */
+function signedOut(): void {
+  window.history.replaceState({}, '', '/')
+}
 
 const AUCTION_ID = 'auc-demo-1'
 // `{auction_id}:{store_id}`, because that is literally what the exchange mints:
@@ -310,6 +378,42 @@ const CLARIFY_ANSWER = {
   confirmed: false,
 }
 
+/**
+ * The three login routes `buyer_svc/auth/routes.py` serves, answered in their real shapes:
+ * `202` with an expiry and NO token, `201` with a session under a vault-minted pseudonym,
+ * `200` with the coarsened profile. `DELETE` shares its path with the redemption, so the two
+ * are told apart by method.
+ *
+ * Shared by every script in this file rather than by the happy path alone: the page redeems
+ * the token in `beforeEach`'s URL on mount, so a fetcher that 404s these leaves it signed out
+ * and no confirm control is ever rendered — which would make an unrelated test fail for a
+ * reason that has nothing to do with what it is about.
+ *
+ * `undefined` means "not a login route", so a caller falls through to its own script.
+ */
+function authAnswer(path: string, init: RequestInit | undefined): Response | undefined {
+  switch (path) {
+    case MAGIC_LINK_PATH:
+      return json({ expires_at: '2026-09-05T00:15:00Z' }, 202)
+    case SESSION_PATH:
+      return init?.method === 'DELETE'
+        ? new Response(null, { status: 204 })
+        : json(
+            {
+              session_id: SESSION_ID,
+              pseudonym: VAULT_PSEUDONYM,
+              issued_at: '2026-09-05T00:00:00Z',
+              expires_at: '2026-09-05T12:00:00Z',
+            },
+            201,
+          )
+    case PROFILE_PATH:
+      return json({ pseudonym: VAULT_PSEUDONYM, buckets: BUCKETS })
+    default:
+      return undefined
+  }
+}
+
 /** The happy path, with `slots` deciding whether the shortlist comes back empty. */
 function demoService(
   options: {
@@ -324,13 +428,22 @@ function demoService(
     readonly recordedAt?: string
     /** Swap any diagnostic array — used by the constructed-state tests. */
     readonly body?: BodyOverrides
+    /**
+     * Answer one of the three login routes differently. Returning `undefined` falls through
+     * to the working answer below, so a test names only the refusal it is about.
+     */
+    readonly auth?: (path: string, init: RequestInit | undefined) => Response | undefined
   } = {},
 ) {
   const rawSlots = options.slots ?? [RAW_SLOT]
   const rendered = options.rendered ?? (rawSlots.length === 0 ? [] : [RENDERED_SLOT])
   const createdAt = options.createdAt ?? CREATED_AT
   const recordedAt = options.recordedAt ?? RECORDED_AT
-  return recorder((path) => {
+  return recorder((path, init) => {
+    const overridden = options.auth?.(path, init)
+    if (overridden !== undefined) return overridden
+    const signedIn = authAnswer(path, init)
+    if (signedIn !== undefined) return signedIn
     switch (path) {
       case CLARIFY_PATH:
         return json(CLARIFY_ANSWER)
@@ -359,8 +472,11 @@ function demoService(
   })
 }
 
-/** Walk beats one and two: one utterance, one answer, and the confirm screen is up. */
-async function walkToConfirm(): Promise<void> {
+/**
+ * Beat one and the clarifying question, which a visitor may do WITHOUT signing in: nothing
+ * in this stretch leaves the buyer's own service, and no store is asked anything.
+ */
+async function walkToIntent(): Promise<void> {
   fireEvent.change(screen.getByLabelText('What are you shopping for?'), {
     target: { value: 'I want a warm merino wool beanie for winter, under $100' },
   })
@@ -368,6 +484,14 @@ async function walkToConfirm(): Promise<void> {
   const question = await screen.findByLabelText('What is your budget?')
   fireEvent.change(question, { target: { value: 'about $100' } })
   fireEvent.submit(question.closest('form')!)
+}
+
+/**
+ * The same walk, waiting for the confirm control — which exists only once the redemption in
+ * `beforeEach`'s URL has landed a session. Signed out it never appears, by design.
+ */
+async function walkToConfirm(): Promise<void> {
+  await walkToIntent()
   await screen.findByRole('button', { name: /confirm and ask stores/i })
 }
 
@@ -621,14 +745,17 @@ describe('the wire the journey owns', () => {
     expect(calls).toHaveLength(0)
   })
 
-  it('mints a fresh rotating pseudonym rather than a stable identifier', () => {
-    const minted = new Set(Array.from({ length: 32 }, () => mintPseudonym()))
-
-    expect(minted.size).toBeGreaterThan(30)
-    for (const handle of minted) {
-      expect(handle.startsWith(PSEUDONYM_PREFIX)).toBe(true)
-      expect(handle.slice(PSEUDONYM_PREFIX.length)).toMatch(/^[0-9a-f]{10}$/)
-    }
+  // The test that stood here asserted `mintPseudonym()` produced 32 distinct `psn-` handles
+  // of ten hex characters, and it passed for as long as the function existed. It is gone with
+  // the function: this app must not be able to mint a pseudonym at all, and a browser-minted
+  // handle being *fresh* was never the property R5 asks for — the vault's is what rotates,
+  // what a sign-out retires and what resolves back to an account. What replaces it is the
+  // served-shape assertion in the R5 describe below (`psn-` + THIRTY-TWO hex characters, the
+  // shape `default_pseudonym` mints) plus this, which is the only claim about the prefix this
+  // app can still make on its own.
+  it('spells the prefix a served pseudonym carries, and mints nothing', () => {
+    expect(PSEUDONYM_PREFIX).toBe('psn-')
+    expect(Object.keys(wireModule)).not.toContain('mintPseudonym')
   })
 
   it('joins a thrown status to the service message without inventing either', () => {
@@ -797,7 +924,10 @@ describe('the four beats', () => {
   })
 
   it('shows the status and the service own words when a request is refused', async () => {
-    const { fetcher } = recorder((path) => {
+    const { fetcher } = recorder((path, init) => {
+      const signedIn = authAnswer(path, init)
+      if (signedIn !== undefined) return signedIn
+
       if (path === CLARIFY_PATH) return json(CLARIFY_ANSWER)
       if (path === CONFIRM_PATH) {
         return json({ detail: 'no exchange client is wired; refusing to open an auction' }, 503)
@@ -816,7 +946,10 @@ describe('the four beats', () => {
   })
 
   it('refuses a permalink a browser must not follow instead of linking to it', async () => {
-    const { fetcher } = recorder((path) => {
+    const { fetcher } = recorder((path, init) => {
+      const signedIn = authAnswer(path, init)
+      if (signedIn !== undefined) return signedIn
+
       switch (path) {
         case CLARIFY_PATH:
           return json(CLARIFY_ANSWER)
@@ -849,46 +982,22 @@ describe('the four beats', () => {
     expect(screen.queryByTestId('permalink-url')).toBeNull()
   })
 
-  it('confirms with a per-visit pseudonym, and a second visit gets a different one', async () => {
-    const first = demoService()
-    render(<Journey fetcher={first.fetcher} />)
-    const shown = screen.getByTestId('pseudonym').textContent ?? ''
-    const handle = shown.match(/psn-[0-9a-f]{10}/)?.[0]
-    expect(handle).toBeDefined()
+  // What stood here asserted the page confirmed under a handle it had generated itself
+  // (`psn-` + ten hex characters) and that a second visit generated a different one. Both
+  // halves were true and the behaviour was the defect: a browser-minted handle is not the
+  // vault's, is not what a sign-out retires, and resolves back to no account. The property is
+  // now asserted the other way round, against the service's own pseudonym, in
+  // "opens the auction under the service pseudonym and the coarsened profile" below.
 
-    await walkToConfirm()
-    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
-    await screen.findByLabelText('Shortlist')
-
-    const body = bodyOf(first.calls.find((call) => call.path === CONFIRM_PATH)?.init) as Record<
-      string,
-      unknown
-    >
-    expect(body.profile).toEqual({ pseudonym: handle, buckets: {} })
-    expect(typeof body.confirmed).toBe('boolean')
-    expect(body.confirmed).toBe(true)
-
-    // A second visit is a second handle: nothing is persisted for a store to join on.
-    cleanup()
-    const second = demoService()
-    render(<Journey fetcher={second.fetcher} />)
-    const again = (screen.getByTestId('pseudonym').textContent ?? '').match(/psn-[0-9a-f]{10}/)?.[0]
-    expect(again).toBeDefined()
-    expect(again).not.toBe(handle)
-  })
-
-  it('states the five gaps permanently, and asks for no email it could never redeem', async () => {
+  it('states the gaps that remain, permanently, and no longer claims sign-in is one', async () => {
     const { fetcher } = demoService()
     render(<Journey fetcher={fetcher} />)
 
-    const signin = screen.getByTestId('gap-signin')
-    expect(signin.textContent).toContain('POST /buyer/auth/magic-link')
-    expect(signin.textContent).toContain('202')
-    expect(signin.textContent).toContain('never returns')
+    // Sign-in and the browser-minted pseudonym were the first two entries on this list and
+    // are gone from it, because the gap closed rather than because the sentence softened.
+    expect(screen.queryByTestId('gap-signin')).toBeNull()
+    expect(screen.queryByTestId('gap-pseudonym')).toBeNull()
     expect(screen.getByTestId('gap-domain').textContent).toContain('store_domain')
-    const minted = screen.getByTestId('gap-pseudonym').textContent ?? ''
-    expect(minted).toContain('POST /buyer/auth/session')
-    expect(minted).toContain('generated in this browser')
 
     // The slot carries no price either, so the page says where the price it shows came from.
     const price = screen.getByTestId('gap-price').textContent ?? ''
@@ -906,7 +1015,10 @@ describe('the four beats', () => {
     expect(model).toContain('double:buyer')
     expect(model).toContain('no live model')
 
-    expect(screen.queryByLabelText(/email/i)).toBeNull()
+    // Signed in from the emailed link, so the sign-in form has been replaced rather than
+    // hidden: the page asks for no address it has no use for.
+    await screen.findByTestId('signed-in')
+    expect(screen.queryByLabelText('Email address')).toBeNull()
 
     // Still there at the end of the journey, not only at the start.
     await walkToConfirm()
@@ -915,11 +1027,11 @@ describe('the four beats', () => {
     fireEvent.click(screen.getByRole('button', { name: /accept this one/i }))
     await screen.findByTestId('permalink-url')
 
-    await waitFor(() => expect(screen.getByTestId('gap-signin')).toBeInTheDocument())
-    expect(screen.getByTestId('gap-domain')).toBeInTheDocument()
-    expect(screen.getByTestId('gap-pseudonym')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('gap-domain')).toBeInTheDocument())
     expect(screen.getByTestId('gap-price')).toBeInTheDocument()
     expect(screen.getByTestId('gap-model')).toBeInTheDocument()
+    expect(screen.queryByTestId('gap-signin')).toBeNull()
+    expect(screen.queryByTestId('gap-pseudonym')).toBeNull()
   })
 
   it('prints the clock the service sent, and nothing at all when it sent none', async () => {
@@ -1018,7 +1130,10 @@ describe('the four beats', () => {
     // real 0.0. The page prints the number it was sent — it may not round it away or hide
     // it — and says what a zero there can also mean, because "unit 0" alone reads as free.
     const zeroed = [{ ...ENTRIES[0]!, unit_price: 0.0, total_price: 0.0 }]
-    const { fetcher } = recorder((path) => {
+    const { fetcher } = recorder((path, init) => {
+      const signedIn = authAnswer(path, init)
+      if (signedIn !== undefined) return signedIn
+
       switch (path) {
         case CLARIFY_PATH:
           return json(CLARIFY_ANSWER)
@@ -1107,6 +1222,7 @@ describe('the four beats', () => {
     cleanup()
 
     // Forgotten: no Shortlist section, and the notice instead.
+    arrivingFromTheMailbox()
     const gone = demoService({ forgotten: true })
     render(<Journey fetcher={gone.fetcher} />)
     await walkToConfirm()
@@ -1117,7 +1233,11 @@ describe('the four beats', () => {
     cleanup()
 
     // Unreadable: neither claim is made, and the failure names the status and the reason.
-    const broken = recorder((path) => {
+    arrivingFromTheMailbox()
+    const broken = recorder((path, init) => {
+      const signedIn = authAnswer(path, init)
+      if (signedIn !== undefined) return signedIn
+
       if (path === CLARIFY_PATH) return json(CLARIFY_ANSWER)
       if (path === CONFIRM_PATH) {
         return json({ auction_id: AUCTION_ID, intent_id: INTENT.intent_id, created_at: '' }, 201)
@@ -1194,7 +1314,10 @@ describe('the four beats', () => {
       solicited: [],
       recorded_at: RECORDED_AT,
     }
-    const { fetcher } = recorder((path) => {
+    const { fetcher } = recorder((path, init) => {
+      const signedIn = authAnswer(path, init)
+      if (signedIn !== undefined) return signedIn
+
       switch (path) {
         case CLARIFY_PATH:
           return json(CLARIFY_ANSWER)
@@ -1467,6 +1590,179 @@ describe('the four beats', () => {
 // those; the store ids are this market's own three, so nothing here invents a store OR a word.
 // Before that repair every one of these arrived as `no_response`, which is why this panel only
 // ever had a sentence for `no_response`.
+/**
+ * R5's first clause, on the screen that actually ships.
+ *
+ * The backend half of magic-link sign-in has been complete and mounted for weeks and no
+ * served page called it: `index.html` loads `main.tsx`, which mounts THIS component, and it
+ * minted its own pseudonym in the browser. A browser-minted handle is not the vault's, does
+ * not rotate when the vault rotates, and is exactly the stable identifier R5 exists to deny
+ * the stores — so these tests pin the join, not the client (`chat/session.test.ts` owns the
+ * client and its identity backstop).
+ *
+ * The gate this page chose, stated once here because the tests below only show it working:
+ * **browsing is open and confirming is not.** Everything up to and including the clarifying
+ * loop happens between the buyer and the buyer's own service — no store hears any of it — so
+ * a first-time visitor gets the page rather than a login wall. The confirm control, which is
+ * the one gesture that reaches the exchange and therefore the stores, is ABSENT until there
+ * is a session. Absent rather than disabled, for `IntentConfirm`'s own reason and one more:
+ * that button fires at most once per mount, so a click this page refused would have spent
+ * the buyer's single confirmation.
+ */
+describe('R5 — signing in, and the pseudonym that comes with it', () => {
+  it('signed out, offers a link and puts no confirm control in the document', async () => {
+    signedOut()
+    const { fetcher, calls } = demoService()
+    render(<Journey fetcher={fetcher} />)
+
+    // Browsing is open: the clarify loop runs with no session at all.
+    await walkToIntent()
+    await screen.findByTestId('confirm-gated')
+    expect(screen.getByTestId('transcript').textContent).toContain('about $100')
+
+    // …and the one gesture that would reach a store is not on the page.
+    expect(screen.queryByRole('button', { name: /confirm and ask stores/i })).toBeNull()
+    expect(calls.some((call) => call.path === CONFIRM_PATH)).toBe(false)
+
+    const email = screen.getByLabelText('Email address')
+    fireEvent.change(email, { target: { value: BUYER_EMAIL } })
+    fireEvent.submit(email.closest('form')!)
+
+    await screen.findByTestId('link-sent')
+    expect(bodyOf(calls.find((call) => call.path === MAGIC_LINK_PATH)?.init)).toEqual({
+      email: BUYER_EMAIL,
+    })
+    // 202 carries an expiry and never a token, so there is no session to be had from it.
+    expect(screen.queryByTestId('signed-in')).toBeNull()
+    expect(screen.getByTestId('pseudonym').textContent).not.toMatch(/psn-/)
+  })
+
+  it('redeems the token out of the emailed link and wears the pseudonym the vault minted', async () => {
+    const { fetcher, calls } = demoService()
+    render(<Journey fetcher={fetcher} />)
+
+    await screen.findByTestId('signed-in')
+
+    expect(bodyOf(calls.find((call) => call.path === SESSION_PATH)?.init)).toEqual({
+      token: TOKEN,
+    })
+    const profileCall = calls.find((call) => call.path === PROFILE_PATH)
+    expect(profileCall?.init?.headers).toEqual({ [SESSION_HEADER]: SESSION_ID })
+
+    // The handle on the page is the service's, and its shape says so: thirty-two hex
+    // characters out of the vault, not the ten this page used to generate for itself.
+    expect(VAULT_PSEUDONYM).toMatch(VAULT_PSEUDONYM_SHAPE)
+    expect(screen.getByTestId('pseudonym').textContent).toContain(VAULT_PSEUDONYM)
+
+    // The single-use bearer credential is out of the address bar, so it is not in the
+    // history entry, a bookmark or a `Referer` header on the next request.
+    expect(window.location.search).toBe('')
+    expect(document.body.textContent ?? '').not.toContain(TOKEN)
+  })
+
+  it('opens the auction under the service pseudonym and the coarsened profile', async () => {
+    const { fetcher, calls } = demoService()
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Shortlist')
+
+    const body = bodyOf(calls.find((call) => call.path === CONFIRM_PATH)?.init) as Record<
+      string,
+      unknown
+    >
+    // The pseudonym AND the buckets are the service's — R5's "rotating pseudonym and a
+    // coarsened profile", neither of them made up here.
+    expect(body.profile).toEqual({ pseudonym: VAULT_PSEUDONYM, buckets: BUCKETS })
+    expect(body.confirmed).toBe(true)
+
+    // And nothing that could name the buyer went with it. The session id is on this list
+    // deliberately: it is a bearer credential for this origin and the exchange has no use
+    // for it, so a page that helpfully forwarded it would be handing it to the stores.
+    const sent = JSON.stringify(body).toLowerCase()
+    for (const secret of IDENTITY) {
+      expect(sent).not.toContain(secret.toLowerCase())
+    }
+  })
+
+  it('refuses a profile that came back carrying identity, and stays signed out', async () => {
+    const { fetcher, calls } = demoService({
+      auth: (path) =>
+        path === PROFILE_PATH
+          ? json({ pseudonym: VAULT_PSEUDONYM, buckets: {}, email: BUYER_EMAIL })
+          : undefined,
+    })
+    render(<Journey fetcher={fetcher} />)
+
+    const error = await screen.findByTestId('journey-error')
+    expect(error.textContent).toContain('identity-shaped key')
+    expect(screen.queryByTestId('signed-in')).toBeNull()
+    expect(screen.getByLabelText('Email address')).toBeInTheDocument()
+    // The address the service should never have sent is not rendered anywhere either.
+    expect((document.body.textContent ?? '').toLowerCase()).not.toContain('dana.reyes')
+    expect(calls.some((call) => call.path === CONFIRM_PATH)).toBe(false)
+  })
+
+  it('says a spent link is not valid, in the service own words, and stays signed out', async () => {
+    const { fetcher } = demoService({
+      auth: (path, init) =>
+        path === SESSION_PATH && init?.method !== 'DELETE'
+          ? json({ detail: 'this login link is not valid' }, 401)
+          : undefined,
+    })
+    render(<Journey fetcher={fetcher} />)
+
+    const error = await screen.findByTestId('journey-error')
+    expect(error.textContent).toContain('401')
+    expect(error.textContent).toContain('this login link is not valid')
+    expect(screen.getByLabelText('Email address')).toBeInTheDocument()
+    expect(screen.queryByTestId('signed-in')).toBeNull()
+  })
+
+  it('signs out through the service, and takes the signed-in journey off the page with it', async () => {
+    const { fetcher, calls } = demoService()
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Shortlist')
+
+    fireEvent.click(screen.getByRole('button', { name: /sign out/i }))
+    await screen.findByLabelText('Email address')
+
+    const out = calls.find(
+      (call) => call.path === SESSION_PATH && call.init?.method === 'DELETE',
+    )
+    expect(out?.init?.headers).toEqual({ [SESSION_HEADER]: SESSION_ID })
+
+    // The shortlist belonged to a pseudonym the vault has now retired, so it does not stay
+    // on the screen with an Accept button under it.
+    expect(screen.queryByLabelText('Shortlist')).toBeNull()
+    expect(screen.getByTestId('pseudonym').textContent).not.toContain(VAULT_PSEUDONYM)
+  })
+
+  it('never asks the exchange for anything while signed out, however hard the page is pushed', async () => {
+    signedOut()
+    const { fetcher, calls } = demoService()
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToIntent()
+    await screen.findByTestId('confirm-gated')
+
+    // Every button the signed-out page offers, pressed. None of them is an auction.
+    for (const button of screen.getAllByRole('button')) {
+      fireEvent.click(button)
+    }
+    await waitFor(() => expect(screen.getByTestId('confirm-gated')).toBeInTheDocument())
+
+    const reached = calls.map((call) => call.path)
+    expect(reached).not.toContain(CONFIRM_PATH)
+    expect(reached).not.toContain(ACCEPT_PATH)
+    expect(reached).not.toContain(RENDER_PATH)
+  })
+})
+
 const REFUSAL_ENTRIES = [
   {
     store_id: 'demo-woolworks',

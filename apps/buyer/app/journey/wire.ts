@@ -188,22 +188,20 @@ export class MissingProfileError extends Error {
 }
 
 /**
- * A fresh pseudonym for this page visit. `psn-` and ten hex characters of CSPRNG.
+ * There is no `mintPseudonym` here any more, and its absence is the point.
  *
- * Minted per mount and held in component state — deliberately NOT in `localStorage`. A
- * persisted handle would stop rotating, and a handle that does not rotate is a stable
- * identifier for the stores to join on, which is the exact thing R5's pseudonym exists to
- * deny them.
+ * It returned `psn-` plus ten hex characters of CSPRNG and `Journey` held one per mount. Its
+ * docstring argued it was safe because it was not persisted — true, and beside the point: a
+ * handle this page mints is not the one the buyer service's vault issued, does not rotate
+ * when the vault rotates it, cannot be retired by signing out, and resolves back to nobody.
+ * R5 names the vault's pseudonym specifically, so the browser generating a lookalike was the
+ * feature being faked rather than a lighter way of doing it.
+ *
+ * `Journey` now redeems the token out of the mailed link and forwards the pseudonym and
+ * buckets `GET /buyer/profile` answers with. Restoring a client-side minter would put the
+ * fake back; `PSEUDONYM_PREFIX` above stays because it documents the shape a *served*
+ * pseudonym has, and nothing in this app builds one.
  */
-export function mintPseudonym(): string {
-  const bytes = new Uint8Array(5)
-  crypto.getRandomValues(bytes)
-  let hex = ''
-  for (const byte of bytes) {
-    hex += byte.toString(16).padStart(2, '0')
-  }
-  return `${PSEUDONYM_PREFIX}${hex}`
-}
 
 /** One rostered store's answer, as `POST /auctions` reported it. */
 export interface AuctionEntry {

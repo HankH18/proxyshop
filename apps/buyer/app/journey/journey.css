@@ -114,6 +114,10 @@ label {
 
 textarea,
 input[type="text"],
+/* The sign-in field. `input:not([type])` below cannot match it — an email input has a
+   type — so without this line the one control a signed-out visitor is offered was the one
+   unstyled box on the page. */
+input[type="email"],
 input:not([type]) {
   width: 100%;
   font: inherit;

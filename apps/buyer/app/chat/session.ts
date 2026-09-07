@@ -31,13 +31,6 @@ export interface BuyerProfile {
   readonly buckets: Readonly<Record<string, unknown>>
 }
 
-/** One line of the chat transcript. */
-export interface ChatMessage {
-  readonly id: string
-  readonly author: 'buyer' | 'agent'
-  readonly text: string
-}
-
 /** Thrown when a payload carries an identity-shaped key. */
 export class IdentityLeakError extends Error {
   constructor(
@@ -76,6 +69,17 @@ export function assertPseudonymOnly<T>(payload: T, where: string): T {
 /** The `fetch` shape this module needs. Injectable so tests do not touch the network. */
 export type Fetcher = (input: string, init?: RequestInit) => Promise<Response>
 
+/**
+ * The four paths `buyer_svc/auth/routes.py` serves, exported so a test asserts on the
+ * spelling rather than on a guess — the same reason `wire.ts` exports `auctionPath`.
+ */
+export const MAGIC_LINK_PATH = '/buyer/auth/magic-link'
+export const SESSION_PATH = '/buyer/auth/session'
+export const PROFILE_PATH = '/buyer/profile'
+
+/** The header the service reads a session id out of. Spelled once, here. */
+export const SESSION_HEADER = 'X-Buyer-Session'
+
 const JSON_HEADERS = { 'Content-Type': 'application/json' }
 
 async function readJson(response: Response, where: string): Promise<unknown> {
@@ -86,7 +90,7 @@ async function readJson(response: Response, where: string): Promise<unknown> {
 /** POST /buyer/auth/magic-link — asks for a link. Resolves with the link's expiry. */
 export async function requestMagicLink(email: string, fetcher: Fetcher): Promise<string> {
   const body = (await readJson(
-    await fetcher('/buyer/auth/magic-link', {
+    await fetcher(MAGIC_LINK_PATH, {
       method: 'POST',
       headers: JSON_HEADERS,
       body: JSON.stringify({ email }),
@@ -99,7 +103,7 @@ export async function requestMagicLink(email: string, fetcher: Fetcher): Promise
 /** POST /buyer/auth/session — redeems a link into a session under a fresh pseudonym. */
 export async function redeemMagicLink(token: string, fetcher: Fetcher): Promise<BuyerSession> {
   const body = (await readJson(
-    await fetcher('/buyer/auth/session', {
+    await fetcher(SESSION_PATH, {
       method: 'POST',
       headers: JSON_HEADERS,
       body: JSON.stringify({ token }),
@@ -120,14 +124,25 @@ export async function loadProfile(
   fetcher: Fetcher,
 ): Promise<BuyerProfile> {
   const body = (await readJson(
-    await fetcher('/buyer/profile', { headers: { 'X-Buyer-Session': session.sessionId } }),
+    await fetcher(PROFILE_PATH, { headers: { [SESSION_HEADER]: session.sessionId } }),
     'profile',
   )) as BuyerProfile
   return { pseudonym: body.pseudonym, buckets: body.buckets }
 }
 
-/** A short, human-readable form of a pseudonym, for the badge in the chat header. */
-export function shortPseudonym(pseudonym: string): string {
-  const bare = pseudonym.startsWith('psn-') ? pseudonym.slice(4) : pseudonym
-  return `psn-${bare.slice(0, 6)}`
+/**
+ * DELETE /buyer/auth/session — signs out, and the pseudonym stays retired for good.
+ *
+ * The route answers `204` with no body, so there is nothing to run `assertPseudonymOnly`
+ * over and nothing to return. It is called for its effect on the SERVICE rather than on this
+ * page: dropping the session object in the browser would leave the pseudonym live in the
+ * vault, and R5's "rotating" is a property of the vault retiring one handle and issuing a
+ * different one, not of a browser forgetting a string.
+ */
+export async function closeSession(session: BuyerSession, fetcher: Fetcher): Promise<void> {
+  const response = await fetcher(SESSION_PATH, {
+    method: 'DELETE',
+    headers: { [SESSION_HEADER]: session.sessionId },
+  })
+  if (!response.ok) throw new Error(`sign out failed with HTTP ${response.status}`)
 }

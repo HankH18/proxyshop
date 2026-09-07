@@ -59,12 +59,21 @@
  * 3. **A failure shows the status and the service's own words.** `instrumentFetcher` keeps
  *    the refused body so a bare `HTTP 503` from a reused module can be printed with the
  *    reason the service gave for it. Nothing is swallowed.
- * 4. **The gaps are on the screen, permanently.** Sign-in cannot complete in a browser; the
- *    exchange's slot carries neither a store domain nor a price; the clarifying questions
- *    come from the buyer service's offline model double rather than a live model; and the
- *    pseudonym is minted here rather than by the buyer service's vault. All five are stated
- *    in the UI rather than faked, because a demo that supplies its own join is the defect
- *    this app exists to not be.
+ * 4. **The gaps are on the screen, permanently.** The exchange's slot carries neither a store
+ *    domain nor a price, and the clarifying questions come from the buyer service's offline
+ *    model double rather than a live model. All three are stated in the UI rather than faked,
+ *    because a demo that supplies its own join is the defect this app exists to not be.
+ *
+ *    Two entries used to sit at the top of that list and are gone because the gap closed
+ *    rather than because the sentence was softened. They said sign-in could not complete in a
+ *    browser and that the pseudonym was therefore minted here. The first was never true of
+ *    this tree: `buyer_svc/auth/delivery.py` mails a link built as the deployment's base URL
+ *    with the token on it as a query parameter, so a browser arriving from the buyer's own
+ *    mailbox holds the token in `location.search` and `POST /buyer/auth/session` is one call
+ *    away. `magic-link.ts` reads it, `chat/session.ts` spends it, and both of those existed
+ *    already — what was missing was this page calling them. The second went with it:
+ *    `mintPseudonym` is deleted and the handle now comes from the service's vault. See
+ *    point 6.
  * 5. **A shortlist has three outcomes here, not two.** A shortlist with slots; a shortlist
  *    with none, which is a fact about the MARKET (nothing was eligible); and no shortlist at
  *    all, which is a fact about the EXCHANGE — `buyer_svc/auctions/routes.py` answers
@@ -75,11 +84,51 @@
  *    worse than the sentence saying why it is not there. That sentence names no single
  *    cause — the exchange's own 404 lists four and picks none, and the buyer service passes
  *    on a bare `null` with no reason attached.
+ * 6. **Browsing is open; confirming is not.** The deliberate half of R5's sign-in, stated
+ *    here because the code below only shows it working.
+ *
+ *    Steps 1 and 2 run with no session at all. Everything in them is between the buyer and
+ *    the buyer's OWN service — `POST /buyer/intent/clarify` reaches no exchange and no store
+ *    — so there is nothing to protect a visitor from by making them hand over an address
+ *    first, and a login wall in front of a page whose whole purpose is to show what this
+ *    market does would be asking for an email to see a demo.
+ *
+ *    The gate sits at the confirm, because that is the first gesture that leaves this origin:
+ *    `POST /buyer/intent/confirm` opens an auction, the exchange solicits real stores, and
+ *    each of them is handed a pseudonym and a bucket set. R5 says that pseudonym rotates and
+ *    is the service's, so a page that let the auction open without a session would be back to
+ *    naming the buyer itself. The control is therefore ABSENT rather than disabled until
+ *    there is a session — `IntentConfirm`'s button fires once per mount, so a click this page
+ *    refused would have spent the buyer's one confirmation.
+ *
+ *    The cost is named on the page rather than hidden: opening the mailed link loads this
+ *    page again, so a conversation started before signing in does not survive it. Nothing
+ *    here persists the transcript to work around that — `sessionStorage` does not cross the
+ *    new tab a mail client opens, and `localStorage` would write what a buyer is shopping for
+ *    onto their disk to save them retyping one sentence.
  */
-import { Fragment, useCallback, useId, useMemo, useState, type FormEvent } from 'react'
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from 'react'
 
+import {
+  closeSession,
+  loadProfile,
+  redeemMagicLink,
+  requestMagicLink,
+  type BuyerProfile,
+  type BuyerSession,
+} from '../chat/session'
 import { IntentConfirm } from '../intent/IntentConfirm'
 import {
+  MAX_CLARIFYING_QUESTIONS,
   clarifyTurns,
   type AuctionCreated,
   type ClarifyOutcome,
@@ -92,8 +141,11 @@ import {
   type AcceptOutcome,
   type ShortlistSlot,
 } from '../shortlist/shortlist'
+import { SignIn } from './SignIn'
 import { WhyEmpty } from './WhyEmpty'
+import { strippedUrl, tokenFromSearch } from './magic-link'
 import {
+  MissingProfileError,
   confirmWithProfile,
   describeComponents,
   describeTrust,
@@ -102,7 +154,6 @@ import {
   explain,
   instrumentFetcher,
   loadAuction,
-  mintPseudonym,
   permalinkHost,
   rankedForSlot,
   renderShortlist,
@@ -215,10 +266,21 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
   const wire = useMemo(() => instrumentFetcher(fetcher), [fetcher])
   const utteranceId = useId()
 
-  // One rotating handle per page visit, minted here and held nowhere else. Not in
-  // `localStorage`: a persisted pseudonym stops rotating, and a handle that does not rotate
-  // is exactly the stable identifier R5 exists to deny the stores.
-  const [pseudonym] = useState(mintPseudonym)
+  // The session, and the store-facing profile behind it. BOTH come from the buyer service:
+  // `POST /buyer/auth/session` mints the pseudonym in the service's vault and
+  // `GET /buyer/profile` coarsens the account into R5's buckets. This page mints neither and
+  // no longer can — `mintPseudonym` was deleted with this change, because a browser-minted
+  // handle does not rotate when the vault rotates and is exactly the stable identifier R5
+  // exists to deny the stores.
+  //
+  // Held in component state and NOWHERE else. Not `localStorage`, and not `sessionStorage`:
+  // the session id is a bearer credential for this origin, and the rest of this page's state
+  // (the transcript, the auction, the shortlist) is in memory too, so persisting only the
+  // credential would buy a reload nothing except a live session with no journey around it.
+  const [session, setSession] = useState<BuyerSession | null>(null)
+  const [profile, setProfile] = useState<BuyerProfile | null>(null)
+  // What the service said the last accepted link expires at. Never a clock of this page's.
+  const [linkExpiresAt, setLinkExpiresAt] = useState<string | undefined>(undefined)
   const [turns, setTurns] = useState<readonly string[]>([])
   const [draft, setDraft] = useState('')
   const [outcome, setOutcome] = useState<ClarifyOutcome | undefined>(undefined)
@@ -253,6 +315,64 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
     [wire],
   )
 
+  // The redemption happens once per page load, and only when the buyer arrived from their
+  // own mailbox. `redeemed` is a ref rather than state because the guard has to hold BEFORE
+  // the first render commits — a second redemption of a single-use token is a 401, and it
+  // would be this page showing a buyer a refusal it caused itself.
+  const redeemed = useRef(false)
+
+  useEffect(() => {
+    if (redeemed.current) return
+    redeemed.current = true
+    const token = tokenFromSearch(window.location.search)
+    if (token === undefined) return
+    // Out of the address bar first, before any request is made and whatever the redemption
+    // then does: a single-use bearer credential must not survive in the history entry, in a
+    // bookmark, or in a `Referer` header on a later navigation to a store's domain.
+    window.history.replaceState({}, '', strippedUrl(new URL(window.location.href)))
+    void run(async () => {
+      const live = await redeemMagicLink(token, wire.fetcher)
+      // The profile is loaded before the session is shown, on purpose: `loadProfile` runs
+      // `assertPseudonymOnly` over the body, so a service that regressed and returned an
+      // identity field leaves this page signed OUT with the refusal on screen, rather than
+      // signed in with a profile it is about to forward to the exchange.
+      const coarsened = await loadProfile(live, wire.fetcher)
+      setSession(live)
+      setProfile(coarsened)
+    })
+  }, [run, wire])
+
+  const askForLink = useCallback(
+    async (email: string) => {
+      await run(async () => {
+        // The address goes up and nothing about it comes back: the answer is `202` with an
+        // expiry, and the token is mailed rather than returned. This page therefore cannot
+        // sign anybody in from here, and does not pretend to.
+        setLinkExpiresAt(await requestMagicLink(email, wire.fetcher))
+      })
+    },
+    [run, wire],
+  )
+
+  const signOut = useCallback(async () => {
+    const live = session
+    if (live === null) return
+    await run(async () => {
+      await closeSession(live, wire.fetcher)
+      setSession(null)
+      setProfile(null)
+      setLinkExpiresAt(undefined)
+      // Everything downstream of the confirm belonged to a pseudonym the vault has now
+      // retired. Leaving a shortlist on the screen with an Accept under it would leave a
+      // store-reaching control wired to a session that no longer exists.
+      setTurns([])
+      setOutcome(undefined)
+      setStage(undefined)
+      setAccepted(undefined)
+      setAcceptedSlot(undefined)
+    })
+  }, [run, session, wire])
+
   const say = useCallback(
     async (text: string) => {
       const spoken = text.trim()
@@ -282,9 +402,22 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
   const confirm = useCallback(
     async (intent: Intent) => {
       await run(async () => {
+        if (profile === null) {
+          // Defence in depth, and it should be unreachable: the control that calls this is
+          // not in the document while `session` is null. Reusing `MissingProfileError`
+          // rather than inventing a second one — its message already says the right thing
+          // about what sending nothing would cost.
+          throw new MissingProfileError(
+            'this browser has no signed-in session, so there is no vault-minted pseudonym ' +
+              'to open an auction under',
+          )
+        }
+        // R5's two halves, both the service's: the rotating pseudonym its vault minted and
+        // the coarsened buckets it built. Neither is composed here, and the session id — a
+        // bearer credential for this origin — is not among them.
         const created = await confirmWithProfile(
           intent,
-          { pseudonym, buckets: {} },
+          { pseudonym: profile.pseudonym, buckets: profile.buckets },
           wire.fetcher,
         )
         const record = await loadAuction(created.auction_id, wire.fetcher)
@@ -298,7 +431,7 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
         setStage({ created, record, slots })
       })
     },
-    [pseudonym, run, wire],
+    [profile, run, wire],
   )
 
   const accept = useCallback(
@@ -316,6 +449,22 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
   )
 
   const answers = turns.slice(1)
+  // Whether `IntentConfirm` would put its confirm button in the document. It is restated
+  // here rather than asked of the component because this page must not MOUNT that button
+  // while signed out: it fires `onConfirm` at most once per mount, so a click this page
+  // refused would spend the buyer's single confirmation and leave a dead button behind.
+  // Both halves mirror `IntentConfirm`'s own conditions, in its order.
+  const confirmable =
+    outcome !== undefined &&
+    outcome.questions.length <= MAX_CLARIFYING_QUESTIONS &&
+    outcome.questions.length <= answers.length
+  // One condition for "signed in", used by the sign-in panel, the pseudonym line and the
+  // gate alike. The two pieces of state are set together and cleared together, so a
+  // half-signed-in page is not reachable — and deriving the gate from the SAME thing
+  // `confirm` needs is what makes the refusal inside `confirm` genuinely unreachable rather
+  // than merely unlikely.
+  const signedIn = session !== null && profile !== null
+  const gateOnSignIn = confirmable && !signedIn
   const permalink = accepted?.permalink_url
   const refusal =
     permalink === undefined
@@ -331,10 +480,9 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
         <p className="lede">
           Say what you need. Your agent asks the exchange, the exchange asks the stores, and
           the stores answer for themselves. Every value below arrived in an HTTP response from
-          the service on this origin during this session, with exactly two exceptions, both
-          named where they appear and both listed under &ldquo;What is not wired yet&rdquo;:
-          your pseudonym is minted in this browser, and the grey text inside the box is a hint
-          rather than an answer.
+          the service on this origin during this session, with exactly one exception, named
+          where it appears and listed under &ldquo;What is not wired yet&rdquo;: the grey text
+          inside the box is a hint rather than an answer.
         </p>
       </header>
 
@@ -350,6 +498,31 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
           </span>
         </p>
       ) : null}
+
+      <section aria-label="Sign in" className="step" data-testid="signin">
+        <h2>Sign in</h2>
+        {session === null || profile === null ? (
+          <SignIn onRequestLink={askForLink} linkExpiresAt={linkExpiresAt} busy={busy} />
+        ) : (
+          <>
+            <p data-testid="signed-in">
+              Signed in. This session runs under{' '}
+              <strong>{profile.pseudonym}</strong>, which the buyer
+              service&rsquo;s pseudonym vault minted when you opened your link. The address you
+              typed stayed in your mailbox and on your own device: nothing the service answers
+              with has a field it could ride back in.
+            </p>
+            <button type="button" onClick={() => void signOut()} disabled={busy}>
+              Sign out
+            </button>
+            <p className="gloss">
+              Signing out retires that handle in the vault for good &mdash; it is never
+              reissued, to you or to anybody &mdash; and clears the auction below with it.
+              Signing in again mints a different one, which is what R5 means by rotating.
+            </p>
+          </>
+        )}
+      </section>
 
       <section aria-label="Step 1 - say what you need" className="step">
         <h2>
@@ -387,9 +560,20 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
           </ol>
         )}
         <p className="gloss" data-testid="pseudonym">
-          The stores are told you are <strong>{pseudonym}</strong>, and nothing else. That
-          handle was generated in this browser when you opened the page and is thrown away
-          when you reload it.
+          {profile === null ? (
+            <>
+              No store has been told anything about you, and there is no handle to tell them
+              with: you are not signed in. What you type here goes to this origin&rsquo;s own
+              buyer service and no further until you sign in and confirm.
+            </>
+          ) : (
+            <>
+              The stores are told you are <strong>{profile.pseudonym}</strong>, and nothing
+              else. That handle was minted by the buyer service&rsquo;s pseudonym vault when
+              you signed in &mdash; this browser cannot mint one &mdash; and signing out
+              retires it.
+            </>
+          )}
         </p>
       </section>
 
@@ -398,16 +582,32 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
           <h2>
             <span className="ordinal">2</span> Check what we understood
           </h2>
-          <IntentConfirm
-            key={`intent-${attempt}`}
-            questions={outcome.questions}
-            answers={answers}
-            intent={outcome.intent}
-            unresolved={outcome.unresolved}
-            onAnswer={say}
-            onConfirm={confirm}
-            busy={busy}
-          />
+          {gateOnSignIn ? (
+            // The whole of the gate. Not a disabled confirm button — absent, for the reason
+            // `IntentConfirm` gives for never rendering one while a question is outstanding,
+            // plus the one in `confirmable` above. Nothing here restates the intent: that is
+            // `IntentConfirm`'s job and it does it as soon as there is a session to do it
+            // under.
+            <p role="status" data-testid="confirm-gated">
+              <strong>Sign in to ask the stores.</strong> Everything so far has stayed between
+              you and this origin&rsquo;s buyer service. The next step is the one that leaves
+              it: the exchange solicits real stores, and each of them is told a pseudonym and
+              a handful of coarse buckets. That pseudonym has to come from the service&rsquo;s
+              vault rather than from this page, so there is no button here until you have
+              signed in above.
+            </p>
+          ) : (
+            <IntentConfirm
+              key={`intent-${attempt}`}
+              questions={outcome.questions}
+              answers={answers}
+              intent={outcome.intent}
+              unresolved={outcome.unresolved}
+              onAnswer={say}
+              onConfirm={confirm}
+              busy={busy}
+            />
+          )}
           <p className="gloss" data-testid="cluster-id">
             The exchange will match this to cluster {outcome.intent.cluster_id}, which is a hash
             of the use case, the budget band and the constraints above.
@@ -618,19 +818,6 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
       <section aria-label="What is not wired yet" className="gaps">
         <h2>What is not wired yet</h2>
         <ul>
-          <li data-testid="gap-signin">
-            <strong>Sign-in: not available yet</strong> —{' '}
-            <code>POST /buyer/auth/magic-link</code> answers 202 and by design never returns
-            the token, so a browser cannot redeem one without an email transport. There is no
-            sign-in form on this page because there is nothing a sign-in form could complete.
-          </li>
-          <li data-testid="gap-pseudonym">
-            <strong>Pseudonym: minted in this browser</strong> — your pseudonym was generated
-            in this browser for this visit. In a real deployment it comes from{' '}
-            <code>POST /buyer/auth/session</code>, which mints it in the buyer service&rsquo;s
-            pseudonym vault and rotates it; sign-in cannot complete here (above), so there is
-            no session to mint one from. Stores never see anything else about you either way.
-          </li>
           <li data-testid="gap-domain">
             <strong>Store domain: not pinned</strong> — the exchange&rsquo;s shortlist slot
             carries no <code>store_domain</code>, so the checkout host could only be checked
