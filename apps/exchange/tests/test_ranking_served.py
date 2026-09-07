@@ -1398,3 +1398,216 @@ def test_suppressing_the_fallback_flag_makes_the_same_auction_mint_again(monkeyp
         "the flag is gone, so this accept is an ordinary one and must carry no fallback "
         f"notice: {payload}"
     )
+
+
+# =====================================================================================
+# 5. R2's five slot fields — what a served slot shows, and where the other three stop
+# =====================================================================================
+# R2, verbatim: "present a shortlist of up to 4 differentiated slots (best fit / best value /
+# most reliable / specialist), each showing PRODUCT, PRICE, COMMITMENTS, STORE TRUST
+# INDICATOR, and PROVENANCE LABELS ('store-confirmed' vs 'from their website')".
+#
+# MEASURED on this branch, `GET /buyer/auctions/{id}` on the real buyer app against a real
+# `uvicorn exchange.main:app` on loopback. One served slot, verbatim:
+#
+#     {"slot": "fit", "bid_ref": "auction-bc81…:demo-woolworks", "fit_score": 0.602,
+#      "trust_summary": {"store_id": "demo-woolworks", "available": true, "score": 0.81,
+#                        "confidence": 0.7, "low_data": false, "dimensions": ["delivery"]},
+#      "provenance_labels": ["store-confirmed"]}
+#
+# R2's last two are there and are real (the first test below shows the trust indicator is the
+# number the trust SERVICE answered with, not a constant). PRODUCT, PRICE and COMMITMENTS are
+# absent — and the second test below is the half that says WHY that is not a missing producer:
+# all three are on the candidate `rank_auction` holds while it builds the shortlist.
+#
+# Where they stop is `packages/contracts/schemas/protocol.schema.json`. `ShortlistSlot` declares
+# exactly `slot`, `bid_ref`, `fit_score`, `trust_summary`, `provenance_labels` and is
+# `additionalProperties: false` (generated as `model_config = ConfigDict(extra="forbid")`), and
+# `GET /auctions/{auction_id}/shortlist` declares `response_model=Shortlist`. An added key is a
+# response-validation ERROR, not a dropped field — measured on this app, by putting one extra
+# key on a stored slot and reading the route back: **500 Internal Server Error**. Publishing it
+# only in the `POST /auctions` body instead is not available either: `CreateAuctionResponse`
+# says of that field "the same object `GET /auctions/{auction_id}/shortlist` serves", and
+# `test_the_shortlist_is_readable_at_the_published_path_after_the_auction_closes` above asserts
+# the two bodies are equal.
+#
+# So the three fields need three optional properties on `ShortlistSlot` in the contract bundle
+# before any of `exchange.ranking.serving`, the exchange's two doors or the buyer's auction view
+# can carry them. Nothing here asserts their absence: a test that pinned it would go red on
+# whoever adds them, which is the wrong direction for a gate to fail in.
+class _TrustService:
+    """The trust service's ``GET /snapshot``, on a real socket, answering a mutable table.
+
+    Here so the slot's trust indicator can be shown to be MEASURED rather than typed: the number
+    in the slot is compared against the number this server answered with, and moving the
+    server's number moves the slot's.
+    """
+
+    def __init__(self, rows: dict[str, Any]) -> None:
+        self.rows = dict(rows)
+        self.version = "v1"
+        self.reads = 0
+        self._server: Any = None
+
+    def start(self) -> str:
+        import json  # noqa: PLC0415
+        import threading  # noqa: PLC0415
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer  # noqa: PLC0415
+
+        service = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's spelling
+                service.reads += 1
+                payload = json.dumps({"version": service.version, "stores": service.rows}).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(payload)))
+                self.send_header("etag", service.version)
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *_: Any) -> None:
+                return
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+        host, port = self._server.server_address[:2]
+        return f"http://{host}:{port}"
+
+    def stop(self) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+
+
+@pytest.fixture
+def trust_service():
+    service = _TrustService(
+        {
+            STORE_A: {"store_id": STORE_A, "blacklisted": False, "score": 0.42, "confidence": 0.9},
+            STORE_B: {"store_id": STORE_B, "blacklisted": False, "score": 0.77, "confidence": 0.8},
+        }
+    )
+    url = service.start()
+    try:
+        yield service, url
+    finally:
+        service.stop()
+
+
+def test_the_slots_trust_indicator_is_the_number_the_trust_service_answered_with(trust_service):
+    """R2's STORE TRUST INDICATOR, shown to be measured rather than typed.
+
+    A trust indicator a human typed is worse than none, because a buyer reads it as measured.
+    So the snapshot wired here is the live reader the composition root binds
+    (:class:`~exchange.composition.LiveTrustSnapshot` over
+    :class:`~exchange.composition.HttpTrustSnapshot`) rather than a ``trust_snapshot`` dict typed
+    into a deployment document, the trust service is a real socket, and the assertion is an
+    equality against what that SERVICE answered — followed by moving the service's number and
+    re-running the auction, which is the half a constant cannot pass.
+
+    (The literal trust scores an audit found — ``0.86``/``0.58``/``0.61`` — are in
+    ``proxyshop_demo/s1.py``, a demonstration script. Nothing on this path reads them.)
+    """
+    from exchange.composition import HttpTrustSnapshot, LiveTrustSnapshot  # noqa: PLC0415
+
+    service, url = trust_service
+    snapshot = LiveTrustSnapshot(HttpTrustSnapshot(f"{url}/snapshot", refresh_seconds=0.0))
+    app = _wired_app(
+        bidders=Bidders({STORE_A: _bid(STORE_A, 100.0), STORE_B: _bid(STORE_B, 100.0)}),
+        trust_snapshot=snapshot,
+    )
+
+    body = _post(app, [_rostered(STORE_A, 100.0), _rostered(STORE_B, 100.0)])
+
+    assert service.reads > 0, "the auction never read the trust service"
+    shown = {
+        slot["trust_summary"]["store_id"]: slot["trust_summary"]["score"]
+        for slot in body["shortlist"]["slots"]
+    }
+    assert shown == {STORE_A: pytest.approx(0.42), STORE_B: pytest.approx(0.77)}, shown
+
+    # Move the SERVICE's number; the slot must move with it.
+    service.rows[STORE_A]["score"] = 0.11
+    service.version = "v2"
+    again = _post(app, [_rostered(STORE_A, 100.0), _rostered(STORE_B, 100.0)])
+    moved = {
+        slot["trust_summary"]["store_id"]: slot["trust_summary"]["score"]
+        for slot in again["shortlist"]["slots"]
+    }
+    assert moved[STORE_A] == pytest.approx(0.11), (
+        f"the slot's trust indicator did not follow the trust service: {moved}"
+    )
+
+
+def test_serving_holds_the_product_the_price_and_the_commitments_of_every_shortlisted_bid():
+    """R2's other three exist at serving time, on the candidate that produced each slot.
+
+    Driven at the library level, deliberately: :func:`rank_auction` is the unit that holds the
+    built shortlist and the projected candidates at once, and §2 above is what establishes that
+    unit is on the served path. A route driving this would test the projection through two
+    layers that can each mask it.
+
+    This is the half that distinguishes "no producer" from "dropped on the way out", and it is
+    the invariant whoever widens ``ShortlistSlot`` will fill the slot from: for every
+    ``bid_ref`` the shortlist publishes, ``rank_auction``'s ``projected`` candidate of that id
+    carries the store's ``product_ref``, its prices and currency, and the commitments it bid
+    with. Asserted against the values the STORE bid, so a projection that grew the keys and
+    filled them with zeroes fails here.
+
+    The commitments are the repository's own: ``fixtures/envelopes/store-alpha.approved.json``
+    carries the standing commitments a merchant-onboarding review approved
+    (``free_returns: 30 days``, ``ships_within: 2 business days``), which is what a hosted bid
+    puts in ``offer.commitments``.
+    """
+    import json  # noqa: PLC0415
+
+    approved = list(
+        json.loads(
+            (REPO_ROOT / "fixtures" / "envelopes" / "store-alpha.approved.json").read_text(
+                encoding="utf-8"
+            )
+        )["envelope"]["standing_commitments"]
+    )
+    priced = {STORE_A: 100.0, STORE_B: 120.0}
+    bids = {}
+    for store_id, price in priced.items():
+        bid = _bid(store_id, price)
+        bid["offer"]["commitments"] = approved
+        bid["offer"]["currency"] = "USD"
+        bids[store_id] = bid
+
+    roster = [_rostered(STORE_A, 100.0), _rostered(STORE_B, 120.0)]
+    solicit = Bidders(bids)
+    now = time.time()
+    entries = collect_bids(roster, [solicit(row) for row in roster], now + 1.0)
+    ranking = rank_auction(
+        entries,
+        auction_id="auction-r2",
+        intent=_intent(),
+        now=now,
+        trust_snapshot={store: {"blacklisted": False, "score": 0.6} for store in priced},
+        registered_domains=StaticRegisteredDomains({s: _domain(s) for s in priced}),
+        catalog=_catalog(tuple(priced)),
+        product_refs={store: "product-1" for store in priced},
+    )
+
+    projected = {str(row["bid_id"]): row for row in ranking["projected"]}
+    slots = ranking["shortlist"]["slots"]
+    assert len(slots) == 2, slots
+    for slot in slots:
+        candidate = projected[slot["bid_ref"]]
+        offer = candidate["offer"]
+        store_id = str(candidate["store_id"])
+        assert offer["product_ref"] == "product-1", offer
+        assert offer["unit_price"] == pytest.approx(priced[store_id]), offer
+        assert offer["total_price"] == pytest.approx(priced[store_id]), offer
+        assert offer["currency"] == "USD", offer
+        assert offer["commitments"] == approved, offer
+        assert [claim["key"] for claim in offer["commitments"]] == [
+            "free_returns",
+            "ships_within",
+        ], offer
