@@ -6,7 +6,8 @@
   "scripts": {
     "build:ui": "vite build --config vite.config.ts",
     "demo": "npm run build:ui && ../../.venv/bin/python devstack/run.py",
-    "devstack": "../../.venv/bin/python devstack/run.py"
+    "devstack": "npm run build:ui && ../../.venv/bin/python devstack/run.py",
+    "devstack:nobuild": "../../.venv/bin/python devstack/run.py"
   },
   "dependencies": {
     "react": "19.2.8",

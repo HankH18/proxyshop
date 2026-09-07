@@ -203,9 +203,12 @@ PROXYSHOP_WORKER=1 npm run demo --workspace @proxyshop/buyer
 ```
 
 That npm script is `npm run build:ui && ../../.venv/bin/python devstack/run.py`: it builds the
-Vite/React SPA and then boots the stack. The build took 97 ms and 22 transformed modules on my
-run, and `http://127.0.0.1:8100/` answered `HTTP/1.1 200 OK` within a second of the banner
-appearing.
+Vite/React SPA and then boots the stack. `npm run devstack --workspace @proxyshop/buyer` is the
+same thing under a different name — both build first, because `apps/buyer/dist` is gitignored
+and a stack booted without it serves the API and a "THE UI IS NOT BUILT" banner instead of the
+page. (`npm run devstack:nobuild` is the one that skips the build, for API work.) The build
+took 152 ms and 25 transformed modules on my run, and `http://127.0.0.1:8100/` answered
+`HTTP/1.1 200 OK` within a second of the banner appearing.
 
 This launcher runs **five servers in one process** — three store agents, the exchange and the
 buyer app. Only the buyer app takes a fixed port; everything else binds port 0. `--no-open`
@@ -230,7 +233,49 @@ The banner tells you where everything landed:
   BUYER APP  http://127.0.0.1:8100      <- open this
 ```
 
-### Type the scripted conversation exactly
+…and then a **SIGN IN** block, which is the next section: the journey has a sign-in step and
+this launcher is what makes it completable without a mail server.
+
+### Sign in first — the confirm button does not exist until you do
+
+**Do this before you type anything into the shopping box.** Step 2's **Confirm and ask
+stores** button is not disabled while you are signed out; it is *absent from the page*,
+because confirming is the step that leaves this origin — the exchange solicits real stores
+and each of them is told a pseudonym minted by the buyer service's vault, which the browser
+cannot mint. And redeeming a sign-in link reloads the page, so a conversation you started
+first is gone when you come back.
+
+There is no password. You type an address, the service issues a single-use link, and opening
+it starts the session. On a workstation there is no mail server to send it through, so the
+devstack sets `PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT=console` and the service **prints the
+link into the terminal you launched it from** — no mailbox needs to exist and the address you
+type does not have to be real:
+
+1. type anything into **Email address** and press **Email me a link**
+2. read the block that appears in the launcher's terminal
+3. open the `http://127.0.0.1:8100/?token=…` URL it prints
+
+```
+======================================================================================
+  MAGIC LINK (printed because this deployment asked for the console
+  transport; this is a live single-use credential)
+
+    to       demo-buyer@example.com
+    open     http://127.0.0.1:8100/?token=K1xHjIKZMNAzrGTYJ_qz1PJPn1IFvnVnnkyD39ijCRA
+    expires  2026-09-07T23:05:26.678704+00:00
+======================================================================================
+```
+
+That token is a real bearer credential and the console is a **local-development transport**:
+whoever can read the process's stdout can sign in as whoever asked for a link. It has to be
+named exactly — a deployment that simply forgets to configure mail still refuses every login
+with `503` and prints nothing, which is the behaviour every non-devstack deployment gets. See
+`PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT` in `.env.example`.
+
+The page comes back signed in, and tells you the only thing the stores will be told about
+you — a fresh handle such as `psn-b8af82a121c2d6e27df53151513395ce`.
+
+### Then type the scripted conversation exactly
 
 The banner also prints two scripted conversations, and it is not being precious about them.
 `cluster_id` is a hash over the clarified query, the budget band and the constraints, and a
@@ -242,7 +287,8 @@ is your own keystrokes.** The shortest of the two is a single line with no follo
 I want a warm merino wool beanie for winter, under $100
 ```
 
-Type that, press Send, and step 2 comes back with the extraction:
+Type that, press Send, and step 2 comes back with the extraction (cluster
+`cl-4d3c3e4edadaa5e7`):
 
 ```
 Here is what we understood
@@ -252,31 +298,35 @@ Must have            material is merino-wool
                      price_usd at most 100
 ```
 
-Press **Confirm and ask stores**, and step 3 is a real auction result:
+Press **Confirm and ask stores** — the button is there now — and step 3 is a real auction.
+Three stores are solicited and two come back on the shortlist, one slot each. From a run of
+this exact walkthrough on this branch:
+
+| slot    | store                | unit / total | `fit_score` | trust | labels |
+|---------|----------------------|--------------|-------------|-------|--------|
+| `fit`   | `demo-woolworks`     | 78.00 / 78.00 USD | `0.57685` | 0.82 | from their website · store-confirmed · unverified |
+| `value` | `demo-alpine-supply` | 72.00 / 72.00 USD | `0.53485` | 0.61 | from their website · store-confirmed · unverified |
+
+Each slot carries the store's own commitment (`free returns — 30 days`,
+`ships within — 2 business days`, both store-confirmed) and the platform's case for it,
+written from the facts rather than from adjectives:
 
 ```
-Auction auction-d945ab99-70e2-4844-bb4d-c368d4554ee1, opened 2026-09-05T16:58:13.437561Z.
-The exchange asked 3 stores when the auction opened. Its shortlist, re-fetched for this
-page, came back with 2 options.
-
-2 options, one per store
-  Fit    fit 0.5640000000000001   score 0.82   from their website / store-confirmed
-  Value  fit 0.522                score 0.61   from their website / store-confirmed
-
-fit — demo-woolworks       unit 78, total 78
-value — demo-alpine-supply unit 72, total 72
+You said price was a must-have, and here it is: 78.00 USD. Also offer held until:
+2026-09-07; reliability: 82%.
 ```
 
-Three stores were asked and two are shown, because the third is excluded on the record. Asked
-through the API, the exchange gives both of its reasons for `demo-fastfleece` in full:
+Three stores were asked and two are shown, because the third is excluded on the record. The
+auction view gives both of its reasons for `demo-fastfleece` in full:
 
 ```
 "blacklisted_store: 'demo-fastfleece' is blacklisted and may not participate (R12)"
 "hard_constraint_unsatisfied: 'material': the candidate carries no such attribute, so the
- constraint is undecidable and does not count as satisfied (R19)"
+ constraint is undecidable and does not count as satisfied (R19) — only a verified
+ supporting claim satisfies a hard constraint (R19)"
 ```
 
-Click **Accept this one** on the Fit slot and the page hands off to the seller's own domain,
+Click **Accept this one** on the `fit` slot and the page hands off to the seller's own domain,
 and says whose decision that was:
 
 ```
@@ -286,7 +336,9 @@ exchange did.
 
 The same journey driven over HTTP against the running stack gives the same thing in JSON —
 `POST /buyer/shortlist/accept` answers 200 with
-`"permalink_url": "https://demo-woolworks.example.com/cart/1:1?discount=PSX-05JN5156"`.
+`"permalink_url": "https://demo-woolworks.example.com/cart/44352913:1?discount=PSX-ARNSGGXH"`.
+The discount code and the auction id are minted per run, so yours will differ; the stores, the
+prices and the exclusion reasons will not.
 
 ---
 

@@ -1009,10 +1009,17 @@ class _Mailbox:
         return found[0]
 
 
+#: The variable that SELECTS a transport, kept out of ``TRANSPORT_ENVS`` because that tuple
+#: is unpacked as the three mail variables. It is cleared by ``no_transport`` all the same:
+#: a shell (or a devstack left running in the same session) that exports it would otherwise
+#: decide what "no transport configured" means for every test below.
+TRANSPORT_SELECT_ENV = "PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT"
+
+
 @pytest.fixture
 def no_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     """No mail transport configured — the state every deployment has actually been in."""
-    for name in TRANSPORT_ENVS:
+    for name in (*TRANSPORT_ENVS, TRANSPORT_SELECT_ENV):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -1174,3 +1181,246 @@ def test_t361_a_half_configured_transport_refuses_to_boot_rather_than_guessing(
         assert named in str(raised.value), (
             f"the boot failure for {override!r} does not name {named}: {raised.value}"
         )
+
+
+# =======================================================================================
+# The console transport — the third state, and the reason it is not a hole in the second
+#
+# The demo dead-ended. A person could open the devstack UI, type a query and answer the
+# clarifying questions, and then stop: `Journey.tsx` keeps the confirm button OUT of the
+# document until there is a session (`gateOnSignIn`), a session comes only from redeeming a
+# mailed link, and no deployment in this tree could mail one — a workstation has no MTA, so
+# `build_magic_link_delivery` returned `_undeliverable` and the route answered 503.
+#
+# The fix is NOT to make the unconfigured case print the token. `_drop`'s docstring is right
+# and stays right: a service booted WITHOUT a transport must fail to log buyers in rather
+# than publish bearer credentials to stdout. What was missing is a transport an operator can
+# DELIBERATELY choose, and the tests here are all about that distinction:
+#
+#   * absence still fails closed, and prints nothing (the first two);
+#   * the console is reachable only by naming it exactly (the third);
+#   * having named it, the link really is printed and really opens a session (the fourth);
+#   * and choosing it says so, loudly, at boot (the fifth).
+# =======================================================================================
+
+CONSOLE_BASE_URL = "http://127.0.0.1:8100/"
+
+
+@pytest.fixture
+def known_token(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Make the next minted magic-link token a value this test can search output for.
+
+    The service keeps only ``token_fingerprint(token)``, so a test cannot ask it what it
+    issued — which is correct of the service and unhelpful here. Deciding the token in
+    advance is what turns "no token appears to have been printed" into "THIS credential was
+    not printed anywhere".
+    """
+    import secrets
+
+    from buyer_svc.auth import magic_link as magic_link_mod
+
+    token = "test-token-must-never-reach-stdout"
+    monkeypatch.setattr(secrets, "token_urlsafe", lambda _bytes: token)
+    assert magic_link_mod.secrets is secrets, "the module no longer mints through `secrets`"
+    return token
+
+
+def test_an_unconfigured_deployment_still_refuses_and_still_prints_no_token(
+    clean_env: None,
+    no_transport: None,
+    fresh_process_state: Any,
+    known_token: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Adding a third state must not soften the default. Unset is still 503, still silent.
+
+    This is the regression that matters most about the console transport: the failure mode
+    of "a dev convenience nobody selected" is a service that prints live sign-in tokens into
+    a log aggregator because somebody forgot a variable. Nothing is set here, and both halves
+    are asserted — the refusal on the wire, and the absence of the credential on stdout.
+    """
+    from buyer_svc.main import create_app
+    from fastapi.testclient import TestClient
+
+    routes_mod = fresh_process_state
+    routes_mod.set_auth_service(routes_mod.build_auth_service())
+    client = TestClient(create_app(), raise_server_exceptions=False)
+
+    answered = client.post("/buyer/auth/magic-link", json={"email": DANA["email"]})
+    assert answered.status_code == 503, answered.text
+
+    printed = capsys.readouterr()
+    stream = printed.out + printed.err
+    assert known_token not in stream, (
+        "a deployment with NO transport configured printed the sign-in token to its output; "
+        "the fail-closed default has been weakened into a credential leak"
+    )
+    assert "token=" not in stream, f"something link-shaped reached the output: {stream!r}"
+    assert known_token not in answered.text, answered.text
+
+
+def test_the_console_transport_cannot_be_reached_by_accident(
+    clean_env: None, no_transport: None, fresh_process_state: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A typo, a near miss, or a blank is a refusal — never a quiet promotion to stdout.
+
+    Two different refusals, and the difference is whether the operator said anything. A value
+    that is not a transport is a BOOT FAILURE that names what would have been accepted: it is
+    a statement this service cannot honour, and honouring it as "the default" would mean a
+    deployment reading `PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT=consoel` in its own manifest
+    while mailing nothing and refusing every login. A blank is not a statement at all, so it
+    falls through to the fail-closed default — which refuses too, just not by raising.
+    """
+    from buyer_svc.auth.delivery import MagicLinkTransportMisconfigured, MagicLinkUndeliverable
+
+    routes_mod = fresh_process_state
+    monkeypatch.setenv("PROXYSHOP_BUYER_MAGIC_LINK_BASE_URL", CONSOLE_BASE_URL)
+
+    for stated in ("Console", "CONSOLE", "consol", "console!", "stdout", "print", "true", "1"):
+        monkeypatch.setenv(TRANSPORT_SELECT_ENV, stated)
+        with pytest.raises(MagicLinkTransportMisconfigured) as raised:
+            routes_mod.build_auth_service()
+        assert TRANSPORT_SELECT_ENV in str(raised.value), (
+            f"the refusal of {stated!r} does not name the variable: {raised.value}"
+        )
+        assert "console" in str(raised.value), (
+            f"the refusal of {stated!r} does not say what it would have accepted: {raised.value}"
+        )
+
+    for blank in ("", "   "):
+        monkeypatch.setenv(TRANSPORT_SELECT_ENV, blank)
+        service = routes_mod.build_auth_service()
+        with pytest.raises(MagicLinkUndeliverable):
+            service.request_login(DANA["email"])
+
+
+def test_the_console_transport_refuses_to_boot_without_the_origin_it_would_link_to(
+    clean_env: None, no_transport: None, fresh_process_state: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A printed link with no front door is the same outage as a mailed one with none.
+
+    The SPA reads its token off `?token=` at its own origin root, so the base URL is not
+    decoration: without it there is nothing to print but a bare token, and with a wrong one
+    the operator clicks into a 404. Refused at boot, in the same shape as the half-configured
+    mail transport above.
+    """
+    from buyer_svc.auth.delivery import MagicLinkTransportMisconfigured
+
+    routes_mod = fresh_process_state
+    monkeypatch.setenv(TRANSPORT_SELECT_ENV, "console")
+
+    for value in (None, "127.0.0.1:8100", "/auth/callback"):
+        if value is None:
+            monkeypatch.delenv("PROXYSHOP_BUYER_MAGIC_LINK_BASE_URL", raising=False)
+        else:
+            monkeypatch.setenv("PROXYSHOP_BUYER_MAGIC_LINK_BASE_URL", value)
+        with pytest.raises(MagicLinkTransportMisconfigured) as raised:
+            routes_mod.build_auth_service()
+        assert "PROXYSHOP_BUYER_MAGIC_LINK_BASE_URL" in str(raised.value), raised.value
+
+
+def test_stating_smtp_with_no_mta_is_a_boot_failure_rather_than_a_silent_503(
+    clean_env: None, no_transport: None, fresh_process_state: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An operator who named a transport gets told when there is nothing behind it.
+
+    Unset means "nothing stated", and nothing stated is the deliberate 503. `smtp` means "I
+    intend to mail", and a deployment that intends to mail and cannot is exactly the state
+    T-361 is about — so it stops the process instead of serving refusals that look like a
+    policy decision.
+    """
+    from buyer_svc.auth.delivery import MagicLinkTransportMisconfigured
+
+    routes_mod = fresh_process_state
+    monkeypatch.setenv(TRANSPORT_SELECT_ENV, "smtp")
+
+    with pytest.raises(MagicLinkTransportMisconfigured) as raised:
+        routes_mod.build_auth_service()
+    assert "PROXYSHOP_BUYER_MAGIC_LINK_SMTP_URL" in str(raised.value), raised.value
+
+
+def test_the_console_transport_announces_itself_at_boot(
+    clean_env: None,
+    no_transport: None,
+    fresh_process_state: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Choosing it is a decision somebody can be held to, so the process says so out loud.
+
+    An operator reading this service's start-up must be able to tell that sign-in tokens are
+    going to stdout — that is the difference between a deliberate local convenience and a
+    credential leak discovered later in a log file. Asserted on stdout rather than on the
+    logger because the launcher this exists for configures uvicorn's loggers and not this
+    package's, so a `_log.warning` alone is frequently swallowed.
+    """
+    routes_mod = fresh_process_state
+    monkeypatch.setenv(TRANSPORT_SELECT_ENV, "console")
+    monkeypatch.setenv("PROXYSHOP_BUYER_MAGIC_LINK_BASE_URL", CONSOLE_BASE_URL)
+
+    routes_mod.build_auth_service()
+
+    announced = capsys.readouterr().out.casefold()
+    assert announced.strip(), "the console transport was selected and said nothing at all"
+    for fragment in (TRANSPORT_SELECT_ENV.casefold(), "console", "stdout", "credential"):
+        assert fragment in announced, (
+            f"the boot announcement never says {fragment!r}, so an operator reading the log "
+            f"cannot tell this process is publishing sign-in tokens:\n{announced}"
+        )
+
+
+def test_the_console_transport_prints_a_link_that_opens_a_session(
+    clean_env: None,
+    no_transport: None,
+    fresh_process_state: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The headline, and the whole reason this exists: the demo journey can be completed.
+
+    Nothing here injects a `deliver`. The transport under test is the one
+    `build_auth_service` chose from the environment, the token is scraped out of what the
+    process actually printed — the same text a developer reads off their terminal — and it is
+    then spent against the running app. That is what makes this evidence that the browser
+    journey works rather than that the function was called.
+    """
+    from urllib.parse import parse_qs, urlsplit
+
+    from buyer_svc.main import create_app
+    from fastapi.testclient import TestClient
+
+    routes_mod = fresh_process_state
+    monkeypatch.setenv(TRANSPORT_SELECT_ENV, "console")
+    monkeypatch.setenv("PROXYSHOP_BUYER_MAGIC_LINK_BASE_URL", CONSOLE_BASE_URL)
+
+    routes_mod.set_auth_service(routes_mod.build_auth_service())
+    client = TestClient(create_app(), raise_server_exceptions=False)
+    capsys.readouterr()  # drop the boot announcement; the next read is the delivery alone
+
+    requested = client.post("/buyer/auth/magic-link", json={"email": DANA["email"]})
+    assert requested.status_code == 202, requested.text
+
+    printed = capsys.readouterr().out
+    links = [
+        word.rstrip(".,")
+        for word in printed.split()
+        if word.startswith(CONSOLE_BASE_URL) and "token=" in word
+    ]
+    assert len(links) == 1, f"expected exactly one printed sign-in link, got {links!r}:\n{printed}"
+    found = parse_qs(urlsplit(links[0]).query).get("token")
+    assert found, f"the printed link carries no token: {links[0]}"
+    token = found[0]
+
+    assert token not in requested.text, (
+        "the token is on the HTTP response as well as in the terminal; the console is no "
+        "longer the only place the credential appears"
+    )
+
+    session = client.post("/buyer/auth/session", json={"token": token})
+    assert session.status_code == 201, (
+        f"the token printed to the console did not open a session ({session.status_code}): "
+        f"{session.text}"
+    )
+    assert session.json()["pseudonym"].startswith("psn-")
+    # Single use, exactly as the mailed one: printing it does not make it a reusable password.
+    assert client.post("/buyer/auth/session", json={"token": token}).status_code == 401

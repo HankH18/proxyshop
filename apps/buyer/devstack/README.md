@@ -8,12 +8,18 @@ sockets. Nothing is mocked and no fixture stands in for a service.
 
 ```sh
 npm run demo --workspace @proxyshop/buyer      # builds the UI, then boots the stack
-npm run devstack --workspace @proxyshop/buyer  # boots the stack without rebuilding the UI
+npm run devstack --workspace @proxyshop/buyer  # the same thing under a different name
 ```
 
-or by hand, from the repo root:
+Both build first. `apps/buyer/dist` is gitignored, so a checkout has no built page until
+something builds one, and a launcher that skips the build serves the API plus a "THE UI IS NOT
+BUILT" banner — which reads like a broken demo. `npm run devstack:nobuild` is the one that
+skips it, for work on the API where the page does not matter.
+
+Or by hand, from the repo root — the build is then yours to run:
 
 ```sh
+npm run build:ui --workspace @proxyshop/buyer
 PROXYSHOP_WORKER=10 .venv/bin/python apps/buyer/devstack/run.py
 ```
 
@@ -23,6 +29,36 @@ this process needs to find them. `--help` lists all of it. Ctrl-C shuts everythi
 
 If `apps/buyer/dist` does not exist the stack still starts — the API is fully live — and says
 loudly that the page is missing and how to build it.
+
+## Signing in, which the journey requires and a workstation cannot mail
+
+Step 2's confirm button is **absent from the page** until there is a session (`Journey.tsx`,
+`gateOnSignIn`): confirming is the step that leaves this origin, and the pseudonym the stores
+are told has to come from the buyer service's vault rather than from the browser. A session
+comes from redeeming an emailed single-use link, and a laptop has no MTA — with none
+configured `POST /buyer/auth/magic-link` answers `503` on purpose, which is correct and also a
+dead end for the demo.
+
+So this launcher sets two variables before it creates the buyer app:
+
+- `PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT=console` — the explicitly-named local transport that
+  **prints the sign-in link to this terminal** instead of mailing it. Nothing else reaches it:
+  unset, blank, or misspelled is a refusal, so the fail-closed default is untouched for every
+  deployment that is not this launcher.
+- `PROXYSHOP_BUYER_MAGIC_LINK_BASE_URL=http://127.0.0.1:8100/` — the origin *this* process
+  serves the page on. `.env.example` ships `http://localhost:8081/`, which is right for
+  `apps/buyer/compose.yaml` and wrong here by a port, and a link built from the wrong port is a
+  404 rather than a sign-in.
+
+Set either variable yourself — a real MTA, say — and the launcher leaves both alone.
+
+Type any address into the page's sign-in panel (no mailbox has to exist), then open the
+`?token=` URL that appears in the terminal. **Do it before typing the conversation:** opening
+the link reloads the page, and a conversation started first is gone.
+
+That printed token is a live bearer credential. Anything that can read this process's stdout
+can sign in as whoever asked for a link, which is fine for one terminal on one workstation and
+is an authentication bypass anywhere stdout is collected. The transport says so at boot.
 
 ## What is data and what is computed
 

@@ -81,6 +81,11 @@ UI_DIST = REPO_ROOT / "apps" / "buyer" / "dist"
 DEFAULT_BUYER_PORT = 8100
 BUYER_PORT_ENV = "BUYER_UI_PORT"
 
+#: The interface the buyer app binds. A CONSTANT rather than a parameter, because the
+#: magic-link base URL is built from it before the server is started and a link built from a
+#: different host than the one serving the page is a 404 in the buyer's browser.
+BUYER_HOST = "127.0.0.1"
+
 BUILD_HINT = "npm run demo --workspace @proxyshop/buyer"
 
 
@@ -252,10 +257,58 @@ def write_document(directory: Path, name: str, document: Any) -> Path:
 
 
 # --------------------------------------------------------------------------------------
+# where the sign-in link goes
+# --------------------------------------------------------------------------------------
+def configure_magic_link_delivery(origin: str) -> str:
+    """Point this stack's sign-in links at ``origin`` and put them in this terminal.
+
+    Without this the demo dead-ends and the reason is not on screen. ``Journey.tsx`` keeps
+    the confirm button OUT of the document until there is a session (it is a gate, not a
+    disabled button), a session comes only from redeeming a mailed link, and a workstation
+    has no MTA - so ``build_magic_link_delivery`` correctly returns its refusing transport
+    and ``POST /buyer/auth/magic-link`` answers ``503``. The buyer can be clarified and can
+    go no further.
+
+    Two variables fix that, and neither weakens the refusal for anybody who has not run this
+    launcher:
+
+    * ``PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT=console`` - the explicit, exactly-spelled choice
+      that makes the service print the link. This launcher IS the operator making it, on a
+      stack it has just bound to loopback for one person.
+    * ``PROXYSHOP_BUYER_MAGIC_LINK_BASE_URL=<origin>`` - the origin THIS process serves the
+      SPA on. ``.env.example`` ships ``http://localhost:8081/``, which is right for
+      ``apps/buyer/compose.yaml`` (``BUYER_SVC_PORT``) and wrong here by a port: the SPA
+      reads its token off ``?token=`` at its own origin root, so a link built from 8081 while
+      the page is on 8100 is a dead link rather than a sign-in.
+
+    An operator who stated either variable is left alone, including one who pointed this
+    stack at a real MTA. The launcher only decides what nobody decided.
+
+    Returns:
+        The transport name in force, for the banner to describe.
+    """
+    from buyer_svc.auth.delivery import (  # noqa: PLC0415
+        CONSOLE_TRANSPORT,
+        MAGIC_LINK_BASE_URL_ENV,
+        MAGIC_LINK_SMTP_URL_ENV,
+        MAGIC_LINK_TRANSPORT_ENV,
+        SMTP_TRANSPORT,
+    )
+
+    stated = str(os.environ.get(MAGIC_LINK_TRANSPORT_ENV) or "").strip()
+    mta = str(os.environ.get(MAGIC_LINK_SMTP_URL_ENV) or "").strip()
+    if not stated and not mta:
+        os.environ[MAGIC_LINK_TRANSPORT_ENV] = stated = CONSOLE_TRANSPORT
+    if not str(os.environ.get(MAGIC_LINK_BASE_URL_ENV) or "").strip():
+        os.environ[MAGIC_LINK_BASE_URL_ENV] = origin
+    return stated or SMTP_TRANSPORT
+
+
+# --------------------------------------------------------------------------------------
 # serving the buyer app on a FIXED port
 # --------------------------------------------------------------------------------------
 @contextlib.contextmanager
-def serve_on_port(app: Any, port: int, *, host: str = "127.0.0.1", timeout: float = 20.0):
+def serve_on_port(app: Any, port: int, *, host: str = BUYER_HOST, timeout: float = 20.0):
     """Run ``app`` on a fixed port in a background thread; yield its base URL.
 
     ``proxyshop_support.asgi_server.serve`` binds port 0 (D40) and is what the store agents
@@ -337,6 +390,43 @@ def _further_answers_line(conversation: dict[str, Any]) -> str:
     )
 
 
+def _sign_in_lines(buyer_url: str, transport: str) -> list[str]:
+    """The sign-in beat, in the banner, because the journey stops without it.
+
+    Step 2's confirm button is ABSENT from the page until there is a session
+    (``Journey.tsx``: ``gateOnSignIn``), so a reader who does not know a sign-in is coming
+    reads a working gate as a broken demo. Says where the link will appear rather than that
+    one was sent: on this stack it is printed into this same terminal.
+    """
+    from buyer_svc.auth.delivery import CONSOLE_TRANSPORT  # noqa: PLC0415
+
+    if transport != CONSOLE_TRANSPORT:
+        return [
+            "",
+            "  SIGN IN    step 2's confirm button is absent until you have a session.",
+            f"             This stack is configured to MAIL the link ({transport}); check the",
+            "             mailbox for the address you type into the page.",
+        ]
+    return [
+        "",
+        "  SIGN IN    step 2's confirm button is absent until you have a session - the",
+        "             exchange is told a pseudonym minted by the buyer service's vault, and",
+        "             the page cannot mint one. Do this FIRST, before typing the",
+        "             conversation: redeeming the link reloads the page and a conversation",
+        "             started beforehand is gone.",
+        "",
+        f"             1. open {buyer_url}",
+        "             2. type any address into 'Email address' and press 'Email me a link'",
+        "                (nothing is mailed and no mailbox has to exist)",
+        "             3. the link is PRINTED IN THIS TERMINAL, below this banner. Open it.",
+        "",
+        "             That link carries a live single-use sign-in token, printed because",
+        "             this launcher set PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT=console. It is",
+        "             a local-development transport: never set it on a deployment whose",
+        "             stdout anyone else can read.",
+    ]
+
+
 def print_banner(
     *,
     market: dict[str, Any],
@@ -344,6 +434,7 @@ def print_banner(
     exchange_url: str,
     buyer_url: str,
     ui_dist: Path | None,
+    transport: str,
 ) -> None:
     out = sys.stdout
     print(f"\n{RULE}", file=out)
@@ -376,6 +467,9 @@ def print_banner(
         print(RULE, file=out)
     else:
         print(f"             serving the built UI from {ui_dist}", file=out)
+
+    for line in _sign_in_lines(buyer_url, transport):
+        print(line, file=out)
 
     print("\n  DEMO CONVERSATIONS - type the turns in order, exactly as written.", file=out)
     print("  The wording is load-bearing: cluster_id is a hash over the clarified", file=out)
@@ -501,6 +595,11 @@ def run(*, open_browser: bool, port: int) -> int:
                 "the journey from."
             ) from exc
 
+        # BEFORE the app is created, because `build_auth_service` reads these on first use
+        # and a service built from an unset environment is one that answers 503 to every
+        # login for the life of the process. The port is decided; the URL is not guessed.
+        transport = configure_magic_link_delivery(f"http://{BUYER_HOST}:{port}/")
+
         # `buyer_svc.main.create_app()` is the entrypoint the Dockerfile runs
         # (`uvicorn buyer_svc.main:app`), and it globs and mounts every `<feature>/routes.py`
         # - including the auction view the page reads. The exchange client is NOT bound here:
@@ -529,6 +628,7 @@ def run(*, open_browser: bool, port: int) -> int:
             exchange_url=exchange_url,
             buyer_url=buyer_url,
             ui_dist=ui_dist,
+            transport=transport,
         )
 
         if open_browser and ui_dist is None:
