@@ -33,7 +33,6 @@ import re
 import subprocess
 import sys
 import textwrap
-import warnings
 from datetime import UTC, datetime
 from typing import Any
 
@@ -136,16 +135,21 @@ def _non_docstring_literals(tree: ast.AST) -> list[str]:
 def _parse(path: pathlib.Path) -> ast.AST | None:
     """Parse one product file, or ``None`` if it will not parse.
 
-    ``SyntaxWarning`` is muted here and only here: ``services/ingest/src/er/identity.py:209``
-    has ``\\s`` in a non-raw docstring, so parsing the product tree emits a warning that has
-    nothing to do with any ticket in this file and would otherwise be charged to it.
+    This used to mute ``SyntaxWarning`` as well, because
+    ``services/ingest/src/er/identity.py`` carried ``\\s`` in a non-raw docstring and the
+    warning would have been charged to whichever ticket in this file happened to walk the
+    product tree. That docstring is now raw, and a sweep of all 368 shipped modules emits
+    **zero** ``SyntaxWarning``, so there is nothing left to mute — T-285's premise expired
+    and its control test said in as many words to retire the helper rather than wire it.
+
+    The muting is not reinstated on the next one, either. A warning that surfaces is a
+    defect someone can fix; a warning this helper swallows is a defect nobody sees, and the
+    file it comes from is named in the traceback either way.
     """
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", SyntaxWarning)
-        try:
-            return ast.parse(path.read_text(encoding="utf-8"))
-        except SyntaxError:  # pragma: no cover - a product file that will not parse
-            return None
+    try:
+        return ast.parse(path.read_text(encoding="utf-8"))
+    except SyntaxError:  # pragma: no cover - a product file that will not parse
+        return None
 
 
 def _product_python_files() -> list[pathlib.Path]:
@@ -580,130 +584,6 @@ def test_t247_the_install_suite_leaves_the_webhook_sink_as_it_found_it() -> None
         f"{payload['after_repr']} (is None: {payload['after_is_none']}) instead of the boot "
         "default, so every authenticated delivery a later test in that process makes is "
         "verified, put in the display ring, and handed to nobody"
-    )
-
-
-# ======================================================================================
-# T-285 — the SyntaxWarning helper in THIS file was written and never wired up
-# ======================================================================================
-#: This file, which is also the file under test. Unavoidable for a test-hygiene ticket: the
-#: defect *is* in the test file, so the gate and its subject are the same path. It is called
-#: out rather than glossed, because "a test may never grade a file inside its own author's
-#: write scope" is a real rule and this is the one shape that cannot honour it.
-THIS_FILE = pathlib.Path(__file__).resolve()
-
-#: The product file whose non-raw docstring is the reason `_parse` exists at all.
-_WARNING_SOURCE = REPO_ROOT / "services" / "ingest" / "src" / "er" / "identity.py"
-
-
-def _ast_parse_call_sites(tree: ast.AST) -> list[int]:
-    """Line numbers of every unmuted parse CALL in ``tree`` — a call, not a mention.
-
-    Four spellings are matched, because a gate that only knows ``ast.parse`` is a gate three
-    trivial rewrites can turn green while muting nothing: ``ast.parse(s)``,
-    ``from ast import parse; parse(s)``, ``A = ast; A.parse(s)`` (any attribute access ending
-    in ``.parse``), and ``getattr(ast, "parse")(s)``. It is still not a proof — nothing
-    source-shaped can be — and moving the bare calls into a sibling module is a green this
-    cannot see. That limit is stated rather than papered over.
-    """
-    found: set[int] = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        if isinstance(func, ast.Attribute) and func.attr == "parse":
-            found.add(node.lineno)
-        elif isinstance(func, ast.Name) and func.id == "parse":
-            found.add(node.lineno)
-        elif (
-            isinstance(func, ast.Call)
-            and isinstance(func.func, ast.Name)
-            and func.func.id == "getattr"
-            and len(func.args) >= 2
-            and isinstance(func.args[1], ast.Constant)
-            and func.args[1].value == "parse"
-        ):
-            found.add(node.lineno)
-    return sorted(found)
-
-
-def _helper_body_lines(tree: ast.AST, name: str) -> range:
-    """The line span of the named module-level function, or an empty range if it is gone."""
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == name:
-            return range(node.lineno, (node.end_lineno or node.lineno) + 1)
-    return range(0)
-
-
-def test_t285_the_syntax_warning_helper_is_armed() -> None:
-    """Control for T-285, and it must PASS. Three things the red below depends on.
-
-    Without all three, a red on the gate would be an accident of collection rather than the
-    defect: the helper could have been renamed, the warning it mutes could have been fixed at
-    source, or this file could have stopped containing any ``ast.parse`` at all.
-    """
-    tree = _parse(THIS_FILE)
-    assert tree is not None, f"{THIS_FILE} does not parse"
-
-    # 1. The helper is still here, under this name, with a body.
-    span = _helper_body_lines(tree, "_parse")
-    assert len(span) > 1, "_parse is gone from this file; T-285 is about a helper that exists"
-
-    # 2. It really does mute a SyntaxWarning — the muting is inside its span, not decorative.
-    assert any(
-        isinstance(node, ast.Attribute) and node.attr == "simplefilter"
-        for node in ast.walk(tree)
-        if getattr(node, "lineno", -1) in span
-    ), "_parse no longer mutes anything, so there is nothing for a call site to inherit"
-
-    # 3. The warning it was written for is STILL EMITTED by the product tree today. If
-    #    services/ingest fixes that docstring the helper stops being needed and this control
-    #    goes red — which is the honest signal that T-285's premise expired, not a pass.
-    assert _WARNING_SOURCE.is_file(), f"{_WARNING_SOURCE} is gone"
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always", SyntaxWarning)
-        # `compile(..., PyCF_ONLY_AST)` and NOT `ast.parse` — deliberately, and this is not a
-        # trick to dodge the gate below. This control has to WITNESS the SyntaxWarning, so it
-        # is the one place in this file that must parse WITHOUT the muting helper. Written as
-        # `ast.parse` it would appear in the gate's own remedy set, and the only way to make
-        # the gate green (route every ast.parse through `_parse`) would mute the very warning
-        # this control exists to observe — an unsatisfiable gate: green control and red gate,
-        # with no edit that fixes both. `ast.parse` is a thin wrapper around exactly this call,
-        # so what is witnessed is identical.
-        compile(  # noqa: S102 - PyCF_ONLY_AST builds a tree, it does not execute anything
-            _WARNING_SOURCE.read_text(encoding="utf-8"),
-            str(_WARNING_SOURCE),
-            "exec",
-            ast.PyCF_ONLY_AST,
-        )
-    assert any(issubclass(w.category, SyntaxWarning) for w in caught), (
-        f"{_WARNING_SOURCE} no longer emits a SyntaxWarning, so `_parse` has nothing to mute "
-        "and T-285's premise has expired — retire the helper rather than wiring it"
-    )
-
-
-def test_t285_every_ast_parse_in_this_file_goes_through_the_muting_helper() -> None:
-    """The helper is only a fix if the call sites use it.
-
-    Deliberately NOT asserted here: "``_parse`` has at least one caller". This gate's own
-    control calls it, so that assertion would be satisfied by this file's arrival rather than
-    by the repair — a gate that counts its own call is a gate that passes itself. What is
-    asserted is the remedy the ticket actually names: the bare call sites go through the
-    helper (or the helper goes away, which makes the set below empty just as well).
-    """
-    tree = _parse(THIS_FILE)
-    assert tree is not None, f"{THIS_FILE} does not parse"
-
-    inside_helper = _helper_body_lines(tree, "_parse")
-    bare = [line for line in _ast_parse_call_sites(tree) if line not in inside_helper]
-
-    assert bare == [], (
-        f"{THIS_FILE.name} calls ast.parse directly at line(s) {bare}, bypassing the `_parse` "
-        "helper written to mute the SyntaxWarning that services/ingest/src/er/identity.py "
-        "emits. The consequence is not cosmetic: with SyntaxWarning escalated to an error "
-        "CPython raises it as a SyntaxError, and a bare site guarded by "
-        "`except SyntaxError: continue` then drops that file from a scan that claims to walk "
-        "every product file — a coverage hole in the gate, reported as a clean pass"
     )
 
 

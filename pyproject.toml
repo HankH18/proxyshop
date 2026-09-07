@@ -153,7 +153,13 @@ extend-exclude = ["node_modules",".venv","dist","build",".swarm-loop",".pkgroot"
 # apply to named paths too.
 force-exclude = true
 [tool.ruff.lint]
-select = ["E","F","I","UP","B","ASYNC"]
+# `W` earns its place: W605 is an invalid escape sequence in a non-raw string, and its
+# absence here is what let `services/ingest/src/er/identity.py` ship a docstring containing
+# `\s`. Nothing in the lint gate saw it, so parsing the product tree emitted a SyntaxWarning
+# instead — and FIVE separate test modules grew hand-rolled `simplefilter("ignore",
+# SyntaxWarning)` blocks to swallow the noise rather than fix the source. A warning five
+# files agree to mute is a defect the linter should have refused. It does now.
+select = ["E","F","I","UP","B","ASYNC","W"]
 ignore = ["E501"]
 [tool.ruff.lint.per-file-ignores]
 "**/tests/**" = ["B"]
