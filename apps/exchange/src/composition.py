@@ -132,6 +132,7 @@ The document
                   "offer": {"unit_price": 389.0, "currency": "USD"}}
                ]}
       },
+      "external_bid_keyring_file": "/run/secrets/exchange-external-bid-keyring.json",
       "checkout_mode": "redirect",
       "trust_url": "http://trust:8084"
     }
@@ -196,6 +197,45 @@ The document
     exist; the shape it builds there is the shape this key takes.
     Omitted, nothing is bound and :func:`~exchange.ranking.serving.catalog_of` keeps its
     ``NoCatalogSnapshots`` default — exactly today's behaviour.
+``external_bid_keyring_file``
+    **A PATH, never the keys.** The signed external bid door
+    (``POST /v1/auctions/{auction_id}/bids``) selects a secret out of a
+    ``{signer_id: {key_id: secret}}`` keyring (R8/C10/D52), and until this key existed the only
+    way to hand it one was :func:`~exchange.external_bids.routes.configure_external_bids`,
+    which no deployment called — so the served door refused every submission in production
+    with ``unknown_signing_key``. It could not be closed by adding the keys to this document:
+    **this document carries no secret material of any kind**, by design, because it is a plain
+    JSON file that gets pasted into tickets, chat and compose overrides. So the document names
+    a file and the SECRETS LIVE IN THAT FILE — the same separation
+    ``PROXYSHOP_ROLE_PASSWORD`` and the service DSNs already keep in this repository, where
+    every document names a role and none of them names a password.
+
+    *Where the secret lives*: a JSON file on the exchange's own filesystem, holding exactly
+    ``{"signer-id": {"key-id": "secret"}}``. *Who can read it*: whoever can read that path —
+    a deployment mounts it read-only at the same place it already mounts the document this key
+    is written in (``EXCHANGE_DEPLOYMENT`` is itself a path inside the container, so this needs
+    no new variable, no new compose line and no change to any shipped artifact), and a
+    ``/run/secrets/…`` mount at mode ``0400`` owned by the service user is what that means on
+    docker and kubernetes. Said exactly rather than generously: a deployment that states its
+    document INLINE through ``EXCHANGE_DEPLOYMENT_JSON`` has no mount yet and has to add one
+    for this file — the keys cannot ride in the variable, for the same reason they cannot ride
+    in the document. *When it is absent*: nothing is bound, ``_keyring`` answers ``{}``
+    and the door refuses every submission ``unknown_signing_key`` — an exchange nobody handed a
+    keyring to admits nothing, which is the property this key may not weaken.
+
+    A file that is NAMED and cannot be read, or that does not spell a keyring, is a **503**
+    like every other malformed deployment — not a fail-closed shrug, because the shrug is
+    indistinguishable from the correct behaviour for an exchange nobody configured, and that is
+    precisely how a deployment ends up refusing an honest seller for a week. The message names
+    the file, the signer and the key id (all three travel on the wire in every submission) and
+    never a secret. Writing the keyring INLINE under ``external_bid_keyring`` is refused
+    outright rather than ignored, because ignoring it would leave an operator believing the
+    door was configured while it refused everything.
+
+    Rotation is a change to that file plus a restart: it is read once per process, at the same
+    moment the rest of the document is. Adding a signer's next key id alongside its current one
+    needs no coordination — that is what the nested shape is for — and REMOVING a key id takes
+    effect when the process next boots.
 ``checkout_mode``
     Optional; ``CHECKOUT_MODE`` still works and this overrides it for this app.
 ``trust_url``
@@ -317,11 +357,14 @@ __all__ = [
     "HttpBidSolicitor",
     "HttpTrustLedgerSink",
     "HttpTrustSnapshot",
+    "KEYRING_FILE_KEY",
+    "KEYRING_INLINE_KEY",
     "LayeredSellerEligibility",
     "LiveTrustSnapshot",
     "MAX_BID_RESPONSE_BYTES",
     "MAX_DEPLOYMENT_BYTES",
     "MAX_DEPLOYMENT_SELLERS",
+    "MAX_KEYRING_BYTES",
     "MAX_SOLICIT_WALL_CLOCK_SECONDS",
     "MAX_UNDELIVERED_LEDGER_EVENTS",
     "SellerRow",
@@ -340,6 +383,7 @@ __all__ = [
     "default_seller_eligibility",
     "ensure_configured",
     "read_deployment",
+    "read_external_bid_keyring",
     "solicitation_profile",
     "trust_events_url",
     "trust_snapshot_endpoint",
@@ -403,6 +447,25 @@ MAX_BID_RESPONSE_BYTES = 256 * 1024
 #: mistake rather than against an adversary — which is why the numbers are generous.
 MAX_DEPLOYMENT_BYTES = 4 * 1024 * 1024
 MAX_DEPLOYMENT_SELLERS = 10_000
+
+#: The document key naming the external bid door's keyring FILE, and the key that is refused.
+#:
+#: Two names, one letter apart, and the refusal of the second is the reason both are constants:
+#: an operator's first instinct is to type the keys into the document, and a composition root
+#: that silently ignored that would leave them believing the door was configured while it
+#: refused every submission ``unknown_signing_key``. See the module header.
+KEYRING_FILE_KEY = "external_bid_keyring_file"
+KEYRING_INLINE_KEY = "external_bid_keyring"
+
+#: The most bytes an external bid keyring file may occupy.
+#:
+#: Read once per process, not per request, so this is a guard against a mistake — a path
+#: pointing at a log, a core dump, a whole database export — rather than against an adversary,
+#: which is why it is generous: :data:`MAX_DEPLOYMENT_SELLERS` signers with several rotating
+#: keys each fit inside it many times over. A failure is NOT cached (see
+#: :func:`ensure_configured`), so a document naming a large unusable file is re-read on every
+#: request until it is fixed, and that is the case this ceiling is really about.
+MAX_KEYRING_BYTES = 1024 * 1024
 
 #: The wall-clock ceiling on ONE store's solicitation, from the request leaving to its last
 #: byte arriving.
@@ -515,6 +578,14 @@ class Deployment:
     #: two it does name for this module are the two deployment keys — so the document is the
     #: only knob that reaches the shipped container today.
     trust_url: str | None = None
+    #: Path to the file holding the external bid door's ``{signer_id: {key_id: secret}}``
+    #: keyring, or ``None`` when this deployment states none and the door therefore admits
+    #: nobody. A PATH and never the keys: this record carries no secret material, which is what
+    #: makes a deployment document safe to paste into a ticket. Read by
+    #: :func:`read_external_bid_keyring` at bind time, not here — a parsed document is a
+    #: description of a deployment, and reading a secret while validating one would put the
+    #: keys in every caller's hands, including the two that only wanted to check the syntax.
+    external_bid_keyring_file: str | None = None
 
     @property
     def eligibility_rows(self) -> dict[str, str]:
@@ -771,7 +842,130 @@ def parse_deployment(document: Any, *, source: str) -> Deployment:
         intent_clusters=_intent_clusters(body.get("intent_clusters"), source),
         catalog=_catalog(body.get("catalog"), source),
         trust_url=trust_url,
+        external_bid_keyring_file=_keyring_file(body, source),
     )
+
+
+def _keyring_file(body: Mapping[str, Any], source: str) -> str | None:
+    """The path this document names its external bid keyring at, or ``None``.
+
+    Refuses an INLINE keyring first, and that refusal is the more important half. A document
+    carrying ``{"external_bid_keyring": {...}}`` is an operator who has just typed live signing
+    secrets into the file this module's header describes as the one that gets pasted around;
+    ignoring the key — the default behaviour for anything this parser does not read — would
+    leave them believing the door was configured while it went on refusing every submission
+    ``unknown_signing_key``, which is the exact failure this key exists to end. The message
+    quotes the key NAME and never the value.
+    """
+    if body.get(KEYRING_INLINE_KEY) is not None:
+        raise DeploymentConfigurationError(
+            f"{source}: {KEYRING_INLINE_KEY!r} is not a key this document may carry — a "
+            f"deployment document holds no secret material, because it is a plain JSON file "
+            f"that gets pasted around. State {KEYRING_FILE_KEY!r} instead, naming a file that "
+            f"holds {{signer_id: {{key_id: secret}}}} and that only this service can read"
+        )
+    stated = body.get(KEYRING_FILE_KEY)
+    if stated is None:
+        return None
+    if not isinstance(stated, str) or not stated.strip():
+        raise DeploymentConfigurationError(
+            f"{source}: {KEYRING_FILE_KEY} must be a non-empty path to the file holding this "
+            f"exchange's {{signer_id: {{key_id: secret}}}} keyring, got "
+            f"{type(stated).__name__}. Omit the key entirely to run an exchange that admits no "
+            f"external bid at all"
+        )
+    return stated.strip()
+
+
+def read_external_bid_keyring(path: str, *, source: str) -> Mapping[str, Mapping[str, str]]:
+    """The ``{signer_id: {key_id: secret}}`` keyring ``path`` holds. Raises rather than degrading.
+
+    Every refusal below has the SAME symptom if it is tolerated — the door answers
+    ``unknown_signing_key`` to a correctly signed bid — and that sentence names the seller, not
+    the deployment. So a keyring that was NAMED and cannot be used is a 503 that says which
+    file and which row, exactly as a malformed deployment document is.
+
+    **Nothing here quotes a secret**, only the signer id, the key id and a type name. Both ids
+    travel on the wire in every submission and are already echoed in refusals; the secret is
+    the one value in this file that must never reach a log, a 503 body or an exception's
+    ``__str__`` — which is where an unguarded ``f"{value!r}"`` puts it.
+
+    An EMPTY keyring (``{}``) is accepted and binds: it is a person stating that this exchange
+    registers no external signer yet, and it behaves exactly as omitting the key does. An empty
+    FILE is not JSON and is refused, which is the truncation case worth telling apart.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except OSError as exc:
+        raise DeploymentConfigurationError(
+            f"{source}: the external bid keyring at {path} could not be read "
+            f"({exc.__class__.__name__}: {exc}). A named-but-unreadable keyring is a "
+            f"misconfiguration, not an exchange that registers no signer, so it is refused "
+            f"rather than answered `unknown_signing_key` to every seller who submits"
+        ) from exc
+
+    if len(text) > MAX_KEYRING_BYTES:
+        raise DeploymentConfigurationError(
+            f"{source}: the external bid keyring at {path} is {len(text)} bytes; this exchange "
+            f"reads at most {MAX_KEYRING_BYTES}. A keyring is a handful of short secrets per "
+            f"signer, so a file this size is a path pointing at something else"
+        )
+
+    try:
+        document = json.loads(text)
+    except Exception as exc:  # noqa: BLE001 - RecursionError is not a ValueError; see below
+        # `except ValueError` would let `json.loads` on a deeply nested file escape as a
+        # RecursionError and become a 500 on every route, which is the defect `read_deployment`
+        # already had to fix one layer up. Nothing about this file's contents may reach the
+        # message: `str(exc)` for a JSON error is a position and a reason, never the text.
+        raise DeploymentConfigurationError(
+            f"{source}: the external bid keyring at {path} is not valid JSON ({type(exc).__name__})"
+        ) from exc
+
+    if not isinstance(document, Mapping):
+        raise DeploymentConfigurationError(
+            f"{source}: the external bid keyring at {path} must be a JSON object of "
+            f"{{signer_id: {{key_id: secret}}}}, got {type(document).__name__}"
+        )
+
+    keyring: dict[str, dict[str, str]] = {}
+    for signer_id, keys in document.items():
+        if not isinstance(signer_id, str) or not signer_id:
+            raise DeploymentConfigurationError(
+                f"{source}: the external bid keyring at {path} names a signer that is not a "
+                f"string ({type(signer_id).__name__}); a submission's `signer_id` is a string "
+                f"and would match nothing"
+            )
+        if not isinstance(keys, Mapping):
+            raise DeploymentConfigurationError(
+                f"{source}: the external bid keyring at {path} maps signer {signer_id!r} to "
+                f"{type(keys).__name__}, not to a {{key_id: secret}} object. The nesting is the "
+                f"contract (R8): two signers may use the same key id, and a flat table would "
+                f"let one signer's key verify another's bid"
+            )
+        if not keys:
+            raise DeploymentConfigurationError(
+                f"{source}: the external bid keyring at {path} names signer {signer_id!r} with "
+                f"no key at all, so every bid it signs is refused `unknown_signing_key`. Remove "
+                f"the signer, or state the key id it signs with"
+            )
+        row: dict[str, str] = {}
+        for key_id, secret in keys.items():
+            if not isinstance(key_id, str) or not key_id:
+                raise DeploymentConfigurationError(
+                    f"{source}: the external bid keyring at {path} gives signer {signer_id!r} a "
+                    f"key id that is not a string ({type(key_id).__name__})"
+                )
+            if not isinstance(secret, str) or not secret:
+                raise DeploymentConfigurationError(
+                    f"{source}: the external bid keyring at {path} holds no usable secret for "
+                    f"signer {signer_id!r} key {key_id!r} ({type(secret).__name__}). A blank or "
+                    f"non-string secret is not an HMAC key, and `keyring_secret` reads it as no "
+                    f"such key — so the row would refuse the seller it was written for"
+                )
+            row[key_id] = secret
+        keyring[signer_id] = row
+    return keyring
 
 
 def read_deployment(env: Mapping[str, str] | None = None) -> Deployment | None:
@@ -1704,6 +1898,7 @@ def configure_exchange(
     from .accept.routes import InMemoryAuctionBids, configure_accept  # noqa: PLC0415
     from .auction.routes import configure_auctions  # noqa: PLC0415
     from .auction.state import AuctionStateMachine  # noqa: PLC0415
+    from .external_bids.routes import configure_external_bids  # noqa: PLC0415
     from .ranking.serving import configure_ranking  # noqa: PLC0415
 
     bound: list[str] = []
@@ -1782,6 +1977,35 @@ def configure_exchange(
     if deployment.checkout_mode and unset("checkout_mode"):
         configure_accept(app, checkout_mode=deployment.checkout_mode)
         bound.append("checkout_mode")
+
+    if unset("external_bid_queue"):
+        # The signed external door's verification queue (R8/R18). Bound with NO document key
+        # required, for the reason the ledger sink above is: the door refuses
+        # `verification_queue_unavailable` when it finds nothing, so an exchange that has to be
+        # told to keep the bids it admitted is an exchange that admits none — and this seam,
+        # like the keyring, had no production caller at all until now. WHERE it lands is not a
+        # setting for the same reason `trust_url` defaults: Redis is this service's own
+        # datastore (D39), already declared and health-checked in `apps/exchange/compose.yaml`.
+        #
+        # It admits nothing on its own. A deployment that states no keyring still refuses every
+        # submission at the gate before this one, so binding a queue unconditionally changes
+        # what an ADMITTED bid does and never who is admitted.
+        from .external_bids.verification_queue import RedisVerificationQueue  # noqa: PLC0415
+
+        configure_external_bids(app, queue=RedisVerificationQueue())
+        bound.append("external_bid_queue")
+
+    if deployment.external_bid_keyring_file and unset("external_bid_keyring"):
+        # THE SECRETS ARE READ HERE AND NOWHERE ELSE. `deployment` names the file; this is the
+        # only line in the process that opens it, so the keys exist in one object hanging off
+        # `app.state` and never in a parsed document that a caller might log, echo or re-serve.
+        configure_external_bids(
+            app,
+            keyring=read_external_bid_keyring(
+                deployment.external_bid_keyring_file, source=deployment.source
+            ),
+        )
+        bound.append("external_bid_keyring")
 
     if unset("auction_bids"):
         # The auction's own record of what it collected. `POST /auctions` installs one anyway

@@ -13,6 +13,7 @@ witness it was red on.
 
 from __future__ import annotations
 
+import json
 import sys
 import threading
 import time
@@ -896,3 +897,127 @@ def test_a_lone_surrogate_cannot_reach_the_response_renderer() -> None:
     assert response.status_code < 500, (
         f"a lone surrogate in the body answered {response.status_code}"
     )
+
+
+def test_two_stores_rostered_on_one_product_do_not_share_a_price_wall() -> None:
+    """An honest seller must not be refused by ANOTHER store's declared depth.
+
+    ``_auction_terms`` keys ``list_prices`` by ``product_ref``, and a roster is a list of
+    stores asked about the same product — so before this gate the last row on the roster
+    silently decided the price wall for every submitter. Red on the door as merged, and found
+    by driving the real route rather than by reading it: the composition root's own two-store
+    roster (``s1`` at 100.00, ``s2`` at 120.00, both ``prod-1``, 20% of depth) refused ``s1``'s
+    correctly signed 88.00 with ``price_under_declared_depth:offer.unit_price``, because 88.00
+    is under ``s2``'s floor of 96.00.
+
+    Both directions are asserted, because a filter that simply found nothing would also make
+    the first assertion pass: the submitting store's OWN wall must still refuse a bid under
+    its own floor.
+    """
+    future = time.time() + 300
+    roster = [
+        {"store_id": STORE, "product_ref": PRODUCT, "list_price": 100.0, "max_discount_pct": 20.0},
+        {
+            "store_id": "store-external-2",
+            "product_ref": PRODUCT,
+            "list_price": 120.0,
+            "max_discount_pct": 20.0,
+        },
+    ]
+    app = _app(records={OPEN: _Record(roster=roster, deadline=future)})
+    client = TestClient(app, raise_server_exceptions=False)
+
+    admitted = _submit(client, OPEN, _payload(OPEN, nonce="two-store-1", unit_price=88.0))
+    assert admitted.status_code == 202, (
+        f"a bid inside its OWN store's declared depth (100.00 less 20%) was refused "
+        f"{admitted.status_code}: {admitted.text[:300]}"
+    )
+    assert len(app.state.test_queue.items) == 1, app.state.test_queue.items
+
+    # The positive control: this store's own wall is still enforced, so the filter did not
+    # simply switch the price gate off.
+    refused = _submit(client, OPEN, _payload(OPEN, nonce="two-store-2", unit_price=50.0))
+    assert refused.status_code == 400, refused.text[:300]
+    assert any("price" in reason for reason in refused.json()["reasons"]), refused.json()
+    assert len(app.state.test_queue.items) == 1, "a refused submission was queued"
+
+
+def test_the_door_runs_the_composition_root_and_a_broken_keyring_is_a_503(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """This route takes the deployment hook its three siblings take, and answers 503 like them.
+
+    Red before R8: ``submit_external_bid`` read ``app.state`` for its keyring, its queue and
+    its auction machine and never ran the composition root that binds them, so an exchange
+    whose first request was a bid submission was configured by nobody — and a deployment
+    naming an unreadable keyring got a silent ``unknown_signing_key`` for every seller instead
+    of being told its file was wrong.
+
+    A 503 rather than a 400 because "each rejection is final": a 400 from this door tells an
+    honest submitter their bid is permanently refused, and an operator's broken file is not a
+    fact about their bid.
+    """
+    import json as _json
+
+    document = {
+        "sellers": [{"store_id": STORE, "eligibility": "eligible"}],
+        "external_bid_keyring_file": str(tmp_path / "never-mounted.json"),
+    }
+    monkeypatch.setenv("EXCHANGE_DEPLOYMENT_JSON", _json.dumps(document))
+    monkeypatch.delenv("EXCHANGE_DEPLOYMENT", raising=False)
+
+    app = create_app()
+    configure_ranking(
+        app, trust_snapshot={STORE: {"store_id": STORE, "score": 0.9, "blacklisted": False}}
+    )
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = _submit(client, OPEN, _payload(OPEN, nonce="hook-1"))
+
+    assert response.status_code == 503, (
+        f"the door did not run the composition root, or answered a misconfigured deployment "
+        f"as a rejection: {response.status_code} {response.text[:300]}"
+    )
+    detail = response.json()["detail"]
+    assert "never-mounted.json" in detail and "could not be read" in detail, detail
+
+
+def test_a_full_verification_queue_refuses_rather_than_displacing_an_admitted_bid() -> None:
+    """The backlog has a ceiling, and reaching it costs the exchange nothing it already took.
+
+    The obvious bound — ``LTRIM`` to the last N — silently drops the OLDEST work items, which
+    are submissions whose nonce is already spent and which therefore cannot be resubmitted
+    byte-identically: the exchange would have admitted a bid, told the seller 202, and then
+    thrown the only record of it away. So the queue refuses instead, the door answers
+    ``verification_queue_unavailable``, and what was already admitted stays.
+
+    Driven through the real route against a real Redis, with a ceiling of one, because the
+    property is about what the datastore holds after the second submission.
+    """
+    from exchange.external_bids.verification_queue import RedisVerificationQueue
+
+    from proxyshop_support.redis_client import worker_redis
+
+    key = "exchange:external-bid-verification:test-full"
+    redis = worker_redis()
+    redis.delete(key)
+    queue = RedisVerificationQueue(key, max_items=1)
+    future = time.time() + 300
+    app = _app(records={OPEN: _Record(roster=_roster(50.0), deadline=future)})
+    configure_external_bids(app, queue=queue)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    try:
+        first = _submit(client, OPEN, _payload(OPEN, nonce="full-1"))
+        assert first.status_code == 202, first.text[:300]
+        assert queue.depth() == 1, queue.depth()
+
+        second = _submit(client, OPEN, _payload(OPEN, nonce="full-2"))
+        assert second.status_code == 400, second.text[:300]
+        assert "verification_queue_unavailable" in second.json()["reasons"], second.json()
+        assert queue.depth() == 1, "the ceiling displaced a work item that was already admitted"
+        assert json.loads(redis.lrange(key, 0, -1)[0])["nonce"] == "full-1", (
+            "the retained item is not the one that was admitted first"
+        )
+    finally:
+        redis.delete(key)

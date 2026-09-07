@@ -1526,3 +1526,280 @@ def test_an_offer_that_states_no_price_at_all_is_not_this_gates_subject() -> Non
         )
     )
     assert result.code.startswith(CODE_PREFIX)
+
+
+# =====================================================================================
+# R3's VALIDATE half — "create a single-use discount code on that store, VALIDATE IT
+# (validity window, combinesWith), and redirect to the store's checkout via cart
+# permalink with the code pre-applied."
+#
+# The minting half and the permalink half were real and served; this half was not written
+# at all. Measured on this tree over the SERVED route before these tests existed: a bid
+# whose offer had expired an hour before the auction opened came back
+#
+#     POST /auctions/auction-probe-1/accept -> 200
+#     {"permalink_url": "https://store-a.example.com/cart/1:1?discount=PSX-6SMY54PJ",
+#      "code": "PSX-6SMY54PJ", "notice": null}
+#
+# — a live single-use discount, on a permalink handed to a shopper, whose D22 window
+# (`min(now + 48h, offer.expires_at)`) had already closed. `code_expiry` COMPUTED that
+# window and published it in the `code_created` body; nothing compared it to `now`.
+#
+# The second half is the cart: R3 says the buyer is redirected "with the code
+# pre-applied", and the exchange takes the merchant's `permalink_url` verbatim. A
+# permalink that pre-applies a DIFFERENT discount is the shop's own cart already carrying
+# a discount this one does not combine with — the buyer redeems somebody else's code, the
+# promise the exchange recorded is not the promise the cart honours, and `apps/trust`'s
+# reconciler (which joins on `discount_codes[].code`) can never match the order.
+# =====================================================================================
+T_CLOSED_WINDOW = 1_600_000_000.0  # 2020-09-13 — before any wall-clock `now` this repo sees
+
+
+def _accept_route_app(
+    bid_offer: dict[str, Any],
+    *,
+    mode: str,
+    creator: Any | None = None,
+) -> tuple[Any, str, Any]:
+    """A booted exchange with one closed auction holding one bid. The real served route."""
+    from exchange.accept.routes import InMemoryAuctionBids, configure_accept
+    from exchange.auction.state import AuctionStateMachine
+    from exchange.checkout import StaticRegisteredDomains
+    from exchange.eligibility import ELIGIBLE, StaticSellerEligibility
+    from exchange.main import create_app
+
+    machine = AuctionStateMachine()
+    auction_id = "auction-r3-validate"
+    machine.create(auction_id, intent_id="intent-1", cluster_id="cluster-1", roster=[])
+    machine.open(auction_id, now=T_NOW)
+    machine.close(auction_id, now=T_NOW + 1.0)
+    book = InMemoryAuctionBids()
+    book.record(
+        auction_id,
+        [
+            {
+                "bid_id": "bid-a",
+                "store_id": "store-a",
+                "store_domain": SELLER_DOMAIN,
+                "offer": bid_offer,
+            }
+        ],
+    )
+    app = create_app()
+    configure_accept(
+        app,
+        machine=machine,
+        bids=book,
+        code_creator=creator,
+        checkout_mode=mode,
+        registered_domains=StaticRegisteredDomains({"store-a": SELLER_DOMAIN}),
+        eligibility=StaticSellerEligibility({"store-a": ELIGIBLE}),
+    )
+    return app, auction_id, creator
+
+
+def _drive_accept(
+    bid_offer: dict[str, Any], *, mode: str, creator: Any | None = None
+) -> tuple[Any, Any]:
+    """POST the published accept path. Returns ``(response, creator)``."""
+    from exchange.accept import use_registered_domains
+    from fastapi.testclient import TestClient
+
+    app, auction_id, creator = _accept_route_app(bid_offer, mode=mode, creator=creator)
+    previous = use_registered_domains(None)
+    try:
+        response = TestClient(app).post(f"/auctions/{auction_id}/accept", json={"bid_ref": "bid-a"})
+    finally:
+        use_registered_domains(previous)
+    return response, creator
+
+
+def route_offer(**overrides: Any) -> dict[str, Any]:
+    """An offer shaped like the one `POST /auctions` records, on the registered domain."""
+    base = {
+        "product_ref": "product-1",
+        "unit_price": 100.0,
+        "total_price": 100.0,
+        "checkout_url": f"https://{SELLER_DOMAIN}/cart/1:1",
+        "expires_at": T_FUTURE,
+    }
+    base.update(overrides)
+    return base
+
+
+class PermalinkCodeCreator:
+    """A merchant ``POST /codes`` double that answers with a permalink we choose."""
+
+    def __init__(self, code: str, permalink_url: str) -> None:
+        self.code = code
+        self.permalink_url = permalink_url
+        self.calls: list[tuple[str, Any]] = []
+
+    def create_code(self, store_id: str, offer: Any) -> dict[str, str]:
+        self.calls.append((store_id, offer))
+        return {"code": self.code, "permalink_url": self.permalink_url}
+
+    __call__ = create_code
+
+
+@pytest.mark.parametrize("mode", ["redirect", "shopify"])
+def test_a_served_accept_refuses_a_discount_whose_validity_window_has_closed(mode: str) -> None:
+    """R3's validity window, on the route a buyer actually accepts through.
+
+    The offer expired years before any wall clock this suite runs under, so the D22 window
+    ``min(now + 48h, offer.expires_at)`` is already shut. Before this gate the route
+    answered 200 with a live ``PSX-`` code on a permalink.
+    """
+    creator = RecordingCodeCreator() if mode == "shopify" else None
+    response, creator = _drive_accept(
+        route_offer(expires_at=T_CLOSED_WINDOW), mode=mode, creator=creator
+    )
+
+    assert response.status_code == 409, (
+        f"[{mode}] a discount whose window has already closed was handed to a buyer: "
+        f"{response.status_code} {response.text}"
+    )
+    body = response.json()
+    assert body["accepted"] is False
+    assert "expir" in body["denial_reason"].lower(), body["denial_reason"]
+    if creator is not None:
+        assert creator.calls == [], (
+            "the closed window must be found BEFORE the merchant mints anything; "
+            f"POST /codes was called {len(creator.calls)} time(s)"
+        )
+
+
+@pytest.mark.parametrize("mode", ["redirect", "shopify"])
+def test_the_positive_control_an_ordinary_accept_still_mints_and_redirects(mode: str) -> None:
+    """The wall must not become a wall in front of the happy path.
+
+    Same route, same wiring, an offer with an open window: a real code on a real permalink
+    at the registered domain, exactly as before.
+    """
+    creator = RecordingCodeCreator() if mode == "shopify" else None
+    response, creator = _drive_accept(route_offer(), mode=mode, creator=creator)
+
+    assert response.status_code == 200, f"[{mode}] {response.text}"
+    body = response.json()
+    assert body["code"], body
+    assert urlsplit(body["permalink_url"]).hostname == SELLER_DOMAIN
+    assert body["code"] in body["permalink_url"]
+    if creator is not None:
+        assert len(creator.calls) == 1
+
+
+def test_a_permalink_that_pre_applies_another_discount_is_refused_at_the_route() -> None:
+    """combinesWith, in the only form the exchange can observe: the cart it is sending to.
+
+    The merchant answered with a code and a permalink that pre-applies ``SPRING20``. The
+    buyer following it redeems SPRING20, not the single-use code the exchange minted and
+    recorded — two discounts meeting on one cart, which is exactly the condition R3 asks to
+    be detected *before* the redirect.
+    """
+    creator = PermalinkCodeCreator(
+        "PSX-COMBINE1", f"https://{SELLER_DOMAIN}/cart/1:1?discount=SPRING20"
+    )
+    response, creator = _drive_accept(route_offer(), mode="shopify", creator=creator)
+
+    assert response.status_code == 409, (
+        "the buyer was redirected into a cart that applies somebody else's discount: "
+        f"{response.status_code} {response.text}"
+    )
+    reason = response.json()["denial_reason"]
+    assert reason.startswith("checkout_refused"), reason
+    assert "PSX-COMBINE1" not in reason, f"the live code leaked into the 409: {reason!r}"
+    assert code_fingerprint("PSX-COMBINE1") in reason, (
+        f"the refusal carries no fingerprint joining it to the code_created record: {reason!r}"
+    )
+
+
+def test_the_conflicting_code_is_recorded_as_an_orphan_rather_than_dropped() -> None:
+    """The interesting half: the code was already minted, so it is a live orphan.
+
+    ``accept_offer`` is the function the route calls, with the arguments the route passes.
+    A conflict found after the mint must come back through the same vocabulary an
+    off-domain permalink already uses — an ``OrphanedCode`` carried out on the exception,
+    a ``code_created`` event marked ``orphaned``/``revocation_required``, and a refusal
+    whose prose carries only the fingerprint.
+    """
+    from exchange.accept import accept_offer
+    from exchange.checkout import StaticRegisteredDomains
+    from exchange.eligibility import ELIGIBLE, StaticSellerEligibility
+
+    creator = PermalinkCodeCreator(
+        "PSX-COMBINE2", f"https://{SELLER_DOMAIN}/cart/1:1?discount=SPRING20"
+    )
+    result = accept_offer(
+        auction={
+            "auction_id": "auction-orphan-combine",
+            "now": T_NOW,
+            "bids": [
+                {
+                    "bid_id": "bid-a",
+                    "store_id": "store-a",
+                    "store_domain": SELLER_DOMAIN,
+                    "offer": route_offer(),
+                }
+            ],
+        },
+        bid_ref="bid-a",
+        code_creator=creator,
+        mode="shopify",
+        eligibility=StaticSellerEligibility({"store-a": ELIGIBLE}),
+        registered_domains=StaticRegisteredDomains({"store-a": SELLER_DOMAIN}),
+    )
+
+    assert result.accepted is False
+    assert result.orphaned_code is not None, (
+        f"a code the merchant already minted was dropped on the floor: {result.denial_reason!r}"
+    )
+    assert result.orphaned_code.code == "PSX-COMBINE2"
+
+    created = [e for e in result.events if e["kind"] == "code_created"]
+    assert created, (
+        f"no code_created event records the live discount: {[e['kind'] for e in result.events]}"
+    )
+    payload = created[0]["payload"]
+    assert payload["code"] == "PSX-COMBINE2"
+    assert payload["orphaned"] is True and payload["revocation_required"] is True
+    assert "checkout_redirect" not in [e["kind"] for e in result.events], (
+        "the buyer must not be recorded as redirected into a cart that refuses the code"
+    )
+
+
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "PSX-SPELL01",  # exact
+        "psx-spell01",  # a CDN lower-cased the link; Shopify redeems case-insensitively
+        "%50%53%58-SPELL01",  # percent-encoded
+    ],
+    ids=["exact", "lowercased", "percent-encoded"],
+)
+def test_the_positive_control_our_own_code_in_another_spelling_is_not_a_conflict(
+    spelling: str,
+) -> None:
+    """A cart applying OUR code, however the merchant spelled it, is the happy path.
+
+    This is the control that stops "refuse every permalink carrying a discount" from
+    satisfying the conflict test above.
+    """
+    creator = PermalinkCodeCreator(
+        "PSX-SPELL01", f"https://{SELLER_DOMAIN}/cart/1:1?discount={spelling}"
+    )
+    response, _ = _drive_accept(route_offer(), mode="shopify", creator=creator)
+
+    assert response.status_code == 200, f"[{spelling}] {response.text}"
+    assert response.json()["code"] == "PSX-SPELL01"
+
+
+def test_the_positive_control_a_permalink_with_no_discount_at_all_is_not_a_conflict() -> None:
+    """Absent is not conflicting — the same distinction ``domain.py`` draws about a host.
+
+    A merchant that returns a bare cart URL has put no other discount on the cart. That is
+    a different condition from one that pre-applies a rival code, and refusing it would
+    refuse replies this repo's own doubles already return.
+    """
+    creator = PermalinkCodeCreator("PSX-BARE-01", f"https://{SELLER_DOMAIN}/cart/1:1")
+    response, _ = _drive_accept(route_offer(), mode="shopify", creator=creator)
+    assert response.status_code == 200, response.text

@@ -283,8 +283,21 @@ def _unreadable_unit_price_reasons(offer: Mapping[str, Any] | None) -> list[str]
     ]
 
 
-def assert_offer_is_mintable(offer: Mapping[str, Any] | None) -> None:
+def assert_offer_is_mintable(offer: Mapping[str, Any] | None, *, now: float = 0.0) -> float:
     """Refuse an offer whose code-shaping fields — or whose stated price — will not parse.
+
+    Returns the D22 deadline this offer would mint into — ``min(now + 48h,
+    offer.expires_at)`` — so the caller can judge R3's validity window **without reading
+    ``expires_at`` a second time.** That is not a micro-optimisation: an ``offer`` is a
+    merchant's own JSON-shaped object, "the value I validated is the value I will read next"
+    is an assumption rather than a guarantee, and ``test_orphaned_code.py``'s
+    ``ShiftingOffer`` is that assumption failing on purpose. A gate that read the field twice
+    would judge a different value from the one the code is minted out of, which is the same
+    defect ``providers._code_refusals`` documents about a reply read two ways.
+
+    ``now`` defaults to ``0.0`` — the value this function has always used internally — so
+    every existing caller gets exactly the answer it got before. The port passes
+    ``request.now``, which is the only ``now`` a real window can be judged against.
 
     The order this runs in is the whole point. ``code_expiry`` and the permalink builder are
     both reached *after* the provider has minted — after the merchant's ``POST /codes`` has
@@ -310,7 +323,7 @@ def assert_offer_is_mintable(offer: Mapping[str, Any] | None) -> None:
     and not on the other. Both now consult the same boundary, which is the point of having one:
     two doors that disagree about which values are prices is one door with a hole.
     """
-    code_expiry(0.0, offer)
+    deadline = code_expiry(now, offer)
     offer_quantity(offer)
     refused = _unreadable_unit_price_reasons(offer)
     if refused:
@@ -318,6 +331,7 @@ def assert_offer_is_mintable(offer: Mapping[str, Any] | None) -> None:
             f"offer unit_price {describe((offer or {}).get('unit_price'))} is not a price the "
             f"exchange can read ({', '.join(refused)}), so this offer cannot be minted"
         )
+    return deadline
 
 
 def build_cart_permalink(

@@ -3277,3 +3277,171 @@ def test_a_render_the_process_cannot_obtain_is_treated_as_unsafe(
         "with no render available the answer must be 'replace it' for every exception, not "
         "only for ones some other reader happened to flag"
     )
+
+
+# =====================================================================================
+# R3's combinesWith refusal (`checkout/validity.py`) is a POST-MINT refusal, so it inherits
+# every rule this file holds. The value it complains about — the OTHER discount already on
+# the cart — is a merchant-authored field off the same reply as the code, and nothing makes
+# the two disagree: a merchant is free to pre-apply a spelling of the very code it just
+# issued, and that string is then formatted into `denial_reason`, the persisted
+# `policy_event`, `str(exc)` and the traceback.
+#
+# The cases below are the shapes `SPELLINGS` uses, moved into the one component this refusal
+# reads: the `discount` query value AFTER `parse_qsl` has decoded it once. Double-encoding
+# is what makes them differ — `parse_qsl` unquotes once, so `%2550…` comes back as `%50…`,
+# a DIFFERENT string from the code (so it is a genuine conflict) that a reader recovers the
+# code from for free (so it must not be published).
+#
+# WHAT THESE TESTS DO AND DO NOT PROVE, measured rather than assumed. `validity` renders the
+# rival through `safe_token` at the site that builds the sentence, and
+# `OrphanedCheckoutCode.__init__` runs `redact_code` over the finished message afterwards.
+# Removing the FIRST guard was measured here and every case below stayed green: the boundary
+# layer catches these fragments, because a rival discount is a value the boundary is handed
+# INSIDE the message and `redact_code` shares its decoding model with
+# `redeemable_spelling` above (percent, plus, \uNNNN, punycode — the same four). So these
+# are a regression gate on the combined behaviour, NOT evidence that the build-site guard is
+# the only thing standing between the code and the log.
+#
+# The build-site `safe_token` is kept anyway, for the rule `domain.py` states in as many
+# words — "a fragment that relies on a later layer is a fragment the next refactor
+# publishes" — and for one thing the boundary genuinely cannot do: `cart_conflict_reason` is
+# an exported function, and a caller that logs its return value directly never reaches
+# `OrphanedCheckoutCode` at all.
+# =====================================================================================
+CONFLICT_CODE = "PSX-CONFLICT-9XQ"
+
+
+class ConflictingCartMerchant:
+    """A ``POST /codes`` that answers on-domain with somebody else's discount pre-applied.
+
+    On-domain deliberately: an off-domain permalink is refused by the host check one step
+    earlier, so it can never reach the combinesWith comparison. This is the shape that does.
+    """
+
+    def __init__(self, code: str, applied: str) -> None:
+        self.code = code
+        self.applied = applied
+
+    def create_code(self, store_id: Any, offer: Any) -> dict[str, str]:
+        return {
+            "code": self.code,
+            "permalink_url": f"https://{SELLER_DOMAIN}/cart/1:1?discount={self.applied}",
+        }
+
+    __call__ = create_code
+
+
+def _conflicting_checkout(applied: str) -> OrphanedCheckoutCode:
+    from exchange.checkout import ShopifyCheckoutProvider
+
+    with pytest.raises(OrphanedCheckoutCode) as raised:
+        ShopifyCheckoutProvider().checkout(
+            CheckoutRequest(
+                auction_id="auction-1",
+                bid_ref="bid-a",
+                store_id="store-a",
+                store_domain=SELLER_DOMAIN,
+                offer={
+                    "product_ref": "product-1",
+                    "unit_price": 100.0,
+                    "total_price": 100.0,
+                    "checkout_url": f"https://{SELLER_DOMAIN}/cart/1:1",
+                    "expires_at": T_FUTURE,
+                },
+                mode="shopify",
+                code_creator=ConflictingCartMerchant(CONFLICT_CODE, applied),
+                now=T_NOW,
+                registered_domains=StaticRegisteredDomains({"store-a": SELLER_DOMAIN}),
+            )
+        )
+    return raised.value
+
+
+@pytest.mark.parametrize(
+    "applied",
+    [
+        # `parse_qsl` unquotes once, so each of these decodes to a string that is NOT the
+        # code (a real conflict) but that a log reader recovers the code from for free.
+        "%2550%2553%2558-CONFLICT-9XQ",
+        f"{CONFLICT_CODE}X",
+        f"SPRING20-{CONFLICT_CODE}",
+    ],
+    ids=["double-encoded", "code-with-a-suffix", "code-inside-a-rival"],
+)
+def test_a_rival_discount_that_spells_the_live_code_does_not_publish_it(applied: str) -> None:
+    """The combinesWith refusal quotes the OTHER code — which may spell OURS.
+
+    Every published surface, and the T-202 half beside it: refusing must not cost the
+    exchange the record of the discount the merchant already issued.
+    """
+    exc = _conflicting_checkout(applied)
+
+    assert exc.orphan.code == CONFLICT_CODE, "T-202: the live code must still be carried out"
+    assert_code_is_unrecoverable(str(exc), CONFLICT_CODE, "str() of a combinesWith orphan")
+    # The C-level excepthook first, for the reason the result-building case states: reading
+    # `__cause__` through the redacting property mutates the chain in place.
+    assert_code_is_unrecoverable(
+        excepthook_output(exc), CONFLICT_CODE, "the C-level excepthook, combinesWith orphan"
+    )
+    assert_code_is_unrecoverable(
+        "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        CONFLICT_CODE,
+        "the traceback of a combinesWith orphan",
+    )
+    assert code_fingerprint(CONFLICT_CODE) in str(exc), (
+        "redaction must not become deletion: the fingerprint is the join to the "
+        "code_created record that holds the live code"
+    )
+
+
+def test_the_positive_control_an_unrelated_rival_discount_is_still_named() -> None:
+    """The other half: a rival that cannot spell the code stays in the message.
+
+    Without this, "drop every applied discount from the sentence" would satisfy the test
+    above and leave an operator with a refusal that names nothing.
+    """
+    exc = _conflicting_checkout("SPRING20")
+    assert "SPRING20" in str(exc), (
+        f"the refused discount was redacted away with the code; the refusal is now useless "
+        f"to an operator: {str(exc)!r}"
+    )
+    assert_code_is_unrecoverable(str(exc), CONFLICT_CODE, "str() of a plain combinesWith orphan")
+
+
+@pytest.mark.parametrize(
+    "applied",
+    [CONFLICT_CODE, CONFLICT_CODE.lower(), quote(CONFLICT_CODE, safe="")],
+    ids=["exact", "lowercased", "percent-encoded"],
+)
+def test_the_positive_control_a_cart_applying_our_own_code_is_not_refused(applied: str) -> None:
+    """A merchant spelling OUR code differently is the ordinary case, not a conflict.
+
+    Shopify redeems case-insensitively, and lower-casing or percent-encoding a link is
+    ordinary CDN behaviour — the same two spellings ``SPELLINGS`` carries as real merchant
+    behaviour. A comparison that missed this would orphan a live code on every honest
+    checkout whose merchant tidied its own URL.
+    """
+    from exchange.checkout import ShopifyCheckoutProvider
+
+    result = ShopifyCheckoutProvider().checkout(
+        CheckoutRequest(
+            auction_id="auction-1",
+            bid_ref="bid-a",
+            store_id="store-a",
+            store_domain=SELLER_DOMAIN,
+            offer={
+                "product_ref": "product-1",
+                "unit_price": 100.0,
+                "total_price": 100.0,
+                "checkout_url": f"https://{SELLER_DOMAIN}/cart/1:1",
+                "expires_at": T_FUTURE,
+            },
+            mode="shopify",
+            code_creator=ConflictingCartMerchant(CONFLICT_CODE, applied),
+            now=T_NOW,
+            registered_domains=StaticRegisteredDomains({"store-a": SELLER_DOMAIN}),
+        )
+    )
+    assert result.code == CONFLICT_CODE
+    assert result.kinds == ["accepted", "code_created", "checkout_redirect"]

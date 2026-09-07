@@ -2085,3 +2085,416 @@ def test_the_ranking_gates_live_snapshot_tells_the_same_three_states_apart() -> 
     unreadable = blacklist_reason("honest", down)
     assert unreadable is not None and "blacklist_unreadable" in unreadable, unreadable
     assert len(down) == 0 and dict(answering) == rows
+
+
+# =====================================================================================
+# R8 — the keyring the signed external bid door is served with
+# =====================================================================================
+# The door (`POST /v1/auctions/{auction_id}/bids`) shipped served, correct and unusable: the
+# ONLY way to hand it a keyring was `configure_external_bids`, which no deployment called, so
+# a production exchange refused every submission `unknown_signing_key`. The fix cannot be "put
+# the secrets in the deployment document" — that document is a plain JSON file that gets
+# pasted around and carries no secret material of any kind — so the document names a FILE and
+# the secrets live in it, the way `PROXYSHOP_ROLE_PASSWORD` and the service DSNs keep their
+# secrets out of every document in this repository.
+#
+# Each of the three tests below drives the REAL route on a REAL socket. The refusals are as
+# load-bearing as the admission: an exchange nobody handed a keyring to must go on admitting
+# nothing, which is the property this ticket was forbidden to regress.
+
+#: The Tier-2 seller's signing identity. Deliberately NOT the `store_id` it bids for: the
+#: keyring's outer key is the SIGNER (R8/D52), because one seller may submit for several
+#: stores, and a test that used one string for both could not tell the two lookups apart.
+EXTERNAL_SIGNER = "s1-tier2-signer"
+EXTERNAL_KEY_ID = "key-2026-09"
+EXTERNAL_SECRET = "an-external-bid-signing-secret-0001"
+EXTERNAL_STORE = "s1"
+
+
+def _keyring_file(tmp_path: Path) -> Path:
+    """The mounted secret: `{signer_id: {key_id: secret}}`, and nothing else."""
+    path = tmp_path / "external-bid-keyring.json"
+    path.write_text(
+        json.dumps({EXTERNAL_SIGNER: {EXTERNAL_KEY_ID: EXTERNAL_SECRET}}), encoding="utf-8"
+    )
+    return path
+
+
+def _deployed_client(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    agent_url: str,
+    *,
+    keyring_file: Path | None,
+) -> Any:
+    """`served_exchange()`, configured by a document that may or may not name a keyring file."""
+    document = _deployment_document(agent_url)
+    if keyring_file is not None:
+        document["external_bid_keyring_file"] = str(keyring_file)
+    path = tmp_path / "deployment.json"
+    path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+    monkeypatch.setenv(ENV_DEPLOYMENT, str(path))
+    monkeypatch.delenv(ENV_DEPLOYMENT_JSON, raising=False)
+    return served_exchange()
+
+
+def _open_a_wide_auction(client: httpx.Client) -> str:
+    """An auction whose bid window is the published ceiling, so it is still open to submit to.
+
+    `POST /auctions` returns as soon as every rostered store has answered — the deadline is a
+    ceiling on the wait, not the length of it — so asking for the maximum window costs this
+    test nothing and leaves the auction open while the external submission is signed and sent.
+    """
+    response = client.post(
+        "/auctions",
+        json={
+            "intent": INTENT,
+            "profile": {"pseudonym": "psn-external-1", "buckets": {}},
+            "bid_timeout_seconds": 10.0,
+            "roster": [
+                {
+                    "store_id": row["store_id"],
+                    "tier": 1,
+                    "product_ref": "prod-1",
+                    "list_price": row["list_price"],
+                    "max_discount_pct": 20.0,
+                }
+                for row in STORES
+            ],
+        },
+    )
+    assert response.status_code == 201, f"POST /auctions -> {response.status_code}: {response.text}"
+    body = response.json()
+    # The positive control for every refusal below: this deployment's ordinary traffic works.
+    assert body["ranked"], f"the configured exchange ranked nobody: {body}"
+    return str(body["auction_id"])
+
+
+def _external_submission(auction_id: str, *, nonce: str, key_id: str = EXTERNAL_KEY_ID) -> dict:
+    """A submission in the published `SignedBidSubmission` shape, priced inside the wall."""
+    import time as _time
+
+    return {
+        "auction_id": auction_id,
+        "store_id": EXTERNAL_STORE,
+        "offer": {
+            "product_ref": "prod-1",
+            "unit_price": 88.0,
+            "total_price": 88.0,
+            "currency": "USD",
+            "discount": None,
+            "commitments": [],
+            "expires_at": "2999-01-01T00:00:00Z",
+        },
+        "claims": [],
+        "message": "a Tier-2 seller's pitch",
+        "agent_version": "tier2-seller/0.1.0",
+        "schema_version": "1.0.0",
+        "signer_id": EXTERNAL_SIGNER,
+        "key_id": key_id,
+        "issued_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+        "nonce": nonce,
+    }
+
+
+def _submit_external(client: httpx.Client, payload: dict, secret: str) -> httpx.Response:
+    from store_agent.external import sign_bid
+
+    return client.post(
+        f"/v1/auctions/{payload['auction_id']}/bids",
+        json=payload,
+        headers={"X-ProxyShop-Signature": sign_bid(payload, secret)},
+    )
+
+
+def _queued_work_items() -> list[dict[str, Any]]:
+    """Whatever the door queued for verification, read back out of the datastore itself."""
+    from exchange.external_bids.verification_queue import VERIFICATION_QUEUE_KEY
+
+    from proxyshop_support.redis_client import worker_redis
+
+    client = worker_redis()
+    return [json.loads(raw) for raw in client.lrange(VERIFICATION_QUEUE_KEY, 0, -1)]
+
+
+def _drain_the_queue() -> None:
+    from exchange.external_bids.verification_queue import VERIFICATION_QUEUE_KEY
+
+    from proxyshop_support.redis_client import worker_redis
+
+    worker_redis().delete(VERIFICATION_QUEUE_KEY)
+
+
+def test_a_deployment_that_states_a_keyring_file_admits_a_correctly_signed_external_bid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None, agent_url: str
+) -> None:
+    """State 1 of 3: configured, correctly signed -> 202 and a queued verification work item.
+
+    RED before the composition root read `external_bid_keyring_file`: the document key was
+    ignored, nothing bound `app.state.external_bid_keyring`, and this returned
+    ``400 {"reasons": ["unknown_signing_key"]}`` — the finding, reproduced through the route.
+
+    The work item is asserted out of the QUEUE ITSELF rather than from a stub handed to the
+    app, because that is the half a served process could not previously do either: the door
+    refuses `verification_queue_unavailable` when nothing is bound, so a keyring alone would
+    have moved the refusal one gate along instead of admitting anything.
+    """
+    _drain_the_queue()
+    with _deployed_client(
+        tmp_path, monkeypatch, agent_url, keyring_file=_keyring_file(tmp_path)
+    ) as client:
+        auction_id = _open_a_wide_auction(client)
+        response = _submit_external(
+            client, _external_submission(auction_id, nonce="nonce-r8-admitted"), EXTERNAL_SECRET
+        )
+
+    assert response.status_code == 202, (
+        f"the deployment's own keyring did not admit a correctly signed bid "
+        f"{response.status_code}: {response.text}"
+    )
+    body = response.json()
+    assert body["accepted"] is True and body["verification_status"] == "unverified", body
+
+    items = _queued_work_items()
+    assert len(items) == 1, f"the admitted bid was not queued for verification: {items}"
+    item = items[0]
+    assert item["kind"] == "external_bid_verification", item
+    assert item["auction_id"] == auction_id, item
+    assert item["signer_id"] == EXTERNAL_SIGNER and item["key_id"] == EXTERNAL_KEY_ID, item
+    assert item["nonce"] == "nonce-r8-admitted", item
+    assert item["submission"]["offer"]["unit_price"] == 88.0, item
+    assert EXTERNAL_SECRET not in json.dumps(item), "the signing secret rode into the queue"
+
+
+def test_an_external_bid_naming_a_key_id_the_deployment_never_registered_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None, agent_url: str
+) -> None:
+    """State 2 of 3: configured exchange, unknown `key_id` -> refused, and nothing is queued.
+
+    The keyring is `{signer_id: {key_id: secret}}` precisely so a key id nobody registered
+    never falls back to another of that signer's keys (R8). The signer is known, the secret is
+    the real one, and the only wrong thing is which key it claims to be.
+    """
+    _drain_the_queue()
+    with _deployed_client(
+        tmp_path, monkeypatch, agent_url, keyring_file=_keyring_file(tmp_path)
+    ) as client:
+        auction_id = _open_a_wide_auction(client)
+        response = _submit_external(
+            client,
+            _external_submission(auction_id, nonce="nonce-r8-rotated", key_id="key-2019-01"),
+            EXTERNAL_SECRET,
+        )
+
+    assert response.status_code == 400, f"{response.status_code}: {response.text}"
+    assert "unknown_signing_key" in response.json()["reasons"], response.json()
+    assert _queued_work_items() == [], "a refused submission reached the verification queue"
+
+
+def test_an_exchange_whose_deployment_states_no_keyring_refuses_every_external_bid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None, agent_url: str
+) -> None:
+    """State 3 of 3: the SAME signed bytes, at an exchange nobody handed a keyring to.
+
+    Fail-closed is the property this ticket may not regress, so the contrast is drawn with one
+    variable: the document is byte-identical to state 1's except that it does not name a
+    keyring file. The caller is told exactly what state 2's caller is told — the door does not
+    disclose whether a keyring exists — and the difference is visible only here, in what the
+    exchange did with it: nothing was queued.
+    """
+    _drain_the_queue()
+    with _deployed_client(tmp_path, monkeypatch, agent_url, keyring_file=None) as client:
+        auction_id = _open_a_wide_auction(client)
+        response = _submit_external(
+            client,
+            _external_submission(auction_id, nonce="nonce-r8-unconfigured"),
+            EXTERNAL_SECRET,
+        )
+
+    assert response.status_code == 400, f"{response.status_code}: {response.text}"
+    assert "unknown_signing_key" in response.json()["reasons"], response.json()
+    assert _queued_work_items() == [], "an unconfigured exchange queued a submission"
+
+    # And the same again for an exchange with NO deployment document at all, which is what
+    # `docker compose up` starts and what `create_app()` builds. It cannot open an auction, so
+    # the submission names one that does not exist — and is refused for the keyring, before the
+    # door ever asks whether that auction is real.
+    monkeypatch.delenv(ENV_DEPLOYMENT, raising=False)
+    monkeypatch.delenv(ENV_DEPLOYMENT_JSON, raising=False)
+    with served_exchange() as bare:
+        unconfigured = _submit_external(
+            bare,
+            _external_submission("auction-nobody-opened", nonce="nonce-r8-bare"),
+            EXTERNAL_SECRET,
+        )
+
+    assert unconfigured.status_code == 400, f"{unconfigured.status_code}: {unconfigured.text}"
+    assert "unknown_signing_key" in unconfigured.json()["reasons"], unconfigured.json()
+    assert _queued_work_items() == [], "an exchange nobody configured queued a submission"
+
+
+def test_a_keyring_the_exchange_cannot_read_is_a_503_that_never_quotes_a_secret(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None, agent_url: str
+) -> None:
+    """A named-but-unusable keyring is a misconfiguration, answered like every other one.
+
+    Three shapes, all of which produce the SAME symptom if they are shrugged at — every
+    external submission refused `unknown_signing_key`, which reads as a signer's problem and
+    is the operator's. A 503 naming the file is what the two routes already do for a malformed
+    deployment document, and the message may name the signer and the key id (both travel on
+    the wire in every submission) and never the secret.
+    """
+    missing = tmp_path / "not-mounted.json"
+    empty_secret = tmp_path / "empty-secret.json"
+    empty_secret.write_text(json.dumps({EXTERNAL_SIGNER: {EXTERNAL_KEY_ID: ""}}), encoding="utf-8")
+    not_nested = tmp_path / "flat.json"
+    not_nested.write_text(json.dumps({EXTERNAL_SIGNER: EXTERNAL_SECRET}), encoding="utf-8")
+
+    for keyring_file, expected in (
+        (missing, "not-mounted.json"),
+        (empty_secret, EXTERNAL_KEY_ID),
+        (not_nested, EXTERNAL_SIGNER),
+    ):
+        with _deployed_client(tmp_path, monkeypatch, agent_url, keyring_file=keyring_file) as c:
+            response = c.post("/auctions", json={"intent": INTENT, "roster": []})
+        assert response.status_code == 503, (
+            f"{keyring_file.name} -> {response.status_code}: {response.text}"
+        )
+        detail = response.json()["detail"]
+        assert expected in detail, detail
+        assert EXTERNAL_SECRET not in detail, "the 503 published the signing secret"
+
+
+def test_a_deployment_document_that_types_the_keyring_inline_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None, agent_url: str
+) -> None:
+    """The obvious first attempt — pasting the secrets into the document — is refused loudly.
+
+    Ignoring the key would be the worst of the three answers: the operator would believe the
+    door was configured and every submission would still be refused `unknown_signing_key`,
+    which is the exact failure this ticket exists to end. The deployment document is a plain
+    JSON file that gets pasted around, so it names where the secrets are and never carries
+    them.
+    """
+    document = _deployment_document(agent_url)
+    document["external_bid_keyring"] = {EXTERNAL_SIGNER: {EXTERNAL_KEY_ID: EXTERNAL_SECRET}}
+    monkeypatch.setenv(ENV_DEPLOYMENT_JSON, json.dumps(document))
+    monkeypatch.delenv(ENV_DEPLOYMENT, raising=False)
+
+    with served_exchange() as client:
+        response = client.post("/auctions", json={"intent": INTENT, "roster": []})
+
+    assert response.status_code == 503, f"{response.status_code}: {response.text}"
+    detail = response.json()["detail"]
+    assert "external_bid_keyring_file" in detail, detail
+    assert EXTERNAL_SECRET not in detail, "the 503 published the secret the document carried"
+
+
+def test_the_reference_sellers_own_pitch_is_admitted_and_queued_as_unverified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None, agent_url: str
+) -> None:
+    """Honest traffic, from this repository's own fixtures, through the door that now works.
+
+    The three gates above are all synthetic payloads written for them. This one is not: the
+    submission carries the five ``seller_asserted`` claims ``apps/seller-reference``'s
+    ``aggressive`` persona scripts out of the approved fixture manifest, its own prose as the
+    message, and the unit price it asserts. A door that admitted a hand-written body and
+    refused the platform's own Tier-2 seller would be a door that works only in its own tests.
+
+    It also pins the half of R8 that "202" alone does not say: **admitted is not trusted**.
+    Every one of the five claims comes back in ``unverified_claim_indexes``, and the queued
+    work item carries the claims themselves, so the verification stage has what it needs and
+    nothing here has decided any claim is true.
+    """
+    import time as _time
+
+    from seller_reference.personas import build_persona
+
+    pitch = build_persona("aggressive").pitch(INTENT)
+    claims = [claim.model_dump(mode="json") for claim in pitch.claims]
+    assert claims, "the approved manifest scripts no claims; this gate would prove nothing"
+
+    keyring = tmp_path / "reference-seller-keyring.json"
+    keyring.write_text(
+        json.dumps({EXTERNAL_SIGNER: {EXTERNAL_KEY_ID: EXTERNAL_SECRET}}), encoding="utf-8"
+    )
+    document = _deployment_document(agent_url)
+    document["trust_snapshot"]["stores"][pitch.store_id] = {
+        "store_id": pitch.store_id,
+        "blacklisted": False,
+        "score": 0.7,
+    }
+    document["external_bid_keyring_file"] = str(keyring)
+    path = tmp_path / "deployment.json"
+    path.write_text(json.dumps(document, indent=2), encoding="utf-8")
+    monkeypatch.setenv(ENV_DEPLOYMENT, str(path))
+    monkeypatch.delenv(ENV_DEPLOYMENT_JSON, raising=False)
+
+    _drain_the_queue()
+    with served_exchange() as client:
+        opened = client.post(
+            "/auctions",
+            json={
+                "intent": INTENT,
+                "profile": {"pseudonym": "psn-external-2", "buckets": {}},
+                "bid_timeout_seconds": 10.0,
+                "roster": [
+                    *(
+                        {
+                            "store_id": row["store_id"],
+                            "tier": 1,
+                            "product_ref": "prod-1",
+                            "list_price": row["list_price"],
+                            "max_discount_pct": 20.0,
+                        }
+                        for row in STORES
+                    ),
+                    {
+                        "store_id": pitch.store_id,
+                        "tier": 2,
+                        "product_ref": "prod-brightbean",
+                        "list_price": 25.0,
+                        "max_discount_pct": 30.0,
+                    },
+                ],
+            },
+        )
+        assert opened.status_code == 201, opened.text
+        assert opened.json()["ranked"], f"the exchange ranked nobody: {opened.json()}"
+        auction_id = opened.json()["auction_id"]
+
+        submission = {
+            "auction_id": auction_id,
+            "store_id": pitch.store_id,
+            "offer": {
+                "product_ref": "prod-brightbean",
+                # The persona's OWN asserted price, inside the 30% of depth the roster declares.
+                "unit_price": 18.50,
+                "total_price": 18.50,
+                "currency": "USD",
+                "discount": None,
+                "commitments": [],
+                "expires_at": "2999-01-01T00:00:00Z",
+            },
+            "claims": claims,
+            "message": pitch.text,
+            "agent_version": "seller-reference/0.1.0",
+            "schema_version": "1.0.0",
+            "signer_id": EXTERNAL_SIGNER,
+            "key_id": EXTERNAL_KEY_ID,
+            "issued_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+            "nonce": "nonce-r8-reference-seller",
+        }
+        response = _submit_external(client, submission, EXTERNAL_SECRET)
+
+    assert response.status_code == 202, (
+        f"the platform's own reference seller was refused by the door "
+        f"{response.status_code}: {response.text}"
+    )
+    items = _queued_work_items()
+    assert len(items) == 1, items
+    item = items[0]
+    assert item["store_id"] == pitch.store_id, item
+    assert len(item["submission"]["claims"]) == len(claims), item["submission"]["claims"]
+    assert item["unverified_claim_indexes"] == list(range(len(claims))), item
+    assert item["verified"] is False and item["verification_status"] == "unverified", item

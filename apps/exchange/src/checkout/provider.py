@@ -55,6 +55,11 @@ from .redaction import (
     safe_token,
     spells_code,
 )
+from .validity import (
+    DiscountDoesNotApply,
+    assert_the_cart_applies_this_code,
+    assert_the_window_is_open,
+)
 
 __all__ = [
     "CHECKOUT_EVENT_KINDS",
@@ -65,6 +70,7 @@ __all__ = [
     "OrphanedCheckoutCode",
     "OrphanedCode",
     "OrphanedOffDomainCheckout",
+    "OrphanedUnusableDiscount",
     "PortMethodIsFinal",
     "RedactedCause",
     "RegisteredDomains",
@@ -608,6 +614,23 @@ class OrphanedOffDomainCheckout(OrphanedCheckoutCode, OffDomainCheckout):
     """
 
 
+class OrphanedUnusableDiscount(OrphanedCheckoutCode, DiscountDoesNotApply):
+    """R3's validation refused the code the provider minted, and that code is live.
+
+    Both parents carry weight, for the same reason :class:`OrphanedOffDomainCheckout` has
+    two. It **is** a :class:`~.validity.DiscountDoesNotApply` — a caller watching for "this
+    discount will not apply" keeps catching it — and it is **also** an orphan: the merchant
+    already issued the discount, so ``accept()`` must file the ``code_created`` record that
+    makes it revocable rather than deny and forget.
+
+    This is deliberately the SAME shape the off-domain post-mint refusal already uses rather
+    than a third one. A conflict found after the mint and a permalink refused after the mint
+    leave identical wreckage — a live single-use discount in a merchant's account for a
+    checkout that never happened — so they are recorded identically, and an operator reading
+    ``code_created`` with ``orphaned: True`` does not have to know which wall it hit.
+    """
+
+
 @dataclass(frozen=True)
 class CheckoutRequest:
     """Everything a provider is allowed to see about a won offer.
@@ -773,7 +796,35 @@ class CheckoutProvider:
         # 3. The rest of the offer must be usable too, and this has to happen before the
         #    mint: the Shopify adapter's mint issues a real merchant discount, and a field
         #    that only blows up afterwards leaves that code live and unrecorded.
-        assert_offer_is_mintable(request.offer)
+        deadline = assert_offer_is_mintable(request.offer, now=request.now)
+
+        # 3b. R3's VALIDATE half, the part that needs nothing but the offer and the clock:
+        #     the window the code would be minted INTO must still be open.
+        #
+        #     `deadline` is D22's arithmetic — `min(now + 48h, offer.expires_at)` — computed
+        #     by the call above and HANDED BACK rather than recomputed, so the offer's
+        #     `expires_at` is read exactly as many times as it was before this check
+        #     existed. `ShiftingOffer` in `test_orphaned_code.py` is why that matters: a
+        #     merchant's mapping may answer differently on a second read, and a gate that
+        #     judged a different value from the one the code is minted out of is not a gate.
+        #     So this line is a comparison and nothing else.
+        #
+        #     An offer that expired before `now` can only produce a code that is already
+        #     dead, and until this line the port MINTED one anyway. Measured over the served
+        #     route with an offer an hour past its expiry:
+        #
+        #         200 {"code": "PSX-6SMY54PJ",
+        #              "permalink_url": "https://store-a.example.com/cart/1:1?discount=…"}
+        #
+        #     — a live single-use discount on a permalink handed to a shopper, whose window
+        #     the port had computed and published without ever looking at it.
+        #
+        #     It sits HERE, ahead of the mint, on purpose: a closed window is a property of
+        #     the offer alone, so discovering it after `POST /codes` has issued a real
+        #     discount would manufacture an orphan out of a condition that was knowable for
+        #     free. Nothing is minted, no code is stranded, and the buyer gets the ordinary
+        #     `checkout_refused` denial with the next slot re-offered (A5).
+        assert_the_window_is_open(deadline, request.now, what="the offer's own expiry")
 
         # 4. The provider's only job.
         #
@@ -856,6 +907,62 @@ class CheckoutProvider:
                 f"minted by {self.name!r} for store "
                 f"{safe_token(request.store_id, minted.code, label='store')!r} and is live "
                 f"in the merchant's system; record and revoke it via the code_created event",
+                orphan=orphan,
+            ) from cause
+
+        # 5b. R3's VALIDATE half again, now on what the provider ACTUALLY handed back — the
+        #     one reading that can differ from step 3b's, and the only place the cart is
+        #     visible at all.
+        #
+        #     Two questions, and the scope of the second is the whole of what this port may
+        #     claim (see :mod:`.validity`):
+        #
+        #     * the window the PROVIDER published. `MintedCheckout.expires_at` is the
+        #       provider's own answer and the one carried into the `code_created` body and
+        #       onto `CheckoutResult`; a merchant that issued a code expiring before this
+        #       checkout completes has said so here and nowhere else.
+        #     * the cart. R3's last clause is "redirect … with the code pre-applied", and
+        #       the Shopify adapter takes `reply["permalink_url"]` verbatim. A permalink
+        #       that pre-applies a DIFFERENT code sends the buyer into a cart already
+        #       carrying a discount this one does not combine with: they redeem somebody
+        #       else's code, the single-use code the exchange recorded stays live and
+        #       unredeemed, and `apps/trust`'s reconciler — which joins an order to an offer
+        #       on `discount_codes[].code` — can never match the order to this acceptance.
+        #
+        #     Whether the SHOP's automatic discounts combine is not asked here and must not
+        #     be: that answer needs the Admin API and lives in
+        #     `apps/merchant/svc/src/codes/combines.py`, behind the merchant's own served
+        #     `POST /codes`. This is the half the exchange can see for itself.
+        #
+        #     A failure here is post-mint, so it is an ORPHAN refusal in exactly the shape
+        #     the off-domain permalink already uses — never a bare raise: `accept()` reads
+        #     `OrphanedCheckoutCode.orphan` and files the `code_created` record that makes
+        #     the live discount visible and revocable (T-202), and if that body will not
+        #     validate, `_published_or_recorded` puts it down the audit-anomaly channel
+        #     (T-283). Both are existing channels; a conflict does not get a third one.
+        try:
+            assert_the_window_is_open(
+                minted.expires_at, request.now, what=f"{self.name} expires_at"
+            )
+            assert_the_cart_applies_this_code(
+                minted.permalink_url, minted.code, what=f"{self.name} permalink_url"
+            )
+        except DiscountDoesNotApply as exc:
+            # Sanitised before chaining, for the reason spelled out at the matching
+            # off-domain site above: `raise … from` writes the C-level cause slot, which the
+            # default excepthook reads without running any Python-level property.
+            cause = _sanitised_cause(exc, minted.code, (minted.permalink_url, request.checkout_url))
+            raise OrphanedUnusableDiscount(
+                # `{exc}` is safe to interpolate BECAUSE `validity` guards its own
+                # fragments: the rival discount code is a merchant value and goes through
+                # `safe_token` at the site that builds the sentence, and our own code is
+                # named only by its fingerprint. `store_id` is read straight off the bid, so
+                # it is merchant-controlled here exactly as it is two handlers up.
+                f"{exc} — the discount code {code_fingerprint(minted.code)} was ALREADY "
+                f"minted by {self.name!r} for store "
+                f"{safe_token(request.store_id, minted.code, label='store')!r} and is live "
+                f"in the merchant's system; the buyer is not redirected, and the code must "
+                f"be recorded and revoked via the code_created event",
                 orphan=orphan,
             ) from cause
 

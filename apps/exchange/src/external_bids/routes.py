@@ -64,6 +64,17 @@ REACHED; each now has its own gate in ``apps/exchange/tests/test_external_bids_d
 name a key, so every submission is refused ``unknown_signing_key``. That is deliberate: an
 exchange nobody has handed a keyring to should admit nothing, the same rule
 ``NoRegisteredDomains`` applies in ``accept/routes.py``.
+
+**And until R8 nothing could stop defaulting.** The paragraph above was the whole of this
+door's production behaviour: ``configure_external_bids`` had no caller outside this
+repository's tests, so a deployed exchange refused EVERY submission ``unknown_signing_key``
+and, had it got past that gate, ``verification_queue_unavailable`` — served, correct, and
+unusable. The keyring could not simply move into the deployment document, because that
+document carries no secret material by design; it names a file instead
+(``external_bid_keyring_file``), the composition root reads it, and :func:`_bind_deployment`
+below is what makes this route run that composition root at all. A door that reads
+``app.state`` for its collaborators and never runs the hook that binds them is a door nobody
+can configure, whatever the document says.
 """
 
 from __future__ import annotations
@@ -72,10 +83,11 @@ import json
 import threading
 from typing import Any
 
-from fastapi import APIRouter, Header, Request, Response
+from fastapi import APIRouter, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from store_agent.external.door import DEFAULT_FRESHNESS_WINDOW_SECONDS, receive_bid
 
+from .. import redact_addresses
 from ..ranking.serving import trust_snapshot_of
 
 __all__ = [
@@ -303,6 +315,44 @@ def _payload_and_signature(body: dict[str, Any], header: str) -> tuple[Any, str]
     return payload, "" if signature is None else str(signature)
 
 
+def _bind_deployment(request: Request) -> None:
+    """Run the composition root once for this app, before anything reads a collaborator.
+
+    The same request-time start-up hook ``auction/routes.py``, ``accept/routes.py`` and
+    ``policy/routes.py`` take, and this route is here because it did not take it: ``main.py``
+    is orchestrator-frozen (B6(iii)), so a deployment cannot be composed in ``create_app``, and
+    a route that skips the hook reads whatever ``app.state`` happens to hold. For this door
+    that meant the keyring, the verification queue and the auction terms were all whatever the
+    OTHER routes had bound — so an exchange whose first request was a bid submission refused it
+    with no keyring, no queue and no auction machine to read a deadline or a list price from.
+
+    It also fixes an ordering that was invisible while nothing configured this door: the terms
+    a submission is judged against (:func:`_auction_terms`) come off ``app.state.auction_machine``,
+    which the composition root binds. Without the hook, an exchange serving auctions from a
+    shared store still judged external bids against no terms at all.
+
+    A malformed deployment — including a keyring file that is named and cannot be read — is a
+    **503 naming the problem**, never a 400. The distinction is the seller's: a 400 from this
+    door is a ``BidValidationResult`` and "each rejection is final", so answering an operator's
+    broken configuration with one would tell an honest submitter their bid was permanently
+    refused. It is not. ``redact_addresses`` for the reason the siblings use it, and the
+    composition root's own messages never quote a secret.
+
+    It does not weaken the module's ordering rule, which is that nothing may answer before
+    ``receive_bid`` decides. That rule exists so a caller cannot learn which auctions exist by
+    watching which ones answer differently — and this answer does not vary with the submission
+    at all: the same 503 goes to every caller, including one that sends no body, and it says
+    only that this exchange is misconfigured, which ``POST /auctions`` says to the same
+    anonymous caller already.
+    """
+    from ..composition import DeploymentConfigurationError, ensure_configured  # noqa: PLC0415
+
+    try:
+        ensure_configured(request.app)
+    except DeploymentConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=redact_addresses(exc)) from exc
+
+
 def _keyring(request: Request) -> Any:
     """The deployment's signing table. Absent means 'admit nothing', not 'admit anything'."""
     return getattr(request.app.state, "external_bid_keyring", None) or {}
@@ -339,7 +389,7 @@ def _nonce_store(request: Request) -> Any:
         return store
 
 
-def _auction_terms(request: Request, auction_id: str) -> tuple[Any, Any]:
+def _auction_terms(request: Request, auction_id: str, store_id: Any) -> tuple[Any, Any]:
     """``(deadline, list_prices)`` for ``auction_id``, or ``(None, None)`` if it is not known.
 
     Best effort ON PURPOSE. Everything this returns is an input the door VALIDATES AGAINST,
@@ -347,6 +397,24 @@ def _auction_terms(request: Request, auction_id: str) -> tuple[Any, Any]:
     is ``auction_deadline_unparseable`` and no roster is
     ``price_unreconcilable:offer.unit_price:list_price_unavailable``. Raising here instead
     would answer an unknown auction before the signature was ever checked.
+
+    **THE ROSTER IS READ FOR ONE STORE, AND IT USED NOT TO BE.** ``list_prices`` is keyed by
+    ``product_ref``, so a roster on which two stores are asked about the same product — which
+    is what a roster IS, and what every roster in this repository's own tests looks like —
+    collapsed into one entry, and the LAST row silently decided the price wall for every
+    seller. Measured on the served exchange the moment a deployment could reach this door at
+    all: an auction rostering ``s1`` at a list price of 100.00 with 20% of depth and ``s2`` at
+    120.00, both on ``prod-1``, refused ``s1``'s correctly signed 88.00 —
+    ``price_under_declared_depth:offer.unit_price`` — because it was judged against ``s2``'s
+    120.00 floor of 96.00. That is an honest seller refused by another store's terms, and it
+    is the shape of failure this door must not have: the refusal is final and names the seller.
+
+    So the rows are filtered to the store the SUBMISSION names. A submission whose store is not
+    on the roster at all now finds no list price and is refused
+    ``price_unreconcilable:offer.unit_price:list_price_unavailable`` rather than being judged
+    against a store it is not — fail closed, and for a stated reason. ``store_id`` is compared
+    only when it is a string, because it arrives off the wire: the door refuses a non-string
+    one itself, and an ``__eq__`` that raises must not escape this function.
     """
     machine = getattr(request.app.state, "auction_machine", None)
     if machine is None:
@@ -358,6 +426,8 @@ def _auction_terms(request: Request, auction_id: str) -> tuple[Any, Any]:
     prices: dict[Any, Any] = {}
     for row in getattr(record, "roster", None) or ():
         if not isinstance(row, dict):
+            continue
+        if not isinstance(store_id, str) or row.get("store_id") != store_id:
             continue
         ref = row.get("product_ref")
         if not isinstance(ref, str) or not ref:
@@ -473,6 +543,17 @@ def _rejected(reasons: list[str], *, indexes: list[int] | None = None) -> JSONRe
     responses={
         202: {"description": "AcceptedForVerification. Admitted is not trusted (R18)."},
         400: {"description": "Rejected. Each rejection is final."},
+        # NOT a rejection, which is why it is not a `BidValidationResult`: the deployment
+        # document (or the keyring file it names) cannot be read, so this exchange has not
+        # judged the submission at all and the seller should retry it unchanged.
+        #
+        # `packages/contracts/openapi/exchange.openapi.json` declares 202 and 400 for this
+        # operation and no 503 — as it does for `/auctions` and `/accept`, which have answered
+        # 503 to a malformed deployment since the composition root landed. So this entry is a
+        # served document that says more than the published one, not less, and the sweep in
+        # `test_repro_open_tickets.py` compares OPERATIONS rather than response codes. Making
+        # the published contract say it is a change to a file this route does not own.
+        503: {"description": "This exchange is misconfigured. The submission was not judged."},
     },
     # DECLARED BY HAND BECAUSE THERE IS NO REQUEST MODEL TO INFER IT FROM. Reading the body as
     # bytes is what keeps T-270 off this door, and the cost is that FastAPI has nothing to
@@ -518,7 +599,12 @@ async def submit_external_bid(
     identifier may be, and whether the URL agrees with what was signed. Each is decidable from
     values this one caller supplied, so none of them leaks anything, and each closes a hole
     that would otherwise defeat a rule the door DOES enforce.
+
+    The composition root runs FIRST, before the body is even read: everything below reads a
+    collaborator off ``app.state``, and this is the request-time start-up hook that puts them
+    there. See :func:`_bind_deployment`.
     """
+    _bind_deployment(request)
     try:
         raw = await _bounded_body(request)
         body = _submission_of(raw)
@@ -531,7 +617,11 @@ async def submit_external_bid(
     if refusal is not None:
         return _rejected([refusal])
 
-    deadline, list_prices = _auction_terms(request, auction_id)
+    # The terms come from the roster row for the store this submission names — see
+    # `_auction_terms`. `payload` is whatever arrived, so the store is read defensively;
+    # anything that is not a string finds no terms, and the door refuses.
+    submitted_store = payload.get("store_id") if isinstance(payload, dict) else None
+    deadline, list_prices = _auction_terms(request, auction_id, submitted_store)
 
     receipt = receive_bid(
         payload,

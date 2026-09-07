@@ -37,6 +37,7 @@ What the layout buys, module by module:
 :mod:`.domain`     the exact-host check the port applies to every provider (D22/C10)
 :mod:`.codes`      the ONLY place a code is minted and a permalink is built (D22)
 :mod:`.discounts`  the ONLY place a protocol percent becomes a Shopify fraction (T-183)
+:mod:`.validity`   R3's VALIDATE half: the window is open, and the cart applies OUR code
 :mod:`.lint`       the mechanical proof that no code is minted outside this package
 =================  ================================================================
 
@@ -94,6 +95,7 @@ from .provider import (
     OrphanedCheckoutCode,
     OrphanedCode,
     OrphanedOffDomainCheckout,
+    OrphanedUnusableDiscount,
     PortMethodIsFinal,
     RedactedCause,
     RegisteredDomains,
@@ -121,6 +123,15 @@ from .registry import (
     resolve_provider,
 )
 from .sellers import NoRegisteredDomains, StaticRegisteredDomains
+from .validity import (
+    DISCOUNT_QUERY_KEYS,
+    DiscountDoesNotApply,
+    applied_discount_codes,
+    assert_the_cart_applies_this_code,
+    assert_the_window_is_open,
+    cart_conflict_reason,
+    window_reason,
+)
 
 __all__ = [
     "CHECKOUT_EVENT_KINDS",
@@ -130,6 +141,7 @@ __all__ = [
     "CODE_BODY_LENGTH",
     "CODE_PREFIX",
     "DEFAULT_CHECKOUT_MODE",
+    "DISCOUNT_QUERY_KEYS",
     "FIXED_AMOUNT_DISCOUNT_TYPES",
     "MAX_CODE_TTL_SECONDS",
     "MAX_DISCOUNT_PERCENT",
@@ -144,6 +156,7 @@ __all__ = [
     "CheckoutProvider",
     "CheckoutRequest",
     "CheckoutResult",
+    "DiscountDoesNotApply",
     "MintedCheckout",
     "MintingCallSite",
     "NoRegisteredDomains",
@@ -151,6 +164,7 @@ __all__ = [
     "OrphanedCheckoutCode",
     "OrphanedCode",
     "OrphanedOffDomainCheckout",
+    "OrphanedUnusableDiscount",
     "RedactedCause",
     "RegisteredDomains",
     "PortMethodIsFinal",
@@ -161,9 +175,13 @@ __all__ = [
     "UnknownCheckoutMode",
     "UnusableDiscount",
     "UnusableOffer",
+    "applied_discount_codes",
     "assert_offer_is_mintable",
     "assert_on_domain",
+    "assert_the_cart_applies_this_code",
+    "assert_the_window_is_open",
     "build_cart_permalink",
+    "cart_conflict_reason",
     "code_expiry",
     "code_fingerprint",
     "code_minting_call_sites",
@@ -190,4 +208,5 @@ __all__ = [
     "shopify_discount_percentage",
     "spells_code",
     "unbound_checkout_requests",
+    "window_reason",
 ]
