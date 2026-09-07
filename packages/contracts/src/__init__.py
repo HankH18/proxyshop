@@ -117,11 +117,20 @@ from contracts.protocol import (
     VerificationResult,
 )
 from contracts.ranking import (
+    CONTRADICTED_CLAIM,
     DEFAULT_RANKING_WEIGHTS,
+    EVIDENCE_GAIN_BY_RELEVANCE,
+    INTENT_MATCH_WHEN_ABSENT,
+    PREFERENCE_FIELD_TERMS,
     RANK_FEATURES,
+    RANKING_FEATURES_VERSION,
     RANKING_WEIGHTS_VERSION,
+    RELEVANCE_TIERS,
     WEIGHT_FIELDS,
     RankingWeights,
+    canonical_field,
+    diminishing_evidence,
+    preference_term_conflict,
 )
 from contracts.registry import (
     PROTOCOL_SCHEMA_PATH,
@@ -220,7 +229,16 @@ __all__ = [
     "payload_hash",
     # ranking policy
     "DEFAULT_RANKING_WEIGHTS",
+    "RANKING_FEATURES_VERSION",
     "RANKING_WEIGHTS_VERSION",
+    "RELEVANCE_TIERS",
+    "CONTRADICTED_CLAIM",
+    "EVIDENCE_GAIN_BY_RELEVANCE",
+    "INTENT_MATCH_WHEN_ABSENT",
+    "PREFERENCE_FIELD_TERMS",
+    "canonical_field",
+    "diminishing_evidence",
+    "preference_term_conflict",
     "RANK_FEATURES",
     "RankingWeights",
     "WEIGHT_FIELDS",

@@ -8,14 +8,23 @@
 import {describe, expect, it} from "vitest";
 
 import {
+  CONTRADICTED_CLAIM,
   DEFAULT_RANKING_WEIGHTS,
+  EVIDENCE_GAIN_BY_RELEVANCE,
+  INTENT_MATCH_WHEN_ABSENT,
+  PREFERENCE_FIELD_TERMS,
+  RANKING_FEATURES_VERSION,
   RANKING_WEIGHTS_VERSION,
   RANK_FEATURES,
+  RELEVANCE_TIERS,
   WEIGHT_FIELDS,
   WEIGHT_SUM_TOLERANCE,
   assertRankingWeights,
+  canonicalField,
+  diminishingEvidence,
   featureWeights,
   isRankingWeights,
+  preferenceTermConflict,
   rankingWeightsErrors,
   totalPenalty,
 } from "../src/ts/ranking.js";
@@ -131,5 +140,83 @@ describe("normalization and penalties", () => {
       "price",
       "bid_id",
     ]);
+  });
+});
+
+describe("features 2.0.0 — the definitions the weights are applied to", () => {
+  it("versions the feature definitions separately from the weights", () => {
+    // A feature redefined under an unchanged weights version re-scores history silently:
+    // every stored number still validates and every published weight still matches (R15/S3).
+    expect(RANKING_FEATURES_VERSION).toBeTruthy();
+    expect(RANKING_FEATURES_VERSION).not.toBe(RANKING_WEIGHTS_VERSION);
+    expect(RANKING_FEATURES_VERSION.split(".")[0]).toBe("2");
+  });
+
+  it("publishes intent_match's neutral without moving it", () => {
+    const bounds = DEFAULT_RANKING_WEIGHTS.normalization;
+    const midpoint = (bounds.feature_min + bounds.feature_max) / 2;
+    expect(INTENT_MATCH_WHEN_ABSENT).toBe(midpoint);
+  });
+
+  it("prices a contradicted claim, bounded from both sides", () => {
+    const perKind = DEFAULT_RANKING_WEIGHTS.penalties.per_kind as Record<string, number>;
+    const penalty = perKind[CONTRADICTED_CLAIM]!;
+    const mapped = featureWeights(DEFAULT_RANKING_WEIGHTS);
+    const bounds = DEFAULT_RANKING_WEIGHTS.normalization;
+    // Large enough: more than the whole evidence term can pay, so true evidence cannot buy
+    // out one lie. Small enough: below severe_policy_violation and below the terms a store
+    // recovers on, so one bad verdict is survivable.
+    expect(penalty).toBeCloseTo(0.15);
+    const mostEvidenceCanPay =
+      mapped["verified_claim_ratio"]! *
+      (bounds.feature_max - bounds.verified_claim_ratio_when_absent);
+    expect(penalty).toBeGreaterThan(mostEvidenceCanPay);
+    expect(penalty).toBeLessThan(perKind["severe_policy_violation"]!);
+    expect(penalty).toBeLessThan(mapped["trust"]!);
+    expect(totalPenalty(DEFAULT_RANKING_WEIGHTS, [CONTRADICTED_CLAIM, CONTRADICTED_CLAIM])).toBeCloseTo(
+      2 * penalty,
+    );
+  });
+
+  it("aggregates evidence with diminishing returns that never saturate", () => {
+    const neutral = DEFAULT_RANKING_WEIGHTS.normalization.verified_claim_ratio_when_absent;
+    expect(Object.keys(EVIDENCE_GAIN_BY_RELEVANCE)).toEqual([...RELEVANCE_TIERS]);
+    // Every tier beats silence on ONE claim, or the term pays a store to say nothing.
+    for (const tier of RELEVANCE_TIERS) {
+      expect(EVIDENCE_GAIN_BY_RELEVANCE[tier]!).toBeGreaterThan(neutral);
+    }
+    const gain = EVIDENCE_GAIN_BY_RELEVANCE["hard_constraint"]!;
+    const values = [0, 1, 2, 3, 4, 5].map((n) => diminishingEvidence(Array(n).fill(gain)));
+    expect(values[0]).toBe(0);
+    const steps = values.slice(1).map((value, index) => value! - values[index]!);
+    for (const step of steps) expect(step).toBeGreaterThan(0);
+    for (let i = 1; i < steps.length; i += 1) expect(steps[i]!).toBeLessThan(steps[i - 1]!);
+    expect(values[values.length - 1]!).toBeLessThan(DEFAULT_RANKING_WEIGHTS.normalization.feature_max);
+    // Order-independent (R11, S3 replay): multiplication commutes.
+    const tiers = RELEVANCE_TIERS.map((tier) => EVIDENCE_GAIN_BY_RELEVANCE[tier]!);
+    expect(diminishingEvidence(tiers)).toBeCloseTo(diminishingEvidence([...tiers].reverse()), 12);
+    expect(diminishingEvidence([0.6, 0, -1, Number.NaN])).toBeCloseTo(0.6);
+  });
+
+  it("refuses every preference field a published term already scores", () => {
+    // S1's intent carries one preference, {price, minimize, 1.0}: admitted into intent_match
+    // it IS normalised inverse price, and price's weight goes from w_v 0.15 to w_v+w_m 0.50.
+    const mapped = featureWeights(DEFAULT_RANKING_WEIGHTS);
+    expect(mapped["price_value"]! + mapped["intent_match"]!).toBeCloseTo(0.5);
+    for (const term of Object.values(PREFERENCE_FIELD_TERMS)) {
+      expect(RANK_FEATURES as readonly string[]).toContain(term);
+    }
+    for (const field of Object.keys(PREFERENCE_FIELD_TERMS)) {
+      expect(canonicalField(field)).toBe(field);
+    }
+    for (const spelling of ["price", "Price USD", "price_usd", "list_price"]) {
+      expect(preferenceTermConflict(spelling)).toBe("price_value");
+    }
+    for (const spelling of ["delivery", "delivery_estimate_days", "Shipping Speed"]) {
+      expect(preferenceTermConflict(spelling)).toBe("delivery_fit");
+    }
+    for (const spelling of ["capacity_l", "material", "boiler_type"]) {
+      expect(preferenceTermConflict(spelling)).toBeUndefined();
+    }
   });
 });

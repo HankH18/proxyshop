@@ -29,7 +29,12 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from contracts.ranking import DEFAULT_RANKING_WEIGHTS, RANK_FEATURES, RankingWeights
+from contracts.ranking import (
+    DEFAULT_RANKING_WEIGHTS,
+    INTENT_MATCH_WHEN_ABSENT,
+    RANK_FEATURES,
+    RankingWeights,
+)
 
 from .filters import read
 
@@ -81,16 +86,23 @@ def feature_vector(
 ) -> dict[str, float]:
     """The five published features for one candidate, in the published order.
 
-    A feature that is absent or unreadable takes its published neutral value rather than
-    zero; `intent_match`, `price_value` and `trust` have no published `when_absent`, so a
-    missing one takes the midpoint of the normalization range, which is the same "we do not
-    know" that `when_absent` encodes for the other two.
+    A feature that is absent or unreadable takes its published neutral value rather than zero.
+
+    **`intent_match`'s neutral is now PUBLISHED** as
+    :data:`contracts.ranking.INTENT_MATCH_WHEN_ABSENT` rather than inherited from the
+    normalization midpoint. The number does not move — it was 0.5 and it is 0.5 — but the
+    inheritance was the problem: a reader of a served score could not tell a COMPUTED 0.5 (an
+    exactly average fit) from an ABSENT one (a served auction is handed a roster and queries no
+    index, so nothing produces this term at all), and those are the same float saying opposite
+    things about whose gap it is. `price_value` and `trust` still take the midpoint, and both
+    genuinely mean "the midpoint of the range" rather than a published neutral of their own.
     """
     bounds = weights.normalization
     midpoint = (float(bounds.feature_min) + float(bounds.feature_max)) / 2.0
     when_absent = {
         "delivery_fit": float(bounds.delivery_fit_when_absent),
         "verified_claim_ratio": float(bounds.verified_claim_ratio_when_absent),
+        "intent_match": float(INTENT_MATCH_WHEN_ABSENT),
     }
 
     vector: dict[str, float] = {}
@@ -110,8 +122,17 @@ def penalty_of(candidate: Any, weights: RankingWeights) -> float:
 
     Two spellings are accepted because two producers exist: a caller that has already summed
     its open policy events hands a number in `policy_penalties`, and one that has the raw
-    event kinds hands them in `policy_events`. Both go through the published catalogue's
-    `max_total_penalty`, so neither can drive a score arbitrarily negative.
+    event kinds hands them in `policy_events`. The whole is bounded by the published
+    catalogue's `max_total_penalty`, so nothing here can drive a score arbitrarily negative.
+
+    **The two spellings are SUMMED, not preferred.** They used to be preferred, `policy_events`
+    first, and that was safe only while at most one producer ever wrote to a record. It is not
+    safe any more: `.features.attach_features` now appends a `contradicted_claim` event to every
+    candidate whose claims this exchange's own snapshot contradicts, so a record carrying a
+    caller-supplied `policy_penalties` AND a minted event would have had the caller's number
+    silently discarded — a store forgiven a penalty by earning a second one. Summing has no
+    effect on either producer alone: a record with only events scores what it scored, and a
+    record with only a number scores what it scored.
 
     A penalty that is PRESENT but not a finite number takes the published maximum rather than
     zero. `min(nan, 1.0)` is `nan`, which would poison the score; and of the two safe answers,
@@ -119,19 +140,22 @@ def penalty_of(candidate: Any, weights: RankingWeights) -> float:
     reward a producer whose penalty arithmetic broke. `inf` already behaved this way — it is
     only NaN that needed saying out loud.
     """
+    cap = float(weights.penalties.max_total_penalty)
+    total = 0.0
     kinds = read(candidate, "policy_events", None)
     if kinds:
-        total = float(weights.total_penalty(kinds))
-        return total if math.isfinite(total) else float(weights.penalties.max_total_penalty)
+        from_kinds = float(weights.total_penalty(kinds))
+        if not math.isfinite(from_kinds):
+            return cap
+        total += from_kinds
     declared = read(candidate, "policy_penalties", None)
-    if declared is None:
-        return 0.0
-    raw = _number(declared)
-    if raw is None:
-        return float(weights.penalties.max_total_penalty)
-    if raw <= 0.0:
-        return 0.0
-    return min(raw, float(weights.penalties.max_total_penalty))
+    if declared is not None:
+        raw = _number(declared)
+        if raw is None:
+            return cap
+        if raw > 0.0:
+            total += raw
+    return min(total, cap)
 
 
 def score(

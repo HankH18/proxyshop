@@ -643,7 +643,15 @@ def rank_auction(
     # for every honest store. `entries` are handed over positionally for the roster's
     # `list_price`, which exists on no candidate; see :mod:`.features` for what each feature
     # reads and for the one (`intent_match`) this exchange still cannot produce.
-    candidates = attach_features(candidates, entries)
+    #
+    # `intent` is handed over because `verified_claim_ratio` is BUYER-CONDITIONAL now: its
+    # numerator counts only the verified claims whose key lands on something this shopper
+    # actually asked about (D55's persuasion market — see `.features` for the term-by-term
+    # measurement of why the formula paid nothing for customization before). Without it every
+    # candidate's evidence term is absent and the one feature a store can move for THIS buyer
+    # goes flat, which is the defect the redefinition exists to close. Only the intent's asks
+    # are read; `Intent.preferences[].weight` never touches the published weights (D50).
+    candidates = attach_features(candidates, entries, intent=intent)
     ranked = rank(
         candidates,
         intent,

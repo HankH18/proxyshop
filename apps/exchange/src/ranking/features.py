@@ -29,6 +29,7 @@ every list price on the roster returned bit-identical scores and the identical s
     and then nothing counted them. SPEC.md:63 defines ``verified_claim_ratio`` as a field of
     ``VerificationResult``, and ``packages/verification`` does not return it — so it is derived
     here, from the attested verdicts and from nothing else.
+
 ``delivery_fit``
     The input existed (``Offer.delivery_estimate_days``) and nothing read it. See
     :func:`delivery_fits` for exactly what is and is not modelled, because this is the one
@@ -59,24 +60,79 @@ Three properties this module keeps
   rather than written as a number, so :func:`.scoring.feature_vector` applies the published
   ``when_absent`` value. Writing 0.0 for "we do not know" is the D13/D14 bias against every
   store nobody has measured yet.
+
+The redefinition this module now carries (features version 2.0.0)
+-----------------------------------------------------------------
+The product is a MATCHING AND PERSUASION market (D55): a store buys a dedicated advocate that
+writes a pitch for THIS shopper. **The published formula paid nothing for that.** Classify each
+term by whether a store can move it at bid time and whether its value depends on this buyer:
+
+===================== ====== ==================== ================
+term                  weight movable at bid time  buyer-dependent
+===================== ====== ==================== ================
+intent_match          0.35   no (catalogue)       YES
+verified_claim_ratio  0.20   YES                  no
+trust                 0.20   no (months)          no
+price_value           0.15   YES                  no
+delivery_fit          0.10   YES                  no
+===================== ====== ==================== ================
+
+The movable-AND-buyer-dependent cell was EMPTY, and :func:`.scoring.score` is strictly additive
+with no interaction term — so a store's argmax over pitches was identical for every buyer and
+customization returned exactly zero. Worse, the store-agent learning loop would have measured
+that correctly and converged every store onto one generic pitch.
+
+Two features are redefined here to fill that cell and to stop the race to the bottom, both under
+their existing published names and weights (which is why
+:data:`contracts.ranking.RANKING_FEATURES_VERSION` exists — see there):
+
+* :func:`verified_claim_ratio` counts only verified claims whose key lands on something in THIS
+  buyer's intent, aggregated with diminishing returns rather than as a raw share. It is now
+  movable at bid time AND buyer-dependent, and it cannot saturate, because the attainable set is
+  (this buyer's asks ∩ this store's catalogue facts that survive verification) and that differs
+  per store.
+* :func:`price_value` saturates at :func:`band_depth` — full credit for clearing this auction's
+  own price band, zero marginal return past it.
+
+And one penalty is minted: :func:`contradicted_claim_events`, the only asymmetric downside in
+the design. Without it, a false claim costs one auction's share of one ratio and nothing else,
+so a persuasion market is a lying market.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
+
+from contracts.ranking import (
+    CONTRADICTED_CLAIM,
+    EVIDENCE_GAIN_BY_RELEVANCE,
+    RELEVANCE_TIERS,
+    canonical_field,
+    diminishing_evidence,
+    preference_term_conflict,
+)
 
 from .attestation import ATTESTATION_FIELD, attested_status
 from .filters import VERIFIED, read
 
 __all__ = [
+    "CONTRADICTED",
+    "MIN_QUERY_TOKEN",
     "PRODUCED_FEATURES",
+    "QUERY_STOPWORDS",
     "UNDECIDED",
+    "IntentSurface",
     "attach_features",
+    "band_depth",
+    "contradicted_claim_events",
     "delivery_estimate",
     "delivery_fits",
+    "intent_surface",
     "offer_price",
+    "price_band",
     "price_value",
     "verified_claim_ratio",
 ]
@@ -102,6 +158,52 @@ PRODUCED_FEATURES: tuple[str, ...] = (
 #: ``contradicted`` — the store's cost) apart from "we could not check" (this — the
 #: exchange's own unknown, which is what ``when_absent`` exists for).
 UNDECIDED = "ambiguous"
+
+#: R18's verdict for a claim this exchange's own catalogue snapshot says OTHERWISE about — as
+#: opposed to one it records nothing behind (``unsupported``) or could not compare
+#: (:data:`UNDECIDED`). It is the only verdict that mints a penalty, and the distinction is the
+#: reason the penalty is defensible: the exchange is not charging a store for its own gaps.
+CONTRADICTED = "contradicted"
+
+#: The shortest query token that can make a claim key buyer-relevant. Two-character tokens are
+#: noise on this comparison — a bare unit, a stray "hx", the "l" in ``capacity_l`` — and a token
+#: that matches everything makes every claim relevant, which is the same as making none of them.
+MIN_QUERY_TOKEN = 3
+
+#: Query words that name nothing a claim could be about. Kept deliberately tiny: this is a filter
+#: against tokens that would match a key by accident, not a stemmer or a stop-list for retrieval,
+#: and the shorter it is the less of the buyer's own wording this exchange silently discards.
+QUERY_STOPWORDS: frozenset[str] = frozenset(
+    {
+        "and",
+        "any",
+        "are",
+        "but",
+        "can",
+        "for",
+        "from",
+        "has",
+        "have",
+        "its",
+        "not",
+        "one",
+        "our",
+        "some",
+        "than",
+        "that",
+        "the",
+        "them",
+        "they",
+        "this",
+        "under",
+        "was",
+        "what",
+        "which",
+        "with",
+        "you",
+        "your",
+    }
+)
 
 
 def _number(value: Any) -> float | None:
@@ -143,8 +245,79 @@ def offer_price(offer: Any) -> float | None:
     return None
 
 
-def price_value(list_price: Any, offer: Any) -> float | None:
-    """``clamp((list_price − total_price)/list_price, 0, 1)`` (DESIGN.md:127), or ``None``.
+def price_band(list_prices: Iterable[Any]) -> tuple[float, float] | None:
+    """``(low, high)`` — the band THIS auction's own roster spans, or ``None``.
+
+    The roster's list prices and nothing else: the least and the most anybody in this auction
+    is asking for the thing. ``None`` when fewer than two of them are readable positive numbers,
+    or when they are all the same — an auction with one price has no band, and a band of zero
+    width is not a scale anything can be measured against.
+
+    Deterministic and order-independent (``min``/``max``), which R11 and S3's replay properties
+    both need.
+    """
+    listed = [price for price in (_number(value) for value in list_prices) if price is not None]
+    priced = [price for price in listed if price > 0.0]
+    if len(priced) < 2:
+        return None
+    low, high = min(priced), max(priced)
+    if high <= low:
+        return None
+    return (low, high)
+
+
+def band_depth(band: tuple[float, float] | None) -> float | None:
+    """The auction's price band expressed as a DISCOUNT DEPTH, or ``None``.
+
+    ``(high − low)/high`` — the depth that would carry the dearest listing in this auction down
+    to the cheapest one. That is what "clearing this auction's own price band" costs, measured
+    in the same units :func:`price_value` measures a store's discount in, which is what lets the
+    two be compared at all.
+    """
+    if band is None:
+        return None
+    low, high = band
+    if high <= 0.0 or high <= low:
+        return None
+    return (high - low) / high
+
+
+def price_value(
+    list_price: Any, offer: Any, *, depth_to_clear: float | None = None
+) -> float | None:
+    """The store's discount depth, SATURATING at this auction's own price band, or ``None``.
+
+    ``clamp(depth / depth_to_clear, 0, 1)`` where ``depth`` is DESIGN.md:127's
+    ``clamp((list_price − total_price)/list_price, 0, 1)`` and ``depth_to_clear`` is
+    :func:`band_depth` for this auction. Full credit for clearing the band; **zero marginal
+    return past it** — the second half of that sentence is the entire point, and it is exactly
+    0.000, not "a smaller amount".
+
+    **Why lowering ``w_v`` is not a substitute, and this has to be understood before anyone
+    proposes it again.** `price_value` reads only the store's own two numbers, so it is
+    rival-independent and strictly increasing in depth: at ANY positive weight, deeper is weakly
+    better, forever. Every store has a maximum discount it will authorise, so a term with that
+    shape guarantees every store reaches its maximum and then differentiates on nothing — the
+    network trains its own participants into a commodity market and destroys the margin it
+    exists to broker (SPEC's core tenet, R11). A smaller weight makes the race slower, not
+    finite. Saturation makes it finite: past the band there is nothing left to win.
+
+    **What saturation does to roster list-price inflation, stated precisely rather than
+    overclaimed.** ``depth`` still divides by the candidate's own ``list_price``, which arrives
+    on an unauthenticated request body, so inflating it still raises ``depth``. What changes is
+    that it no longer BUYS anything: the prize saturates at 1.0 and an honest store reaches the
+    same 1.0 by discounting as deep as this auction's listings already spread. Before, 1.0 was
+    reachable only by giving the product away, so inflation was the cheap route to the top of
+    the term; now it is worth no more than clearing the band, which is what the term is for.
+    Removing ``list_price`` from the denominator entirely would go further and was rejected:
+    it makes `price_value` independent of what the store lists at, which hands the cheapest
+    LISTING a free 1.0 for not discounting at all — including an R10 fallback from a store that
+    never replied, which is the exact ordering `verified_claim_ratio`'s ``ambiguous`` split
+    exists to prevent.
+
+    ``depth_to_clear`` of ``None`` — an auction whose roster states no band — falls back to the
+    published depth unchanged. There is no band to clear, so nothing saturates, and inventing a
+    saturation point from a single price would move rankings for a reason nobody could audit.
 
     ``None`` — so the feature is absent and reads its neutral — only when the ROSTER states no
     price this exchange can compare against. That is the exchange's own unknown, and there is
@@ -165,60 +338,306 @@ def price_value(list_price: Any, offer: Any) -> float | None:
     charged = offer_price(offer)
     if charged is None:
         return 0.0
-    return _clamp01((listed - charged) / listed)
+    depth = _clamp01((listed - charged) / listed)
+    scale = _number(depth_to_clear)
+    if scale is None or scale <= 0.0:
+        return depth
+    return _clamp01(depth / scale)
 
 
-def verified_claim_ratio(claims: Any, *, store_id: Any = None) -> float | None:
-    """The share of this candidate's claims THIS EXCHANGE attested ``verified``, or ``None``.
+@dataclass(frozen=True)
+class IntentSurface:
+    """What THIS buyer asked about — the only thing `verified_claim_ratio` counts against.
 
-    The verdict is read only out of the attested :data:`.attestation.ATTESTATION_FIELD` block,
-    through :func:`.attestation.attested_status`, which checks a MAC the bidder cannot compute
-    and refuses a verdict attested for another store. A ``status`` the claim's author wrote is
-    read by nothing here, exactly as it is read by nothing in :func:`.filters.verified_attributes`
-    — that equivalence is the point, because a hard constraint and this feature disagreeing
-    about what "verified" means would be two rules wearing one word.
+    ``tiers`` maps a canonical field name to the strongest relevance tier it holds
+    (:data:`contracts.ranking.RELEVANCE_TIERS`); ``query_tokens`` are the words the buyer typed
+    that survive :data:`QUERY_STOPWORDS` and :data:`MIN_QUERY_TOKEN`; ``refused`` records every
+    preference field a published term ALREADY scores, together with which term took it.
 
-    Denominator is every claim this exchange DECIDED, including every one it decided against.
-    ``unsupported`` ("the catalogue records nothing behind this") and ``contradicted`` ("the
-    catalogue says otherwise") both count, and so does a claim carrying no readable
-    attestation at all — dropping those would make the ratio a statement about a list that
-    had already been filtered, and a store claiming ten things and evidencing one would read
-    1.0.
+    ``refused`` is carried rather than discarded because a dropped preference is a thing a store
+    operator will ask about, and "we ignored it" and "`price_value` already scores it" are
+    different answers.
+    """
 
-    **A claim this exchange could not check is not in the denominator, and that is not the
-    same rule wearing a looser spelling.** :data:`UNDECIDED` — R18's ``ambiguous`` — is the
-    verdict for a claim no comparison was made on, and the case that reaches it in bulk is an
-    exchange holding no catalogue snapshot for the store: :func:`.verification
-    .attest_candidate_claims` attests every claim of such a candidate ``ambiguous`` with the
-    reason "the exchange holds no catalog snapshot for this store, so its claims could not be
-    checked". Counting those as failures writes 0.0 for "we do not know", which is exactly the
-    D13/D14 bias this module's header says it never writes — and it does it to the stores that
-    ANSWERED. MEASURED on the S1 demo, whose driver deliberately states no ``catalog``: two
-    hosted stores that bid read ``verified_claim_ratio`` 0.0 while the silent store's R10
-    fallback — no claims, so no ratio, so the published neutral — read 0.5 and took the top of
-    the shortlist off both of them. Accepting a fallback is a handoff that mints no discount
-    code (``accept/reasons.py``'s ``DENIAL_UNROUTABLE_FALLBACK`` note), so the shopper who
-    followed the ranking got no code: an exchange with no catalogue wired ranked the store
-    that never replied above the stores that did.
+    tiers: Mapping[str, str]
+    query_tokens: frozenset[str]
+    refused: Mapping[str, str]
+    #: Published TERMS the buyer asked on — ``{"price_value": "price", ...}``, term to the ask
+    #: field that named it. A claim on the same axis is relevant at the weakest tier; see
+    #: :data:`contracts.ranking.RELEVANCE_TIERS` for why it is demoted rather than refused.
+    scored_axes: Mapping[str, str]
 
-    ``None`` for a candidate with no claims at all, and for one whose every claim was
-    undecided: a ratio over nothing is not 0.0, it is undefined, and the published neutral is
-    what an undefined feature reads (D13/D14). A fallback offer carries no claims by
-    construction (R10), so this is the answer it gets, and a store that presents claims this
-    exchange checked and could not confirm scores BELOW one that presents none. That ordering
-    is deliberate: an unevidenced claim is a cost, and silence is only neutral.
+    def __bool__(self) -> bool:
+        return bool(self.tiers) or bool(self.query_tokens) or bool(self.scored_axes)
 
-    Nothing a bidder writes can buy an exclusion. A claim the exchange never decided scores
-    exactly as if it had not been presented, which is what a store could have had for free by
-    staying quiet — so an undecided claim is never worth more than silence, and the only way
-    to move this feature upward is still a verdict this exchange minted itself.
+    def relevance(self, key: Any, value: Any = None) -> str | None:
+        """The tier ``(key, value)`` lands on in this intent, or ``None`` for neither.
+
+        Fields first — a hard constraint the buyer made mandatory, then a preference they
+        stated — because those are asks this exchange can compare by NAME, and a name is the
+        unambiguous half of an intent.
+
+        **Then the query, matched against the claim's KEY and nothing else.** The buyer's words
+        are prose and a claim key is an identifier, so both sides are folded through
+        :func:`_query_tokens_of` and a shared token is the match — ``capacity_l`` answers "does
+        it have the capacity", ``frame_material`` answers "a frame material that lasts".
+
+        The claim's VALUE is deliberately NOT matched, and this was tried: matching a verified
+        claim's value against the query would let ``boiler_type = "heat exchange"`` answer a
+        shopper who typed "heat-exchange", which is genuinely the right semantics. It is out
+        because the case that motivated it did not survive measurement — S1's hosted agents
+        claim ``list_price``, ``in_stock``, ``units_left`` and ``policy_action``, whose values
+        are two numbers, a bool and a dict, so value-matching changed nothing there — and
+        because with no measurement behind it, all it adds is a surface: a value is a string a
+        store's own catalogue supplies, so quoting the shopper's words back inside a real
+        product attribute would be worth an evidence tier. Key-only is what
+        `contracts.ranking.RELEVANCE_TIERS` prices, and a store whose catalogue calls the field
+        something the buyer did not say is answered by the tiers above, which match by NAME.
+
+        ``value`` is still taken, and read by nothing here, because it is what the attestation
+        MAC covers — the caller already holds it, and a later relevance rule that needs it
+        should not change every call site to get it.
+        """
+        field = canonical_field(key) if key is not None else ""
+        if field:
+            tier = self.tiers.get(field)
+            if tier is not None:
+                return tier
+            if self.query_tokens and _query_tokens_of(field) & self.query_tokens:
+                return "query_term"
+        # LAST, and weakest: the buyer asked on an axis a published term already SCORES, and this
+        # claim is on that same axis. MEASURED on S1, which is why this tier exists at all: its
+        # buyer states one preference (`price`) and a prose query, and its hosted stores claim
+        # `list_price`, `in_stock`, `units_left` and `policy_action` — so with the price ask
+        # refused outright, not one claim in the whole run landed on anything, the two stores
+        # that bid scored exactly what the store that never replied scored
+        # (`verified_claim_ratio` component 0.1 for all three), and
+        # `e2e/test_s1_flow.py::test_the_ranking_moved_on_the_features_the_exchange_computed`
+        # went red — correctly. A store proving its catalogue list price is what it says IS
+        # answering a buyer who asked about price; what it is not is CUSTOMIZED, which is why it
+        # earns 0.55 against silence's 0.5 rather than the 0.70 a proved must-have earns.
+        if field and self.scored_axes:
+            axis = preference_term_conflict(field)
+            if axis is not None and axis in self.scored_axes:
+                return "term_scored_ask"
+        return None
+
+    def gain(self, key: Any, value: Any = None) -> float:
+        """The published evidence gain one verified claim earns. ``0.0`` when nobody asked."""
+        tier = self.relevance(key, value)
+        return 0.0 if tier is None else float(EVIDENCE_GAIN_BY_RELEVANCE.get(tier, 0.0))
+
+
+#: An intent this exchange could read nothing out of. Every claim is irrelevant against it, so
+#: every candidate's `verified_claim_ratio` is ABSENT and reads the published neutral — the term
+#: discriminates nobody rather than guessing which of a store's facts this buyer wanted.
+EMPTY_SURFACE = IntentSurface(tiers={}, query_tokens=frozenset(), refused={}, scored_axes={})
+
+
+def _query_tokens_of(text: Any) -> frozenset[str]:
+    """The comparable tokens of ``text`` — canonicalised, split, stopworded, length-filtered."""
+    if not isinstance(text, str):
+        return frozenset()
+    return frozenset(
+        token
+        for token in canonical_field(text).split("-")
+        if len(token) >= MIN_QUERY_TOKEN and token not in QUERY_STOPWORDS and not token.isdigit()
+    )
+
+
+def _strongest(current: str | None, candidate: str) -> str:
+    """The stronger of two relevance tiers, in the published order."""
+    if current is None:
+        return candidate
+    order = {tier: index for index, tier in enumerate(RELEVANCE_TIERS)}
+    return (
+        current if order.get(current, len(order)) <= order.get(candidate, len(order)) else candidate
+    )
+
+
+def intent_surface(intent: Any) -> IntentSurface:
+    """What this buyer asked about, folded into the shape :class:`IntentSurface` compares with.
+
+    Three sources, in the published tier order — a hard constraint the buyer made mandatory, a
+    preference they stated, and a word they typed into the query.
+
+    **A preference field a published term already scores is REFUSED here**, through
+    :func:`contracts.ranking.preference_term_conflict`, and this is the structural rule that
+    stops the formula scoring one thing twice. A ``price`` preference is already `price_value`
+    and a ``delivery`` preference is already `delivery_fit`; admitting either one would make a
+    verified ``price_usd`` claim buy `verified_claim_ratio` as well, so the same number would be
+    paid for under two published names. The refusal is the same one `intent_match` owes — see
+    :data:`contracts.ranking.PREFERENCE_FIELD_TERMS` for the measured hazard, which is that S1's
+    intent carries exactly one preference and it is ``{price, minimize, 1.0}``.
+
+    An intent this function cannot read yields :data:`EMPTY_SURFACE`, and an empty surface is
+    NOT an excuse to fall back to counting everything: "this buyer asked about nothing this
+    exchange can read" is an unknown, and an unknown feature reads its published neutral rather
+    than a number invented from the claims a store chose to send.
+    """
+    if intent is None:
+        return EMPTY_SURFACE
+    tiers: dict[str, str] = {}
+    refused: dict[str, str] = {}
+    scored_axes: dict[str, str] = {}
+
+    def add(raw_field: Any, tier: str) -> None:
+        field = canonical_field(raw_field) if raw_field is not None else ""
+        if not field:
+            return
+        axis = preference_term_conflict(field)
+        if axis is not None:
+            # An ask on an axis a published term already SCORES. It never enters `tiers` — a
+            # claim on it is relevant at the weakest tier and never at a constraint's — so the
+            # price and delivery axes are the same weight of evidence however the buyer phrased
+            # the ask, and neither can be dressed as a must-have.
+            scored_axes.setdefault(axis, field)
+            return
+        tiers[field] = _strongest(tiers.get(field), tier)
+
+    constraints = read(intent, "hard_constraints", None)
+    if isinstance(constraints, Iterable) and not isinstance(constraints, (str, bytes)):
+        for constraint in constraints:
+            add(read(constraint, "field", None), "hard_constraint")
+
+    preferences = read(intent, "preferences", None)
+    if isinstance(preferences, Iterable) and not isinstance(preferences, (str, bytes)):
+        for preference in preferences:
+            raw_field = read(preference, "field", None)
+            if raw_field is None:
+                continue
+            taken = preference_term_conflict(raw_field)
+            if taken is not None:
+                # RECORDED as refused, because that is the answer `intent_match` owes: a
+                # preference a published term already scores may never reach `intent_match`, and
+                # a store operator asking why needs the term's name rather than silence.
+                refused[canonical_field(raw_field)] = taken
+            add(raw_field, "preference")
+
+    return IntentSurface(
+        tiers=tiers,
+        query_tokens=_query_tokens_of(read(intent, "query", None)),
+        refused=refused,
+        scored_axes=scored_axes,
+    )
+
+
+def verified_claim_ratio(
+    claims: Any, *, store_id: Any = None, surface: IntentSurface | None = None
+) -> float | None:
+    """This candidate's verified evidence **about what THIS buyer asked**, or ``None``.
+
+    Read :data:`contracts.ranking.EVIDENCE_GAIN_BY_RELEVANCE` first: the value is
+    ``1 - Π(1 - gain_i)`` over the claims this exchange attested ``verified`` whose key lands on
+    something in this intent, and the gain depends on how hard the buyer asked (a hard
+    constraint, a stated preference, a word in the query).
+
+    **Why this is not the share-of-decided-claims ratio it used to be.** The product is a
+    matching-and-persuasion market: a store buys a dedicated advocate that writes a pitch for
+    THIS shopper (D55). Under a raw ratio nothing in the published formula paid for that — every
+    term was either fixed at bid time (`trust`, `intent_match`) or the same number for every
+    buyer (`price_value`, `delivery_fit`, and the old ratio), the formula is strictly additive
+    with no interaction term, and so a store's argmax over pitches was IDENTICAL FOR EVERY
+    BUYER. Customization returned exactly zero. The store-agent learning loop would have
+    measured that correctly and converged every store onto one generic pitch. This is the cell
+    the redirect needs filled: movable at bid time AND dependent on this buyer.
+
+    Four consequences, each deliberate:
+
+    * **Claim-stuffing pays nothing.** A verified claim about something nobody asked contributes
+      exactly 0.0 gain — it does not raise the value and does not dilute it either, so it is
+      worth precisely what silence is worth. Ten verified claims about things nobody asked lose
+      to three about things this buyer did.
+    * **The ceiling is per store, so the term does not go flat at full effort.** The attainable
+      set is (this buyer's asks ∩ this store's catalogue facts that survive verification), which
+      differs between two stores with different inventory, and the aggregation itself never
+      reaches 1.0. There is always another relevant fact worth having.
+    * **Silence is still neutral and evidence still beats it.** A candidate with no relevant
+      DECIDED claims has no evidence to aggregate, so the feature is ABSENT and reads the
+      published `verified_claim_ratio_when_absent` (0.5) — the D13/D14 rule, unchanged. Every
+      published gain is above 0.5, so one relevant proved fact already beats saying nothing.
+    * **A relevant claim this exchange decided against scores 0.0**, which is below silence. That
+      ordering is the old one and it is kept: an unevidenced claim is a cost, silence is only
+      neutral. What a CONTRADICTED claim additionally costs is the published
+      ``contradicted_claim`` penalty (:func:`contradicted_claim_events`), which is where the
+      asymmetric downside of lying now lives.
+
+    Everything about WHOSE verdict counts is unchanged. The status is read only out of the
+    attested :data:`.attestation.ATTESTATION_FIELD` block through
+    :func:`.attestation.attested_status`, which checks a MAC the bidder cannot compute and
+    refuses a verdict attested for another store; a ``status`` the claim's author wrote is read
+    by nothing, exactly as in :func:`.filters.verified_attributes`.
+
+    :data:`UNDECIDED` — R18's ``ambiguous``, the verdict for a claim no comparison was made on —
+    still counts as nothing at all rather than as a failure. The case that reaches it in bulk is
+    an exchange holding no catalogue snapshot for the store, and counting those as failures
+    writes 0.0 for "we do not know", to the stores that ANSWERED. MEASURED on the S1 demo before
+    that split: two hosted stores that bid read 0.0 while the silent store's R10 fallback — no
+    claims, so no evidence, so the published neutral — read 0.5 and took the top of the
+    shortlist off both of them, and accepting a fallback mints no discount code.
+
+    ``surface`` of ``None`` means the caller stated no intent, which is
+    :data:`EMPTY_SURFACE`: nothing is relevant, so every candidate's feature is absent and this
+    term discriminates nobody. That is the honest answer for an auction whose intent this
+    exchange could not read, and it is the same direction every other unknown fails in here.
     """
     presented = list(claims or ())
     if not presented:
         return None
-    verified = 0
+    asked = EMPTY_SURFACE if surface is None else surface
+    gains: list[float] = []
     decided = 0
     for claim in presented:
+        key = read(claim, "key", None)
+        value = read(claim, "value", None)
+        if asked.relevance(key, value) is None:
+            # Nobody asked. Not a cost and not a credit — the same as not having said it.
+            continue
+        status = attested_status(
+            read(claim, ATTESTATION_FIELD, None),
+            key=key,
+            value=value,
+            unit=read(claim, "unit", None),
+            subject=store_id,
+        )
+        # `None` — no attestation, a forged one, or one minted for another store — is NOT
+        # undecided. It is a claim this exchange has no readable verdict on, and R12's rule
+        # applies: an unreadable answer is not a permissive one. It counts as decided and
+        # unverified, exactly as it did before this redefinition.
+        text = str(getattr(status, "value", status))
+        if text == UNDECIDED:
+            continue
+        decided += 1
+        if text == VERIFIED:
+            gains.append(asked.gain(key, value))
+    if not decided:
+        return None
+    return _clamp01(diminishing_evidence(gains))
+
+
+def contradicted_claim_events(claims: Any, *, store_id: Any = None) -> list[str]:
+    """One :data:`contracts.ranking.CONTRADICTED_CLAIM` event per claim the catalogue contradicts.
+
+    **Why a penalty and not a smaller ratio.** Before this, a false claim cost one auction's
+    share of one ratio and nothing else: verdicts are minted per auction and carried between
+    none, so a store paid for a contradiction only in the auction it was caught in, and with
+    cheap generation an aggressive claim had positive expected value. A persuasion market whose
+    only feedback on a lie is "that particular sentence scored zero" is a lying market. This is
+    the one asymmetric downside in the design.
+
+    **Contradicted only, and regardless of what the buyer asked.** ``unsupported`` ("the
+    catalogue records nothing behind this") and :data:`UNDECIDED` are the exchange's own gaps as
+    much as the store's, and charging for them would bill stores for an unfinished crawl. A
+    contradiction is different in kind: this exchange's own snapshot of that store says
+    otherwise. And it is charged whether or not this buyer asked about it — a store does not get
+    to lie for free about the things nobody happened to ask.
+
+    The bound is the published catalogue's: :meth:`RankingWeights.total_penalty` clamps the sum
+    to ``max_total_penalty``, so a bid carrying a hundred contradicted claims costs what the
+    catalogue says the worst case costs and not a hundred times one claim.
+    """
+    events: list[str] = []
+    for claim in claims or ():
         status = attested_status(
             read(claim, ATTESTATION_FIELD, None),
             key=read(claim, "key", None),
@@ -226,19 +645,9 @@ def verified_claim_ratio(claims: Any, *, store_id: Any = None) -> float | None:
             unit=read(claim, "unit", None),
             subject=store_id,
         )
-        # `None` — no attestation, a forged one, or one minted for another store — is NOT
-        # undecided. It is a claim this exchange has no verdict on because the verdict on it
-        # is unreadable, and R12's rule applies: an unreadable answer is not a permissive one.
-        # It stays in the denominator, unverified, exactly as it was before this split.
-        text = str(getattr(status, "value", status))
-        if text == UNDECIDED:
-            continue
-        decided += 1
-        if text == VERIFIED:
-            verified += 1
-    if not decided:
-        return None
-    return verified / decided
+        if str(getattr(status, "value", status)) == CONTRADICTED:
+            events.append(CONTRADICTED_CLAIM)
+    return events
 
 
 def delivery_estimate(offer: Any) -> float | None:
@@ -312,7 +721,9 @@ def delivery_fits(estimates: Sequence[float | None]) -> list[float | None]:
     return [None if days is None else _clamp01((slowest - days) / span) for days in estimates]
 
 
-def attach_features(candidates: Sequence[Any], entries: Sequence[Any] = ()) -> list[Any]:
+def attach_features(
+    candidates: Sequence[Any], entries: Sequence[Any] = (), *, intent: Any = None
+) -> list[Any]:
     """Every candidate of one auction, carrying the features this module can compute.
 
     New records, never mutated ones: :func:`~exchange.ranking.rank` promises its inputs are
@@ -334,6 +745,19 @@ def attach_features(candidates: Sequence[Any], entries: Sequence[Any] = ()) -> l
     ranked candidate are exactly the ones this module produced, so a value that arrived from
     anywhere else — a projection that started copying the bid, a caller assembling candidates
     by hand — cannot reach the formula wearing a published feature's name.
+
+    ``intent`` is the BUYER's, and it is what makes `verified_claim_ratio` buyer-conditional:
+    it is folded once, here, into an :class:`IntentSurface` shared by every candidate in the
+    auction, so two stores are graded against the same asks. A caller that states no intent gets
+    :data:`EMPTY_SURFACE` — nothing is relevant, the feature is absent for everybody, and the
+    term discriminates nobody rather than guessing. Nothing on the intent reaches the published
+    WEIGHTS: `Intent.preferences[].weight` is not read here at all (D50).
+
+    ``policy_events`` are APPENDED, never replaced: one
+    :data:`contracts.ranking.CONTRADICTED_CLAIM` per claim this exchange's own snapshot
+    contradicts. Appending matters because a record may already carry events from a producer
+    upstream of this one, and a feature module that silently dropped a policy event would be
+    forgiving a store for something it was already being charged for.
     """
     records: list[Any] = [
         dict(candidate) if isinstance(candidate, Mapping) else candidate
@@ -348,14 +772,21 @@ def attach_features(candidates: Sequence[Any], entries: Sequence[Any] = ()) -> l
 
     offers = [read(record, "offer", None) for record in records]
     fits = delivery_fits([delivery_estimate(offer) for offer in offers])
+    # ONE band and ONE surface for the whole auction, computed before the loop: both are
+    # statements about the auction rather than about a candidate, and deriving either one
+    # per candidate would let the answer depend on which candidate was being scored.
+    depth_to_clear = band_depth(price_band(listed))
+    surface = intent_surface(intent)
 
     for record, offer, list_price, fit in zip(records, offers, listed, fits, strict=True):
         if not isinstance(record, dict):
             continue
+        claims = read(record, "claims", None)
+        store_id = read(record, "store_id", None)
         produced = {
-            "price_value": price_value(list_price, offer),
+            "price_value": price_value(list_price, offer, depth_to_clear=depth_to_clear),
             "verified_claim_ratio": verified_claim_ratio(
-                read(record, "claims", None), store_id=read(record, "store_id", None)
+                claims, store_id=store_id, surface=surface
             ),
             "delivery_fit": fit,
         }
@@ -365,4 +796,9 @@ def attach_features(candidates: Sequence[Any], entries: Sequence[Any] = ()) -> l
                 record.pop(name, None)
             else:
                 record[name] = float(value)
+        events = contradicted_claim_events(claims, store_id=store_id)
+        if events:
+            existing = read(record, "policy_events", None)
+            already = list(existing) if isinstance(existing, (list, tuple)) else []
+            record["policy_events"] = [*already, *events]
     return records

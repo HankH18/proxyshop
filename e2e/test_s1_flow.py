@@ -510,14 +510,36 @@ def test_the_ranking_moved_on_the_features_the_exchange_computed(s1_run, s1_fixt
         # product claim it took the ratio to 3/4; a store publishing three such records
         # beside three true ones would have landed on exactly the 0.5 neutral the SILENT
         # store gets for free, and a fourth would have put an honest store below silence.
-        # The ratio is 1.0 here, which is twice that neutral.
+        #
+        # **The number this pins moved with `RANKING_FEATURES_VERSION` 2.0.0 and the reason is
+        # in the published definition, not here.** `verified_claim_ratio` is no longer the
+        # share of decided claims verified; it is `1 - Π(1 - gain_i)` over the verified claims
+        # whose key lands on something THIS buyer asked about (`contracts.ranking
+        # .EVIDENCE_GAIN_BY_RELEVANCE`). A diminishing-returns aggregation never reaches 1.0
+        # by construction, so "twice the neutral" is not a value any store can hold under
+        # 2.0.0 and the old assertion pinned an arithmetic that no longer exists.
+        #
+        # What is pinned instead is STRICTLY TIGHTER: the exact published value of this run,
+        # which is one relevant verified claim and nothing else. S1's buyer states one ask
+        # this exchange can name — a `price` preference — and of the four claims each hosted
+        # agent makes (`list_price`, `in_stock`, `units_left`, `policy_action`) exactly one,
+        # `list_price`, is on that axis. So the term is one `term_scored_ask` gain: anything
+        # counting `policy_action` against the store, or dropping `list_price`, or minting a
+        # penalty, lands somewhere else and this fails. The `> silent` assertion above is the
+        # control that the term still separates a store that answered from one that did not.
+        from contracts.ranking import DEFAULT_RANKING_WEIGHTS, EVIDENCE_GAIN_BY_RELEVANCE
+
+        w_e = DEFAULT_RANKING_WEIGHTS.feature_weights["verified_claim_ratio"]
         assert components[store_id]["verified_claim_ratio"] == pytest.approx(
-            2 * components[silent]["verified_claim_ratio"]
+            w_e * EVIDENCE_GAIN_BY_RELEVANCE["term_scored_ask"]
         ), (
-            "a hosted store's verified_claim_ratio is not the full 1.0 against the silent "
-            "store's 0.5 neutral, so something it said that this exchange could not check "
-            f"was counted against it: {components[store_id]} vs {components[silent]}"
+            "a hosted store's verified_claim_ratio is not the published value of the one "
+            "buyer-relevant claim it proved, so something it said that this exchange could "
+            f"not check was counted against it: {components[store_id]} vs {components[silent]}"
         )
+        assert components[store_id]["verified_claim_ratio"] > w_e * float(
+            DEFAULT_RANKING_WEIGHTS.normalization.verified_claim_ratio_when_absent
+        ), "a store that proved a buyer-relevant fact scored no better than the published neutral"
     # The exchange's OWN verdicts are what moved it — one `claim_verified` per counted claim,
     # and none for the store that made none.
     verdicts = Counter(

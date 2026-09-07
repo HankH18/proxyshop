@@ -70,7 +70,11 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from contracts.ranking import DEFAULT_RANKING_WEIGHTS, RankingWeights
+from contracts.ranking import (
+    DEFAULT_RANKING_WEIGHTS,
+    RANKING_FEATURES_VERSION,
+    RankingWeights,
+)
 
 from . import shortlist as _shortlist
 from .filters import (
@@ -341,6 +345,15 @@ def rank(
         "candidates": rows,
         "shortlist": _shortlist.build(ranked, _auction_id(candidates, intent, config)),
         "relaxed_constraints": relaxed,
+        # BOTH versions, because a score is reproducible from neither alone (R15/S3). The
+        # weights version says which numbers were applied; the features version says what they
+        # were applied TO, and a feature redefined under an unchanged weights version re-scores
+        # history with every recorded number still validating and every published weight still
+        # matching. A replay that compares only the weights version cannot tell that happened.
+        "ranking_versions": {
+            "weights": str(weights.version),
+            "features": RANKING_FEATURES_VERSION,
+        },
     }
 
 

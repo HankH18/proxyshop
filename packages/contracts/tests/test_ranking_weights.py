@@ -220,3 +220,145 @@ def test_a_negative_penalty_is_rejected() -> None:
     payload["penalties"] = {**payload["penalties"], "per_kind": {"severe_policy_violation": -0.3}}
     with pytest.raises(ValidationError, match="non-negative"):
         RankingWeights.model_validate(payload)
+
+
+# --- features 2.0.0: the published definitions the weights are applied TO -------------------
+
+
+def test_the_feature_definitions_are_versioned_separately_from_the_weights() -> None:
+    """R15/S3: a replay reproduces served scores only if it knows BOTH versions.
+
+    Weights and feature definitions change independently. Redefining `verified_claim_ratio`
+    under an unchanged `RANKING_WEIGHTS_VERSION` re-scores every historical auction with
+    nothing anywhere recording that anything moved — every stored number still validates and
+    every published weight still matches — which is exactly the silent divergence the weights
+    version exists to make impossible. So there are two versions, and they are not the same
+    string: a single version would make one of the two changes invisible.
+    """
+    from contracts.ranking import RANKING_FEATURES_VERSION
+
+    assert RANKING_FEATURES_VERSION
+    assert RANKING_FEATURES_VERSION != RANKING_WEIGHTS_VERSION
+    # 2.x, because two of the five features were REDEFINED and not merely retuned.
+    assert RANKING_FEATURES_VERSION.split(".")[0] == "2"
+
+
+def test_intent_match_has_a_published_neutral_of_its_own() -> None:
+    """The number does not move; where a reader finds it does.
+
+    It has always been 0.5, inherited from the scorer's `[feature_min, feature_max]` midpoint
+    and published nowhere — so a computed 0.5 (an exactly average fit) and an absent one (a
+    served auction is handed a roster and queries no index, so nothing produces the term) were
+    the same float saying opposite things about whose gap it is. `NormalizationBounds`
+    publishes that distinction for the other two and its property set is closed.
+    """
+    from contracts.ranking import INTENT_MATCH_WHEN_ABSENT
+
+    bounds = DEFAULT_RANKING_WEIGHTS.normalization
+    midpoint = (float(bounds.feature_min) + float(bounds.feature_max)) / 2.0
+    assert INTENT_MATCH_WHEN_ABSENT == pytest.approx(midpoint), (
+        "publishing the neutral CHANGED it, so every historical intent_match-absent score "
+        "just moved"
+    )
+    assert 0.0 <= INTENT_MATCH_WHEN_ABSENT <= 1.0
+
+
+def test_a_contradicted_claim_is_priced_and_the_price_is_bounded_from_both_sides() -> None:
+    """The only asymmetric downside in the design, and why 0.15 rather than any other number.
+
+    Both bounds are asserted rather than described, because both are what make it a deterrent
+    that is not also a death sentence.
+    """
+    from contracts.ranking import CONTRADICTED_CLAIM
+
+    weights = DEFAULT_RANKING_WEIGHTS
+    penalty = weights.penalty_for(CONTRADICTED_CLAIM)
+    bounds = weights.normalization
+
+    assert penalty == pytest.approx(0.15)
+    # LARGE ENOUGH: no amount of true, buyer-relevant evidence buys out one lie. The most the
+    # whole evidence term can pay a store is w_e * (max - neutral).
+    most_the_evidence_term_can_pay = weights.feature_weights["verified_claim_ratio"] * (
+        float(bounds.feature_max) - float(bounds.verified_claim_ratio_when_absent)
+    )
+    assert penalty > most_the_evidence_term_can_pay == pytest.approx(0.10)
+    # SMALL ENOUGH: below `severe_policy_violation`, and below both of the terms a store
+    # recovers on, so one bad verdict is survivable.
+    assert penalty < weights.penalty_for("severe_policy_violation")
+    assert penalty < weights.feature_weights["trust"]
+    assert penalty < weights.feature_weights["intent_match"]
+    # And it accumulates under the published bound rather than without one.
+    assert weights.total_penalty([CONTRADICTED_CLAIM] * 2) == pytest.approx(2 * penalty)
+    assert weights.total_penalty([CONTRADICTED_CLAIM] * 100) == pytest.approx(
+        weights.penalties.max_total_penalty
+    )
+
+
+def test_the_evidence_aggregation_diminishes_without_ever_saturating() -> None:
+    """`verified_claim_ratio`'s published aggregation, and the four properties it is chosen for.
+
+    Both failure modes are real. Without diminishing returns the term is a claim-count race and
+    the longest pitch wins; with a hard ceiling it goes flat at full effort and every store
+    converges on one pitch again.
+    """
+    from contracts.ranking import EVIDENCE_GAIN_BY_RELEVANCE, RELEVANCE_TIERS, diminishing_evidence
+
+    bounds = DEFAULT_RANKING_WEIGHTS.normalization
+    neutral = float(bounds.verified_claim_ratio_when_absent)
+
+    assert tuple(EVIDENCE_GAIN_BY_RELEVANCE) == RELEVANCE_TIERS
+    # EVERY tier beats silence on ONE claim, or the term pays a store to say nothing.
+    assert all(gain > neutral for gain in EVIDENCE_GAIN_BY_RELEVANCE.values())
+    # The tiers rank how hard the buyer asked.
+    ordered = [EVIDENCE_GAIN_BY_RELEVANCE[tier] for tier in RELEVANCE_TIERS]
+    assert ordered == sorted(ordered, reverse=True)
+
+    gain = EVIDENCE_GAIN_BY_RELEVANCE["hard_constraint"]
+    values = [diminishing_evidence([gain] * n) for n in range(0, 10)]
+    assert values[0] == 0.0, "proving nothing the buyer asked about is not worth anything"
+    steps = [later - earlier for earlier, later in zip(values, values[1:], strict=False)]
+    assert all(step > 0.0 for step in steps), f"the aggregation saturates: {values}"
+    assert all(later < earlier for earlier, later in zip(steps, steps[1:], strict=False)), (
+        f"the returns are not diminishing: {steps}"
+    )
+    assert values[-1] < float(bounds.feature_max)
+
+    # Order-independent, which R11 and S3's replay both need: multiplication commutes.
+    tiers = list(EVIDENCE_GAIN_BY_RELEVANCE.values())
+    assert diminishing_evidence(tiers) == pytest.approx(diminishing_evidence(reversed(tiers)))
+    # A non-positive or non-finite gain contributes nothing rather than poisoning the product.
+    assert diminishing_evidence([0.6, 0.0, -1.0, float("nan")]) == pytest.approx(0.6)
+
+
+def test_intent_match_must_refuse_a_preference_a_published_term_already_scores() -> None:
+    """The structural rule that stops `intent_match` becoming price under a new name.
+
+    Measured hazard: S1's intent carries exactly ONE preference, `{price, minimize, 1.0}`, so
+    with min-max normalisation across the eligible set an `intent_match` wired naively over it
+    IS normalised inverse price — and price's share of the published weight goes from
+    `w_v` = 0.15 to `w_v + w_m` = 0.50. Scoring one thing twice under two names contradicts
+    DESIGN's "this is the only rank formula in the system".
+    """
+    from contracts.ranking import (
+        PREFERENCE_FIELD_TERMS,
+        canonical_field,
+        preference_term_conflict,
+    )
+
+    weights = DEFAULT_RANKING_WEIGHTS.feature_weights
+    assert weights["price_value"] + weights["intent_match"] == pytest.approx(0.50)
+
+    # Every refusal names a term the published formula actually has, so nothing is refused on
+    # behalf of a term that does not exist.
+    assert set(PREFERENCE_FIELD_TERMS.values()) <= set(RANK_FEATURES)
+    # Every key is already canonical, so a lookup cannot miss on spelling alone.
+    assert all(canonical_field(field) == field for field in PREFERENCE_FIELD_TERMS)
+
+    for spelling in ("price", "Price USD", "price_usd", "total-price", "list_price"):
+        assert preference_term_conflict(spelling) == "price_value", spelling
+    for spelling in ("delivery", "delivery_estimate_days", "Shipping Speed"):
+        assert preference_term_conflict(spelling) == "delivery_fit", spelling
+    # …and a field no published term scores is NOT refused, or `intent_match` would have
+    # nothing left to score at all.
+    for spelling in ("capacity_l", "material", "boiler_type", "warranty_months"):
+        assert preference_term_conflict(spelling) is None, spelling

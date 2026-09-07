@@ -1079,9 +1079,11 @@ def test_inverting_every_list_price_changes_the_served_scores_and_the_shortlist(
     assert upright["excluded"] == [], upright["excluded"]
     assert inverted["excluded"] == [], inverted["excluded"]
 
-    # price_value: a=(100-90)/100=0.10  b=(200-100)/200=0.50  c=(300-90)/300=0.70
+    # depth: a=(100-90)/100=0.10  b=(200-100)/200=0.50  c=(300-90)/300=0.70, and each is then
+    # divided by this auction's own band depth, (300-100)/300 = 2/3, and clamped:
+    # price_value a=0.15  b=0.75  c=1.0 (c has CLEARED the band and saturates).
     assert _served_order(upright) == ["store-c", "store-b", "store-a"], upright["ranked"]
-    # inverted: a=(300-90)/300=0.70  b=0.50  c=(100-90)/100=0.10
+    # inverted: depth a=0.70 b=0.50 c=0.10 -> price_value a=1.0 b=0.75 c=0.15
     assert _served_order(inverted) == ["store-a", "store-b", "store-c"], inverted["ranked"]
 
     assert _served_scores(upright) != _served_scores(inverted), (
@@ -1094,11 +1096,26 @@ def test_inverting_every_list_price_changes_the_served_scores_and_the_shortlist(
     # And the number is the published formula's, not merely "different": every non-price
     # feature is equal across these three stores, so the score gap is w_v times the
     # price_value gap and nothing else.
+    #
+    # The gap is computed from the published SATURATING definition rather than written as a
+    # literal, so it stays a statement about the formula rather than about this arrangement.
+    # Under features 2.0.0 `price_value` is `clamp(depth / band_depth, 0, 1)`: the roster's
+    # list prices still reach the score (which is this test's whole subject) and they now also
+    # set the point past which extra depth is worth nothing.
     from contracts.ranking import DEFAULT_RANKING_WEIGHTS
+    from exchange.ranking.features import band_depth, price_band
 
     w_v = DEFAULT_RANKING_WEIGHTS.feature_weights["price_value"]
+    to_clear = band_depth(price_band([100.0, 200.0, 300.0]))
+    assert to_clear == pytest.approx((300.0 - 100.0) / 300.0)
+    expected = min(0.70 / to_clear, 1.0) - min(0.10 / to_clear, 1.0)
     scores = _served_scores(upright)
-    assert scores["store-c"] - scores["store-a"] == pytest.approx(w_v * (0.70 - 0.10))
+    assert scores["store-c"] - scores["store-a"] == pytest.approx(w_v * expected)
+
+    # store-c bid 90 against a 300 list price — a depth of 0.70 against a band that is cleared
+    # at 2/3 — so it is PAST the band. The saturation is asserted directly rather than left
+    # implicit in the gap: this is R11's "no marginal return past the auction's own price band".
+    assert _served_features(upright)["store-c"]["price_value"] == pytest.approx(1.0)
 
 
 def test_the_served_price_value_is_the_published_formula_over_the_rosters_list_price():
@@ -1131,11 +1148,19 @@ def test_the_served_verified_claim_ratio_is_the_exchanges_own_verdicts():
     """`verified_claim_ratio` is a count over the verdicts THIS exchange attested.
 
     Driven on an intent with no hard constraint, so that a store presenting no claim at all
-    is still eligible and its feature can be read: a claimless store has no ratio to take,
-    so the feature is absent and reads the published neutral rather than 0.0 — scoring
-    silence as zero is the D13/D14 bias this codebase refuses everywhere else. Every store
-    bids the same price against the same list price, so `price_value` is 0.0 for all three
-    and this term is the only one that can separate them.
+    is still eligible and its feature can be read: a claimless store has no evidence to
+    aggregate, so the feature is absent and reads the published neutral rather than 0.0 —
+    scoring silence as zero is the D13/D14 bias this codebase refuses everywhere else. Every
+    store bids the same price against the same list price, so `price_value` is 0.0 for all
+    three and this term is the only one that can separate them.
+
+    **The intent STATES the thing the claims are about**, which features 2.0.0 requires and
+    the raw ratio did not: `verified_claim_ratio` counts verified claims whose key lands on
+    something THIS buyer asked about, so an intent that asks for nothing makes every claim
+    irrelevant and the term reads its neutral for everybody. A `capacity_l` preference is the
+    smallest ask that keeps this test testing what it has always tested — WHOSE verdict the
+    feature reads — without also turning it into an eligibility filter, which a hard
+    constraint would and which would take the claimless control store out of the comparison.
     """
     bids = {
         "store-a": _served_bid(
@@ -1153,25 +1178,47 @@ def test_the_served_verified_claim_ratio_is_the_exchanges_own_verdicts():
     body = _served_post(
         _served_app(bids),
         _served_roster({"store-a": 100.0, "store-b": 100.0, "store-c": 100.0}),
-        intent={"intent_id": "intent-1", "cluster_id": "cluster-1", "hard_constraints": []},
+        intent={
+            "intent_id": "intent-1",
+            "cluster_id": "cluster-1",
+            "hard_constraints": [],
+            "preferences": [{"field": "capacity_l", "direction": "maximize", "weight": 1.0}],
+        },
     )
     features = _served_features(body)
 
+    from contracts.ranking import EVIDENCE_GAIN_BY_RELEVANCE, diminishing_evidence
+
+    gain = EVIDENCE_GAIN_BY_RELEVANCE["preference"]
+
     # The second claim says 12 where the catalogue says 35 -> `contradicted`, which is a
-    # verdict this exchange reached and is not `verified`: 1 of 2.
+    # verdict this exchange reached and is not `verified`. One verified claim on something
+    # this buyer asked about, and the contradicted one adds no evidence.
     #
     # It used to be a claim on `colour`, a key the snapshot does not carry at all, and that
-    # case has MOVED rather than been dropped: an unanswerable key is now `ambiguous` and out
-    # of the denominator entirely, which
+    # case has MOVED rather than been dropped: an unanswerable key is now `ambiguous` and
+    # counted as nothing at all, which
     # `test_a_claim_this_catalogue_could_never_decide_is_undecided_rather_than_a_cost` pins.
-    # The number here is unchanged because the property here is unchanged — a claim the
-    # exchange DECIDED against still costs the store.
-    assert features["store-a"]["verified_claim_ratio"] == pytest.approx(0.5)
-    # Both claims agree with the catalogue: 2 of 2.
-    assert features["store-b"]["verified_claim_ratio"] == pytest.approx(1.0)
+    # The PROPERTY here is unchanged — a claim the exchange DECIDED against buys the store
+    # nothing, and under features 2.0.0 it also mints a `contradicted_claim` penalty, which
+    # the ordering below is what proves.
+    assert features["store-a"]["verified_claim_ratio"] == pytest.approx(gain)
+    # Both claims agree with the catalogue: two verified, aggregated with diminishing returns.
+    assert features["store-b"]["verified_claim_ratio"] == pytest.approx(
+        diminishing_evidence([gain, gain])
+    )
+    assert (
+        features["store-b"]["verified_claim_ratio"] > features["store-a"]["verified_claim_ratio"]
+    ), "two proved facts did not beat one, so the aggregation is not counting the second"
     # No claims at all: absent, therefore the published neutral.
     assert features["store-c"]["verified_claim_ratio"] == pytest.approx(0.5)
     assert _served_order(body)[0] == "store-b", body["ranked"]
+    # And the store caught contradicting its own catalogue now ranks BELOW the store that said
+    # nothing, which is the `contradicted_claim` penalty doing the only thing it exists to do.
+    scores = _served_scores(body)
+    assert scores["store-a"] < scores["store-c"], (
+        f"a contradicted claim cost the store nothing against staying silent: {scores}"
+    )
 
 
 def test_a_claim_this_catalogue_could_never_decide_is_undecided_rather_than_a_cost():
@@ -1202,6 +1249,12 @@ def test_a_claim_this_catalogue_could_never_decide_is_undecided_rather_than_a_co
     * `store-b` — the same true claim alone (the control the rule must make `store-a` equal to);
     * `store-c` — no claims at all, the published neutral;
     * `store-d` — one claim the catalogue CONTRADICTS, which must still cost.
+
+    The intent asks about BOTH keys under features 2.0.0. `capacity_l` is the true claim's key
+    and `policy_action` is the unanswerable one's, and naming both is what keeps the test
+    honest: with `policy_action` left out of the intent it would be irrelevant and therefore
+    free for a second, weaker reason, and the test would pass without the ``ambiguous`` rule it
+    exists to pin ever being exercised.
     """
     bids = {
         "store-a": _served_bid(
@@ -1217,16 +1270,28 @@ def test_a_claim_this_catalogue_could_never_decide_is_undecided_rather_than_a_co
     body = _served_post(
         _served_app(bids, stores=stores),
         _served_roster(dict.fromkeys(stores, 100.0)),
-        intent={"intent_id": "intent-1", "cluster_id": "cluster-1", "hard_constraints": []},
+        intent={
+            "intent_id": "intent-1",
+            "cluster_id": "cluster-1",
+            "hard_constraints": [],
+            "preferences": [
+                {"field": "capacity_l", "direction": "maximize", "weight": 1.0},
+                {"field": "policy_action", "direction": "prefer", "weight": 1.0},
+            ],
+        },
     )
     features = _served_features(body)
     scores = _served_scores(body)
 
-    assert features["store-a"]["verified_claim_ratio"] == pytest.approx(1.0), (
+    from contracts.ranking import EVIDENCE_GAIN_BY_RELEVANCE
+
+    gain = EVIDENCE_GAIN_BY_RELEVANCE["preference"]
+
+    assert features["store-a"]["verified_claim_ratio"] == pytest.approx(gain), (
         "a claim on a key this exchange's catalogue cannot decide was counted against the "
         "store, so publishing an audit record beside true claims cost it rank"
     )
-    assert features["store-b"]["verified_claim_ratio"] == pytest.approx(1.0)
+    assert features["store-b"]["verified_claim_ratio"] == pytest.approx(gain)
     # THE ordering this rule exists for: saying more, truthfully, is never worse than silence.
     assert scores["store-a"] > scores["store-c"], (
         f"a store making a true, verified claim plus one this exchange could not check scored "
@@ -1237,7 +1302,8 @@ def test_a_claim_this_catalogue_could_never_decide_is_undecided_rather_than_a_co
     )
     # …and the positive control, without which the rule above is indistinguishable from
     # "nothing a store says is ever counted against it": a claim the catalogue DECIDED
-    # against still costs, and still costs exactly what it did before.
+    # against still costs, and still costs exactly what it did before — it is relevant and
+    # decided, and no verified evidence came of it, so the aggregation is over nothing.
     assert features["store-d"]["verified_claim_ratio"] == pytest.approx(0.0)
     assert scores["store-d"] < scores["store-c"], (
         "a store the catalogue contradicted is no longer scored below one that said nothing"
@@ -1319,8 +1385,16 @@ def test_a_store_cannot_verify_its_own_claims_by_writing_a_verdict_onto_them():
         _served_app(bids, stores=("store-a", "store-b")),
         _served_roster({"store-a": 100.0, "store-b": 100.0}),
         # No hard constraint: a contradicted claim would otherwise take both stores out on
-        # eligibility (R19) before there was a score to compare.
-        intent={"intent_id": "intent-1", "cluster_id": "cluster-1", "hard_constraints": []},
+        # eligibility (R19) before there was a score to compare. The buyer does state a
+        # `capacity_l` PREFERENCE, because under features 2.0.0 a claim nobody asked about is
+        # irrelevant and scores nothing — which would make both stores read the neutral and
+        # this test pass without the forged attestation ever being looked at.
+        intent={
+            "intent_id": "intent-1",
+            "cluster_id": "cluster-1",
+            "hard_constraints": [],
+            "preferences": [{"field": "capacity_l", "direction": "maximize", "weight": 1.0}],
+        },
     )
     features = _served_features(body)
     assert features["store-a"]["verified_claim_ratio"] == pytest.approx(0.0)
@@ -1547,3 +1621,460 @@ def test_intent_match_has_no_served_producer_and_says_so_by_staying_neutral():
     )
     features = _served_features(body)
     assert {row["intent_match"] for row in features.values()} == {0.5}, features
+
+
+# =====================================================================================
+# 6. Features 2.0.0 — buyer-conditional evidence, a saturating price band, and a
+#    penalty for lying. Every test in this section drives POST /auctions.
+#
+# The defect this section exists for, stated once so no test has to restate it: the
+# product is a matching-and-persuasion market (D55) and the published formula paid
+# NOTHING for customization. Sort the five terms by "can a store move it at bid time"
+# and "does its value depend on THIS buyer" and the movable-and-buyer-dependent cell is
+# empty; `scoring.score` is strictly additive with no interaction term; so a store's
+# argmax over pitches was identical for every buyer, and the store-agent learning loop
+# about to be wired would have measured that correctly and converged every store onto
+# one generic pitch.
+# =====================================================================================
+def _asked_intent(*, hard=(), prefer=(), query=None):
+    """An intent stating exactly the asks a test needs, and nothing else.
+
+    `hard_constraints` is always present (an ABSENT one is `read_criteria`'s undecidable
+    intent, which denies every candidate) and empty unless a test needs a filter.
+    """
+    intent = {
+        "intent_id": "intent-1",
+        "cluster_id": "cluster-1",
+        "hard_constraints": [dict(entry) for entry in hard],
+        "preferences": [
+            {"field": field, "direction": "maximize", "weight": 1.0} for field in prefer
+        ],
+    }
+    if query is not None:
+        intent["query"] = query
+    return intent
+
+
+def _multi_key_app(bids, *, stores, attributes):
+    """A served exchange whose catalogue carries `attributes` for every store.
+
+    `_served_app` publishes a single `capacity_l` reading, which is enough for one claim and
+    not enough to tell three claims apart from ten.
+    """
+    import time
+
+    from exchange.auction.routes import configure_auctions
+    from exchange.checkout.sellers import StaticRegisteredDomains
+    from exchange.eligibility import ELIGIBLE, StaticSellerEligibility
+    from exchange.main import create_app
+    from exchange.ranking.serving import configure_ranking
+    from exchange.ranking.verification import StaticCatalogSnapshots
+
+    def solicit(store):
+        store_id = str(store["store_id"])
+        bid = bids.get(store_id)
+        if bid is None:
+            return None
+        return {"store_id": store_id, "received_at": time.time(), "bid": dict(bid)}
+
+    app = create_app()
+    configure_auctions(
+        app,
+        solicitor=solicit,
+        eligibility=StaticSellerEligibility({store: ELIGIBLE for store in stores}),
+    )
+    configure_ranking(
+        app,
+        trust_snapshot={store: {"blacklisted": False, "score": 0.6} for store in stores},
+        registered_domains=StaticRegisteredDomains(
+            {store: _served_domain(store) for store in stores}
+        ),
+        catalog=StaticCatalogSnapshots(
+            {
+                store: {
+                    "snapshot_id": f"snap-{store}",
+                    "products": [
+                        {
+                            "product_ref": "product-1",
+                            "canonical_name": "product-1",
+                            "evidence_ref": f"snap-{store}#product-1",
+                            "attributes": {
+                                key: {"value": value}
+                                for key, value in attributes.get(store, {}).items()
+                            },
+                        }
+                    ],
+                }
+                for store in stores
+            }
+        ),
+    )
+    return app
+
+
+#: Ten true facts about a product that no shopper in these tests asks about.
+UNASKED_FACTS: dict = {
+    "box_colour": "brown",
+    "carton_count": 6,
+    "pallet_code": "PX-9",
+    "sku_prefix": "AAA",
+    "label_font": "helvetica",
+    "warehouse_bay": "B12",
+    "barcode_kind": "ean13",
+    "shrinkwrap": True,
+    "insert_card": "yes",
+    "tape_width": 48,
+}
+
+#: Three true facts about the same product that the shopper in `test_three_asked...` DOES ask
+#: about — one per relevance tier, which is also what makes the ordering in the customization
+#: test visible.
+ASKED_FACTS: dict = {
+    "capacity_l": 35,
+    "frame_material": "aluminium",
+    "waterproof_rating": "ip67",
+}
+
+
+def test_three_verified_claims_this_buyer_asked_about_beat_ten_nobody_asked():
+    """THE headline. Customization pays; volume does not.
+
+    Both stores are honest and both are believed: every claim either one makes is checked
+    against this exchange's own catalogue snapshot and comes back `verified`. They bid the
+    same price against the same list price, they have the same trust score, and neither
+    declares a delivery estimate — so `price_value`, `trust`, `delivery_fit` and
+    `intent_match` are identical and this term is the only thing that can separate them.
+
+    `store-focused` makes THREE claims, all about things this shopper asked for.
+    `store-loud` makes TEN, all true, none of them about anything the shopper asked.
+
+    Under the raw ratio both read 1.0 and the shortlist was a coin toss decided by
+    `bid_id`. Under features 2.0.0 the ten score exactly nothing — a claim nobody asked
+    about is worth what silence is worth, so `store-loud` reads the published neutral —
+    and the three win.
+    """
+    stores = ("store-focused", "store-loud")
+    attributes = {
+        "store-focused": {**ASKED_FACTS, **UNASKED_FACTS},
+        "store-loud": {**ASKED_FACTS, **UNASKED_FACTS},
+    }
+    bids = {
+        "store-focused": _served_bid(
+            "store-focused",
+            100.0,
+            claims=[_served_claim(key, value) for key, value in ASKED_FACTS.items()],
+        ),
+        "store-loud": _served_bid(
+            "store-loud",
+            100.0,
+            claims=[_served_claim(key, value) for key, value in UNASKED_FACTS.items()],
+        ),
+    }
+    body = _served_post(
+        _multi_key_app(bids, stores=stores, attributes=attributes),
+        _served_roster(dict.fromkeys(stores, 100.0)),
+        # PREFERENCES and a query, no hard constraint: a hard constraint is an eligibility
+        # filter (R19), so `store-loud` — which claims nothing about `capacity_l` — would be
+        # EXCLUDED rather than out-scored and this test would prove nothing about the formula.
+        intent=_asked_intent(
+            prefer=["capacity_l", "frame_material"],
+            query="a waterproof rating I can trust",
+        ),
+    )
+    features = _served_features(body)
+    scores = _served_scores(body)
+
+    assert len(bids["store-loud"]["claims"]) == 10
+    assert len(bids["store-focused"]["claims"]) == 3
+    assert _served_order(body) == ["store-focused", "store-loud"], body["ranked"]
+
+    from contracts.ranking import EVIDENCE_GAIN_BY_RELEVANCE, diminishing_evidence
+
+    # `capacity_l` and `frame_material` are stated preferences; `waterproof_rating` is a word
+    # in the query. Three relevant facts, aggregated with diminishing returns.
+    expected = diminishing_evidence(
+        [
+            EVIDENCE_GAIN_BY_RELEVANCE["preference"],
+            EVIDENCE_GAIN_BY_RELEVANCE["preference"],
+            EVIDENCE_GAIN_BY_RELEVANCE["query_term"],
+        ]
+    )
+    assert features["store-focused"]["verified_claim_ratio"] == pytest.approx(expected)
+    # Ten verified claims, none of them asked for: absent, therefore the published neutral.
+    assert features["store-loud"]["verified_claim_ratio"] == pytest.approx(0.5)
+    assert features["store-focused"]["price_value"] == pytest.approx(
+        features["store-loud"]["price_value"]
+    ), "the two stores were separated by price rather than by evidence"
+
+    from contracts.ranking import DEFAULT_RANKING_WEIGHTS
+
+    w_e = DEFAULT_RANKING_WEIGHTS.feature_weights["verified_claim_ratio"]
+    assert scores["store-focused"] - scores["store-loud"] == pytest.approx(
+        w_e * (expected - 0.5)
+    ), f"the whole gap is the evidence term and nothing else: {scores}"
+
+
+def test_the_same_store_has_a_different_best_pitch_for_two_different_buyers():
+    """Customization pays: the ORDERING of a store's own facts by value moves with the intent.
+
+    One store, one catalogue, one price. Two shoppers who want different things. For each
+    shopper the store is offered the same three facts to lead with, and the auction is driven
+    once per fact per shopper — six requests — so what is measured is the store's own argmax
+    over pitches, which is the quantity the store-agent learning loop optimises.
+
+    Under the raw ratio all six requests answered the identical `verified_claim_ratio` (1.0:
+    one verified claim of one decided), the argmax was a tie, and there was nothing for a
+    learning loop to learn except that customization does not pay.
+    """
+    store = "store-one"
+    facts = {"capacity_l": 35, "frame_material": "aluminium", "waterproof_rating": "ip67"}
+    shoppers = {
+        # Shopper A came for capacity and merely mentioned the frame. Stated as a PREFERENCE
+        # rather than a hard constraint for the same reason as the test above: a constraint
+        # would exclude the store outright on the two runs where it leads with another fact,
+        # and an excluded candidate has no score to compare.
+        "capacity-shopper": _asked_intent(
+            prefer=["capacity_l"],
+            query="a frame material that lasts",
+        ),
+        # Shopper B came for a waterproof rating and merely mentioned capacity.
+        "waterproof-shopper": _asked_intent(
+            prefer=["waterproof_rating"],
+            query="does it have the capacity",
+        ),
+    }
+
+    def value_of(fact_key, intent):
+        bids = {store: _served_bid(store, 100.0, claims=[_served_claim(fact_key, facts[fact_key])])}
+        body = _served_post(
+            _multi_key_app(bids, stores=(store,), attributes={store: facts}),
+            _served_roster({store: 100.0}),
+            intent=intent,
+        )
+        return _served_features(body)[store]["verified_claim_ratio"]
+
+    by_shopper = {
+        name: {fact: value_of(fact, intent) for fact in facts} for name, intent in shoppers.items()
+    }
+    ordered = {
+        name: sorted(values, key=lambda fact: (-values[fact], fact))
+        for name, values in by_shopper.items()
+    }
+
+    assert ordered["capacity-shopper"][0] == "capacity_l", by_shopper
+    assert ordered["waterproof-shopper"][0] == "waterproof_rating", by_shopper
+    assert ordered["capacity-shopper"] != ordered["waterproof-shopper"], (
+        f"the same store's facts rank identically for two different buyers, so its best "
+        f"pitch is buyer-independent and customization pays nothing: {by_shopper}"
+    )
+
+    from contracts.ranking import EVIDENCE_GAIN_BY_RELEVANCE as GAIN
+
+    # And the arithmetic, so the ordering is the published tiers rather than a coincidence.
+    assert by_shopper["capacity-shopper"]["capacity_l"] == pytest.approx(GAIN["preference"])
+    assert by_shopper["capacity-shopper"]["frame_material"] == pytest.approx(GAIN["query_term"])
+    assert by_shopper["capacity-shopper"]["waterproof_rating"] == pytest.approx(0.5), (
+        "a fact this shopper never mentioned was worth more than saying nothing"
+    )
+    assert by_shopper["waterproof-shopper"]["waterproof_rating"] == pytest.approx(
+        GAIN["preference"]
+    )
+    assert by_shopper["waterproof-shopper"]["capacity_l"] == pytest.approx(GAIN["query_term"])
+    assert by_shopper["waterproof-shopper"]["frame_material"] == pytest.approx(0.5)
+
+
+def test_the_evidence_term_does_not_saturate_so_effort_keeps_paying():
+    """One more relevant proved fact is always worth something, and always worth less.
+
+    Both halves matter. Without diminishing returns the term is a claim-count race and the
+    pitch that wins is the longest one; with a hard ceiling the term goes flat at full effort
+    and every store converges on the same pitch again — which is the failure this whole
+    section exists to prevent, arriving one step later.
+    """
+    from contracts.ranking import EVIDENCE_GAIN_BY_RELEVANCE, diminishing_evidence
+
+    gain = EVIDENCE_GAIN_BY_RELEVANCE["hard_constraint"]
+    values = [diminishing_evidence([gain] * n) for n in range(1, 9)]
+    steps = [later - earlier for earlier, later in zip(values, values[1:], strict=False)]
+
+    assert all(step > 0.0 for step in steps), f"the term saturates: {values}"
+    assert all(later < earlier for earlier, later in zip(steps, steps[1:], strict=False)), (
+        f"the returns are not diminishing: {steps}"
+    )
+    assert values[-1] < 1.0, "the aggregation reached its ceiling, so effort stopped paying"
+    # And every published tier is worth more than silence on ONE claim, or the term would pay
+    # a store to say nothing.
+    assert all(value > 0.5 for value in EVIDENCE_GAIN_BY_RELEVANCE.values())
+
+
+def test_a_store_discounting_past_the_band_gains_exactly_nothing_for_the_extra_depth():
+    """R11's saturation, measured over the served route to five decimal places of zero.
+
+    Three stores, one roster spanning 100..300 so the band is a real one, and the SAME store
+    driven twice: once priced exactly at the band floor and once priced far below it. The
+    difference in its `price_value` — and in its `rank_score` — is asserted to be 0.0 exactly
+    rather than "small".
+    """
+    roster = _served_roster({"store-a": 100.0, "store-b": 200.0, "store-c": 300.0})
+    intent = _asked_intent()
+
+    def priced(store_a_price):
+        bids = {
+            "store-a": _served_bid("store-a", store_a_price),
+            "store-b": _served_bid("store-b", 200.0),
+            "store-c": _served_bid("store-c", 300.0),
+        }
+        body = _served_post(_served_app(bids), roster, intent=intent)
+        return _served_features(body)["store-a"], _served_scores(body)["store-a"]
+
+    # The band is cleared at a depth of (300-100)/300 = 2/3, so store-a (list 100) clears it
+    # by charging 100 * (1 - 2/3) = 33.33... or less. 33.00 is the first cent past that.
+    at_the_band, score_at = priced(33.00)
+    past_the_band, score_past = priced(1.0)
+
+    assert at_the_band["price_value"] == pytest.approx(1.0), at_the_band
+    assert past_the_band["price_value"] - at_the_band["price_value"] == 0.0, (
+        f"discounting from 33.00 to 1.00 — past the band — still moved price_value: "
+        f"{at_the_band['price_value']} -> {past_the_band['price_value']}"
+    )
+    assert score_past - score_at == 0.0, (
+        f"the extra depth still moved the rank score: {score_at} -> {score_past}"
+    )
+
+    # The positive control, without which the above is indistinguishable from a dead term:
+    # depth INSIDE the band still pays.
+    inside, _ = priced(80.0)
+    assert 0.0 < inside["price_value"] < 1.0, inside
+    assert inside["price_value"] < at_the_band["price_value"]
+
+
+def test_a_contradicted_claim_costs_more_than_silence_and_silence_is_still_viable():
+    """The only asymmetric downside in the design, and the bound on it.
+
+    Four stores, same price, same list price, same trust, on an intent that asks about the
+    key all four speak to:
+
+    * `store-true` proves it and is believed;
+    * `store-quiet` says nothing at all;
+    * `store-liar` claims a value this exchange's own catalogue contradicts;
+    * `store-liar-twice` does it twice, so the penalty is shown to accumulate.
+
+    The ordering is the whole point: evidence beats silence beats lying, and the liar is
+    still ranked rather than annihilated — one bad verdict must not be a death sentence.
+    """
+    stores = ("store-true", "store-quiet", "store-liar", "store-liar-twice")
+    attributes = dict.fromkeys(stores, {"capacity_l": 35, "frame_material": "aluminium"})
+    bids = {
+        "store-true": _served_bid("store-true", 100.0, claims=[_served_claim("capacity_l", 35)]),
+        "store-quiet": _served_bid("store-quiet", 100.0, claims=[]),
+        "store-liar": _served_bid("store-liar", 100.0, claims=[_served_claim("capacity_l", 999)]),
+        "store-liar-twice": _served_bid(
+            "store-liar-twice",
+            100.0,
+            claims=[_served_claim("capacity_l", 999), _served_claim("frame_material", "gold")],
+        ),
+    }
+    body = _served_post(
+        _multi_key_app(bids, stores=stores, attributes=attributes),
+        _served_roster(dict.fromkeys(stores, 100.0)),
+        # A PREFERENCE and not a hard constraint: a contradicted claim on a hard constraint is
+        # excluded by R19 before it is scored, and this test is about what a lie costs a
+        # candidate that is still in the auction.
+        intent=_asked_intent(prefer=["capacity_l", "frame_material"]),
+    )
+    scores = _served_scores(body)
+    components = {row["store_id"]: row["components"] for row in body["ranked"]}
+
+    from contracts.ranking import CONTRADICTED_CLAIM, DEFAULT_RANKING_WEIGHTS
+
+    penalty = DEFAULT_RANKING_WEIGHTS.penalty_for(CONTRADICTED_CLAIM)
+    assert penalty > 0.0, "the published catalogue prices a contradicted claim at nothing"
+
+    assert scores["store-true"] > scores["store-quiet"] > scores["store-liar"], (
+        f"evidence does not beat silence, or silence does not beat lying: {scores}"
+    )
+    assert scores["store-liar-twice"] < scores["store-liar"], (
+        f"a second contradicted claim cost nothing: {scores}"
+    )
+    assert components["store-liar"]["policy_penalties"] == pytest.approx(-penalty)
+    assert components["store-liar-twice"]["policy_penalties"] == pytest.approx(-2 * penalty)
+    assert "policy_penalties" not in components["store-quiet"], components["store-quiet"]
+
+    # STAYING SILENT IS STILL VIABLE: the quiet store is eligible, scored, and shortlisted.
+    assert "store-quiet" in _served_slot_stores(body), body["shortlist"]
+    # And a single bad verdict is survivable: the liar is still ranked, still shortlisted,
+    # and is beatable rather than beaten into a negative score.
+    assert scores["store-liar"] > 0.0, scores
+    assert "store-liar" in _served_order(body), body["ranked"]
+    # The bound: no amount of true evidence buys out one lie. The published penalty exceeds
+    # the most the whole evidence term can pay a store.
+    w_e = DEFAULT_RANKING_WEIGHTS.feature_weights["verified_claim_ratio"]
+    neutral = float(DEFAULT_RANKING_WEIGHTS.normalization.verified_claim_ratio_when_absent)
+    assert penalty > w_e * (1.0 - neutral), (
+        "a store could out-evidence a contradiction, so the penalty is not a deterrent"
+    )
+
+
+def test_a_price_preference_cannot_become_a_second_price_term():
+    """R6's structural rule: `intent_match` refuses a field a published term already scores.
+
+    The measured hazard is S1's: its intent carries exactly ONE preference,
+    `{price, minimize, 1.0}`, so with the min-max-across-the-eligible-set normalisation
+    `retrieval.service` applies, an `intent_match` wired naively over that intent IS
+    normalised inverse price — and price's share of the published weight goes from
+    `w_v` = 0.15 to `w_v + w_m` = 0.50.
+
+    Two halves, because the rule has to hold in both directions.
+    """
+    from contracts.ranking import (
+        DEFAULT_RANKING_WEIGHTS,
+        PREFERENCE_FIELD_TERMS,
+        RANK_FEATURES,
+        preference_term_conflict,
+    )
+    from exchange.ranking.features import intent_surface
+
+    # 1. Every refusal names a term the published formula actually has, so the map cannot
+    #    quietly refuse a field on behalf of a term that does not exist.
+    assert set(PREFERENCE_FIELD_TERMS.values()) <= set(RANK_FEATURES)
+    assert preference_term_conflict("price") == "price_value"
+    assert preference_term_conflict("Price USD") == "price_value"
+    assert preference_term_conflict("delivery_estimate_days") == "delivery_fit"
+    assert preference_term_conflict("capacity_l") is None
+
+    # 2. On S1's own intent shape, the price preference is refused by name and never reaches
+    #    the soft-scoring surface — and the arithmetic of what admitting it would cost is
+    #    asserted rather than described, so the number in the docstring cannot rot.
+    surface = intent_surface(
+        {
+            "intent_id": "intent-s1-espresso",
+            "hard_constraints": [],
+            "preferences": [{"field": "price", "direction": "minimize", "weight": 1.0}],
+            "query": "a heat-exchange espresso machine for an office under $500",
+        }
+    )
+    assert surface.refused == {"price": "price_value"}
+    assert "price" not in surface.tiers, surface.tiers
+    weights = DEFAULT_RANKING_WEIGHTS.feature_weights
+    assert weights["price_value"] + weights["intent_match"] == pytest.approx(0.50)
+    assert weights["price_value"] == pytest.approx(0.15)
+
+
+def test_the_published_versions_travel_with_the_answer():
+    """R15/S3: a replay needs the FEATURE definitions as well as the weights.
+
+    Redefining a feature under an unchanged weights version re-scores history silently —
+    every recorded number still validates and every published weight still matches — so the
+    ranker answers with both.
+    """
+    from contracts.ranking import RANKING_FEATURES_VERSION, RANKING_WEIGHTS_VERSION
+    from exchange.ranking import rank
+
+    result = rank([_candidate("bid-a")], _intent(), _snapshot(["store-a"]), _config())
+    assert result["ranking_versions"] == {
+        "weights": RANKING_WEIGHTS_VERSION,
+        "features": RANKING_FEATURES_VERSION,
+    }
+    assert RANKING_FEATURES_VERSION != RANKING_WEIGHTS_VERSION, (
+        "the two versions are the same string, so a feature redefinition is invisible"
+    )
