@@ -227,6 +227,19 @@ from proxyshop_support.trust_ledger import (
 # be deferred to the bottom the way `bind_spellings` is. See that class for why it inherits.
 from .intent.errors import AuctionClientUnusable
 
+# The SECOND module-scope import from a sibling package, and it is cycle-free for the same
+# reason the first one is: `livecheck/__init__.py` imports `deferred`, `fetching` and
+# `targets`, and `livecheck/routes.py` — the only file under `livecheck/` that imports THIS
+# module — is not among them (it binds itself at the bottom of its own file, exactly as
+# `intent/routes.py` and `accept/routes.py` do).
+from .livecheck.fetching import NoPageFetcher, RecordedPageFetcher, guarded_page_fetcher
+from .livecheck.targets import (
+    StaticProductPages,
+    StaticRegisteredDomains,
+    set_product_pages,
+    set_registered_domains,
+)
+
 _log = logging.getLogger(__name__)
 
 __all__ = [
@@ -355,7 +368,40 @@ _TRUST_SOURCE_PHRASE = {
 }
 
 #: Every key this document may carry. An unrecognised key is refused against this set.
-DOCUMENT_KEYS = frozenset({"exchange_url", "roster", "request_timeout_seconds"})
+DOCUMENT_KEYS = frozenset(
+    {
+        "exchange_url",
+        "roster",
+        "request_timeout_seconds",
+        # The three the live-page check reads (T-live). All optional, and a document naming
+        # none of them configures a service that checks no pages and decides nothing — which
+        # is the fail-closed default, not a degraded one.
+        "registered_domains",
+        "product_pages",
+        "live_page_fetcher",
+    }
+)
+
+#: Where the live-page fetcher lives on the app. Mirrors
+#: ``buyer_svc.livecheck.routes.LIVE_PAGE_FETCHER_ATTR``, which is the reader.
+LIVE_PAGE_FETCHER_ATTR = "live_page_fetcher"
+
+#: What ``live_page_fetcher`` may say.
+#:
+#: ``"guarded"`` asks for the real fetcher — ``ingest``'s SSRF netguard, robots obedience and
+#: per-crawl budgets — through
+#: :func:`buyer_svc.livecheck.fetching.set_page_fetcher_factory`, the seam a process that
+#: SHIPS that crawl core installs itself into. This image does not ship it (measured: see
+#: ``buyer_svc.livecheck.fetching``'s docstring and the copy-set gate that made it a rule), so
+#: with nothing installed this resolves to ``NoPageFetcher`` and logs a WARNING naming the
+#: gap — never a silent nothing.
+#:
+#: ``"recorded:<dir>"`` replays a captured corpus and opens no socket at all. That is a real
+#: deployment as well as the test posture: a platform that has already crawled a store holds
+#: the page bytes.
+#:
+#: ``"off"`` is the default and reads nothing.
+LIVE_PAGE_FETCHERS: tuple[str, ...] = ("off", "guarded")
 
 #: The most roster rows a deployment may register.
 #:
@@ -506,6 +552,17 @@ class Deployment:
     #: three places to edit.
     roster_source: str = ""
     request_timeout_seconds: float = DEFAULT_EXCHANGE_TIMEOUT_SECONDS
+    #: ``store_id -> the domain the PLATFORM registered for that store``. The live-page check
+    #: fetches nothing on a host that is not in here; see
+    #: :mod:`buyer_svc.livecheck.targets` for why the store's own ``store_domain`` is not it.
+    registered_domains: tuple[tuple[str, str], ...] = ()
+    #: ``"store_id/product_ref" -> the live product page`` the platform observed. The same
+    #: transcription interim the roster is, and it carries the same warning — see
+    #: :class:`buyer_svc.livecheck.targets.StaticProductPages`.
+    product_pages: tuple[tuple[str, str], ...] = ()
+    #: ``"off"`` (the default), ``"guarded"``, or ``"recorded:<dir>"``. See
+    #: :data:`LIVE_PAGE_FETCHERS`.
+    live_page_fetcher: str = "off"
 
 
 def _require_mapping(value: Any, what: str, source: str) -> Mapping[str, Any]:
@@ -680,6 +737,90 @@ def _timeout_seconds(raw: Any, source: str) -> float:
     return seconds
 
 
+def _registered_domains(raw: Any, source: str) -> tuple[tuple[str, str], ...]:
+    """``store_id -> registered domain``, refused rather than filtered.
+
+    A row this service quietly dropped is a store the operator believes is being checked and
+    which is never fetched — the same argument :func:`_roster` makes, and it matters more here
+    because the *absence* of a registration is indistinguishable from a check that ran and
+    found nothing wrong.
+    """
+    if raw is None:
+        return ()
+    body = _require_mapping(raw, "registered_domains", source)
+    rows: list[tuple[str, str]] = []
+    for store_id, domain in body.items():
+        name = str(store_id).strip()
+        if not name:
+            raise DeploymentConfigurationError(
+                f"{source}: registered_domains names an empty store id. A registration nobody "
+                f"can look up registers nothing while making the table look one entry longer."
+            )
+        if not isinstance(domain, str) or not domain.strip():
+            raise DeploymentConfigurationError(
+                f"{source}: registered_domains[{name!r}] is {domain!r}; it must be the "
+                f"domain the platform registered for that store, as a string. This value is "
+                f"the ONLY thing standing between a seller-supplied url and an unattended "
+                f"fetch of whatever host that seller chose."
+            )
+        rows.append((name, domain.strip()))
+    return tuple(rows)
+
+
+def _product_pages(raw: Any, source: str) -> tuple[tuple[str, str], ...]:
+    """``"store/product" -> page url``, or ``{store: {product: url}}``. Both spellings.
+
+    Refused when a url is not a string, for the reason above; NOT refused for being on the
+    wrong host, because that check belongs where it is enforced
+    (:func:`buyer_svc.livecheck.targets.usable_page_url`, against the registry) rather than
+    duplicated in a document parser that would then be a second place to keep it in step.
+    """
+    if raw is None:
+        return ()
+    body = _require_mapping(raw, "product_pages", source)
+    rows: list[tuple[str, str]] = []
+    for key, value in body.items():
+        if isinstance(value, Mapping):
+            for product_ref, url in value.items():
+                rows.append(
+                    (f"{key}/{product_ref}", _page_url(url, f"{key}/{product_ref}", source))
+                )
+            continue
+        rows.append((str(key), _page_url(value, str(key), source)))
+    return tuple(rows)
+
+
+def _page_url(raw: Any, where: str, source: str) -> str:
+    if not isinstance(raw, str) or not raw.strip():
+        raise DeploymentConfigurationError(
+            f"{source}: product_pages[{where!r}] is {raw!r}; it must be the live product "
+            f"page's url, as a string."
+        )
+    return raw.strip()
+
+
+def _live_page_fetcher(raw: Any, source: str) -> str:
+    """``"off"``, ``"guarded"``, or ``"recorded:<dir>"``. Refused otherwise.
+
+    Refused rather than defaulted, because the difference between the three is whether this
+    process opens sockets to third-party storefronts, and a typo that silently fell back to
+    ``"off"`` would leave an operator believing a check is running that is not.
+    """
+    if raw is None:
+        return "off"
+    if not isinstance(raw, str):
+        raise DeploymentConfigurationError(
+            f"{source}: live_page_fetcher must be a string, got {type(raw).__name__} ({raw!r})"
+        )
+    value = raw.strip()
+    if value in LIVE_PAGE_FETCHERS or value.startswith("recorded:"):
+        return value
+    raise DeploymentConfigurationError(
+        f"{source}: live_page_fetcher is {raw!r}; it must be one of "
+        f"{list(LIVE_PAGE_FETCHERS)} or 'recorded:<directory>'."
+    )
+
+
 def parse_deployment(document: Any, *, source: str) -> Deployment:
     """Validate one deployment document. Raises rather than degrading."""
     body = _require_mapping(document, "the deployment document", source)
@@ -712,6 +853,9 @@ def parse_deployment(document: Any, *, source: str) -> Deployment:
     return Deployment(
         source=source,
         exchange_url=exchange_url,
+        registered_domains=_registered_domains(body.get("registered_domains"), source),
+        product_pages=_product_pages(body.get("product_pages"), source),
+        live_page_fetcher=_live_page_fetcher(body.get("live_page_fetcher"), source),
         roster=roster,
         # Empty is "this document named none", not "this document named nobody": an empty
         # roster is not a statement a deployment makes on purpose (it is the defect), and
@@ -1285,6 +1429,78 @@ def _excerpt(body: bytes, limit: int = 400) -> str:
 # =====================================================================================
 # Binding
 # =====================================================================================
+def _configure_live_page_check(app: Any, deployment: Deployment, unset: Any) -> list[str]:
+    """Bind the live-page check's three seams. Returns the names it bound.
+
+    Two of them are MODULE-level (:func:`buyer_svc.livecheck.targets.set_registered_domains`
+    and ``set_product_pages``) and one is on ``app.state``. The split is not arbitrary: the
+    two registries are read by ``POST /buyer/shortlist/render``, which takes no ``Request``
+    deliberately — R2's guarantee that the handler cannot reach an exchange client — so a
+    registry on ``app.state`` would put ``app.state`` back inside that handler. The FETCHER
+    is read by ``POST /buyer/livecheck/run``, which does take a ``Request`` and holds
+    ``app.state`` already, so it lives where a per-app object belongs.
+
+    Everything here is fail-closed and stays fail-closed: a document that names no
+    ``registered_domains`` resolves no target, and ``"off"`` reads no page. Nothing in this
+    function can make a deployment fetch a host it did not register.
+    """
+    bound: list[str] = []
+    if deployment.registered_domains:
+        set_registered_domains(StaticRegisteredDomains(dict(deployment.registered_domains)))
+        bound.append("registered_domains")
+    if deployment.product_pages:
+        set_product_pages(StaticProductPages(dict(deployment.product_pages)))
+        bound.append("product_pages")
+
+    choice = deployment.live_page_fetcher
+    if choice == "off":
+        # Nothing is bound, deliberately, rather than binding a `NoPageFetcher`. A deployment
+        # that asked for no fetcher should occupy no seam: `livecheck/routes.py` falls back to
+        # `NoPageFetcher()` when the attribute is absent, so the behaviour is identical, and
+        # leaving the attribute UNSET is what lets a document that later turns the check on be
+        # picked up by the next request rather than by the next restart (the same "a failure
+        # is not cached" property `superseded` gives the exchange client).
+        if deployment.registered_domains:
+            _log.warning(
+                "buyer composition: %d store(s) are registered for the live-page check but "
+                "this deployment states live_page_fetcher='off', so no product page will be "
+                "read and every check will record no verdict",
+                len(deployment.registered_domains),
+            )
+        return bound
+    if not unset(LIVE_PAGE_FETCHER_ATTR):
+        return bound
+
+    fetcher: Any
+    if choice.startswith("recorded:"):
+        fetcher = RecordedPageFetcher(choice.split(":", 1)[1])
+    elif choice == "guarded":
+        fetcher = guarded_page_fetcher() or NoPageFetcher()
+    else:  # pragma: no cover - `_live_page_fetcher` admits no other spelling
+        fetcher = NoPageFetcher()
+    setattr(app.state, LIVE_PAGE_FETCHER_ATTR, fetcher)
+    bound.append(LIVE_PAGE_FETCHER_ATTR)
+
+    if deployment.registered_domains and isinstance(fetcher, NoPageFetcher):
+        # The one combination worth a WARNING: an operator registered stores for checking and
+        # this process will never read a page. Silence here is the shape of "a feature that
+        # looks wired and decides nothing, forever".
+        _log.warning(
+            "buyer composition: %d store(s) are registered for the live-page check but the "
+            "fetcher resolved to NoPageFetcher (live_page_fetcher=%r); no product page will "
+            "be read and every check will record no verdict",
+            len(deployment.registered_domains),
+            choice,
+        )
+    elif deployment.registered_domains:
+        _log.info(
+            "buyer composition: live-page check armed for %d store(s) over %s",
+            len(deployment.registered_domains),
+            type(fetcher).__name__,
+        )
+    return bound
+
+
 def configure_buyer(app: Any, deployment: Deployment) -> tuple[str, ...]:
     """Bind everything ``deployment`` states that this app has not already been given.
 
@@ -1347,6 +1563,8 @@ def configure_buyer(app: Any, deployment: Deployment) -> tuple[str, ...]:
         if unset(attr) or superseded(attr):
             setattr(app.state, attr, client)
             bound.append(attr)
+
+    bound.extend(_configure_live_page_check(app, deployment, unset))
 
     if bound:
         _log.info(

@@ -1,0 +1,79 @@
+{
+  "corpus_version": "1.0.0",
+  "derived_from": {
+    "file": "fixtures/real-catalogs/stores/gaiaherbs.com.products.jsonl.gz",
+    "handle": "reflux-relief",
+    "host": "gaiaherbs.com",
+    "product_id": 2211146661999,
+    "title": "Reflux Relief\u00ae",
+    "variant_available": true,
+    "variant_id": 20669295362159,
+    "variant_price": "29.97",
+    "variant_sku": "90C09090",
+    "vendor": "Gaia Herbs"
+  },
+  "no_network": "Nothing here was fetched by a test and nothing here is fetched by a test. D3/C9: the suite runs offline and a test that reaches the network is a defect even when it passes.",
+  "pages": {
+    "https://www.gaiaherbs.com/products/reflux-relief?fixture=agrees.html": {
+      "body_file": "agrees.html",
+      "encoding": "utf-8",
+      "final_url": "https://www.gaiaherbs.com/products/reflux-relief?fixture=agrees.html",
+      "status": 200
+    },
+    "https://www.gaiaherbs.com/products/reflux-relief?fixture=broken-json-ld.html": {
+      "body_file": "broken-json-ld.html",
+      "encoding": "utf-8",
+      "final_url": "https://www.gaiaherbs.com/products/reflux-relief?fixture=broken-json-ld.html",
+      "status": 200
+    },
+    "https://www.gaiaherbs.com/products/reflux-relief?fixture=microdata.html": {
+      "body_file": "microdata.html",
+      "encoding": "utf-8",
+      "final_url": "https://www.gaiaherbs.com/products/reflux-relief?fixture=microdata.html",
+      "status": 200
+    },
+    "https://www.gaiaherbs.com/products/reflux-relief?fixture=missing": {
+      "reason": "the page answered 404",
+      "status": 404
+    },
+    "https://www.gaiaherbs.com/products/reflux-relief?fixture=no-structured-data.html": {
+      "body_file": "no-structured-data.html",
+      "encoding": "utf-8",
+      "final_url": "https://www.gaiaherbs.com/products/reflux-relief?fixture=no-structured-data.html",
+      "status": 200
+    },
+    "https://www.gaiaherbs.com/products/reflux-relief?fixture=og-only.html": {
+      "body_file": "og-only.html",
+      "encoding": "utf-8",
+      "final_url": "https://www.gaiaherbs.com/products/reflux-relief?fixture=og-only.html",
+      "status": 200
+    },
+    "https://www.gaiaherbs.com/products/reflux-relief?fixture=pre-order.html": {
+      "body_file": "pre-order.html",
+      "encoding": "utf-8",
+      "final_url": "https://www.gaiaherbs.com/products/reflux-relief?fixture=pre-order.html",
+      "status": 200
+    },
+    "https://www.gaiaherbs.com/products/reflux-relief?fixture=price-moved.html": {
+      "body_file": "price-moved.html",
+      "encoding": "utf-8",
+      "final_url": "https://www.gaiaherbs.com/products/reflux-relief?fixture=price-moved.html",
+      "status": 200
+    },
+    "https://www.gaiaherbs.com/products/reflux-relief?fixture=robots": {
+      "reason": "this store's robots.txt disallows this crawler for that page",
+      "status": 0
+    },
+    "https://www.gaiaherbs.com/products/reflux-relief?fixture=sold-out.html": {
+      "body_file": "sold-out.html",
+      "encoding": "utf-8",
+      "final_url": "https://www.gaiaherbs.com/products/reflux-relief?fixture=sold-out.html",
+      "status": 200
+    },
+    "https://www.gaiaherbs.com/products/reflux-relief?fixture=timeout": {
+      "reason": "the page could not be fetched (timed out after 20.0s)",
+      "status": 0
+    }
+  },
+  "what_this_is": "Replay pages for the live-page check. The VALUES are recorded from fixtures/real-catalogs (a point-in-time capture of a real public catalogue); the MARKUP is a reconstruction of the schema.org block a Shopify theme emits, because that corpus holds /products.json and not product-page HTML."
+}

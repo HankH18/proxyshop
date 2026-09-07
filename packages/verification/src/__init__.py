@@ -14,7 +14,16 @@ objects rather than two sets of classes.
 :func:`compare`                        one claimed value vs one catalog attribute.
 :data:`VERIFICATION_STATUSES`          the four, and exactly four.
 :func:`verification_key`               the ``(pitch, snapshot, version)`` idempotency key.
+:func:`read_product_page`              a live product page's bytes -> its structured data.
+:func:`check_pitch_against_page`       that reading vs the pitch — the CROSS-SURFACE check.
 =====================================  ==============================================
+
+The third row of that table is a different KIND of evidence from the second and the difference
+is load-bearing. :func:`verify` grades a pitch against the exchange's own catalogue snapshot.
+:func:`check_pitch_against_page` grades it against the SELLER's own live product page, which
+is still the seller's own word: it catches drift and cross-surface contradiction and it does
+not catch a store lying consistently everywhere. See :mod:`claim_verification.live_page`,
+which says so at length so that no caller has to infer it.
 
 The two halves are deliberately separate objects. :func:`decompose_pitch` ASSERTS — it turns
 prose into claims and never decides anything — and :func:`verify` DECIDES, against a catalog
@@ -42,6 +51,22 @@ LEDGER verifier. Different concepts, deliberately not merged.
 from __future__ import annotations
 
 from .comparators import FIELD_TOLERANCES, ComparisonOutcome, compare, tolerance_for
+from .live_page import (
+    AGREES,
+    CONTRADICTED,
+    LIVE_PAGE_SURFACE,
+    MAX_PAGE_BYTES,
+    NO_VERDICT,
+    LivePageCheck,
+    LiveReading,
+    PageReading,
+    availability_disagreement,
+    check_pitch_against_page,
+    page_vocabulary,
+    price_disagreement,
+    read_product_page,
+    unreadable_page,
+)
 from .normalize import (
     UNIT_FAMILIES,
     attribute_value,
@@ -80,12 +105,17 @@ from .verifier import (
 )
 
 __all__ = [
+    "AGREES",
+    "CONTRADICTED",
     "DECIDED_STATUSES",
     "FIELD_TOLERANCES",
     "KEY_ALIASES",
     "KEY_CLAIM_TYPES",
+    "LIVE_PAGE_SURFACE",
+    "MAX_PAGE_BYTES",
     "MAX_PITCH_CHARS",
     "MAX_PITCH_CLAIMS",
+    "NO_VERDICT",
     "PITCH_CONFIDENCE_FLOOR",
     "PITCH_EXTRACTOR_VERSION",
     "PITCH_RULES",
@@ -96,20 +126,29 @@ __all__ = [
     "VERIFICATION_STATUSES",
     "ComparisonOutcome",
     "InvalidVerificationStatus",
+    "LivePageCheck",
+    "LiveReading",
+    "PageReading",
     "VerificationInputError",
     "attribute_value",
+    "availability_disagreement",
+    "check_pitch_against_page",
     "compare",
     "decompose_pitch",
     "is_decided",
     "normalize_boolean",
     "normalize_text",
+    "page_vocabulary",
     "parse_quantity",
     "pitch_ref_for",
+    "price_disagreement",
+    "read_product_page",
     "require_status",
     "satisfies_hard_constraint",
     "to_base_unit",
     "tolerance_for",
     "unit_family",
+    "unreadable_page",
     "verification_key",
     "verify",
 ]

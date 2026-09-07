@@ -101,13 +101,30 @@ COPY apps/buyer/svc/src/         /app/apps/buyer/svc/src/
 COPY packages/llm/src/              /app/packages/llm/src/
 COPY packages/llm/fixtures/         /app/packages/llm/fixtures/
 
+# `buyer_svc.livecheck` imports `claim_verification` at MODULE SCOPE, and it is mounted by
+# the frozen `main.create_app` glob, so without the line below `importlib.import_module`
+# raises inside `create_app()` and the whole service fails to start — not a degraded feature,
+# a crash loop. It is a plain module-scope import on purpose: the two lazy/guarded shapes in
+# this image (T-300's `from llm import ...`, and `guarded_page_fetcher`'s `ingest` import)
+# are both there because the dependency is genuinely optional, and this one is not.
+#
+# It costs NOTHING in the pip layer, measured the same way T-300's addition was: the
+# module-scope closure of `packages/verification/src` is stdlib only — `json`, `hashlib`,
+# `math`, `re`, `html.parser`, `dataclasses`, `datetime`, `collections.abc`, `types`,
+# `typing`. No fastapi, no pydantic, no beautifulsoup4, no lxml. `live_page.py` parses
+# storefront HTML with `html.parser` from the standard library FOR THIS REASON: bs4 and lxml
+# are in the root manifest and in NO service image's pip layer, so a parser dependency there
+# would import in a checkout and be absent here.
+COPY packages/verification/src/     /app/packages/verification/src/
+
 # `.pkgroot/<pkg> -> <member>/src` is what makes the FLAT layout importable (R1b/D42).
 # The repo tracks these as git symlinks; the image RECREATES them instead of copying them
 # so the build never depends on how a daemon happens to treat symlinks in a context tar.
 RUN mkdir -p /app/.pkgroot \
  && ln -s ../packages/contracts/src /app/.pkgroot/contracts \
  && ln -s ../apps/buyer/svc/src /app/.pkgroot/buyer_svc \
- && ln -s ../packages/llm/src /app/.pkgroot/llm
+ && ln -s ../packages/llm/src /app/.pkgroot/llm \
+ && ln -s ../packages/verification/src /app/.pkgroot/claim_verification
 
 # Non-root: nothing in these services writes to the filesystem, so there is no reason for
 # the process to be able to.

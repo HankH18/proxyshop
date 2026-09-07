@@ -36,6 +36,7 @@ exchange client, and a composition hook in it would be an exchange client in its
 
 from __future__ import annotations
 
+import logging
 import sys
 from typing import Any
 
@@ -43,6 +44,7 @@ from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field, StrictBool
 
 from ..composition import DeploymentConfigurationError, ExchangeCallFailed, ensure_configured
+from ..livecheck import queue_live_checks
 from ..pitch import pitch_writer, pitches_for
 from ._spellings import bind_spellings
 from .errors import (
@@ -75,6 +77,8 @@ __all__ = [
     "RenderedSlot",
     "router",
 ]
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/buyer/shortlist", tags=["buyer-shortlist"])
 
@@ -228,15 +232,33 @@ async def render_route(body: RenderBody) -> RenderResponse:
     and the pitcher iterate. Ranking is the exchange's published formula (R11) and nothing
     here reorders, filters or drops a slot: a render with a broken model returns exactly the
     slots a render with a working one returns.
+
+    The live-page check is ENQUEUED here and run nowhere near here. Every sponsored slot —
+    one with a store-authored message, which is the side D55 says carries the motive — is
+    resolved to a product page and appended to an in-memory queue; nothing is fetched, no
+    socket is opened and nothing is waited on, so this response is served at the latency it
+    was served at before. ``POST /buyer/livecheck/run`` is the other end. See
+    :mod:`buyer_svc.livecheck.deferred` for why a verdict that lands afterwards still costs
+    the store, and why a synchronous check was rejected on measured numbers.
     """
     slots = render_shortlist(body.shortlist, derive=body.derive_missing_labels)
+    rows = slot_rows(body.shortlist)
     pitches = pitches_for(
         slots,
-        slot_rows(body.shortlist),
+        rows,
         intent=body.intent,
         profile=body.profile,
         writer=pitch_writer(),
     )
+    try:
+        queue_live_checks(rows, auction_id=str(body.shortlist.get("auction_id") or ""))
+    except Exception:  # noqa: BLE001 - optional evidence never fails a shopper's shortlist
+        # Same posture as `pitch_writer()` returning `None`: a buyer service that cannot
+        # queue a check still serves every slot. Logged at exception level because it is a
+        # bug in this service rather than an outcome — the queue is in-memory and every
+        # refusal path inside `queue_live_checks` is already a recorded refusal, so nothing
+        # is expected to reach here.
+        _log.exception("could not queue live-page checks for this shortlist; serving it anyway")
     return RenderResponse(
         slots=[
             RenderedSlot(
