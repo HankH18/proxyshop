@@ -57,6 +57,10 @@
     "11": {
       "claimed_at": "2026-09-06T21:33:19",
       "agent_ref": "proxyshop-4e-gate-verify"
+    },
+    "12": {
+      "claimed_at": "2026-09-06T21:47:38",
+      "agent_ref": "proxyshop-4e-demo-wiring"
     }
   }
 }
