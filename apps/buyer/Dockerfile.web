@@ -1,0 +1,79 @@
+# The proxyshop-buyer-web container — nginx serving the shopper's SPA.
+#
+# The sibling `apps/buyer/Dockerfile` builds the buyer API. This one builds the PAGE, and the
+# two are separate services because they answer different things on one origin: nginx serves
+# the bundle and reverse-proxies `/buyer/` to `buyer-svc`. Every endpoint the SPA calls is a
+# bare relative path on plain `fetch` and `buyer_svc.main` installs no CORS, so same-origin is
+# not a preference here — a split origin breaks the journey at the first request.
+#
+# WHY THIS FILE EXISTS AT ALL, rather than `image: nginx:1.27-alpine` with the bundle bind-
+# mounted: T-313 requires every service in an `include:`d compose fragment to build from a
+# first-party Dockerfile, and its own comment says why a bare `image:` was the loophole it
+# closed — "pointing a service at `python:3.12-slim` deploys a container that runs none of the
+# component's code". A bind-mounted `apps/buyer/dist` is exactly that failure wearing a
+# friendlier face: the image contains no bundle, so it is deployable on precisely one machine,
+# the one whose filesystem happens to hold the artefact. `apps/buyer/dist/` is gitignored, so
+# on a fresh clone that mount hands nginx an empty directory and every page is a 403.
+#
+# Building it here fixes both. The bundle is IN the image, the image runs anywhere, and there
+# is no longer a build step a reader can forget before `compose up`.
+#
+# Build context is the REPO ROOT (see the sibling compose.yaml): this is an npm workspace and
+# `apps/buyer` alone cannot resolve `@proxyshop/contracts`.
+
+# ---------------------------------------------------------------------------------
+# Stage 1 — vite
+# ---------------------------------------------------------------------------------
+# 22-alpine, not `node:latest`: the root package.json pins `engines.node >= 22.12.0`, and an
+# unpinned base is a build that changes under you with no commit to point at.
+FROM node:22-alpine AS bundle
+
+WORKDIR /repo
+
+# The workspace manifests first, so the dependency layer is cached on everything except a
+# manifest change. `npm ci` needs the root lockfile plus EVERY workspace's package.json — the
+# lockfile describes the whole workspace tree and `npm ci` refuses a tree it cannot match.
+COPY package.json package-lock.json ./
+COPY packages/contracts/package.json packages/contracts/
+COPY apps/buyer/package.json apps/buyer/
+COPY apps/merchant/package.json apps/merchant/
+COPY pixel/package.json pixel/
+
+RUN npm ci
+
+# The root tsconfig both workspace members `extends`. Without it vite's transform fails with
+# `Tsconfig not found /repo/tsconfig.base.json` after transforming three modules — a build
+# error, not a missing-file error, so it reads like a code fault rather than a copyset one.
+COPY tsconfig.base.json tsconfig.json ./
+
+# Then the sources that actually change.
+COPY packages/contracts/ packages/contracts/
+COPY apps/buyer/ apps/buyer/
+
+# `--workspace` rather than a `cd`: the script resolves its own config relative to the
+# workspace root either way, and naming the workspace keeps the failure legible when the
+# member is missing.
+RUN npm run build:ui --workspace @proxyshop/buyer
+
+# A build that silently produces nothing is the failure this whole file exists to prevent, so
+# check rather than trust: an empty `dist` must fail HERE, where the message names the build,
+# instead of at runtime as a 403 on a page nobody can explain.
+RUN test -f apps/buyer/dist/index.html || \
+    (echo "buyer bundle is missing index.html; vite produced nothing" && exit 1)
+
+# ---------------------------------------------------------------------------------
+# Stage 2 — nginx
+# ---------------------------------------------------------------------------------
+FROM nginx:1.27-alpine
+
+# Baked, not mounted, for the same reason the bundle is: a server block that lives on the host
+# makes the image's behaviour depend on the machine it runs on. It REPLACES the stock image's
+# `default.conf` rather than sitting beside it — two server blocks both listening would make
+# which one answers an alphabetical accident.
+COPY deploy/buyer-web/nginx.conf /etc/nginx/conf.d/default.conf
+
+COPY --from=bundle /repo/apps/buyer/dist/ /usr/share/nginx/html/
+
+# 8080, matching the server block. Documentation only — compose publishes the port — but a
+# reader should not have to open the conf to learn what this listens on.
+EXPOSE 8080

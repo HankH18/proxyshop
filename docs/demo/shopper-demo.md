@@ -28,7 +28,7 @@ Bringing this stack up used to give you eleven containers that every readiness p
   the repository, and it was the devstack launcher.
 - Neo4j came up empty and nothing ever loaded the recorded catalogues into it.
 
-Every one of those is closed below, and §5 is the measurement that says so.
+Every one of those is closed below, and §4 is the measurement that says so.
 
 ## What you need
 
@@ -89,18 +89,7 @@ roster its `--probe` asked for — the shops the graph returns for the demo's ow
 
 Idempotent: run it again and it re-reads nothing that has not changed.
 
-## 3. Build the shopper page
-
-```bash
-make demo-ui
-```
-
-Vite builds `apps/buyer/app/` into `apps/buyer/dist/`, which `buyer-web` bind-mounts. That
-directory is gitignored, so this must happen before the next step: Docker answers a missing
-bind source by creating an empty directory, and nginx answers an empty directory with a 403
-rather than with anything that tells you why.
-
-## 4. Start the market
+## 3. Start the market
 
 ```bash
 make demo-up
@@ -132,7 +121,7 @@ them in the graph and still rosters them; nobody answers their bid door; and the
 represents each at its catalogue list price and marks the entry `fallback / no_response`.
 That is R10, and both halves of it are on screen in one run.
 
-## 5. Prove the graph found the shops — the money path
+## 4. Prove the graph found the shops — the money path
 
 ```bash
 make demo-check
@@ -197,7 +186,7 @@ contradiction events — measured on this stack. The fix is in the wire contract
 product selection, or the attestation's choice of reference, and all three are outside this
 lane.
 
-## 6. The shopper journey in a browser
+## 5. The shopper journey in a browser
 
 Open **http://localhost:8080/**.
 
@@ -259,9 +248,8 @@ that is now spent.
 | the demo worked and then stopped finding shops | **something ran the graph tests in this checkout.** See the warning below |
 | shops found, `entries: []` | every rostered store failed the eligibility gate: the deployment document's `sellers` do not name the graph's store ids (which are bare hosts, e.g. `gaiaherbs.com`) |
 | every entry is `fallback / no_response` | the agents are not running; the `demo` profile was not used |
-| the page is a 403 | `apps/buyer/dist` is empty — `make demo-ui` |
 | a service is `(healthy)` and answers 503 | the migrations are not applied — `make db-migrate` |
-| the mailed sign-in link 404s | the base URL is buyer-svc's origin, not buyer-web's — see §6 |
+| the mailed sign-in link 404s | the base URL is buyer-svc's origin, not buyer-web's — see §5 |
 | `POST /buyer/auth/magic-link` answers 503 | no mail transport configured; the service says so rather than promising a mail nothing will send |
 | everything authenticates badly on a stack that used to work | you exported `PROXYSHOP_ROLE_PASSWORD` **after** the pgdata volume existed. That hook runs once; `make deps-down` then `make deps-up` |
 
@@ -347,9 +335,9 @@ Re-run it after the corpus moves, and `--check` reports drift instead of writing
 - **The claim grading here is as good as the shipped catalogue snapshots.** They are trimmed
   to sixty products per hosted store; a `product_ref` the graph rosters from outside that
   window grades `ambiguous`, which R19 will not let satisfy a hard constraint.
-- **The shopper journey in §6 supplies its own roster.** The buyer service refuses to open an
+- **The shopper journey in §5 supplies its own roster.** The buyer service refuses to open an
   auction with no candidate set — that is its own fail-closed posture — so the browser path
-  sends `buyer-roster.json` and the exchange uses it rather than the graph. §5 is where the
+  sends `buyer-roster.json` and the exchange uses it rather than the graph. §4 is where the
   graph is proved, and it is the same exchange, the same request shape and the same auction
   machine, minus one key in the body.
 - **A green container list is not a working demo.** Every container here can report

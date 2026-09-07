@@ -182,21 +182,21 @@ services:
   # So: the API image keeps serving the API (which is what its own comment above says it
   # should), the SPA gets real routing, and nothing frozen has to move.
   buyer-web:
-    image: nginx:1.27-alpine
-    pull_policy: missing      # already cached on the scaffold host; no network on `up`
-    # `demo` because the bundle is a BUILD ARTEFACT that may not exist. `apps/buyer/dist/` is
-    # gitignored, so on a fresh clone the bind mount below would hand nginx an empty directory
-    # and every page would be a 403 — a worse failure than the service not being there.
-    # `make demo-ui` builds it; the runbook runs that before this profile.
+    build:
+      # Relative to THIS file's directory, so the context is the repo root — the SPA is an npm
+      # workspace member and cannot resolve `@proxyshop/contracts` from `apps/buyer` alone.
+      context: ../..
+      dockerfile: apps/buyer/Dockerfile.web
+    # This used to be `image: nginx:1.27-alpine` with `apps/buyer/dist` bind-mounted, and
+    # T-313 caught it: every service in an included fragment must build from a first-party
+    # Dockerfile, because a bare `image:` deploys a container that runs none of the
+    # component's code. A bind-mounted bundle is that same failure — the image holds no
+    # bundle, so it runs on exactly one machine, the one whose filesystem has the artefact.
+    # The bundle is built into the image now, which also retires the `make demo-ui` step and
+    # the fresh-clone 403 that came from mounting a gitignored directory.
     profiles: ["demo"]
     ports:
       - "${BUYER_WEB_PORT:-8080}:8080"      # D40: env-overridable
-    volumes:
-      # The vite output. Read-only: nginx has no business writing to a build artefact.
-      - ../../apps/buyer/dist:/usr/share/nginx/html:ro
-      # Replaces the stock image's server block rather than sitting beside it — two blocks
-      # both listening would make which one answers an alphabetical accident.
-      - ../../deploy/buyer-web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       buyer-svc:
         condition: service_healthy

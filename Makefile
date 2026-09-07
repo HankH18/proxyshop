@@ -2,7 +2,7 @@
 # GNU Make 3.81-safe: one line per recipe. `.ONESHELL` and `.SHELLFLAGS` are silently
 # ignored by the make on this host, so never rely on them.
 SHELL := /bin/bash
-.PHONY: bootstrap preflight deps-up deps-down db-init db-migrate check verify lint types test-py test-ts demo-seed demo-ui demo-corpus demo-up demo-check demo-down e2e-live clean
+.PHONY: bootstrap preflight deps-up deps-down db-init db-migrate check verify lint types test-py test-ts demo-seed demo-corpus demo-up demo-check demo-down e2e-live clean
 
 bootstrap:  ; @./scripts/bootstrap.sh
 preflight:  ; @./scripts/preflight.sh
@@ -29,7 +29,6 @@ demo-seed:  ; @./.venv/bin/python -m fixtures.seed --category "$(SEED_CATEGORY)"
 # ── the compose shopper demo (docs/demo/shopper-demo.md) ────────────────────────────────
 # Build the SPA bundle `buyer-web` bind-mounts. Must precede demo-up: apps/buyer/dist is
 # gitignored, and Docker answers a missing bind source with an empty directory and a 403.
-demo-ui:    ; @bash scripts/demo_ui.sh
 # Load the ten recorded storefronts into Neo4j. Minutes, not seconds — 3,093 products and
 # 44,803 graph writes — and silent until it finishes, which is why the runbook watches the
 # product count rather than the log. Idempotent: a second run re-reads nothing unchanged.
