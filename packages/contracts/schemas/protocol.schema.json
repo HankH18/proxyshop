@@ -410,9 +410,38 @@
       }
     },
 
+    "ShortlistProduct": {
+      "title": "ShortlistProduct",
+      "description": "R2's PRODUCT on a shortlist slot: WHICH catalogue thing this slot is offering.\n\nA reference, never a rendered name. The exchange holds `product_ref` (and, where the bid named\none, `variant_ref`) because that is what the roster and the offer agree on; a title, an image or\na description belongs to the catalogue the buyer app already resolves refs against, and copying\none through the exchange would publish a second, staler spelling of a fact the exchange does not\nown.\n\n`variant_ref` is optional for the same reason it is optional on `Offer`: cart permalinks are\nvariant-scoped (D25), but the frozen hosted-bid shape predates the field and a fallback offer\nminted from a roster row names no variant at all. Absent means \"the bid did not name one\", never\n\"the default variant\".",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["product_ref"],
+      "properties": {
+        "product_ref": { "type": "string", "minLength": 1 },
+        "variant_ref": { "type": ["string", "null"] }
+      }
+    },
+
+    "ShortlistPrice": {
+      "title": "ShortlistPrice",
+      "description": "R2's PRICE on a shortlist slot: what this store is asking, and until when.\n\nBOTH prices are required together. A slot showing a unit price with no total (or the reverse)\ninvites the buyer to compare two different quantities as if they were the same offer, so the\nproducer publishes this object only when it can read both as finite numbers and nulls the whole\nprice otherwise — a slot with no readable price says so with `price: null`, rather than by\ncarrying a zero, which is the cheapest number there is and would win every comparison a shopper\nmakes (the T-277 shape, one surface over).\n\n`expires_at` is the instant this quote stops being live, and it is ISO-8601 UTC and nothing else.\n`Offer.expires_at` is nominally `format: date-time` while half this tree writes a float epoch into\nit, and T-182 is the measurement of what that ambiguity costs; a NEW buyer-facing surface does not\ninherit it. The exchange normalizes through the same reader its own expiry filter uses\n(`checkout.codes.expiry_epoch`) and renders one spelling, so a client never has to guess which it\nwas handed.\n\n`discount` is the published `Discount` — a *stated* depth, not an entitlement. No single-use code\nexists until the buyer accepts (D22), so this is what the store says it will honour, which is\nexactly what the `discount_honored` trust dimension later grades it against.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit_price", "total_price"],
+      "properties": {
+        "unit_price": { "type": "number" },
+        "total_price": { "type": "number" },
+        "currency": { "type": ["string", "null"] },
+        "discount": {
+          "oneOf": [{ "$ref": "#/$defs/Discount" }, { "type": "null" }]
+        },
+        "expires_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+
     "ShortlistSlot": {
       "title": "ShortlistSlot",
-      "description": "One shortlist slot. `provenance_labels` is an OPEN list of strings, not a closed enum: the\nexchange supplies the buyer-facing labels and the buyer app renders what it was given (D30).",
+      "description": "One shortlist slot. `provenance_labels` is an OPEN list of strings, not a closed enum: the\nexchange supplies the buyer-facing labels and the buyer app renders what it was given (D30).\n\nR2 asks one slot to show five things — PRODUCT, PRICE, COMMITMENTS, a store trust indicator and\nprovenance labels — and for a long time this object declared only the last two, so the other three\nwere dropped at the schema rather than anywhere in a service. `product`, `price` and `commitments`\nclose that. All three are OPTIONAL and all three admit `null`, deliberately on both counts:\n`additionalProperties: false` means every existing producer of a `Shortlist` would have had to be\nchanged on the same commit if they were required, and an R10 list-price fallback genuinely has no\npriced offer to read when its roster row names no price the exchange could charge.\n\nNULL is the honest answer for \"the exchange has nothing here\", and it is never a zero, an empty\nproduct or a `[]` that could be read as \"this store committed to nothing\". Absent and `null` say\nthe same thing, and a producer serving through the pinned model necessarily says it as `null` —\nthe exchange's own two doors are exactly that case, one typing its body `Shortlist` and the other\n`dict`, and they are asserted to serve byte-identical objects.\n\nAll three are the EXCHANGE's reading of the bid, not the bid's own bytes. Nothing here is copied\nverbatim from a store: a value the exchange cannot read as the shape declared below is nulled\nrather than published, because the alternative is a buyer-facing route that a malformed bid can\nturn into a 500.",
       "type": "object",
       "additionalProperties": false,
       "required": ["slot", "bid_ref", "fit_score", "trust_summary", "provenance_labels"],
@@ -421,7 +450,18 @@
         "bid_ref": { "type": "string", "minLength": 1 },
         "fit_score": { "type": "number" },
         "trust_summary": { "type": "object" },
-        "provenance_labels": { "type": "array", "items": { "type": "string" } }
+        "provenance_labels": { "type": "array", "items": { "type": "string" } },
+        "product": {
+          "oneOf": [{ "$ref": "#/$defs/ShortlistProduct" }, { "type": "null" }]
+        },
+        "price": {
+          "oneOf": [{ "$ref": "#/$defs/ShortlistPrice" }, { "type": "null" }]
+        },
+        "commitments": {
+          "type": ["array", "null"],
+          "items": { "$ref": "#/$defs/Claim" },
+          "description": "What this store is promising alongside the price — free returns, a shipping window, a warranty. Every entry is a published `Claim` with real provenance, which is what makes it gradeable later; a commitment the exchange cannot read as one is dropped rather than shown, because the buyer is being told this is a promise somebody can be held to. `null` is spelled out rather than left to `--strict-nullable` to widen (T-195): an optional non-nullable array generates as `list[Claim] | None` in Python regardless, and a schema that did not also say `null` would have pydantic accepting a payload ajv refuses."
+        }
       }
     },
 

@@ -458,8 +458,79 @@ export interface VerificationResult {
   verifier_version: string;
 }
 /**
+ * R2's PRODUCT on a shortlist slot: WHICH catalogue thing this slot is offering.
+ *
+ * A reference, never a rendered name. The exchange holds `product_ref` (and, where the bid named
+ * one, `variant_ref`) because that is what the roster and the offer agree on; a title, an image or
+ * a description belongs to the catalogue the buyer app already resolves refs against, and copying
+ * one through the exchange would publish a second, staler spelling of a fact the exchange does not
+ * own.
+ *
+ * `variant_ref` is optional for the same reason it is optional on `Offer`: cart permalinks are
+ * variant-scoped (D25), but the frozen hosted-bid shape predates the field and a fallback offer
+ * minted from a roster row names no variant at all. Absent means "the bid did not name one", never
+ * "the default variant".
+ *
+ * This interface was referenced by `ProxyShopProtocol`'s JSON-Schema
+ * via the `definition` "ShortlistProduct".
+ */
+export interface ShortlistProduct {
+  product_ref: string;
+  variant_ref?: string | null;
+}
+/**
+ * R2's PRICE on a shortlist slot: what this store is asking, and until when.
+ *
+ * BOTH prices are required together. A slot showing a unit price with no total (or the reverse)
+ * invites the buyer to compare two different quantities as if they were the same offer, so the
+ * producer publishes this object only when it can read both as finite numbers and nulls the whole
+ * price otherwise — a slot with no readable price says so with `price: null`, rather than by
+ * carrying a zero, which is the cheapest number there is and would win every comparison a shopper
+ * makes (the T-277 shape, one surface over).
+ *
+ * `expires_at` is the instant this quote stops being live, and it is ISO-8601 UTC and nothing else.
+ * `Offer.expires_at` is nominally `format: date-time` while half this tree writes a float epoch into
+ * it, and T-182 is the measurement of what that ambiguity costs; a NEW buyer-facing surface does not
+ * inherit it. The exchange normalizes through the same reader its own expiry filter uses
+ * (`checkout.codes.expiry_epoch`) and renders one spelling, so a client never has to guess which it
+ * was handed.
+ *
+ * `discount` is the published `Discount` — a *stated* depth, not an entitlement. No single-use code
+ * exists until the buyer accepts (D22), so this is what the store says it will honour, which is
+ * exactly what the `discount_honored` trust dimension later grades it against.
+ *
+ * This interface was referenced by `ProxyShopProtocol`'s JSON-Schema
+ * via the `definition` "ShortlistPrice".
+ */
+export interface ShortlistPrice {
+  unit_price: number;
+  total_price: number;
+  currency?: string | null;
+  discount?: Discount | null;
+  expires_at?: string | null;
+}
+/**
  * One shortlist slot. `provenance_labels` is an OPEN list of strings, not a closed enum: the
  * exchange supplies the buyer-facing labels and the buyer app renders what it was given (D30).
+ *
+ * R2 asks one slot to show five things — PRODUCT, PRICE, COMMITMENTS, a store trust indicator and
+ * provenance labels — and for a long time this object declared only the last two, so the other three
+ * were dropped at the schema rather than anywhere in a service. `product`, `price` and `commitments`
+ * close that. All three are OPTIONAL and all three admit `null`, deliberately on both counts:
+ * `additionalProperties: false` means every existing producer of a `Shortlist` would have had to be
+ * changed on the same commit if they were required, and an R10 list-price fallback genuinely has no
+ * priced offer to read when its roster row names no price the exchange could charge.
+ *
+ * NULL is the honest answer for "the exchange has nothing here", and it is never a zero, an empty
+ * product or a `[]` that could be read as "this store committed to nothing". Absent and `null` say
+ * the same thing, and a producer serving through the pinned model necessarily says it as `null` —
+ * the exchange's own two doors are exactly that case, one typing its body `Shortlist` and the other
+ * `dict`, and they are asserted to serve byte-identical objects.
+ *
+ * All three are the EXCHANGE's reading of the bid, not the bid's own bytes. Nothing here is copied
+ * verbatim from a store: a value the exchange cannot read as the shape declared below is nulled
+ * rather than published, because the alternative is a buyer-facing route that a malformed bid can
+ * turn into a 500.
  *
  * This interface was referenced by `ProxyShopProtocol`'s JSON-Schema
  * via the `definition` "ShortlistSlot".
@@ -470,6 +541,12 @@ export interface ShortlistSlot {
   fit_score: number;
   trust_summary: {};
   provenance_labels: string[];
+  product?: ShortlistProduct | null;
+  price?: ShortlistPrice | null;
+  /**
+   * What this store is promising alongside the price — free returns, a shipping window, a warranty. Every entry is a published `Claim` with real provenance, which is what makes it gradeable later; a commitment the exchange cannot read as one is dropped rather than shown, because the buyer is being told this is a promise somebody can be held to. `null` is spelled out rather than left to `--strict-nullable` to widen (T-195): an optional non-nullable array generates as `list[Claim] | None` in Python regardless, and a schema that did not also say `null` would have pydantic accepting a payload ajv refuses.
+   */
+  commitments?: Claim[] | null;
 }
 /**
  * DESIGN §Interfaces `Shortlist`.

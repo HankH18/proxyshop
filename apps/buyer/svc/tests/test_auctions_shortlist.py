@@ -16,29 +16,39 @@ R2, verbatim: *"present a shortlist of up to 4 differentiated slots (best fit / 
 most reliable / specialist), each showing PRODUCT, PRICE, COMMITMENTS, STORE TRUST INDICATOR,
 and PROVENANCE LABELS ('store-confirmed' vs 'from their website')"*.
 
-MEASURED here, one served slot, verbatim::
+MEASURED here, one served slot, verbatim — this is the whole of what the shopper is handed::
 
-    {"slot": "fit", "bid_ref": "auction-bc81…:demo-woolworks", "fit_score": 0.602,
+    {"slot": "fit", "bid_ref": "auction-dea4…:demo-woolworks", "fit_score": 0.602,
      "trust_summary": {"store_id": "demo-woolworks", "available": true, "score": 0.81,
-                       "confidence": 0.7, "low_data": false, "dimensions": ["delivery"]},
-     "provenance_labels": ["store-confirmed"]}
+                       "confidence": 0.7},
+     "provenance_labels": ["store-confirmed"],
+     "product": {"product_ref": "beanie-1", "variant_ref": null},
+     "price": {"unit_price": 72.0, "total_price": 72.0, "currency": "USD",
+               "discount": null, "expires_at": "2026-09-07T04:06:38.289327Z"},
+     "commitments": [{"key": "free_returns", "value": "30 days", "claim_id": null,
+                      "claim_type": null, "unit": null, "source_span": null,
+                      "provenance": {"source": "owner_statement", "authority_rank": 1,
+                                     "ref": "envelope:store-alpha:v3#free_returns",
+                                     "observed_at": "2026-01-01T00:00:00Z"}}, …]}
 
-R2's **store trust indicator** and **provenance labels** are there, and the tests below assert
-they carry real per-store values rather than one constant repeated. R2's **product**, **price**
-and **commitments** are not, and they stop at the *protocol schema* rather than anywhere in
-this service: ``ShortlistSlot`` in ``packages/contracts/schemas/protocol.schema.json`` declares
-exactly ``slot``/``bid_ref``/``fit_score``/``trust_summary``/``provenance_labels`` with
-``additionalProperties: false``, and both doors that could carry them are pinned to it —
-``GET /auctions/{auction_id}/shortlist`` declares ``response_model=Shortlist`` (an extra key on
-a slot is a 500, measured, not a dropped field), and the exchange's ``POST /auctions`` answer
-documents its ``shortlist`` as "the same object ``GET /auctions/{auction_id}/shortlist``
-serves", with a test asserting the two bodies are equal. All three values are present on the
-candidate the ranker held — ``apps/exchange/tests/test_ranking_served.py`` asserts that — so
-what is needed is three optional properties on ``ShortlistSlot``, after which
-``exchange.ranking.serving.rank_auction`` can fill them and this route serves them unchanged.
+All five of R2's fields, and the tests below assert each carries a real per-store value rather
+than one constant repeated: the product is that store's rostered ``product_ref``, the price is
+what that store BID (10% under its listing, so it cannot be confused with the roster's number),
+and the commitments are the approved envelope's, dropped through the pinned ``Claim``.
 
-**Nothing here asserts their absence.** A test that pinned it would go red on whoever adds
-them, which is the wrong direction for a gate to fail in.
+**Where the other three used to stop, and why this file is where it shows.** They were dropped at
+the *protocol schema*: ``ShortlistSlot`` declared exactly
+``slot``/``bid_ref``/``fit_score``/``trust_summary``/``provenance_labels`` with
+``additionalProperties: false``, and both doors that could carry them are pinned to it — ``GET
+/auctions/{auction_id}/shortlist`` declares ``response_model=Shortlist``, so an extra key on a
+stored slot was a **500**, measured, not a dropped field. Widening the contract with three
+optional properties is what let ``exchange.ranking.serving.rank_auction`` fill them, and this
+route then serves them unchanged.
+
+``null`` is the spelling for "the exchange had nothing to put here" — see the R10 test below,
+where a store that never answered gets a slot with a real price and ``commitments: null``. It is
+never a zero and never an empty list, and the two exchange doors agree on it because the producer
+stores a fixed point of the pinned model.
 """
 
 from __future__ import annotations
@@ -93,10 +103,42 @@ INTENT = {
     "cluster_id": "cluster-warm-layers",
 }
 
-#: Exactly what ``contracts.protocol.ShortlistSlot`` declares today. Used as a SUBSET check
-#: (``>=``), never an equality: the day the contract carries R2's other three, this file gains
-#: assertions rather than losing one.
-CONTRACT_SLOT_FIELDS = {"slot", "bid_ref", "fit_score", "trust_summary", "provenance_labels"}
+#: Exactly what ``contracts.protocol.ShortlistSlot`` declares today, which is now all five of
+#: R2's fields. Used as a SUBSET check (``>=``), never an equality, so a sixth thing a slot
+#: learns to show makes this file gain assertions rather than lose one.
+CONTRACT_SLOT_FIELDS = {
+    "slot",
+    "bid_ref",
+    "fit_score",
+    "trust_summary",
+    "provenance_labels",
+    "product",
+    "price",
+    "commitments",
+}
+
+#: R2's five, named as R2 names them, mapped to the slot keys that carry them. This is the list
+#: the requirement is actually about; ``CONTRACT_SLOT_FIELDS`` is the schema's spelling of it.
+R2_SLOT_FIELDS = {
+    "PRODUCT": "product",
+    "PRICE": "price",
+    "COMMITMENTS": "commitments",
+    "STORE TRUST INDICATOR": "trust_summary",
+    "PROVENANCE LABELS": "provenance_labels",
+}
+
+
+def canonical_commitments() -> list[dict[str, Any]]:
+    """The approved envelope's commitments as the pinned ``Claim`` serializes them.
+
+    Dropped through ``contracts.protocol.Claim`` rather than compared against the fixture's raw
+    JSON, because the exchange validates each commitment against that model before publishing it
+    — so a claim's unstated optionals come back as explicit ``null``. Restating the expanded shape
+    here by hand would be this test asserting against a spelling somebody typed.
+    """
+    from contracts.protocol import Claim
+
+    return [Claim.model_validate(c).model_dump(mode="json") for c in approved_commitments()]
 
 
 def _domain(store_id: str) -> str:
@@ -318,13 +360,66 @@ def test_a_confirmed_intent_becomes_a_served_shortlist_with_one_slot_per_bidding
 
 
 def test_every_served_slot_carries_the_published_contracts_fields(buyer_client):
-    """``>=`` and not ``==``: this goes green, not red, when the contract carries R2's rest."""
+    """``>=`` and not ``==``: this goes green, not red, when a slot learns to show a sixth thing."""
     auction_id = open_an_auction(buyer_client)
 
     for slot in served_slots(buyer_client, auction_id):
         assert set(slot) >= CONTRACT_SLOT_FIELDS, slot
         assert slot["bid_ref"].startswith(f"{auction_id}:"), slot
         assert isinstance(slot["fit_score"], float), slot
+
+
+def test_a_served_slot_shows_all_five_of_r2s_fields_with_real_values(buyer_client):
+    """R2 verbatim, on the shopper's own route: PRODUCT, PRICE, COMMITMENTS, TRUST, PROVENANCE.
+
+    Every store here answers with a real bid, so every slot must show all five and none of them
+    may be ``null`` — a slot carrying the key with nothing in it is the field being declared and
+    still not served, which is the shape this whole file exists to catch.
+    """
+    auction_id = open_an_auction(buyer_client)
+    slots = served_slots(buyer_client, auction_id)
+    assert len(slots) == len(STORES), slots
+
+    for slot in slots:
+        for requirement, key in R2_SLOT_FIELDS.items():
+            assert key in slot, f"R2 asks a slot to show {requirement}; it has no {key!r}: {slot}"
+            assert slot[key] is not None, (
+                f"R2's {requirement} is declared on the contract but served empty: {slot}"
+            )
+
+
+def test_the_product_price_and_commitments_are_this_stores_own_bid_not_a_placeholder(buyer_client):
+    """The three new fields, checked per store against what that store actually bid.
+
+    Every number here is distinguishable on purpose: each store bids 10% UNDER its own listing, so
+    a price read off a slot can be told apart both from the roster's list price and from the other
+    two stores'. A field filled in with a constant — the failure an audit found in
+    ``proxyshop_demo/s1.py`` — shows up as three identical values.
+    """
+    auction_id = open_an_auction(buyer_client)
+
+    shown: dict[str, dict[str, Any]] = {}
+    for slot in served_slots(buyer_client, auction_id):
+        shown[slot["trust_summary"]["store_id"]] = slot
+
+    assert set(shown) == set(STORES), shown
+    for store, slot in shown.items():
+        assert slot["product"] == {"product_ref": PRODUCTS[store], "variant_ref": None}, slot
+        price = slot["price"]
+        assert price["unit_price"] == pytest.approx(BID_PRICES[store]), slot
+        assert price["total_price"] == pytest.approx(BID_PRICES[store]), slot
+        assert price["unit_price"] != pytest.approx(LIST_PRICES[store]), (
+            "the slot is showing the ROSTER's list price, not what the store bid"
+        )
+        assert price["currency"] == "USD", slot
+        # ISO-8601 UTC, never the float epoch the bidder above actually sent.
+        assert isinstance(price["expires_at"], str) and price["expires_at"].endswith("Z"), slot
+        assert slot["commitments"] == canonical_commitments(), slot
+
+    prices = [slot["price"]["unit_price"] for slot in shown.values()]
+    assert len(set(prices)) == len(prices), f"one price repeated across slots: {prices}"
+    refs = [slot["product"]["product_ref"] for slot in shown.values()]
+    assert len(set(refs)) == len(refs), f"one product repeated across slots: {refs}"
 
 
 def test_the_store_trust_indicator_is_that_stores_own_number_not_one_repeated(buyer_client):
@@ -369,6 +464,14 @@ def test_a_silent_store_still_reaches_a_slot_on_its_list_price(monkeypatch):
     Its entry is marked ``fallback`` in the recorded diagnostics — which is how a reader tells
     a price the STORE quoted from one the exchange manufactured for it — and it still gets a
     slot, because R10 says a silent store can reach the shortlist.
+
+    **The slot's own three R2 fields are what this test is really guarding now.** A silent store
+    asserted nothing: it has a catalogue product and the roster's LIST price, and it has no
+    commitments at all. So its slot must show the product and the list price — not the 10%-under
+    number the other two bid, and not a manufactured ``0.00`` — and must say ``commitments: null``
+    rather than ``[]``, which would read as "this store promises nothing" when what is true is
+    that it promised nothing *because it never spoke*. Enriching a slot from an offer that is not
+    there is the likeliest way to break honest traffic, so it is driven rather than reasoned about.
     """
     silent = "demo-northface"
     server = _LoopbackExchange(_wired_exchange(Bidders(silent=(silent,))))
@@ -397,8 +500,26 @@ def test_a_silent_store_still_reaches_a_slot_on_its_list_price(monkeypatch):
         if store != silent:
             assert entries[store]["fallback"] is False, entries[store]
             assert entries[store]["unit_price"] == pytest.approx(BID_PRICES[store])
-    shortlisted = {slot["trust_summary"]["store_id"] for slot in body["shortlist"]["slots"]}
-    assert silent in shortlisted, shortlisted
+    slots = {slot["trust_summary"]["store_id"]: slot for slot in body["shortlist"]["slots"]}
+    assert silent in slots, sorted(slots)
+
+    slot = slots[silent]
+    assert slot["product"] == {"product_ref": PRODUCTS[silent], "variant_ref": None}, slot
+    assert slot["price"]["unit_price"] == pytest.approx(LIST_PRICES[silent]), slot
+    assert slot["price"]["total_price"] == pytest.approx(LIST_PRICES[silent]), slot
+    assert slot["price"]["unit_price"] != pytest.approx(BID_PRICES[silent]), (
+        "a store that never answered is being shown a price as if it had bid one"
+    )
+    assert slot["price"]["unit_price"] != 0.0, "a manufactured 0.00 would beat every real bid"
+    assert slot["commitments"] is None, (
+        f"a silent store committed to nothing because it never spoke; `{slot['commitments']!r}` "
+        "tells the shopper it made a promise"
+    )
+    # And the stores that DID answer are unaffected by the one that did not.
+    for store in STORES:
+        if store != silent:
+            assert slots[store]["commitments"] == canonical_commitments(), slots[store]
+            assert slots[store]["price"]["unit_price"] == pytest.approx(BID_PRICES[store])
 
 
 # =====================================================================================

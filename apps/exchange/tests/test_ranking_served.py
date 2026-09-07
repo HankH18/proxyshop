@@ -88,6 +88,16 @@ STORE_B = "store-b"
 STORE_OFF_DOMAIN = "store-offdomain"
 STORE_BLACKLISTED = "store-black"
 
+#: R2's five, as the served slot spells them. A SUBSET check everywhere it is used (``>=``), so a
+#: sixth thing a slot learns to show never turns these assertions red.
+R2_SLOT_FIELDS = {
+    "product",
+    "price",
+    "commitments",
+    "trust_summary",
+    "provenance_labels",
+}
+
 
 # --- builders -------------------------------------------------------------------------
 def _domain(store_id: str) -> str:
@@ -872,6 +882,18 @@ def test_reverting_either_half_of_the_r10_join_puts_the_fallback_back_in_the_exc
 # 3. The published shortlist path
 # =====================================================================================
 def test_the_shortlist_is_readable_at_the_published_path_after_the_auction_closes():
+    """The two doors serve the SAME object, and that is not satisfiable by both serving little.
+
+    ``GET`` declares ``response_model=Shortlist`` and therefore re-validates and re-serializes
+    whatever is stored; ``POST``'s ``shortlist`` is a ``dict[str, Any]`` and passes it through
+    verbatim. So the two agree only where the stored object is already a fixed point of the pinned
+    model — a producer that omits an optional it could not fill has the GET body carrying
+    ``price: null`` while the POST body carries no ``price`` at all, which is measured and is why
+    ``rank_auction`` re-validates before storing.
+
+    The R2 assertion below is what stops the equality from being trivial: two empty shortlists are
+    equal too.
+    """
     bidders = Bidders({STORE_A: _bid(STORE_A, 100.0), STORE_B: _bid(STORE_B, 120.0)})
     app = _wired_app(bidders=bidders)
     client = TestClient(app)
@@ -883,6 +905,288 @@ def test_the_shortlist_is_readable_at_the_published_path_after_the_auction_close
     assert read_back.status_code == 200, read_back.text
     assert read_back.json() == body["shortlist"]
     assert client.get("/auctions/auction-never-existed/shortlist").status_code == 404
+
+    slots = read_back.json()["slots"]
+    assert slots, "an empty shortlist would make the equality above vacuous"
+    for slot in slots:
+        assert set(slot) >= R2_SLOT_FIELDS, slot
+        assert slot["product"]["product_ref"] == "product-1", slot
+        assert slot["price"]["unit_price"] in (100.0, 120.0), slot
+
+
+def _commitment(key: str, value: Any) -> dict[str, Any]:
+    """One ``offer.commitments`` entry, exactly as the published ``Claim`` declares it.
+
+    ``observed_at`` is present and ``_claim`` above deliberately does not carry it: ``Provenance``
+    REQUIRES it, so ``_claim``'s shape is a claim the exchange cannot publish as a commitment even
+    though it is a perfectly good input to the hard-constraint verifier. That asymmetry is real
+    and is what :func:`test_a_commitment_the_exchange_cannot_read_is_dropped_rather_than_shown`
+    drives; it is not a typo in either builder.
+    """
+    return {
+        "key": key,
+        "value": value,
+        "provenance": {
+            "source": "owner_statement",
+            "ref": f"envelope:{key}",
+            "observed_at": "2026-01-01T00:00:00Z",
+            "authority_rank": 1,
+        },
+    }
+
+
+def _bid_with_offer(store_id: str, **offer_overrides: Any) -> dict[str, Any]:
+    """``_bid``'s reply with its offer patched — ``None`` deletes a key rather than nulling it."""
+    bid = _bid(store_id, 100.0)
+    offer = dict(bid["offer"])
+    for key, value in offer_overrides.items():
+        if value is None:
+            offer.pop(key, None)
+        else:
+            offer[key] = value
+    bid["offer"] = offer
+    return bid
+
+
+def test_a_served_slot_carries_r2s_product_price_and_commitments_off_the_bid():
+    """R2's other three, over the HTTP door, read off what the store actually offered.
+
+    They cannot be built in ``ranking/shortlist.py``: that module is handed rank ROWS, and a rank
+    row carries ``bid_id``, ``store_id``, ``rank_score``, the trust summary and the provenance
+    labels — no ``offer`` at all. ``rank_auction`` is the only place holding the built shortlist
+    and the projected candidates at once, which is why the join lives there.
+    """
+    bid = _bid_with_offer(
+        STORE_A,
+        variant_ref="variant-9",
+        total_price=210.0,
+        unit_price=105.0,
+        commitments=[_commitment("free_returns", "30 days")],
+    )
+    app = _wired_app(bidders=Bidders({STORE_A: bid}), stores=(STORE_A,))
+
+    body = _post(app, [_rostered(STORE_A, 100.0)])
+
+    (slot,) = body["shortlist"]["slots"]
+    assert set(slot) >= R2_SLOT_FIELDS, slot
+    assert slot["product"] == {"product_ref": "product-1", "variant_ref": "variant-9"}, slot
+    assert slot["price"]["unit_price"] == pytest.approx(105.0), slot
+    assert slot["price"]["total_price"] == pytest.approx(210.0), slot
+    assert slot["price"]["currency"] == "USD", slot
+    # The bid stated a float epoch — the spelling half this tree writes into a property the schema
+    # declares `format: date-time`. What is SERVED is one spelling, and it is the schema's (T-182).
+    assert isinstance(bid["offer"]["expires_at"], float), bid["offer"]
+    assert slot["price"]["expires_at"].endswith("Z"), slot
+    assert [c["key"] for c in slot["commitments"]] == ["free_returns"], slot
+    assert slot["commitments"][0]["provenance"]["source"] == "owner_statement", slot
+
+
+def test_a_fallback_slot_shows_the_roster_list_price_and_commits_to_nothing():
+    """R10's silent store, all the way to its slot. The likeliest way to break honest traffic.
+
+    A fallback has no collected offer — the exchange manufactured one out of the ROSTER — so the
+    three fields must come from that and no further. The price is the listing, never a store's
+    number and never a ``0.00``; the commitments are ``null``, because a store that never answered
+    promised nothing, which is not the same statement as ``[]``.
+
+    ``_intent([])`` because a fallback asserts no claims and therefore satisfies no hard
+    constraint — that exclusion is
+    :func:`test_a_fallback_still_satisfies_no_hard_constraint_and_is_excluded_on_that_alone`'s
+    subject, and leaving it in force here would test nothing about the slot.
+    """
+    app = _wired_app(bidders=Bidders({}), stores=(STORE_A,))
+    client = TestClient(app)
+
+    body = _post(app, [_rostered(STORE_A, 137.5)], intent=_intent([]))
+
+    assert body["entries"][0]["fallback"] is True, "the store answered nothing; it must fall back"
+    (slot,) = body["shortlist"]["slots"]
+    assert slot["product"] == {"product_ref": "product-1", "variant_ref": None}, slot
+    assert slot["price"]["unit_price"] == pytest.approx(137.5), slot
+    assert slot["price"]["total_price"] == pytest.approx(137.5), slot
+    assert slot["price"]["unit_price"] != 0.0, "a manufactured 0.00 beats every real bid there is"
+    assert slot["commitments"] is None, (
+        f"a store that never spoke is being shown as having promised {slot['commitments']!r}"
+    )
+
+    # And the published door serves exactly that, rather than 500ing on it.
+    read_back = client.get(f"/auctions/{body['auction_id']}/shortlist")
+    assert read_back.status_code == 200, read_back.text
+    assert read_back.json() == body["shortlist"]
+
+
+@pytest.mark.parametrize(
+    ("label", "overrides"),
+    [
+        ("a product_ref that is not a string", {"product_ref": 7}),
+        ("no product_ref at all", {"product_ref": None}),
+        ("a variant_ref that is not a string", {"variant_ref": 9}),
+        ("a currency that is not a string", {"currency": 5}),
+        ("commitments that are a string", {"commitments": "free returns, honest"}),
+        ("commitments that are not claims", {"commitments": [1, "x", None, {"key": "k"}]}),
+        ("a commitment with no provenance", {"commitments": [{"key": "k", "value": "v"}]}),
+        (
+            "a commitment whose source is invented",
+            {
+                "commitments": [
+                    {
+                        "key": "k",
+                        "value": "v",
+                        "provenance": {
+                            "source": "vibes",
+                            "ref": "envelope:k",
+                            "observed_at": "2026-01-01T00:00:00Z",
+                            "authority_rank": 1,
+                        },
+                    }
+                ]
+            },
+        ),
+    ],
+)
+def test_no_offer_a_store_can_write_turns_the_published_shortlist_into_a_500(label, overrides):
+    """The failure mode that made the obvious version of this change unshippable.
+
+    NOTHING on the auction path validates a bid against the schema — ``validate_bid`` has no call
+    site in ``apps/exchange/src``, which ``auction/routes.py`` states — so ``offer`` is arbitrary
+    store-written JSON. Publishing it verbatim into a slot pinned by ``response_model=Shortlist``
+    hands any store a one-request 500 on the buyer's own route. Every shape below is therefore
+    driven through the real door: 201, then 200, then the two bodies equal.
+
+    The last case is the interesting one and it is not garbage: it is a well-formed ``Claim``
+    whose ``provenance.source`` is not in the closed ``ProvenanceSource`` enum. A closed enum is
+    exactly what a store gets wrong by accident.
+    """
+    app = _wired_app(
+        bidders=Bidders({STORE_A: _bid_with_offer(STORE_A, **overrides)}), stores=(STORE_A,)
+    )
+    client = TestClient(app)
+
+    body = _post(app, [_rostered(STORE_A, 100.0)])
+
+    (slot,) = body["shortlist"]["slots"]
+    read_back = client.get(f"/auctions/{body['auction_id']}/shortlist")
+    assert read_back.status_code == 200, f"{label}: {read_back.text}"
+    assert read_back.json() == body["shortlist"], label
+    # Unreadable is served as `null`, never as the store's own bytes and never as a zero.
+    assert slot["price"]["unit_price"] == pytest.approx(100.0), slot
+    for key in ("product", "commitments"):
+        assert slot[key] is None or isinstance(slot[key], (dict, list)), slot
+
+
+def test_a_commitment_the_exchange_cannot_read_is_dropped_rather_than_shown():
+    """One good commitment beside three bad ones: the buyer is shown exactly the good one.
+
+    Dropping is the honest answer. A commitment with no provenance is not a weaker promise, it is
+    not a promise — nothing could later grade the store against it — so publishing it under a name
+    the shopper reads as a commitment would be the exchange vouching for a string.
+    """
+    bid = _bid_with_offer(
+        STORE_A,
+        commitments=[
+            {"key": "no_provenance", "value": "trust me"},
+            _commitment("free_returns", "30 days"),
+            "ships fast",
+            {"key": "bad_source", "value": "v", "provenance": {"source": "vibes", "ref": "r"}},
+        ],
+    )
+    app = _wired_app(bidders=Bidders({STORE_A: bid}), stores=(STORE_A,))
+
+    body = _post(app, [_rostered(STORE_A, 100.0)])
+
+    (slot,) = body["shortlist"]["slots"]
+    assert [c["key"] for c in slot["commitments"]] == ["free_returns"], slot
+
+
+def test_r2s_three_fields_are_absent_from_the_rank_rows_that_could_not_carry_them():
+    """The claim the module docstring makes about WHERE this had to be done, asserted.
+
+    If a rank row carried the offer, ``ranking/shortlist.py`` could have built these itself and
+    ``rank_auction`` would be the wrong place. It does not: the row is the ranker's own projection.
+    """
+    bid = _bid_with_offer(STORE_A, commitments=[_commitment("free_returns", "30 days")])
+    app = _wired_app(bidders=Bidders({STORE_A: bid}), stores=(STORE_A,))
+
+    body = _post(app, [_rostered(STORE_A, 100.0)])
+
+    (row,) = body["ranked"]
+    assert "offer" not in row, row
+    assert not ({"product", "commitments"} & set(row)), row
+
+
+def test_reverting_the_slot_enrichment_leaves_r2s_three_fields_null(monkeypatch):
+    """The revert check the R10 join already has, one field set over.
+
+    Without it the tests above are green for a reason nobody has checked — a slot could be
+    carrying product, price and commitments because something ELSE puts them there. This restores
+    ``_with_offer_fields`` to the identity it was before (the pinned model's own dump, which is
+    what ``ranking/shortlist.py`` hands over) and asserts all three go to ``null``.
+    """
+    from contracts.protocol import Shortlist
+
+    monkeypatch.setattr(
+        "exchange.ranking.serving._with_offer_fields",
+        lambda shortlist, candidates: Shortlist.model_validate(shortlist).model_dump(mode="json"),
+    )
+    bid = _bid_with_offer(STORE_A, commitments=[_commitment("free_returns", "30 days")])
+    app = _wired_app(bidders=Bidders({STORE_A: bid}), stores=(STORE_A,))
+
+    body = _post(app, [_rostered(STORE_A, 100.0)])
+
+    (slot,) = body["shortlist"]["slots"]
+    assert [slot["product"], slot["price"], slot["commitments"]] == [None, None, None], (
+        "the reverted producer still served R2's three fields, so something else is filling them "
+        f"and the tests above are not measuring this join: {slot}"
+    )
+    # The two fields that were always there are unaffected, so the revert is surgical.
+    assert slot["trust_summary"]["store_id"] == STORE_A, slot
+    assert slot["provenance_labels"], slot
+
+
+def test_the_exchanges_reading_of_an_offer_is_defensive_field_by_field():
+    """The three builders, directly, on the shapes the HTTP door cannot reach.
+
+    Two of these degrade to a fallback before they ever reach a slot — an unreadable
+    ``total_price`` and a discount the T-177 price wall refuses — so the route cannot drive them.
+    They are still the producer's contract: it is what stands between an unvalidated bid and a
+    pinned response model, and "unreachable today" is a property of code two modules away.
+    """
+    from exchange.ranking.serving import shortlist_commitments, shortlist_price, shortlist_product
+
+    # A price is published only when BOTH numbers read, and never as a zero standing in for one.
+    assert shortlist_price({"unit_price": 10.0, "total_price": 10.0})["unit_price"] == 10.0
+    assert shortlist_price({"unit_price": 10.0}) is None
+    assert shortlist_price({"unit_price": 10.0, "total_price": "lots"}) is None
+    assert shortlist_price({"unit_price": True, "total_price": True}) is None, "True is not $1"
+    assert shortlist_price({"unit_price": float("nan"), "total_price": 1.0}) is None
+    assert shortlist_price(None) is None
+
+    # A discount is the published `Discount` or it is not published. `{"value": 5}` passes the
+    # price wall's own read (a numeric depth) and is still missing a required field.
+    priced = {"unit_price": 10.0, "total_price": 10.0}
+    assert "discount" not in shortlist_price({**priced, "discount": {"value": 5}})
+    assert "discount" not in shortlist_price({**priced, "discount": "half off"})
+    kept = shortlist_price({**priced, "discount": {"type": "percent", "value": 10}})
+    assert kept["discount"]["type"] == "percent", kept
+
+    # Both expiry spellings the schema and this tree disagree about, answered as one.
+    assert shortlist_price({**priced, "expires_at": 0.0})["expires_at"] == "1970-01-01T00:00:00Z"
+    iso = shortlist_price({**priced, "expires_at": "2030-01-01T00:00:00+00:00"})["expires_at"]
+    assert iso == "2030-01-01T00:00:00Z", iso
+    assert "expires_at" not in shortlist_price({**priced, "expires_at": "whenever"})
+
+    # A product is a REF or it is nothing; a blank string is not a ref.
+    assert shortlist_product({"product_ref": "p-1"}) == {"product_ref": "p-1"}
+    assert shortlist_product({"product_ref": "   "}) is None
+    assert shortlist_product({"product_ref": 7}) is None
+    assert "variant_ref" not in shortlist_product({"product_ref": "p-1", "variant_ref": ""})
+
+    # `None` and never `[]`: "the exchange read no commitment" is not "the store made none".
+    assert shortlist_commitments({"commitments": []}) is None
+    assert shortlist_commitments({"commitments": [{"key": "k", "value": "v"}]}) is None
+    assert shortlist_commitments({}) is None
+    good = shortlist_commitments({"commitments": [_commitment("free_returns", "30 days")]})
+    assert [c["key"] for c in good] == ["free_returns"], good
 
 
 def test_an_empty_shortlist_is_served_as_a_shortlist_and_an_unknown_auction_as_a_404():
