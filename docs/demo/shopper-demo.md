@@ -217,22 +217,36 @@ envelopes, and the shortlist comes back with each slot's reason on it.
 **Sign-in is required before the exchange is asked anything**, and the page says so where it
 stops: *"the next step is the one that leaves it: the exchange solicits real stores... That
 pseudonym has to come from the service's vault rather than from this page."* Sign-in is a
-mailed single-use link, so it needs mail transport. Two variables carry it, and one of them
-has a trap:
+single-use link, and a demo stack has nowhere to mail it. So choose the local transport, which
+writes the link to the service's own log instead:
 
 ```bash
-export PROXYSHOP_BUYER_MAGIC_LINK_SMTP_URL=smtp://localhost:1025
-export PROXYSHOP_BUYER_MAGIC_LINK_SENDER=demo@proxyshop.local
-export PROXYSHOP_BUYER_MAGIC_LINK_BASE_URL=http://localhost:8080/
+export PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT=console
 ```
 
-The third line is the trap and it must be exported **after** you source `.env`.
-`.env.example` sets that variable to port 8081 outright — written when the buyer service was
-the only thing that could conceivably serve a page — so sourcing the copied file puts
-buyer-svc's origin in the container whichever default this stack's compose fragment carries.
-buyer-svc serves the API and mounts no bundle, so a link built on that origin 404s before the
-page loads. Measured on this stack: `PROXYSHOP_BUYER_MAGIC_LINK_BASE_URL=http://localhost:8081/`
-inside the container on the documented path.
+Then read the link out of the service:
+
+```bash
+docker compose logs -f buyer-svc | grep 'token='
+```
+
+The value is matched literally: `console` works, `Console` and `stdout` and `1` are a boot
+failure naming what would have been accepted, and leaving the variable unset is still a 503
+with no token printed anywhere. That is the point — a service that is merely MISSING mail
+configuration must refuse to log anyone in rather than publish a bearer credential to be
+helpful. `console` is a choice you make out loud, the service shouts what it is at first use,
+and it is an authentication bypass for anyone who can read the log. Never set it on a
+deployment whose logs you do not own.
+
+For a stack that really should mail, set `PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT=smtp` plus
+`PROXYSHOP_BUYER_MAGIC_LINK_SMTP_URL` and `PROXYSHOP_BUYER_MAGIC_LINK_SENDER`. Naming `smtp`
+with no reachable MTA is a boot failure rather than a silent 503 at the first login attempt.
+
+`PROXYSHOP_BUYER_MAGIC_LINK_BASE_URL` needs no export here: `.env.example` carries
+`http://localhost:8080/`, which is `buyer-web` — the origin that serves the PAGE. It said 8081
+until this stack landed, written when buyer-svc was the only thing that could conceivably
+serve one; a link built on the API's origin 404s before the page loads, holding a credential
+that is now spent.
 
 ## What can go wrong, and what each thing means
 
