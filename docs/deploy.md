@@ -136,6 +136,90 @@ Same population — 5600 + 133 + 2 = 5735 — with 135 tests diverted onto dead 
 If you relocate ports to run a second stack, remove `.env` before running `make verify`, or
 expect the gate to grade a different cluster than you think.
 
+That last sentence used to be the whole mitigation, and it was not one — it asked a reader to
+notice a skip count. The gate now notices for you: see the next section.
+
+## `make verify` with the datastores down
+
+Two things `make verify` could not previously see, both fixed in `scripts/verify.sh`.
+
+### 1. The release blockers are now inside the gate
+
+`.swarm-loop/acceptance` holds 120 frozen acceptance criteria, three of which are the **S8
+release blockers** — a blacklisted seller never surfacing as eligible, a contradicted hard
+constraint never winning, and no checkout URL outside the registered seller domain. `make
+verify` did not run one of them. `testpaths` in `pyproject.toml` lists eight directories and
+`.swarm-loop` is not among them, and no step in `verify.sh` ever named the directory, so the
+build's headline metric was measured over a file set that excluded the tests deciding
+whether the release is allowed.
+
+It now runs as its own step:
+
+```console
+$ PROXYSHOP_WORKER=4 ./scripts/verify.sh acceptance
+ACCEPTANCE: 120/120 frozen criteria passing; S8 release blockers present: S8-1, S8-2, S8-3
+OK: acceptance
+```
+
+That step is inside `all` and `check`, so `make verify` and `make check` both carry it. It
+costs about two seconds and runs first, ahead of the ~7,400-test pytest step, so a red
+blocker is reported in the first ten seconds rather than after six minutes.
+
+It runs as a **separate pytest process**, through the frozen suite's own runner
+(`.swarm-loop/acceptance/run.py`), and that is not incidental: sharing one pytest session
+with `apps`/`packages`/`services` produces phantom failures that vanish in isolation. Do not
+"fix" anything here by deleting `.swarm-loop` from `norecursedirs` — that key was never what
+hid the suite (`pytest --collect-only .swarm-loop/acceptance` collects all 120 tests with it
+in place), and removing it only invites the contaminated session back.
+
+### 2. A run that skipped the datastore checks no longer exits 0
+
+Datastore-backed tests skip cleanly when the store they need is unreachable, which is the
+right behaviour per test and the wrong behaviour for the run as a whole. Measured on this
+tree with Postgres pointed at a closed port and nothing else changed:
+
+```console
+$ PROXYSHOP_PG_DSN_ADMIN=postgresql://nobody@127.0.0.1:1/postgres \
+    pytest apps/trust/tests/test_schema_grants.py -q
+22 passed, 36 skipped   # exit 0
+```
+
+36 live-Postgres least-privilege checks for C3/S7 did not run, and the shell saw success.
+Repo-wide the class is 288 `docker`-marked tests. There is no CI here, so a green local run
+is the only signal anybody gets.
+
+`verify.sh` now probes the three compose endpoints — through `proxyshop_support.reachability`,
+the same per-service prober the tests use, reading the same `PROXYSHOP_PG_DSN_ADMIN` /
+`NEO4J_URI` / `REDIS_URL` — after any step that ran python tests. When they all answer:
+
+```
+DATASTORE COVERAGE: postgres, neo4j-bolt and redis all answered — the
+                    docker-marked tests in this run really ran.
+```
+
+When one does not, the run prints a banner naming the unreachable endpoints and the size of
+the class that was skipped, and **exits 3**. The check is evaluated last, so every other step
+still runs and you get the whole picture before the refusal.
+
+**Docker is not mandatory.** `lint`, `types`, `vitest` and `acceptance` touch no datastore
+and are unaffected. `check` and `pytest` run to completion and can be finished offline:
+
+```console
+$ PROXYSHOP_ALLOW_DEGRADED=1 ./scripts/verify.sh check
+...
+DEGRADED: check — finished, but the datastore-backed checks never ran.
+          This is NOT a full pass. Do not cite it as one.
+```
+
+**There is no opt-out for `all`.** `verify.sh all` is what `make verify` runs, and its exit
+status is this repo's release signal — the frozen `build_succeeds` metric is literally
+`if make verify; then echo 1; else echo 0; fi` and reads nothing else. A banner it cannot
+parse is not a signal to it, and an opt-out living in someone's shell profile or `.env` would
+quietly restore the false green. `make verify` requires the stack; `make deps-up` provides it.
+
+This is also what now catches the relocated-`.env` case above: a `.env` pointing the suite at
+a cluster that is not there trips this gate instead of showing up as 133 skips nobody reads.
+
 ## Where each service is told about the others
 
 Nothing in this stack discovers a peer. Each service is *told*, out of its own environment,

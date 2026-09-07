@@ -58,12 +58,27 @@ export interface WhyEmptyProps {
  * carries both. This module reads an `unknown` body, so it handles the shape anyway — but it
  * is not a state this service can currently produce, and the comment says so rather than
  * implying the panel has seen one.
+ *
+ * A ZERO gets a sentence of its own, and this is now the only place in the app that prints
+ * one of these numbers, so the sentence lives here. MEASURED in
+ * `apps/exchange/src/auction/routes.py::_entries_out`, which builds this very field as
+ * `unit_price=float(offer.get("unit_price", 0.0))`: an offer that named no price is reported
+ * as `0.0`, indistinguishable on the wire from an offer that named zero. This panel cannot
+ * tell the two apart and does not pretend to — it prints the number the service sent and says
+ * what a zero there can also mean, because a bare "unit 0" reads to a buyer as free. The
+ * fallback case names the other origin of a zero: a roster row whose `list_price` the
+ * exchange could not read.
  */
-function priceLine(unit?: number, total?: number): string {
+function priceLine(unit?: number, total?: number, fallback = false): string {
   const parts: string[] = []
   if (unit !== undefined) parts.push(`unit ${unit}`)
   if (total !== undefined) parts.push(`total ${total}`)
-  return parts.length === 0 ? 'no price reported' : parts.join(', ')
+  if (parts.length === 0) return 'no price reported'
+  const line = parts.join(', ')
+  if (unit !== 0 && total !== 0) return line
+  return fallback
+    ? `${line} — a zero is also what gets reported when that roster row carried no readable list price.`
+    : `${line} — a zero is also what the exchange reports for an offer that named no price.`
 }
 
 /**
@@ -318,7 +333,7 @@ export function WhyEmpty({ record, recorded = false }: WhyEmptyProps) {
               ) : (
                 <span>fallback_reason: {entry.fallback_reason}</span>
               )}{' '}
-              <span>{priceLine(entry.unit_price, entry.total_price)}</span>
+              <span>{priceLine(entry.unit_price, entry.total_price, entry.fallback)}</span>
             </li>
           ))}
         </ul>

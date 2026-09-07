@@ -310,3 +310,158 @@ describe('the redirect, attacked as a redirect', () => {
     expect(went).toEqual([])
   })
 })
+
+/**
+ * R2's other three things on the slot — PRODUCT, PRICE, COMMITMENTS — on the screen.
+ *
+ * The exchange publishes all three and the buyer service forwards them; these tests are
+ * about the last hop, where a person actually reads them. Every assertion is on rendered
+ * text rather than on a prop, because "the component received a price" and "a shopper can
+ * see a price" have been different things on this screen before.
+ *
+ * Half of them drive a MISSING field. A fallback bid carries no commitments and a roster row
+ * with no readable list price carries no price; absence is the ordinary case, and the thing
+ * it must never render as is `undefined`, `0`, or a blank.
+ */
+const PRICED_SLOT: ShortlistSlot = {
+  ...SLOT,
+  product: { product_ref: 'prod-merino-crew', variant_ref: 'var-m-navy' },
+  price: {
+    unit_price: 78,
+    total_price: 156,
+    currency: 'USD',
+    discount: { type: 'percent', value: 10 },
+    expires_at: '2026-09-06T12:00:00Z',
+  },
+  commitments: [
+    { key: 'free_returns', value: true, label: LABEL_STORE_CONFIRMED },
+    { key: 'ships_in_days', value: 2, unit: 'days', label: LABEL_FROM_THEIR_WEBSITE },
+  ],
+}
+
+function one(slot: ShortlistSlot): Shortlist {
+  return { auction_id: 'auc-e7-3', slots: [slot] }
+}
+
+describe('what the shopper can read on a slot', () => {
+  it('shows what the thing is', () => {
+    render(<ShortlistView shortlist={one(PRICED_SLOT)} onAccept={vi.fn()} />)
+    const product = screen.getByTestId('product-bid-e7-7').textContent ?? ''
+    expect(product).toContain('prod-merino-crew')
+    expect(product).toContain('var-m-navy')
+  })
+
+  it('shows what it costs, with the currency the exchange named and no invented symbol', () => {
+    render(<ShortlistView shortlist={one(PRICED_SLOT)} onAccept={vi.fn()} />)
+    const price = screen.getByTestId('price-bid-e7-7').textContent ?? ''
+    expect(price).toContain('USD')
+    expect(price).toContain('156')
+    expect(price).toContain('78')
+    expect(price).not.toContain('$')
+    expect(price).not.toContain('undefined')
+  })
+
+  it('calls the discount a stated one, because no code exists until the buyer accepts', () => {
+    render(<ShortlistView shortlist={one(PRICED_SLOT)} onAccept={vi.fn()} />)
+    const discount = screen.getByTestId('discount-bid-e7-7').textContent ?? ''
+    expect(discount).toContain('10')
+    expect(discount.toLowerCase()).toContain('states')
+  })
+
+  it('says when the quote stops being live', () => {
+    render(<ShortlistView shortlist={one(PRICED_SLOT)} onAccept={vi.fn()} />)
+    expect(screen.getByTestId('price-expiry-bid-e7-7').textContent).toContain(
+      '2026-09-06T12:00:00Z',
+    )
+  })
+
+  it('shows every commitment with the provenance label for THAT promise', () => {
+    render(<ShortlistView shortlist={one(PRICED_SLOT)} onAccept={vi.fn()} />)
+    const list = screen.getByTestId('commitments-bid-e7-7').textContent ?? ''
+    expect(list).toContain('free returns')
+    expect(list).toContain('ships in days')
+    expect(list).toContain('2 days')
+    const labels = screen.getAllByTestId('commitment-label-bid-e7-7')
+    expect(labels.map((node) => node.textContent)).toEqual([
+      LABEL_STORE_CONFIRMED,
+      LABEL_FROM_THEIR_WEBSITE,
+    ])
+    // The distinction is what a buyer has instead of having checked themselves, so it is
+    // carried as a tone as well as a word — the same `data-tone` the slot labels use.
+    expect(labels[0]).toHaveAttribute('data-tone', 'confirmed')
+    expect(labels[1]).toHaveAttribute('data-tone', 'observed')
+  })
+
+  it('shows a boolean promise as a promise, not as the word true', () => {
+    render(<ShortlistView shortlist={one(PRICED_SLOT)} onAccept={vi.fn()} />)
+    const list = screen.getByTestId('commitments-bid-e7-7').textContent ?? ''
+    expect(list).not.toContain('true')
+  })
+})
+
+describe('a slot the exchange had nothing for', () => {
+  it('says the store quoted no price rather than showing a zero', () => {
+    render(<ShortlistView shortlist={one({ ...PRICED_SLOT, price: null })} onAccept={vi.fn()} />)
+    const price = screen.getByTestId('price-bid-e7-7').textContent ?? ''
+    expect(price).not.toContain('0')
+    expect(price).not.toContain('undefined')
+    expect(price.toLowerCase()).toContain('no price')
+    expect(screen.queryByTestId('discount-bid-e7-7')).toBeNull()
+    expect(screen.queryByTestId('price-expiry-bid-e7-7')).toBeNull()
+  })
+
+  it('says the exchange named no product rather than rendering an empty line', () => {
+    render(<ShortlistView shortlist={one({ ...PRICED_SLOT, product: null })} onAccept={vi.fn()} />)
+    const product = screen.getByTestId('product-bid-e7-7').textContent ?? ''
+    expect(product.trim().length).toBeGreaterThan(0)
+    expect(product).not.toContain('undefined')
+    expect(product.toLowerCase()).toContain('did not name')
+  })
+
+  it('says a fallback bid promised nothing, and does not read as an error', () => {
+    render(
+      <ShortlistView shortlist={one({ ...PRICED_SLOT, commitments: null })} onAccept={vi.fn()} />,
+    )
+    const commitments = screen.getByTestId('commitments-bid-e7-7').textContent ?? ''
+    expect(commitments).not.toContain('undefined')
+    expect(commitments.toLowerCase()).toContain('no commitments')
+    expect(screen.queryAllByTestId('commitment-label-bid-e7-7')).toHaveLength(0)
+  })
+
+  it('renders a slot carrying none of the three without dropping the rest of the card', () => {
+    render(<ShortlistView shortlist={SHORTLIST} onAccept={vi.fn()} />)
+    // The pre-existing fixture has no product, price or commitments on either slot: the
+    // shape every producer older than this change still sends. It must still render.
+    expect(screen.getByTestId('slot-bid-e7-7')).toBeInTheDocument()
+    expect(screen.getByTestId('product-bid-e7-7')).toBeInTheDocument()
+    expect(screen.getByTestId('price-bid-e7-7')).toBeInTheDocument()
+    expect(screen.getByLabelText('Where this came from: bid-e7-7')).toHaveTextContent(
+      'store-confirmed',
+    )
+  })
+
+  it('shows the variant only when the bid named one', () => {
+    render(
+      <ShortlistView
+        shortlist={one({ ...PRICED_SLOT, product: { product_ref: 'prod-plain' } })}
+        onAccept={vi.fn()}
+      />,
+    )
+    const product = screen.getByTestId('product-bid-e7-7').textContent ?? ''
+    expect(product).toContain('prod-plain')
+    expect(product.toLowerCase()).not.toContain('variant')
+  })
+
+  it('prints a price with no currency as the bare number and says the currency is missing', () => {
+    render(
+      <ShortlistView
+        shortlist={one({ ...PRICED_SLOT, price: { unit_price: 40, total_price: 40 } })}
+        onAccept={vi.fn()}
+      />,
+    )
+    const price = screen.getByTestId('price-bid-e7-7').textContent ?? ''
+    expect(price).toContain('40')
+    expect(price).not.toContain('USD')
+    expect(price.toLowerCase()).toContain('no currency')
+  })
+})

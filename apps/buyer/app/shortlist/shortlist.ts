@@ -41,6 +41,59 @@ export type LabelTone = 'confirmed' | 'observed' | 'unverified' | 'unknown'
 /** The trust snapshot summary the exchange attaches to a slot. */
 export type TrustSummary = Readonly<Record<string, number>>
 
+/**
+ * R2's PRODUCT: WHICH catalogue thing this slot offers. A reference, never a rendered name.
+ *
+ * The exchange holds the ref because that is what the roster and the offer agree on; a
+ * title, an image or a description belongs to a catalogue, and nothing in this app has one.
+ * So the ref is what a shopper is shown, and that is stated on the screen rather than
+ * papered over with an invented product name.
+ */
+export interface ShortlistProduct {
+  readonly product_ref: string
+  /** Absent means the bid named no variant — never "the default variant". */
+  readonly variant_ref?: string | null
+}
+
+/** The discount a slot's price states. A *stated* depth, not an entitlement: no single-use
+ * code exists until the buyer accepts (D22), which is why the screen says "states". */
+export interface SlotDiscount {
+  readonly type: string
+  readonly value: number
+}
+
+/**
+ * R2's PRICE: what this store is asking, and until when.
+ *
+ * Both prices are present together or the whole object is `null` — a unit price with no
+ * total invites comparing two different quantities as if they were one offer. `currency` is
+ * nullable and the screen never invents a symbol for a missing one.
+ */
+export interface ShortlistPrice {
+  readonly unit_price: number
+  readonly total_price: number
+  readonly currency?: string | null
+  readonly discount?: SlotDiscount | null
+  readonly expires_at?: string | null
+}
+
+/**
+ * R2's COMMITMENT: one promise a store makes beside the price, with the provenance label
+ * for THAT promise.
+ *
+ * `label` is the buyer service's addition to the published `Claim` — derived from the
+ * claim's own provenance through the one `contracts.labels` table, so it is the same
+ * source→label answer the slot's `provenance_labels` come from. It is the buyer's only
+ * signal of what has been checked, so it travels beside each promise rather than being
+ * flattened into the slot's aggregate row.
+ */
+export interface SlotCommitment {
+  readonly key: string
+  readonly value?: unknown
+  readonly unit?: string | null
+  readonly label: string
+}
+
 /** One shortlist slot, as `GET /auctions/{id}/shortlist` sends it. */
 export interface ShortlistSlot {
   readonly slot: ShortlistSlotName | string
@@ -60,6 +113,18 @@ export interface ShortlistSlot {
   /** Present only on a slot the caller enriched; the protocol type carries no auction id. */
   readonly auction_id?: string
   readonly store_domain?: string
+  /**
+   * R2's other three, and all three are OPTIONAL and NULLABLE on purpose.
+   *
+   * `null` is the exchange saying it has nothing here — a fallback bid promises nothing, a
+   * roster row with no readable list price prices nothing — and it is a different answer
+   * from `0`, from `''` and from `[]`, each of which reads to a shopper as a claim the
+   * store never made. `undefined` is a producer older than the fields. The screen renders
+   * both as the same honest sentence, and neither as a number.
+   */
+  readonly product?: ShortlistProduct | null
+  readonly price?: ShortlistPrice | null
+  readonly commitments?: readonly SlotCommitment[] | null
 }
 
 /** A whole shortlist. It collapses rather than pads: one eligible store means one slot. */

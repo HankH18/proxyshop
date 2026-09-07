@@ -25,18 +25,33 @@
  *    `"accept failed: HTTP 503"` — the status but not the reason. This wrapper reads a
  *    non-OK body off a *clone*, so the module still gets an unread stream, and the shell can
  *    show the buyer what the service actually said instead of a bare number.
- * 4. **The price join is a lookup, never a calculation.** The exchange's shortlist slot
- *    carries no price at all. The price for that slot's store is in the SAME response, in
- *    `entries[]`, so `entryForSlot` takes the store id off the slot's own `bid_ref` — which
- *    the exchange minted as `{auction_id}:{store_id}` — and looks the entry up by it.
- *    Nothing here adds, converts, rounds or currency-formats a number, and a slot with no
- *    matching entry gets no price rather than a zero.
+ * 4. **A slot's price comes off that slot, and from nowhere else.** There used to be a join
+ *    here — `entryForSlot`, which took the store id out of a slot's `bid_ref` (the exchange
+ *    mints it as `{auction_id}:{store_id}`) and looked that store up in `entries[]` on the
+ *    same response, because the shortlist slot carried no price at all. It has been deleted.
+ *    `ShortlistSlot` now carries `product`, `price` and `commitments`, so the join would be
+ *    a SECOND source of truth for the price, and a worse one: `entries[]` is the RECORDED
+ *    half of that response — what the exchange said when the auction opened — while the slot
+ *    is the LIVE half, re-fetched for this request. Two clocks, one price line. The recorded
+ *    entries are still read, and still shown, as what they are: the diagnostics in
+ *    `WhyEmpty`, where every rostered store's answer is listed whether or not it made the
+ *    shortlist. `readPrice` never adds, converts, rounds or currency-formats a number, and a
+ *    slot the exchange priced nothing for gets no price rather than a zero.
  *
  * Nothing in this module builds a checkout URL, and `discountCodeFrom` reads a query
  * parameter off a URL the exchange minted rather than reconstructing one. R3.
  */
 import { CONFIRM_PATH, assertConfirmable, type AuctionCreated, type Intent } from '../intent/intent'
-import type { Shortlist, ShortlistSlot, TrustSummary } from '../shortlist/shortlist'
+import {
+  LABEL_UNVERIFIED,
+  type Shortlist,
+  type ShortlistPrice,
+  type ShortlistProduct,
+  type ShortlistSlot,
+  type SlotCommitment,
+  type SlotDiscount,
+  type TrustSummary,
+} from '../shortlist/shortlist'
 
 /** Anything that behaves like `fetch`. Injected so tests need no network. */
 export type Fetcher = (input: string, init?: RequestInit) => Promise<Response>
@@ -570,8 +585,11 @@ export function readRanked(value: unknown): readonly RankedBid[] {
  * it — `AuctionView.auction_id` is set from the request's own path parameter, so the prefix
  * is an echo of what this page asked for, not something read back off the exchange. What it
  * does buy is real: a ref carrying some OTHER auction's id fails the match and answers
- * `undefined`, and the caller then says the price is not reported rather than pinning
- * someone else's number to a slot.
+ * `undefined`, and the page then prints the bid ref rather than naming the wrong store.
+ *
+ * It is used to NAME a store, and no longer to look one up: the price join that used to
+ * consume it is gone (see this module's docstring, point 4). Nothing downstream of this
+ * attributes a number to the store it returns.
  */
 export function storeIdFromBidRef(bidRef: unknown, auctionId: string): string | undefined {
   if (!isNonEmptyString(bidRef) || !isNonEmptyString(auctionId)) return undefined
@@ -579,34 +597,6 @@ export function storeIdFromBidRef(bidRef: unknown, auctionId: string): string | 
   if (!bidRef.startsWith(prefix)) return undefined
   const storeId = bidRef.slice(prefix.length)
   return storeId === '' ? undefined : storeId
-}
-
-/**
- * What the exchange's own report of this auction says the slot's store bid, or `undefined`.
- *
- * The shortlist slot carries NO price — measured, and stated on the page as a gap. The price
- * is in the same `GET /buyer/auctions/{auction_id}` body, one level up, in `entries[]` keyed
- * by `store_id`. This is that join and nothing more: no arithmetic, no currency, no default.
- * A slot whose store is in no entry answers `undefined`.
- *
- * TWO THINGS THE CALLER MUST NOT FORGET, because this function cannot say them itself:
- *
- * 1. The two halves come from different clocks. `shortlist` is LIVE — the buyer service
- *    fetches it from the exchange on this request — while `entries` is RECORDED, read out of
- *    the `POST /auctions` answer it kept when the auction opened. `buyer_svc/auctions/
- *    routes.py` keeps them apart on purpose. Joining them is the only way to put a price
- *    beside a slot, so this page does it and then SAYS it did, rather than letting a buyer
- *    read a recorded number as a live one.
- * 2. `.find` is first-wins. `entries` is one row per rostered store, so a duplicate
- *    `store_id` cannot come from `collect_bids` — but nothing here enforces that.
- */
-export function entryForSlot(
-  record: Pick<AuctionRecord, 'auction_id' | 'entries'>,
-  bidRef: unknown,
-): AuctionEntry | undefined {
-  const storeId = storeIdFromBidRef(bidRef, record.auction_id)
-  if (storeId === undefined) return undefined
-  return record.entries.find((entry) => entry.store_id === storeId)
 }
 
 /** The published ranking row for one bid ref, or `undefined` when the ranking has none. */
@@ -736,6 +726,89 @@ export async function loadAuction(auctionId: string, fetcher: Fetcher): Promise<
 }
 
 /**
+ * R2's PRODUCT off one served slot, or `null`.
+ *
+ * `null` for both of the service's absences and for a body this client cannot read as a
+ * product — they are one thing on a screen ("the exchange named no product"), and inventing
+ * a third state for "malformed" would put a distinction on the page that a shopper has no
+ * use for. What is NOT collapsed is a missing `product_ref`: an object with no ref names no
+ * product, so it is an absence rather than a product with a blank name.
+ */
+function readProduct(value: unknown): ShortlistProduct | null {
+  if (!isRecord(value)) return null
+  const productRef = asString(value.product_ref).trim()
+  if (!productRef) return null
+  const variantRef = asString(value.variant_ref).trim()
+  return { product_ref: productRef, variant_ref: variantRef === '' ? null : variantRef }
+}
+
+/** The discount off a served price, or `null`. A stated depth (D22), never an entitlement. */
+function readDiscount(value: unknown): SlotDiscount | null {
+  if (!isRecord(value)) return null
+  const type = asString(value.type).trim()
+  const amount = finiteNumberOrUndefined(value.value)
+  if (!type || amount === undefined) return null
+  return { type, value: amount }
+}
+
+/**
+ * R2's PRICE off one served slot, or `null`.
+ *
+ * BOTH prices or neither, and each read as a finite number — the same rule the service
+ * applies, kept here too because this is the last reader before a number reaches a shopper's
+ * eyes and `undefined` rendered into a price line is the failure this whole file exists to
+ * avoid. A half-price is `null`: it is not a cheaper offer, it is an unreadable one.
+ */
+function readPrice(value: unknown): ShortlistPrice | null {
+  if (!isRecord(value)) return null
+  const unitPrice = finiteNumberOrUndefined(value.unit_price)
+  const totalPrice = finiteNumberOrUndefined(value.total_price)
+  if (unitPrice === undefined || totalPrice === undefined) return null
+  const currency = asString(value.currency).trim()
+  const expiresAt = asString(value.expires_at).trim()
+  return {
+    unit_price: unitPrice,
+    total_price: totalPrice,
+    currency: currency === '' ? null : currency,
+    discount: readDiscount(value.discount),
+    expires_at: expiresAt === '' ? null : expiresAt,
+  }
+}
+
+/**
+ * R2's COMMITMENTS off one served slot, or `null`.
+ *
+ * `null` and `[]` are kept apart all the way from the exchange to here: `null` is "the
+ * exchange sent none", `[]` would be "this store committed to nothing", and a fallback bid
+ * is the first of those. So a body that carried no array reads as `null`, while an array
+ * that carried only unreadable rows reads as `[]` — this client saw commitments and could
+ * not read them, which is not the same as the store having made none.
+ *
+ * A row with no `key` is dropped: there is nothing in it a shopper could read. A row with no
+ * `label` is NOT dropped — it is shown as `unverified`, because a promise whose evidence
+ * this client cannot name is still a promise the store made, and the honest thing is to show
+ * it as unchecked rather than to hide it.
+ */
+function readCommitments(value: unknown): readonly SlotCommitment[] | null {
+  if (!Array.isArray(value)) return null
+  const rows: SlotCommitment[] = []
+  for (const row of value) {
+    if (!isRecord(row)) continue
+    const key = asString(row.key).trim()
+    if (!key) continue
+    const unit = asString(row.unit).trim()
+    const label = asString(row.label).trim()
+    rows.push({
+      key,
+      value: row.value,
+      unit: unit === '' ? null : unit,
+      label: label === '' ? LABEL_UNVERIFIED : label,
+    })
+  }
+  return rows
+}
+
+/**
  * Label a shortlist for display (R2). `shortlist` is forwarded verbatim — see the docstring.
  *
  * Returns the slots the service labelled, each carrying the auction id the service pushed
@@ -772,6 +845,11 @@ export async function renderShortlist(
       trust_summary: asNumberMap(row.trust_summary),
       trust_fields: asUnknownMap(row.trust_summary),
       store_domain: asString(row.store_domain),
+      // R2's other three. They come off THIS slot, from the live shortlist the service
+      // fetched for this request — not joined in from anywhere else on the page.
+      product: readProduct(row.product),
+      price: readPrice(row.price),
+      commitments: readCommitments(row.commitments),
     }),
   )
 }

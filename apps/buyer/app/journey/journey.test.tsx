@@ -64,7 +64,6 @@ import {
   describeTrust,
   detailFromBody,
   discountCodeFrom,
-  entryForSlot,
   explain,
   fallbackReasonDetail,
   fallbackReasonFamily,
@@ -189,6 +188,13 @@ const RAW_SLOT = {
   claims: [{ field: 'material', value: 'merino-wool', provenance: { source: 'store_api' } }],
 }
 
+// The shape `POST /buyer/shortlist/render` answers with. MEASURED against the devstack
+// (`apps/buyer/devstack/run.py`, three real store agents + the real exchange + the real buyer
+// service): `product`, `price` and `commitments` come back on every slot, the commitment
+// carries a `label` the buyer service derived from the claim's own provenance, and
+// `store_domain` really is `''` — `contracts.protocol.ShortlistSlot` has no such field, so a
+// slot served through the pinned model cannot carry one. The AUCTION ID here is this file's
+// (`auc-demo-1`); the run's was a uuid, and every other value below is the run's own.
 const RENDERED_SLOT = {
   slot: 'fit',
   bid_ref: BID_REF,
@@ -200,6 +206,15 @@ const RENDERED_SLOT = {
   // `TrustSummary` is `Record<string, number>`. The page must still show all three.
   trust_summary: { store_id: 'demo-woolworks', available: true, score: 0.82 },
   store_domain: '',
+  product: { product_ref: 'beanie-merino-01', variant_ref: '44352913' },
+  price: {
+    unit_price: 78.0,
+    total_price: 78.0,
+    currency: 'USD',
+    discount: null,
+    expires_at: '2026-09-05T00:15:00Z',
+  },
+  commitments: [{ key: 'free_returns', value: '30 days', unit: null, label: 'store-confirmed' }],
 }
 
 // MEASURED against `apps/buyer/devstack/demo-market.json`. All three stores carry
@@ -522,7 +537,19 @@ describe('the wire the journey owns', () => {
     expect(record.recorded_at).toBe(RECORDED_AT)
   })
 
-  it('joins a slot to its price through the store id the exchange minted into the bid ref', async () => {
+  it('names a slots store from the bid ref, and no longer joins a price out of it', async () => {
+    // WHAT CHANGED, and why this test lost half its assertions rather than being loosened.
+    // It used to assert `entryForSlot(record, BID_REF)?.unit_price === 78` — the client-side
+    // price join, which took the store id out of a bid ref and looked that store up in the
+    // RECORDED `entries[]` because the shortlist slot carried no price. The slot now carries
+    // `price`, so that join is a second source of truth for the price, on a different clock
+    // from the slot beside it, and it has been deleted along with `bidPrice` and the price
+    // list it fed. The price is asserted on where it now comes from — off the slot — in
+    // 'shows the price, product and commitments the exchange put on the slot' below.
+    //
+    // `storeIdFromBidRef` survives and is asserted unchanged: the page still uses it to NAME
+    // a store, which was never the part that had two answers. `rankedForSlot` survives too —
+    // `ranked[]` is published nowhere else, so it is not a second copy of anything.
     const { fetcher } = recorder(() => json(auctionBody([RAW_SLOT])))
 
     const record = await loadAuction(AUCTION_ID, fetcher)
@@ -531,19 +558,14 @@ describe('the wire the journey owns', () => {
     // auction id and its colon — matched as a prefix, never split on the first `:`.
     expect(storeIdFromBidRef(BID_REF, AUCTION_ID)).toBe('demo-woolworks')
     expect(storeIdFromBidRef(FASTFLEECE_BID_REF, AUCTION_ID)).toBe('demo-fastfleece')
-    // A ref some other auction minted names no store THIS page may attribute a price to.
+    // A ref some other auction minted names no store THIS page may attribute anything to.
     expect(storeIdFromBidRef('auc-other:demo-woolworks', AUCTION_ID)).toBeUndefined()
     expect(storeIdFromBidRef(`${AUCTION_ID}:`, AUCTION_ID)).toBeUndefined()
     expect(storeIdFromBidRef(undefined, AUCTION_ID)).toBeUndefined()
 
-    expect(entryForSlot(record, BID_REF)?.unit_price).toBe(78)
-    expect(entryForSlot(record, BID_REF)?.total_price).toBe(78)
-    expect(entryForSlot(record, BID_REF)?.fallback).toBe(false)
-    expect(entryForSlot(record, FASTFLEECE_BID_REF)?.unit_price).toBe(45)
-    expect(entryForSlot(record, FASTFLEECE_BID_REF)?.fallback).toBe(false)
-    // A store this auction's report never mentions: `undefined`, so the page can say so
-    // instead of showing a zero.
-    expect(entryForSlot(record, `${AUCTION_ID}:demo-nobody`)).toBeUndefined()
+    // The recorded entries are still READ — they are the diagnostics panel's subject — and
+    // are still not joined to a slot.
+    expect(record.entries.map((entry) => entry.unit_price)).toEqual([78, 72, 45])
 
     expect(rankedForSlot(record, BID_REF)?.rank_score).toBe(0.564)
     expect(rankedForSlot(record, FASTFLEECE_BID_REF)).toBeUndefined()
@@ -817,16 +839,21 @@ describe('the four beats', () => {
     expect(provenance).toContain('intent_match=0.175')
     expect(provenance).toContain('delivery_fit=0.05')
 
-    // The PRICE, which the slot itself does not carry: read out of `entries[]` by the store
-    // id in the bid ref, printed exactly as it arrived, and labelled as a bid rather than as
-    // a number this page worked out.
-    expect(screen.getByTestId(`price-${BID_REF}`).textContent).toBe(
-      'unit 78, total 78 — the price this store bid, as the exchange reported this auction.',
-    )
-    expect(screen.getByTestId('slot-prices').textContent).toContain('demo-woolworks')
-    expect(screen.getByTestId('price-provenance').textContent).toContain('entries[]')
-    // No currency symbol anywhere: the exchange named none, so this page names none.
-    expect(screen.getByTestId('slot-prices').textContent).not.toContain('$')
+    // WHAT THE THING IS, WHAT IT COSTS, WHAT THE STORE COMMITS TO — off the slot itself,
+    // which is the LIVE half of the answer, re-fetched for this page. There is no longer a
+    // price list joined out of the RECORDED `entries[]` beside it.
+    expect(screen.getByTestId(`product-${BID_REF}`).textContent).toContain('beanie-merino-01')
+    expect(screen.getByTestId(`product-${BID_REF}`).textContent).toContain('44352913')
+    const shownPrice = screen.getByTestId(`price-${BID_REF}`).textContent ?? ''
+    expect(shownPrice).toContain('USD 78')
+    // No currency SYMBOL: the exchange named a currency code and this page prints that code.
+    expect(shownPrice).not.toContain('$')
+    const commitments = screen.getByTestId(`commitments-${BID_REF}`).textContent ?? ''
+    expect(commitments).toContain('free returns')
+    expect(commitments).toContain('30 days')
+    expect(screen.getByTestId(`commitment-label-${BID_REF}`).textContent).toBe('store-confirmed')
+    expect(screen.getByTestId('price-provenance').textContent).toContain('live answer')
+    expect(screen.queryByTestId('slot-prices')).toBeNull()
 
     // The service's whole answer is one click away on the slots-present page too, not only
     // on the empty-shortlist panel — which is what makes "these prices came from entries[]"
@@ -999,11 +1026,14 @@ describe('the four beats', () => {
     expect(screen.queryByTestId('gap-pseudonym')).toBeNull()
     expect(screen.getByTestId('gap-domain').textContent).toContain('store_domain')
 
-    // The slot carries no price either, so the page says where the price it shows came from.
-    const price = screen.getByTestId('gap-price').textContent ?? ''
-    expect(price).toContain('carries no price field')
-    expect(price).toContain('entries[]')
-    expect(price).toContain('bid_ref')
+    // The price gap is CLOSED — the slot carries `price` now — so `gap-price` is gone from
+    // this list, the same way sign-in and the browser-minted pseudonym went: because the gap
+    // closed, not because the sentence softened. What is still true, and is still listed, is
+    // that the product arrives as a REFERENCE and not as a name.
+    expect(screen.queryByTestId('gap-price')).toBeNull()
+    const product = screen.getByTestId('gap-product-name').textContent ?? ''
+    expect(product).toContain('product_ref')
+    expect(product).toContain('catalogue')
 
     // And the questions came from D20's offline double, which is measurable rather than
     // asserted: `build_llm("buyer")` with LLM_PROVIDER unset returns
@@ -1028,8 +1058,9 @@ describe('the four beats', () => {
     await screen.findByTestId('permalink-url')
 
     await waitFor(() => expect(screen.getByTestId('gap-domain')).toBeInTheDocument())
-    expect(screen.getByTestId('gap-price')).toBeInTheDocument()
+    expect(screen.getByTestId('gap-product-name')).toBeInTheDocument()
     expect(screen.getByTestId('gap-model')).toBeInTheDocument()
+    expect(screen.queryByTestId('gap-price')).toBeNull()
     expect(screen.queryByTestId('gap-signin')).toBeNull()
     expect(screen.queryByTestId('gap-pseudonym')).toBeNull()
   })
@@ -1054,26 +1085,47 @@ describe('the four beats', () => {
     expect(line).not.toContain('recorded that answer')
   })
 
-  it('says a slot has no reported price rather than showing a blank or a zero', async () => {
-    // The record EXISTS — `recorded_at` is set — and simply carries no entry for this slot's
-    // store. That is the case the page must distinguish from "no record was kept at all",
-    // which gets a different sentence, and from a zero, which is a price.
-    const orphan = { ...RENDERED_SLOT, bid_ref: `${AUCTION_ID}:demo-alpine-supply` }
-    const { fetcher } = demoService({ rendered: [orphan], body: { entries: [] } })
+  it('says a store quoted no price rather than showing a blank or a zero', async () => {
+    // The ordinary case, not an error: an R10 fallback minted from a roster row that named
+    // no readable list price reaches the buyer as `price: null`, and so does a bid the
+    // exchange could not read a pair of finite numbers out of. What it must never render as
+    // is a blank, an `undefined`, or a `0` — a zero is a price, and the cheapest one there
+    // is. (This assertion used to be about a slot whose store was in no RECORDED entry,
+    // because the price came from `entries[]`; the price comes off the slot now, so the
+    // absence that matters is the slot's own.)
+    const unpriced = {
+      ...RENDERED_SLOT,
+      bid_ref: `${AUCTION_ID}:demo-alpine-supply`,
+      price: null,
+      product: null,
+      commitments: null,
+    }
+    const { fetcher } = demoService({ rendered: [unpriced], body: { entries: [] } })
     render(<Journey fetcher={fetcher} />)
 
     await walkToConfirm()
     fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
     await screen.findByLabelText('Shortlist')
 
-    const cell = screen.getByTestId(`price-${orphan.bid_ref}`)
-    expect(cell.textContent).toBe('price not reported for this slot')
+    const cell = screen.getByTestId(`price-${unpriced.bid_ref}`).textContent ?? ''
+    expect(cell).toContain('No price')
+    expect(cell).not.toContain('0')
+    expect(cell).not.toContain('undefined')
+    // The other two absences are sentences too, not empty elements.
+    expect(screen.getByTestId(`product-${unpriced.bid_ref}`).textContent).toContain(
+      'did not name a product',
+    )
+    expect(screen.getByTestId(`commitments-${unpriced.bid_ref}`).textContent).toContain(
+      'No commitments',
+    )
     // The ranking published no row for it either, and that is said rather than left blank.
-    expect(screen.getByTestId(`labels-source-${orphan.bid_ref}`).textContent).toContain(
+    expect(screen.getByTestId(`labels-source-${unpriced.bid_ref}`).textContent).toContain(
       'rank_score not published for this slot',
     )
     // The store id still names the store, so `?? slot.bid_ref` is not silently standing in.
-    expect(screen.getByTestId('slot-prices').textContent).toContain('demo-alpine-supply')
+    expect(screen.getByTestId(`labels-source-${unpriced.bid_ref}`).textContent).toContain(
+      'demo-alpine-supply',
+    )
   })
 
   it('says a slot has no reported fit score rather than printing a manufactured zero', async () => {
@@ -1095,7 +1147,7 @@ describe('the four beats', () => {
     expect(screen.getByRole('button', { name: /accept this one/i })).toBeInTheDocument()
   })
 
-  it('blames this service, not the exchange, when no record was kept to read a price from', async () => {
+  it('blames this service, not the exchange, when no record was kept to read a ranking from', async () => {
     // `_recorded_rows` answers `[]` both for an empty list and for "no record at all", and
     // `outcome_for` reads a per-process ring of 64 — a restart or a busy run empties every
     // diagnostic while the live shortlist is fine. `recorded_at` is what tells them apart, and
@@ -1115,9 +1167,11 @@ describe('the four beats', () => {
     fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
     await screen.findByLabelText('Shortlist')
 
-    const cell = screen.getByTestId(`price-${BID_REF}`).textContent ?? ''
-    expect(cell).toContain('this service kept no record of the auction')
-    expect(cell).not.toContain('price not reported for this slot')
+    // The PRICE is unaffected, and that is the point of taking it off the slot: it is the
+    // exchange's LIVE answer for this request, so an empty recorded half cannot blank it.
+    // Before this change the price came out of `entries[]` and this same case printed
+    // "no price here: this service kept no record of the auction to read one from".
+    expect(screen.getByTestId(`price-${BID_REF}`).textContent).toContain('USD 78')
 
     const rank = screen.getByTestId(`labels-source-${BID_REF}`).textContent ?? ''
     expect(rank).toContain('this service kept no record of the auction')
@@ -1129,6 +1183,13 @@ describe('the four beats', () => {
     // `float(offer.get("unit_price", 0.0))`, so an offer that named no price arrives as a
     // real 0.0. The page prints the number it was sent — it may not round it away or hide
     // it — and says what a zero there can also mean, because "unit 0" alone reads as free.
+    //
+    // The number is the same one and the sentence is the same sentence; only the ELEMENT
+    // moved. It used to be printed by `Journey`'s `bidPrice`, joining `entries[]` onto a
+    // slot. That join is gone, so the recorded entries are printed in exactly one place now
+    // — `WhyEmpty`'s "What each store answered" panel — and the gloss moved there with them,
+    // rather than being deleted along with its old renderer. The shortlist is empty here
+    // because that panel is the one this page shows when no store made a slot.
     const zeroed = [{ ...ENTRIES[0]!, unit_price: 0.0, total_price: 0.0 }]
     const { fetcher } = recorder((path, init) => {
       const signedIn = authAnswer(path, init)
@@ -1143,9 +1204,9 @@ describe('the four beats', () => {
             201,
           )
         case auctionPath(AUCTION_ID):
-          return json({ ...auctionBody([RAW_SLOT]), entries: zeroed })
+          return json({ ...auctionBody([]), entries: zeroed })
         case RENDER_PATH:
-          return json({ slots: [RENDERED_SLOT] })
+          return json({ slots: [] })
         default:
           return json({ detail: `nothing serves ${path}` }, 404)
       }
@@ -1156,11 +1217,11 @@ describe('the four beats', () => {
     fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
     await screen.findByLabelText('Shortlist')
 
-    const cell = screen.getByTestId(`price-${BID_REF}`).textContent ?? ''
+    const cell = screen.getByTestId('entry-demo-woolworks').textContent ?? ''
     expect(cell).toContain('unit 0, total 0')
     expect(cell).toContain('an offer that named no price')
-    // Not swallowed into "not reported": the service did send a number, and it is shown.
-    expect(cell).not.toBe('price not reported for this slot')
+    // Not swallowed into "no price reported": the service did send a number, and it is shown.
+    expect(cell).not.toContain('no price reported')
   })
 
   it('says the exchange has forgotten the auction, and offers nothing to accept', async () => {
@@ -1352,32 +1413,36 @@ describe('the four beats', () => {
     expect(screen.queryByTestId('no-response-gloss')).toBeNull()
   })
 
-  it('says the store did not bid rather than crediting it with a price it never bid', async () => {
+  it('says the exchange stood in for a store rather than crediting it with a bid', async () => {
     // CONSTRUCTED, and `SILENT_ENTRY`'s own comment says so: in this market all three stores
     // really bid. A `fallback: true` row is the exchange standing in for a store, and the
-    // number on it came off the caller-supplied roster row, so the sentence for it may not be
-    // the one used for a bid. The store id here is the one `SILENT_ENTRY` names, joined to
-    // the slot through the bid ref the exchange would have minted for it.
-    const silent = { ...RENDERED_SLOT, bid_ref: `${AUCTION_ID}:demo-alpine-supply` }
+    // number on it came off the caller-supplied roster row, so it may not be called a price
+    // that store quoted.
+    //
+    // WHERE THIS MOVED. The distinction used to be a sentence on the slot's price cell,
+    // written by `bidPrice` off the joined `entries[]` row. The price comes off the slot now
+    // and the slot carries no `fallback` flag — `contracts.protocol.ShortlistSlot` has none
+    // and forbids extras — so the CARD cannot make this distinction and does not pretend to;
+    // `gap-fallback` in the gaps panel says exactly that. The distinction itself is not lost:
+    // it lives in the recorded entries panel, which states `fallback` per store and glosses
+    // the reason, and that is what is asserted here.
     const { fetcher } = demoService({
-      rendered: [silent],
+      slots: [],
       body: { entries: [ENTRIES[0]!, SILENT_ENTRY, ENTRIES[2]!] },
     })
     render(<Journey fetcher={fetcher} />)
 
     await walkToConfirm()
     fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
-    await screen.findByLabelText('Shortlist')
+    await screen.findByLabelText('Why the shortlist is empty')
 
-    // The numbers are still printed — the stand-in price is a real number the service sent —
-    // and the roster row is named as where it came from, because `RosterEntry.list_price` is
-    // an assertion the caller made, not a price this store quoted.
-    const cell = screen.getByTestId(`price-${silent.bid_ref}`).textContent ?? ''
-    expect(cell).toBe(
-      'unit 72, total 72 — the store did not bid, so the exchange stood in for it at the ' +
-        'list price its roster row carried, as the exchange reported this auction.',
-    )
-    expect(cell).not.toContain('the price this store bid')
+    const row = screen.getByTestId('entry-demo-alpine-supply').textContent ?? ''
+    // The number is still printed — the stand-in price is a real number the service sent —
+    // beside the flag that says nobody bid it.
+    expect(row).toContain('unit 72, total 72')
+    expect(row).toContain('fallback: true')
+    expect(row).toContain('fallback_reason: no_response')
+    expect(screen.getByTestId('no-response-gloss').textContent).toContain('no_response')
   })
 
   it('says an entry that carried neither price reported none, and not that it has no row', async () => {
@@ -1387,25 +1452,27 @@ describe('the four beats', () => {
     // a number, and this is the page's half of that. The row EXISTS here — the verbatim
     // block below shows it — so this is a statement about the prices, not about a store the
     // report never mentioned.
+    //
+    // Asserted on the recorded entries panel, which is the one place these numbers are
+    // printed now that the slot carries its own price.
     const priceless = {
       store_id: 'demo-alpine-supply',
       tier: 1,
       fallback: false,
       fallback_reason: null,
     }
-    const slot = { ...RENDERED_SLOT, bid_ref: `${AUCTION_ID}:demo-alpine-supply` }
     const { fetcher } = demoService({
-      rendered: [slot],
+      slots: [],
       body: { entries: [ENTRIES[0]!, priceless, ENTRIES[2]!] },
     })
     render(<Journey fetcher={fetcher} />)
 
     await walkToConfirm()
     fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
-    await screen.findByLabelText('Shortlist')
+    await screen.findByLabelText('Why the shortlist is empty')
 
-    expect(screen.getByTestId(`price-${slot.bid_ref}`).textContent).toBe(
-      'price not reported for this slot',
+    expect(screen.getByTestId('entry-demo-alpine-supply').textContent).toContain(
+      'no price reported',
     )
     // The record really does carry a row for this store — so the sentence above came from
     // the "entry present, neither price" path and not from "no entry at all".

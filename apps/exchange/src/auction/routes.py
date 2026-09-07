@@ -61,9 +61,12 @@ from pydantic import BaseModel, Field
 from .. import redact_addresses
 from ..eligibility import StaticSellerEligibility
 from ..orchestration import solicit_bids
+from ..ranking.candidates import mint_bid_id
 from ..ranking.serving import (
     catalog_of,
+    claim_dimensions_of,
     rank_auction,
+    record_shown,
     registered_domains_of,
     shortlist_store,
     trust_snapshot_of,
@@ -71,6 +74,7 @@ from ..ranking.serving import (
 )
 from ..retrieval.clusters import assign_cluster, configure_clusters, intent_clusters_of
 from ..retrieval.criteria import MAX_CANDIDATE_LIMIT
+from ..retrieval.fit import FitLogError, annotate_bid_payload
 from .fanout import parallel_fan_out
 from .state import AuctionStateMachine, UnknownAuction
 
@@ -1162,6 +1166,90 @@ def collected_bid_records(
     return records
 
 
+#: The frozen ledger kind one collected bid is receipted under.
+BID_PLACED_KIND = "bid_placed"
+
+
+def record_bid_receipts(
+    recorder: Any,
+    entries: Sequence[Any],
+    *,
+    auction_id: str,
+) -> list[dict[str, Any]]:
+    """Announce one ``bid_placed`` event per bid this auction collected.
+
+    **The exchange kept no record that a bid was ever received.** D34 freezes ``bid_placed``
+    with the payload ``(bid_ref, store_id, offer)``, and the only producer of it in the tree
+    was :func:`~..retrieval.fit.record_fit_scores` — a retrieval-side helper whose own
+    docstring says, in as many words, that "when the auction layer starts emitting its own bid
+    receipts, this call site must become :func:`~..retrieval.fit.annotate_bid_payload` on that
+    event instead". This is that emission, and the annotation is applied here, so fit reaches
+    the ledger on the receipt the auction was going to write rather than on a second event.
+
+    Emitted AFTER ``solicit_bids`` and BEFORE the close, which is the order the ledger should
+    read in: ``auction_opened``, one receipt per collected bid, ``auction_closed``. One per
+    :class:`~.collect.BidEntry` — so a store the exchange represented at its list price (R10)
+    gets a receipt too, because a manufactured offer is still an offer the buyer can be shown,
+    and an absence here would make a silent store indistinguishable from a store that was
+    never solicited (T-086 reads exactly that absence).
+
+    ``bid_ref`` is :func:`~..ranking.candidates.mint_bid_id`'s spelling, imported rather than
+    restated: the receipt has to name the same reference ``ranked``, ``excluded``,
+    ``shortlist.slots`` and the accept door use, and a receipt nobody can join to a bid is not
+    a receipt.
+
+    The OFFER is projected through :func:`_recordable_offer` — the same whitelist and the same
+    three budgets the bid BOOK is held to, and for the same measured reason: the offer is a
+    document the STORE wrote, bounded only by ``composition.MAX_BID_RESPONSE_BYTES`` (256 KiB),
+    and one event per roster row means a fat reply is multiplied by the roster. A bid whose
+    offer does not fit is receipted with an empty one rather than dropped — the exchange really
+    did collect a bid and really did decline to hold its offer, and losing the receipt would
+    lose the more important half of that sentence.
+
+    The payload is **not** re-validated here and does not need to be: the three published keys
+    are the three this function writes, unconditionally, and ``annotate_bid_payload`` validates
+    the annotated form itself (that is what its ``FitLogError`` is). ``build_event`` still
+    refuses a kind outside the frozen vocabulary.
+
+    Returns:
+        The events emitted, in entry order. Never raises: the audit trail must not be able to
+        fail a live auction, so a fit annotation that cannot be built (an offer naming no
+        ``product_ref``) falls back to the plain published payload.
+    """
+    record = getattr(recorder, "record", None)
+    if not callable(record):
+        return []
+    events: list[dict[str, Any]] = []
+    for entry in entries:
+        store_id = str(getattr(entry, "store_id", "") or "")
+        bid = getattr(entry, "bid", None)
+        offer = _recordable_offer(bid.get("offer") if isinstance(bid, Mapping) else None)
+        payload: dict[str, Any] = {
+            "bid_ref": mint_bid_id(auction_id, store_id),
+            "store_id": store_id,
+            "offer": {} if offer is None else offer,
+        }
+        try:
+            # No assessments: a served auction is handed a ROSTER and queries no index, so the
+            # fit block records `fit_unavailable` rather than a number nobody measured. Same
+            # reasoning as `ranking.features`' `intent_match`.
+            payload = annotate_bid_payload(payload, (), auction_id=auction_id)
+        except FitLogError:
+            # The annotation needs `offer.product_ref` to join an assessment to. A roster row
+            # that named no product, or an offer too large to hold, has none — the receipt is
+            # still written, without the fit block.
+            pass
+        events.append(
+            record(
+                BID_PLACED_KIND,
+                auction_id=auction_id,
+                store_id=store_id,
+                payload=payload,
+            )
+        )
+    return events
+
+
 def _entries_out(entries: Sequence[Any]) -> list[AuctionEntryOut]:
     out: list[AuctionEntryOut] = []
     for entry in entries:
@@ -1484,6 +1572,12 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
         started_at=started_at,
     )
 
+    # The receipts for what the fan-out actually collected, written BEFORE the close so the
+    # ledger reads in the order the auction happened. See `record_bid_receipts` for why the
+    # exchange writing its own is what lets `retrieval.fit`'s `record_fit_scores` stop being
+    # the only producer of the kind in the tree.
+    record_bid_receipts(machine.ledger, result.entries, auction_id=auction_id)
+
     # ONE clock reading, used for the close transition and for the ranking's `now`. Two
     # readings would let an offer expire between the auction closing and the ranking that
     # decides whether it was live at the close, which is not a question two instants can
@@ -1508,9 +1602,23 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
             for entry in roster
             if entry.get("product_ref") is not None
         },
+        # The ranker's own audit trail. Every verdict it mints for this auction is announced
+        # as `claim_verified` on the way through, instead of being consumed by the filters and
+        # dropped when the request ends — see `ranking.verification.attest_candidate_claims`,
+        # including for why an exchange with no `claim_dimensions` wired announces nothing.
+        recorder=machine.ledger,
+        claim_dimensions=claim_dimensions_of(request.app),
     )
     shortlist = ranking["shortlist"]
     shortlist_store(request.app).put(auction_id, shortlist, now=closed_at)
+    # What this auction PUT IN FRONT OF THE BUYER, recorded where it is stored so the ledger
+    # names the same object `GET /auctions/{auction_id}/shortlist` will serve.
+    record_shown(
+        machine.ledger,
+        ranking.get("projected") or (),
+        auction_id=auction_id,
+        shortlist=shortlist,
+    )
 
     # The bids this auction collected, kept where the accept route reads them. Without this
     # line `POST /auctions` renders `entries` and then DROPS the `BidEntry` list, so

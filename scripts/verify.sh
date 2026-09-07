@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # The single verification entrypoint. Orchestrator-owned (T-000), frozen.
 #
-#   ./scripts/verify.sh all      full pipeline (per-wave integration gate, stack up)
-#   ./scripts/verify.sh check    per-ticket gate: RUNS docker tests (they skip per-service
-#                                when their datastore is down); excludes needs_model only
-#   ./scripts/verify.sh lint     ruff + import-linter + the banned-reset gate + eslint
-#   ./scripts/verify.sh types    mypy + tsc -b
-#   ./scripts/verify.sh pytest   python tests only
-#   ./scripts/verify.sh vitest   typescript tests only
+#   ./scripts/verify.sh all         full pipeline (per-wave integration gate, stack up)
+#   ./scripts/verify.sh check       per-ticket gate: RUNS docker tests (they skip per-service
+#                                   when their datastore is down); excludes needs_model only
+#   ./scripts/verify.sh lint        ruff + import-linter + the banned-reset gate + eslint
+#   ./scripts/verify.sh types       mypy + tsc -b
+#   ./scripts/verify.sh pytest      python tests only
+#   ./scripts/verify.sh vitest      typescript tests only
+#   ./scripts/verify.sh acceptance  the FROZEN acceptance suite — including the three S8
+#                                   release blockers — in its own pytest process
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT"
 export PATH="$ROOT/.venv/bin:$ROOT/node_modules/.bin:$PATH"
@@ -40,6 +42,12 @@ assert tuple(int(x) for x in pytest.__version__.split('.')[:2]) >= (8,2), pytest
 PY
 
 STEP="${1:-all}"
+
+# Set by datastore_coverage_gate below. `DEGRADED` demotes the final line from OK to
+# DEGRADED; `COVERAGE_FAIL` makes the whole run exit non-zero AFTER every other step has
+# had its say, so a developer gets the full picture and the gate still refuses.
+DEGRADED=0
+COVERAGE_FAIL=0
 
 # Collecting ZERO tests is a FAILURE here, not a warning.
 #
@@ -106,6 +114,236 @@ run_pytest() {
   return "$rc"
 }
 
+# ---------------------------------------------------------------------------------------
+# The FROZEN acceptance suite (.swarm-loop/acceptance), and with it the three S8 RELEASE
+# BLOCKERS. Until this function existed, `make verify` never ran one of them: the build's
+# headline metric was measured over a file set that excluded the tests deciding whether the
+# release is allowed.
+#
+# WHY THE SUITE WAS INVISIBLE — corrected, because the briefing that prompted this named the
+# wrong cause and the correction changed the fix. It is NOT `norecursedirs` in
+# pyproject.toml. Measured on this tree, with that key untouched:
+#     pytest --collect-only -q .swarm-loop/acceptance   ->  120 tests collected
+# `norecursedirs` only stops pytest DESCENDING into a directory it is walking; it never
+# suppresses a path named on the command line. What actually kept the suite out of the gate
+# is simpler and total: `testpaths` lists packages/apps/services/pixel/fixtures/e2e/docs/
+# proxyshop_support and nothing else, and no step in this file ever named the acceptance
+# directory. Measured: `pytest --collect-only -q` collects 7391 tests and exactly 0 of the
+# node ids are under .swarm-loop.
+#
+# So `norecursedirs` STAYS as it is. Un-excluding `.swarm-loop` would not have fixed
+# anything (the directory is not in `testpaths` either) and would have re-opened the
+# cross-contamination hazard below the moment anyone ran `pytest .` at the repo root.
+#
+# WHY ITS OWN PROCESS: sharing one pytest session with apps/packages/services produces
+# phantom failures that vanish in isolation. Appending the directory to the pytest step
+# above is therefore the wrong repair even though it would "collect" the suite.
+#
+# WHY THROUGH `.swarm-loop/acceptance/run.py` RATHER THAN A SECOND `pytest` LINE HERE: that
+# runner is the frozen suite's own harness and it already establishes exactly the isolation
+# this needs — a separate interpreter, PYTEST_DISABLE_PLUGIN_AUTOLOAD=1, `-o addopts=`,
+# `-o pythonpath=`, pinned discovery patterns and `--confcutdir` so the project's root
+# conftest never loads. Re-spelling those flags here would be a second copy of frozen logic,
+# free to drift from the copy the frozen METRICS use. Going through run.py means the number
+# this gate refuses on is the same number `acceptance_pass_rate` reports.
+#
+# `--json` is used because it is the only mode that yields per-test detail: run.py's number
+# modes print a bare figure with `--tb=no`, which would tell a developer that something is
+# red without telling them what. One suite run (~2 s) gives both the verdict and the names.
+run_acceptance() {
+  local report rc
+  report="$(mktemp)"
+  set +e
+  python .swarm-loop/acceptance/run.py --json >/dev/null 2>"$report"
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    echo "FATAL: the frozen acceptance suite could not run (run.py exit $rc)." >&2
+    echo "       run.py prints NOTHING on stdout when the suite cannot run, by design, so" >&2
+    echo "       this is never allowed to degrade into a quiet pass. Its stderr:" >&2
+    sed 's/^/       /' "$report" >&2
+    rm -f "$report"
+    return 1
+  fi
+  set +e
+  ACCEPTANCE_JSON="$report" python - <<'PY'
+import json
+import os
+import sys
+
+# The three S8 release blockers are asserted BY ID, as a minimum set. Requiring only "every
+# blocker-marked test passed" would go green if somebody stripped the marker off one, which
+# is precisely the shape of tamper this gate exists to catch. A fourth blocker, should one
+# ever be frozen in, is covered automatically by the all-records rule below.
+REQUIRED_BLOCKERS = ("S8-1", "S8-2", "S8-3")
+
+raw = open(os.environ["ACCEPTANCE_JSON"]).read()
+start = raw.find("[")
+try:
+    if start < 0:
+        raise ValueError("the runner's stderr carried no JSON array")
+    records = json.loads(raw[start:])
+except ValueError as exc:
+    print(f"FATAL: the acceptance report was unreadable: {exc}", file=sys.stderr)
+    print(raw[-2000:], file=sys.stderr)
+    sys.exit(1)
+
+if not isinstance(records, list) or not records:
+    print("FATAL: the acceptance report listed no tests.", file=sys.stderr)
+    sys.exit(1)
+
+total = len(records)
+red = [r for r in records if r.get("outcome") != "passed"]
+by_blocker: dict[str, list[dict]] = {}
+for record in records:
+    marker = str(record.get("blocker") or "")
+    if marker:
+        by_blocker.setdefault(marker, []).append(record)
+
+problems: list[str] = []
+for blocker in REQUIRED_BLOCKERS:
+    guards = by_blocker.get(blocker)
+    if not guards:
+        problems.append(
+            f"S8 release blocker {blocker} is marked on NO acceptance test. The gate that "
+            f"decides whether the release is allowed has been unmarked, not fixed."
+        )
+        continue
+    failing = [g for g in guards if g.get("outcome") != "passed"]
+    if failing:
+        for guard in failing:
+            problems.append(
+                f"S8 release blocker {blocker} is {guard.get('outcome')}: {guard['nodeid']}"
+            )
+
+if red:
+    problems.append(f"{len(red)} of {total} acceptance criteria are not passing:")
+    for record in red:
+        problems.append(
+            f"    [{record.get('epic', '?')} {record.get('ticket', '?')}]"
+            f" {record['nodeid']} -> {record.get('outcome')}"
+            f" ({record.get('phase_failed') or 'call'})"
+        )
+        detail = (record.get("longrepr") or "").strip().splitlines()
+        if detail:
+            problems.append(f"        {detail[-1][:160]}")
+
+blockers_seen = ", ".join(sorted(by_blocker)) or "NONE"
+print(
+    f"ACCEPTANCE: {total - len(red)}/{total} frozen criteria passing; "
+    f"S8 release blockers present: {blockers_seen}"
+)
+if problems:
+    print("FATAL: the frozen acceptance suite is not green.", file=sys.stderr)
+    for line in problems:
+        print(f"  {line}", file=sys.stderr)
+    sys.exit(1)
+PY
+  rc=$?
+  set -e
+  rm -f "$report"
+  return "$rc"
+}
+
+# ---------------------------------------------------------------------------------------
+# DATASTORE COVERAGE. T-117's rule — "a green gate must NAME what it did not run" — carried
+# one step further: a run in which a whole CLASS of checks never executed must not exit 0.
+#
+# THE DEFECT, measured on this tree with Postgres pointed at a closed port and nothing else
+# changed:
+#     PROXYSHOP_PG_DSN_ADMIN=postgresql://nobody@127.0.0.1:1/postgres \
+#       pytest apps/trust/tests/test_schema_grants.py -q
+#     ->  22 passed, 36 skipped   (exit 0)
+# 36 live-Postgres least-privilege checks never ran and the shell saw success. There is no
+# CI in this repo, so a green local run is the only signal anybody gets; "22 passed" is
+# indistinguishable from a full pass unless something says otherwise. Repo-wide the class is
+# 288 `docker`-marked tests out of 7402 collected.
+#
+# THE MECHANISM, and why this shape and not a quieter one:
+#   * A BANNER ALONE IS NOT ENOUGH. The only automated reader of this pipeline is the frozen
+#     `build_succeeds` metric, `if PROXYSHOP_WORKER=0 make verify; then echo 1; else echo 0;
+#     fi`. It reads an exit status and nothing else. Text it cannot parse is not a signal to
+#     it, so for `all` the exit status is the only place the fact can live.
+#   * DOCKER IS NOT MADE MANDATORY. An offline developer keeps every step: `lint`, `types`,
+#     `vitest` and `acceptance` never touch a datastore at all, and `check` / `pytest` still
+#     run to completion — they simply refuse to call themselves clean unless the developer
+#     says, per run, that they know a class was skipped (PROXYSHOP_ALLOW_DEGRADED=1). Even
+#     then the last line reads DEGRADED rather than OK, so the transcript cannot be mistaken
+#     for a full pass by a human either.
+#   * THE OPT-OUT IS REFUSED FOR `all`. `verify.sh all` IS the release claim, and an opt-out
+#     that survives in somebody's shell profile or `.env` would quietly restore exactly the
+#     false green this closes — with no CI anywhere to notice. `all` requires the stack.
+#   * IT IS EVALUATED LAST, not at the point of detection, so the remaining steps still run
+#     and the developer gets the whole picture before the refusal.
+#
+# This also catches the relocated-`.env` case docs/deploy.md records: the probes read the
+# same PROXYSHOP_PG_DSN_ADMIN / NEO4J_URI / REDIS_URL that the tests do, so a `.env` pointing
+# the suite at a stack that is not there now stops the gate instead of showing up as 133
+# skips nobody reads.
+datastore_coverage_gate() {
+  local down rc docker_tests
+  set +e
+  down="$(python - <<'PY'
+import sys
+
+from proxyshop_support import reachability
+
+missing = reachability.unreachable(timeout=2.0)
+for endpoint in missing:
+    print(endpoint)
+sys.exit(1 if missing else 0)
+PY
+)"
+  rc=$?
+  set -e
+  if [ "$rc" -eq 0 ]; then
+    echo "DATASTORE COVERAGE: postgres, neo4j-bolt and redis all answered — the"
+    echo "                    docker-marked tests in this run really ran."
+    return 0
+  fi
+  # Only paid for on the failure path. Collection never connects to anything, so this is
+  # accurate with the stack down and costs nothing when it is up.
+  set +e
+  docker_tests="$(pytest --collect-only -q -m docker 2>/dev/null \
+                  | grep -Eo '^[0-9]+/[0-9]+ tests collected' | grep -Eo '^[0-9]+')"
+  set -e
+  echo "" >&2
+  echo "=====================================================================" >&2
+  echo "DATASTORE COVERAGE FAILURE — a whole class of checks never executed." >&2
+  echo "  unreachable: $(printf '%s' "$down" | tr '\n' ' ')" >&2
+  # Deliberately NOT phrased as "N tests were skipped". The count is the size of the
+  # docker-marked CLASS in this collection; which members skipped depends on which service
+  # each one needs, and T-109 made that per-service on purpose. Overstating it here would be
+  # the same sin in the other direction — a number that sounds measured and is not.
+  echo "  ${docker_tests:-<uncounted>} docker-marked tests are in this run's collection; every one" >&2
+  echo "  that needs an endpoint listed above SKIPPED instead of running. Among them the" >&2
+  echo "  live-Postgres least-privilege checks for C3/S7: with the datastore down they" >&2
+  echo "  report 'skipped', the run reports 'passed', and nothing has been proven about" >&2
+  echo "  database grants. That is the exact shape of a green build that means nothing." >&2
+  echo "  Bring the stack up with:  make deps-up" >&2
+  if [ "$STEP" = all ]; then
+    echo "  There is no opt-out for 'all'. That step's exit status IS this repo's release" >&2
+    echo "  signal (the frozen build_succeeds metric reads nothing else), so it requires" >&2
+    echo "  the datastores. Offline you still have every other step: lint, types, vitest" >&2
+    echo "  and acceptance touch no datastore at all, and check/pytest finish under" >&2
+    echo "  PROXYSHOP_ALLOW_DEGRADED=1." >&2
+    echo "=====================================================================" >&2
+    return 1
+  fi
+  if [ "${PROXYSHOP_ALLOW_DEGRADED:-}" = 1 ]; then
+    echo "  PROXYSHOP_ALLOW_DEGRADED=1 is set, so this run is allowed to finish. It will" >&2
+    echo "  report DEGRADED rather than OK, and it is NOT evidence about anything above." >&2
+    echo "=====================================================================" >&2
+    DEGRADED=1
+    return 0
+  fi
+  echo "  If you are working offline and know this: re-run with" >&2
+  echo "      PROXYSHOP_ALLOW_DEGRADED=1 ./scripts/verify.sh $STEP" >&2
+  echo "  which finishes and reports DEGRADED instead of OK." >&2
+  echo "=====================================================================" >&2
+  return 1
+}
+
 # D39: the global Redis reset is banned repo-wide. Implementation notes, both load-bearing:
 #  * The needle is assembled from two halves so this gate does not flag itself, and so a
 #    doc that legitimately discusses the ban is not what fails the build — only a real
@@ -148,6 +386,10 @@ fi
 if [ "$STEP" = all ] || [ "$STEP" = check ] || [ "$STEP" = types ]; then
   mypy; npx --no-install tsc -b --pretty false
 fi
+# The frozen acceptance suite runs BEFORE the ~7400-test pytest step, deliberately. It is
+# the release-blocker gate and it costs about two seconds, so a red S8 blocker is reported
+# in the first ten seconds of the pipeline instead of after six minutes of unrelated tests.
+if [ "$STEP" = all ] || [ "$STEP" = check ] || [ "$STEP" = acceptance ]; then run_acceptance; fi
 if [ "$STEP" = all ] || [ "$STEP" = pytest ]; then run_pytest -q -m "not needs_model"; fi
 # T-117 acceptance 1 + 3 (ESC-005): `docker` is NO LONGER deselected here.
 #
@@ -216,5 +458,18 @@ run_vitest() {
   return "$rc"
 }
 if [ "$STEP" = all ] || [ "$STEP" = vitest ]; then run_vitest; fi
+# Only steps that actually ran python tests can have silently skipped a datastore class.
+if [ "$STEP" = all ] || [ "$STEP" = check ] || [ "$STEP" = pytest ]; then datastore_coverage_gate || COVERAGE_FAIL=1; fi
 if [ "$STEP" = all ] || [ "$STEP" = check ]; then python scripts/check_verify_contracts.py; fi
+if [ "$COVERAGE_FAIL" -ne 0 ]; then
+  echo "FAILED: $STEP — the datastore-backed checks never executed (see above)." >&2
+  echo "        Every other step's result stands; this one class was not measured, and a" >&2
+  echo "        run that did not measure it is not allowed to exit 0." >&2
+  exit 3
+fi
+if [ "$DEGRADED" -ne 0 ]; then
+  echo "DEGRADED: $STEP — finished, but the datastore-backed checks never ran."
+  echo "          This is NOT a full pass. Do not cite it as one."
+  exit 0
+fi
 echo "OK: $STEP"

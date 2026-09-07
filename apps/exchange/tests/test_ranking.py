@@ -1141,7 +1141,7 @@ def test_the_served_verified_claim_ratio_is_the_exchanges_own_verdicts():
         "store-a": _served_bid(
             "store-a",
             100.0,
-            claims=[_served_claim("capacity_l", 35), _served_claim("colour", "black")],
+            claims=[_served_claim("capacity_l", 35), _served_claim("capacity_l", 12)],
         ),
         "store-b": _served_bid(
             "store-b",
@@ -1157,14 +1157,91 @@ def test_the_served_verified_claim_ratio_is_the_exchanges_own_verdicts():
     )
     features = _served_features(body)
 
-    # `colour` is not in the catalogue snapshot at all -> `unsupported`, which is not
-    # verified: 1 of 2.
+    # The second claim says 12 where the catalogue says 35 -> `contradicted`, which is a
+    # verdict this exchange reached and is not `verified`: 1 of 2.
+    #
+    # It used to be a claim on `colour`, a key the snapshot does not carry at all, and that
+    # case has MOVED rather than been dropped: an unanswerable key is now `ambiguous` and out
+    # of the denominator entirely, which
+    # `test_a_claim_this_catalogue_could_never_decide_is_undecided_rather_than_a_cost` pins.
+    # The number here is unchanged because the property here is unchanged — a claim the
+    # exchange DECIDED against still costs the store.
     assert features["store-a"]["verified_claim_ratio"] == pytest.approx(0.5)
     # Both claims agree with the catalogue: 2 of 2.
     assert features["store-b"]["verified_claim_ratio"] == pytest.approx(1.0)
     # No claims at all: absent, therefore the published neutral.
     assert features["store-c"]["verified_claim_ratio"] == pytest.approx(0.5)
     assert _served_order(body)[0] == "store-b", body["ranked"]
+
+
+def test_a_claim_this_catalogue_could_never_decide_is_undecided_rather_than_a_cost():
+    """A key the exchange's catalogue does not carry is the EXCHANGE's gap, not the store's.
+
+    `claim_verification.verify` answers `unsupported` for a key its snapshot has no reading
+    for — "the catalog snapshot records no 'policy_action' for this product" — and
+    `verified_claim_ratio` counts every `unsupported` verdict in its denominator as a cost the
+    store bears. That is right for a key the catalogue DOES carry and does not support. It is
+    wrong for a key no catalogue was ever going to carry, and the S1 demo is the measurement:
+    the hosted store agent publishes a `policy_action` claim — its own record of the discount
+    decision, which `trust.scoring.claim_dimension` already refuses to route to any trust
+    dimension because it is not an assertion about the product or the offer — so a store making
+    three true, checked, VERIFIED claims plus that one audit record read 0.75, while the store
+    that answered with nothing at all read the published neutral 0.5. Three such records beside
+    three true claims would have read exactly 0.5, and a fourth would have put an entirely
+    honest store BELOW silence. Being richer than silence was a cost.
+
+    `claim_verification.verifier.catalog_keys` is the permitted key vocabulary and
+    `exchange.ranking.verification.UNDECIDABLE_KEY_REASON` is the verdict: outside the
+    vocabulary is `ambiguous`, R18's "no comparison was made", which the ratio leaves out of
+    the denominator and which R19 still refuses to let satisfy a hard constraint.
+
+    Four stores, one term, all four bidding the same price against the same list price so
+    `price_value` cannot separate them:
+
+    * `store-a` — one true claim and one on a key the catalogue cannot decide;
+    * `store-b` — the same true claim alone (the control the rule must make `store-a` equal to);
+    * `store-c` — no claims at all, the published neutral;
+    * `store-d` — one claim the catalogue CONTRADICTS, which must still cost.
+    """
+    bids = {
+        "store-a": _served_bid(
+            "store-a",
+            100.0,
+            claims=[_served_claim("capacity_l", 35), _served_claim("policy_action", "intro_5pct")],
+        ),
+        "store-b": _served_bid("store-b", 100.0, claims=[_served_claim("capacity_l", 35)]),
+        "store-c": _served_bid("store-c", 100.0, claims=[]),
+        "store-d": _served_bid("store-d", 100.0, claims=[_served_claim("capacity_l", 12)]),
+    }
+    stores = ("store-a", "store-b", "store-c", "store-d")
+    body = _served_post(
+        _served_app(bids, stores=stores),
+        _served_roster(dict.fromkeys(stores, 100.0)),
+        intent={"intent_id": "intent-1", "cluster_id": "cluster-1", "hard_constraints": []},
+    )
+    features = _served_features(body)
+    scores = _served_scores(body)
+
+    assert features["store-a"]["verified_claim_ratio"] == pytest.approx(1.0), (
+        "a claim on a key this exchange's catalogue cannot decide was counted against the "
+        "store, so publishing an audit record beside true claims cost it rank"
+    )
+    assert features["store-b"]["verified_claim_ratio"] == pytest.approx(1.0)
+    # THE ordering this rule exists for: saying more, truthfully, is never worse than silence.
+    assert scores["store-a"] > scores["store-c"], (
+        f"a store making a true, verified claim plus one this exchange could not check scored "
+        f"{scores['store-a']} against {scores['store-c']} for a store that said nothing at all"
+    )
+    assert scores["store-a"] == pytest.approx(scores["store-b"]), (
+        "an unanswerable claim moved the score, so it is not undecided — it is being graded"
+    )
+    # …and the positive control, without which the rule above is indistinguishable from
+    # "nothing a store says is ever counted against it": a claim the catalogue DECIDED
+    # against still costs, and still costs exactly what it did before.
+    assert features["store-d"]["verified_claim_ratio"] == pytest.approx(0.0)
+    assert scores["store-d"] < scores["store-c"], (
+        "a store the catalogue contradicted is no longer scored below one that said nothing"
+    )
 
 
 def test_an_exchange_with_no_catalog_does_not_rank_the_store_that_bid_below_the_one_that_did_not():

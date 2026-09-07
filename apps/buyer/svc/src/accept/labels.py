@@ -31,10 +31,38 @@ An empty result is never returned. A slot with no provenance at all reads to a b
 slot with nothing to hide, which is the opposite of the truth, so it renders as
 ``("unverified",)`` — the same answer ``exchange.ranking.shortlist.provenance_labels``
 gives for the same input.
+
+PRODUCT, PRICE and COMMITMENTS
+------------------------------
+R2 asks one slot to show five things, and for a long time this module carried two of them.
+``contracts.protocol.ShortlistSlot`` now publishes ``product``, ``price`` and
+``commitments``, and :class:`LabelledSlot` carries all three through to the screen — because
+a shopper choosing between four stores is choosing on what the thing is and what it costs,
+and a slot that arrives with a price and leaves without one is this hop deciding they may
+not see it.
+
+**Absence is the ordinary case and it is never a zero.** An R10 fallback bid promises
+nothing and a roster row with no readable list price prices nothing, so all three fields are
+``None`` when the exchange sent nothing readable — never ``0.0``, which is the cheapest
+number there is and would win every comparison a shopper makes, and never ``[]``, which
+reads as "this store committed to nothing" rather than "the exchange sent no commitments".
+The readable/unreadable split here is deliberately the *same* one
+``exchange.ranking.serving`` applies when it publishes the fields, so a slot that made it
+through that producer is never nulled again here: the round trip is lossless for honest
+traffic, and the checks exist for the shortlist a *caller* posts to ``/render``, which is an
+arbitrary ``dict`` this package does not own.
+
+Commitments get a label EACH. The slot's ``provenance_labels`` are one aggregate line, and a
+shopper deciding whether to believe "free returns" needs the label for that promise rather
+than for the slot. It is derived here — from :func:`provenance_label`, i.e. from the same
+``contracts.labels`` table the exchange labels slots with, so there is still exactly one
+source→label answer in the tree. That is not the D30 exception: D30 is about the *slot's*
+``provenance_labels``, which are still rendered verbatim and never re-derived.
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -59,12 +87,17 @@ __all__ = [
     "LABEL_STORE_CONFIRMED",
     "LABEL_UNVERIFIED",
     "PROVENANCE_BUYER_LABELS",
+    "LabelledCommitment",
     "LabelledSlot",
+    "commitment_label",
     "label_slot",
     "labels_for_claims",
     "provenance_label",
     "render_shortlist",
+    "slot_commitments",
     "slot_labels",
+    "slot_price",
+    "slot_product",
 ]
 
 #: :attr:`LabelledSlot.labels_source` — the exchange sent these labels and we printed them.
@@ -128,6 +161,161 @@ def labels_for_claims(claims: Any) -> tuple[str, ...]:
 
 
 @dataclass(frozen=True, slots=True)
+class LabelledCommitment:
+    """One promise a store made, and how well evidenced it is (R2).
+
+    ``label`` is the buyer's only signal of what has been checked, so it is beside the
+    promise rather than aggregated with the slot's. ``value`` is the store's own — a bool, a
+    number, a string, whatever the claim carried — and is reduced to plain data rather than
+    coerced to text, so a renderer can tell ``True`` from the string ``"true"``.
+    """
+
+    key: str
+    value: Any
+    unit: str | None
+    label: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"key": self.key, "value": self.value, "unit": self.unit, "label": self.label}
+
+
+def commitment_label(claim: Any) -> str:
+    """The buyer-facing provenance label for ONE commitment.
+
+    :func:`provenance_label` for a source the tree publishes a label for. A commitment whose
+    provenance is missing, or whose source is not one of the seven pinned in
+    ``ProvenanceSource``, reads as :data:`LABEL_UNVERIFIED` — the promise is still shown,
+    and it is shown as something nobody has checked.
+
+    The alternative, dropping it the way :func:`labels_for_claims` drops it from the
+    *aggregate*, is wrong here for a reason worth stating: an aggregate that omits an
+    unreadable claim is merely incomplete, but a commitment list that omits one hides a
+    promise the store made. Never a default of "store-confirmed", which is the failure R2
+    exists to prevent.
+    """
+    provenance = read(claim, "provenance", None)
+    if provenance is None:
+        return LABEL_UNVERIFIED
+    try:
+        return provenance_label(provenance)
+    except UnknownProvenanceSource:
+        return LABEL_UNVERIFIED
+
+
+def _finite(value: Any) -> float | None:
+    """``value`` as a finite float, or ``None``.
+
+    ``bool`` is excluded before the conversion because ``True`` is not one dollar, and NaN is
+    excluded after it because NaN compares false against every bound a caller might apply.
+    The same two rules ``exchange.ranking.serving._finite`` applies when it publishes the
+    price, so what that producer served reads back identically here.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def slot_product(slot: Any) -> dict[str, Any] | None:
+    """R2's PRODUCT for one slot: WHICH catalogue thing this slot is offering.
+
+    A reference, never a rendered name — the exchange does not own the catalogue and neither
+    does this package, so nothing here invents a title. ``None`` when the slot names no
+    readable ``product_ref``: an R10 fallback minted from a roster row that named none
+    carries ``{"product_ref": None}``, and publishing that would put the word ``null`` on a
+    screen where the product goes.
+    """
+    product = read(slot, "product", None)
+    if product is None:
+        return None
+    product_ref = text(read(product, "product_ref", None))
+    if not product_ref:
+        return None
+    rendered: dict[str, Any] = {"product_ref": product_ref}
+    variant_ref = text(read(product, "variant_ref", None))
+    rendered["variant_ref"] = variant_ref or None
+    return rendered
+
+
+def _slot_discount(price: Any) -> Any:
+    """The published discount, or ``None``. A STATED depth, never an entitlement (D22).
+
+    Forwarded whole rather than rebuilt, because it is the exchange's published ``Discount``
+    and re-spelling it here would drop whatever a later schema adds to it. What is checked is
+    only that it is readable *as* one: a discount with no type, or with a value that is not a
+    finite number, is not shown at all rather than shown as ``undefined% off``.
+    """
+    discount = read(price, "discount", None)
+    if discount is None:
+        return None
+    if not text(read(discount, "type", None)):
+        return None
+    if _finite(read(discount, "value", None)) is None:
+        return None
+    rendered = plain(discount)
+    return rendered if isinstance(rendered, dict) else None
+
+
+def slot_price(slot: Any) -> dict[str, Any] | None:
+    """R2's PRICE for one slot: what this store is asking, and until when.
+
+    ``None`` unless BOTH prices read as finite numbers. That is the contract's own rule and
+    its reason is a shopper's: a slot showing a unit price with no total invites comparing
+    two different quantities as if they were the same offer, and a slot whose missing price
+    defaulted to ``0`` would beat every real one.
+    """
+    price = read(slot, "price", None)
+    if price is None:
+        return None
+    unit_price = _finite(read(price, "unit_price", None))
+    total_price = _finite(read(price, "total_price", None))
+    if unit_price is None or total_price is None:
+        return None
+    rendered: dict[str, Any] = {"unit_price": unit_price, "total_price": total_price}
+    rendered["currency"] = text(read(price, "currency", None)) or None
+    rendered["discount"] = _slot_discount(price)
+    rendered["expires_at"] = text(read(price, "expires_at", None)) or None
+    return rendered
+
+
+def slot_commitments(slot: Any) -> list[LabelledCommitment] | None:
+    """R2's COMMITMENTS for one slot: what this store promises beside the price.
+
+    ``None`` — not ``[]`` — when the exchange sent none, because an empty list on a screen
+    reads as "this store committed to nothing" and the honest answer is "the exchange sent
+    nothing here". A fallback bid is exactly that case and it is the common one.
+
+    A commitment with no readable ``key`` is dropped, and only that one: there is nothing a
+    shopper could read in it, and dropping its neighbours because of it would hide promises
+    that were fine. Everything that survives carries :func:`commitment_label`.
+    """
+    raw = read(slot, "commitments", None)
+    if raw is None or isinstance(raw, (str, bytes)):
+        return None
+    try:
+        rows = list(raw)
+    except TypeError:
+        return None
+    commitments: list[LabelledCommitment] = []
+    for row in rows:
+        key = text(read(row, "key", None))
+        if not key:
+            continue
+        commitments.append(
+            LabelledCommitment(
+                key=key,
+                value=plain(read(row, "value", None)),
+                unit=text(read(row, "unit", None)) or None,
+                label=commitment_label(row),
+            )
+        )
+    return commitments or None
+
+
+@dataclass(frozen=True, slots=True)
 class LabelledSlot:
     """One shortlist slot, ready to render (R2).
 
@@ -149,6 +337,12 @@ class LabelledSlot:
     labels_source: str
     trust_summary: dict[str, Any] = field(default_factory=dict)
     store_domain: str = ""
+    #: WHICH catalogue thing (:func:`slot_product`), or ``None``. A reference, not a title.
+    product: dict[str, Any] | None = None
+    #: What the store is asking (:func:`slot_price`), or ``None``. Never a zero.
+    price: dict[str, Any] | None = None
+    #: What it promises beside the price (:func:`slot_commitments`), or ``None`` — not ``[]``.
+    commitments: tuple[LabelledCommitment, ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """The published, buyer-facing projection of this slot."""
@@ -161,6 +355,15 @@ class LabelledSlot:
             "labels_source": self.labels_source,
             "trust_summary": dict(self.trust_summary),
             "store_domain": self.store_domain,
+            "product": dict(self.product) if self.product is not None else None,
+            "price": dict(self.price) if self.price is not None else None,
+            # `None` and `[]` are different answers and stay different all the way to the
+            # screen: nothing sent, versus a store that committed to nothing.
+            "commitments": (
+                [commitment.to_dict() for commitment in self.commitments]
+                if self.commitments is not None
+                else None
+            ),
         }
 
     def __getitem__(self, key: str) -> Any:
@@ -204,6 +407,7 @@ def label_slot(slot: Any, *, auction_id: str = "", derive: bool = True) -> Label
     except (TypeError, ValueError):
         fit_score = 0.0
     summary = plain(read(slot, "trust_summary", None))
+    commitments = slot_commitments(slot)
     return LabelledSlot(
         slot=text(read(slot, "slot", "")),
         bid_ref=text(read(slot, "bid_ref", "")),
@@ -213,6 +417,9 @@ def label_slot(slot: Any, *, auction_id: str = "", derive: bool = True) -> Label
         labels_source=source,
         trust_summary=summary if isinstance(summary, dict) else {},
         store_domain=text(read(slot, "store_domain", "")),
+        product=slot_product(slot),
+        price=slot_price(slot),
+        commitments=None if commitments is None else tuple(commitments),
     )
 
 

@@ -68,6 +68,7 @@ __all__ = [
     "AcceptResponse",
     "RenderBody",
     "RenderResponse",
+    "RenderedCommitment",
     "RenderedSlot",
     "router",
 ]
@@ -92,8 +93,28 @@ class RenderBody(BaseModel):
     derive_missing_labels: StrictBool = True
 
 
+class RenderedCommitment(BaseModel):
+    """One promise a store made, and the buyer-facing label for that promise alone."""
+
+    key: str
+    value: Any = None
+    unit: str | None = None
+    label: str
+
+
 class RenderedSlot(BaseModel):
-    """One slot, labelled for display."""
+    """One slot, labelled for display.
+
+    **Every field the screen needs must be declared here.** ``BaseModel``'s ``extra`` defaults
+    to ``ignore``, so ``RenderedSlot(**slot.to_dict())`` silently drops a key this class does
+    not name — which is how ``product``, ``price`` and ``commitments`` could have been added
+    to :class:`~buyer_svc.accept.labels.LabelledSlot`, dumped by its ``to_dict``, and still
+    never reached a buyer. No exception, no 500, just a field missing from the body.
+
+    The three are ``None`` when the exchange sent nothing readable, and ``None`` is a
+    different answer from ``0`` or ``[]`` in every one of them. See
+    :mod:`buyer_svc.accept.labels`.
+    """
 
     slot: str
     bid_ref: str
@@ -103,6 +124,13 @@ class RenderedSlot(BaseModel):
     labels_source: str
     trust_summary: dict[str, Any] = Field(default_factory=dict)
     store_domain: str = ""
+    #: R2's PRODUCT: ``{"product_ref": ..., "variant_ref": ... | null}``, or ``null``.
+    product: dict[str, Any] | None = None
+    #: R2's PRICE: both prices, the currency, the stated discount and the expiry, or ``null``.
+    price: dict[str, Any] | None = None
+    #: R2's COMMITMENTS. ``null`` means the exchange sent none — never an empty list, which
+    #: would read to a shopper as a store that promised nothing.
+    commitments: list[RenderedCommitment] | None = None
 
 
 class RenderResponse(BaseModel):

@@ -413,7 +413,14 @@ def accept_pixel_event(payload: Any, *, now: datetime | None = None) -> PixelObs
 
 
 class PixelInbox:
-    """A bounded log of accepted observations. The seam E6's reconciler replaces."""
+    """A bounded log of accepted observations, for an operator and a fresh-process probe.
+
+    **Not the reconciler's input, and it never was.** ``merchant_svc.composition.
+    publish_pixel_observation`` appends a ``checkout_pixel`` row to ``apps/trust``'s chained
+    ledger and that is what ``trust.reconcile.engine`` folds; this ring is process memory in
+    a different deployable. The route fills it BEFORE it publishes, so the record is here
+    whether or not the write landed — which is precisely when an operator wants it.
+    """
 
     def __init__(self, capacity: int = 512) -> None:
         self.capacity = max(1, capacity)

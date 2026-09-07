@@ -48,19 +48,30 @@ from typing import Any
 
 from claim_verification import attribute_value, verify
 
+# `catalog_keys` comes from the SUBMODULE rather than from the package root, which is where its
+# two siblings above come from. `claim_verification/__init__.py` re-exports a fixed list and is
+# outside this change's file scope; the name is published in `verifier.__all__` either way, and
+# the submodule path is the same module object the root would have handed back.
+from claim_verification.verifier import catalog_keys
+from contracts.ledger import validate_ledger_payload
+
 from .attestation import attest_claim
 from .filters import read
 
 __all__ = [
+    "CLAIM_VERIFIED_KIND",
     "DEFAULT_VERIFIER_VERSION",
     "MAX_CATALOG_PRODUCTS",
     "NoCatalogSnapshots",
     "StaticCatalogSnapshots",
     "STORE_SUPPLIED_FIELDS_DROPPED",
+    "UNDECIDABLE_KEY_REASON",
     "attest_candidate_claims",
     "attest_candidates",
     "catalog_unit",
     "catalog_units",
+    "claim_ref_for",
+    "claim_verdict_payload",
     "declared_attributes",
     "snapshot_for",
 ]
@@ -69,6 +80,52 @@ __all__ = [
 #: every attestation and covered by its MAC, so a comparator change invalidates the verdicts
 #: minted under the previous one rather than silently inheriting them.
 DEFAULT_VERIFIER_VERSION = "verification/1.0.0"
+
+#: The frozen ledger kind a minted verdict is announced under. Named rather than spelled at
+#: the emission, so the one string this module writes to the ledger has an address.
+CLAIM_VERIFIED_KIND = "claim_verified"
+
+#: What this exchange attests for a claim whose KEY its catalogue could never decide.
+#:
+#: **The distinction this reason draws is the difference between a cost the store bears and a
+#: gap the exchange has, and it was measured on this repository's own S1 fixture.**
+#: :func:`claim_verification.verify` answers ``unsupported`` for a key the snapshot does not
+#: carry — "the catalog snapshot records no ``'policy_action'`` for this product" — and
+#: :func:`exchange.ranking.features.verified_claim_ratio` counts every ``unsupported`` verdict
+#: in its denominator, deliberately: an unevidenced claim is a cost and silence is only
+#: neutral. That rule is right for a key the catalogue DOES carry and does not support. It is
+#: wrong for a key no catalogue was ever going to carry, and the S1 run is the proof::
+#:
+#:     store-northroast  list_price   -> verified
+#:                       in_stock     -> verified
+#:                       units_left   -> verified
+#:                       policy_action-> unsupported   ("records no 'policy_action'")
+#:     verified_claim_ratio 3/4 = 0.75; the SILENT store's fallback, carrying no claims at
+#:     all, reads the published neutral 0.5.
+#:
+#: ``policy_action`` is the hosted agent's own record of its discount decision.
+#: ``trust.scoring.claim_dimension`` already refuses to route it to any trust dimension,
+#: because it is not an assertion about the product or the offer — the exchange grading it as
+#: a failed product claim is the same category error one layer up. Three true, checked,
+#: verified claims plus that one audit record scored 0.75; three of them plus three such
+#: records would have scored 0.50, which is exactly what saying NOTHING scores, and a fourth
+#: would put an entirely honest store below silence. Being richer than silence was a cost.
+#:
+#: So a claim outside :func:`claim_verification.verifier.catalog_keys`' vocabulary is
+#: ``ambiguous`` — R18's "no comparison was made" — which :func:`verified_claim_ratio` leaves
+#: out of the denominator entirely, and which R19 still refuses to let satisfy a hard
+#: constraint. **Nothing a bidder writes buys anything with it**: an ambiguous claim scores
+#: exactly as if it had not been presented, which is what the store could have had for free by
+#: staying quiet, so spraying unknown keys is worth precisely nothing. Only a verdict this
+#: exchange minted itself still moves the feature upward.
+#:
+#: Narrow on purpose: applied ONLY where the verifier already said ``unsupported`` AND the key
+#: is outside the vocabulary. A ``contradicted`` verdict, and an ``unsupported`` one on a key
+#: the catalogue does carry (a stale reading, say), are untouched and still cost the store.
+UNDECIDABLE_KEY_REASON = (
+    "this exchange's catalogue records no such key for this product, so the claim could not be "
+    "checked either way; it is undecided rather than unsupported"
+)
 
 #: The most products one store's snapshot may hold when it arrives in a deployment document.
 #:
@@ -481,6 +538,22 @@ def catalog_unit(snapshot: Any, product_ref: Any, key: Any) -> Any:
     return catalog_units(snapshot, product_ref).get(str(key))
 
 
+def claim_ref_for(store_id: Any, index: int) -> str:
+    """This exchange's reference for one claim of one candidate: ``{store_id}#{position}``.
+
+    POSITIONAL, and minted rather than read, for the reason :data:`STORE_SUPPLIED_FIELDS_DROPPED`
+    gives about ``claim_ref``: :func:`verify` answers one result per claim in input order and
+    the results are zipped back by position, so two claims sharing a store-supplied reference
+    is a way to make that zip lie.
+
+    Named here because two callers need the same spelling — :func:`_pitch_claims`, which puts
+    it in front of the verifier, and :func:`attest_candidate_claims`, which writes it into the
+    ledger beside the verdict. A ledger reference that did not match the one the verdict was decided under would
+    be an audit trail pointing at nothing.
+    """
+    return f"{store_id}#{int(index)}"
+
+
 def _pitch_claims(claims: Iterable[Any], store_id: str) -> list[dict[str, Any]]:
     """The store's claims as the verifier's input, with the fields it must not read removed.
 
@@ -492,7 +565,7 @@ def _pitch_claims(claims: Iterable[Any], store_id: str) -> list[dict[str, Any]]:
         entry = {
             key: value for key, value in source.items() if key not in STORE_SUPPLIED_FIELDS_DROPPED
         }
-        entry["claim_ref"] = f"{store_id}#{index}"
+        entry["claim_ref"] = claim_ref_for(store_id, index)
         out.append(entry)
     return out
 
@@ -504,6 +577,9 @@ def attest_candidate_claims(
     product_ref: Any = None,
     catalog: Any = None,
     verifier_version: Any = DEFAULT_VERIFIER_VERSION,
+    recorder: Any = None,
+    auction_id: str = "",
+    dimensions: Any = None,
 ) -> list[dict[str, Any]]:
     """One candidate's claims, each carrying this exchange's attested verdict.
 
@@ -520,6 +596,38 @@ def attest_candidate_claims(
     The verifier is handed the snapshot :func:`_narrowed_to` the product this auction names —
     every claim gets the same answer it would have got from the whole document, and the walk
     the bidder was able to multiply is gone. See that function for the measurement.
+
+    **A claim on a key this catalogue could never decide is attested ``ambiguous``, not
+    ``unsupported``** — see :data:`UNDECIDABLE_KEY_REASON` for the measurement that made the
+    distinction load-bearing, and :func:`claim_verification.verifier.catalog_keys` for the
+    vocabulary it is decided against.
+
+    **Every verdict minted here is ANNOUNCED to the ledger as ``claim_verified``, and until
+    this the exchange threw all of them away.** The ranker already ran the verifier over every
+    candidate's claims against its own catalogue; :mod:`.filters` read the answers to decide
+    hard constraints and :mod:`.features` counted them into ``verified_claim_ratio``, and then
+    the request ended and no record survived that any claim had ever been checked. D34 freezes
+    ``claim_verified`` for exactly that statement and, on the auction path, nothing wrote it.
+
+    It happens HERE rather than in a second pass over the attested candidates, and the reason
+    is which ``claim_type`` gets recorded. The dimension is routed from the type
+    :func:`claim_verification.verify` DERIVED — declared type, else the published key table,
+    else where in the catalogue the evidence was found — and that answer exists only inside
+    this function: :func:`attest_claim` carries the AUTHOR's ``claim_type`` through onto the
+    candidate, and a second pass could read only that one. Routing a trust dimension off a
+    field the bidder wrote is the shape of defect this module exists to close, and typing a
+    claim by where its evidence lives is the verifier's published rule.
+
+    Emission is OPT-IN and this function is unchanged without it: ``recorder=None`` (the
+    default, and every existing caller) writes nothing and the function stays the pure one its
+    tests drive. ``dimensions`` is the injected ``claim_type -> trust dimension`` routing — see
+    :func:`claim_verdict_payload` for why a missing or refusing routing announces nothing
+    rather than guessing, and :func:`~.serving.claim_dimensions_of` for why the exchange
+    cannot hold that table itself.
+
+    The recorder's contract is :class:`~..auction.ledger.LedgerRecorder`'s: a sink that is down
+    is recorded in ``failures`` rather than raised, so the audit trail cannot fail a live
+    auction.
     """
     presented = list(claims or ())
     if not presented:
@@ -558,14 +666,46 @@ def attest_candidate_claims(
     unchecked_reason = (
         "the exchange holds no catalog snapshot for this store, so its claims could not be checked"
     )
+    # The keys this snapshot can decide a claim on AT ALL, resolved once per candidate for the
+    # same reason `catalog_units` is: it walks the product row, and how many claims a bid
+    # carries is the bidder's choice. Empty when no snapshot resolved, which changes nothing —
+    # every claim is already `ambiguous` on that branch.
+    decidable = catalog_keys(snapshot, product_ref) if snapshot is not None else frozenset()
+    # A recorder is one thing: something with `record`. Checked once rather than per claim,
+    # and the emission below calls `recorder.record(CLAIM_VERIFIED_KIND, ...)` in full rather
+    # than through a local alias — the S1 suite's producer search reads this call shape, and a
+    # producer a gate cannot see is a producer that can be deleted without anything going red.
+    announcing = recorder is not None and callable(getattr(recorder, "record", None))
 
     attested: list[dict[str, Any]] = []
     for index, claim in enumerate(presented):
         result = results[index] if index < len(results) else {}
+        status = read(result, "status", "ambiguous")
+        reason = read(result, "reason", None) or (
+            None if snapshot is not None else unchecked_reason
+        )
+        if status == "unsupported" and str(read(claim, "key", None)) not in decidable:
+            # This exchange's own gap, not the store's. See `UNDECIDABLE_KEY_REASON`.
+            status, reason = "ambiguous", UNDECIDABLE_KEY_REASON
+        if announcing:
+            payload = claim_verdict_payload(
+                claim_ref_for(store_id, index),
+                status,
+                # The VERIFIER's type, not the author's. See this function's docstring.
+                read(result, "claim_type", None),
+                dimensions,
+            )
+            if payload is not None:
+                recorder.record(
+                    CLAIM_VERIFIED_KIND,
+                    auction_id=auction_id,
+                    store_id=store_id,
+                    payload=payload,
+                )
         attested.append(
             attest_claim(
                 claim,
-                status=read(result, "status", "ambiguous"),
+                status=status,
                 # The exchange's unit, out of the exchange's catalogue — never the claim's own.
                 # `verify()` is not given the claim's unit at all (a bare claimed number is
                 # read in the CATALOGUE's unit), so attesting the author's string would put
@@ -578,11 +718,55 @@ def attest_candidate_claims(
                 catalog_snapshot=snapshot_id,
                 evidence_refs=read(result, "evidence_refs", ()) or (),
                 confidence=read(result, "confidence", None),
-                reason=read(result, "reason", None)
-                or (None if snapshot is not None else unchecked_reason),
+                reason=reason,
             )
         )
     return attested
+
+
+def claim_verdict_payload(
+    claim_ref: str,
+    status: Any,
+    claim_type: Any,
+    dimensions: Any,
+) -> dict[str, Any] | None:
+    """One verdict as the frozen ``claim_verified`` payload, or ``None`` to announce nothing.
+
+    Pure, and separate from the emission so the rule can be tested without a ledger.
+    ``None`` — never a partial payload and never a guessed dimension — for every way the
+    announcement cannot be made honestly: no routing wired, a routing that refuses this claim
+    type (it raises :class:`trust.scoring.UnmappedClaimType` or answers nothing), or a payload
+    that does not satisfy the published shape.
+
+    ``dimensions`` accepts a callable ``claim_type -> dimension`` (``trust.scoring.
+    claim_dimension`` is one) or a plain mapping.
+    """
+    if dimensions is None:
+        return None
+    resolve = dimensions if callable(dimensions) else getattr(dimensions, "get", None)
+    if not callable(resolve):
+        return None
+    try:
+        dim = resolve(claim_type)
+    except Exception:
+        # `claim_dimension` RAISES for a type the approved table does not map — deliberately,
+        # so nobody defaults one. Refusing to announce is this side of that same rule.
+        return None
+    if not dim:
+        return None
+    payload = {
+        "claim_ref": str(claim_ref),
+        "status": str(status),
+        "dim": str(dim),
+        # Beyond the three pinned keys, and deliberately: it is what the dimension was routed
+        # FROM, so a reader can re-derive `dim` from the same approved table instead of taking
+        # this producer's word for it. `apps/trust`'s own `POST /claims/verifications` puts the
+        # same key on the same kind, so the two producers of `claim_verified` agree on the
+        # spelling rather than each publishing half a record.
+        "claim_type": None if claim_type is None else str(claim_type),
+    }
+    # Validated at the PRODUCING boundary, the way every other emitter in this tree does it.
+    return None if validate_ledger_payload(CLAIM_VERIFIED_KIND, payload) else payload
 
 
 def attest_candidates(
@@ -591,6 +775,9 @@ def attest_candidates(
     catalog: Any = None,
     verifier_version: Any = DEFAULT_VERIFIER_VERSION,
     product_refs: Mapping[str, Any] | None = None,
+    recorder: Any = None,
+    auction_id: str = "",
+    dimensions: Any = None,
 ) -> list[dict[str, Any]]:
     """Every candidate of one auction, with its claims replaced by attested ones.
 
@@ -623,6 +810,9 @@ def attest_candidates(
             product_ref=product_ref,
             catalog=catalog,
             verifier_version=verifier_version,
+            recorder=recorder,
+            auction_id=auction_id,
+            dimensions=dimensions,
         )
         out.append(record)
     return out

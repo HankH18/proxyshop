@@ -50,6 +50,7 @@ __all__ = [
     "KEY_CLAIM_TYPES",
     "STATUS_CONFIDENCE",
     "VerificationInputError",
+    "catalog_keys",
     "verification_key",
     "verify",
 ]
@@ -163,6 +164,58 @@ def _lookup_attribute(product: Any, key: Any) -> tuple[Any, str | None]:
     if isinstance(product, Mapping) and name in product:
         return product[name], "product"
     return None, None
+
+
+def catalog_keys(catalog_snapshot: Any, product_ref: Any = None) -> frozenset[str]:
+    """The keys this snapshot can decide a claim on at all — the permitted key vocabulary.
+
+    Not "the keys the catalog happens to carry": the keys :func:`_lookup_attribute` can
+    RESOLVE, which is the same three places in the same order — the typed ``attributes`` block,
+    the ``offer`` block, and the product record itself. Written beside that lookup, and
+    deliberately not in the consumer that needed it, because a vocabulary that disagrees with
+    the resolution rule is worse than no vocabulary: it would report a key as decidable that
+    :func:`verify` then answers ``unsupported`` for, or the reverse.
+
+    Product resolution is :func:`_resolve_product`'s own, reused rather than restated — with a
+    ``product_ref``, the first row carrying it; with none, the single product if there is
+    exactly one. **Empty when the snapshot resolves to no product**, which is the honest answer
+    and the important one: an ``ambiguous`` snapshot (several products, none named) and one
+    holding no row for the product an auction is about can both decide NOTHING, and reporting
+    an empty vocabulary is what lets a caller tell that apart from a claim the catalog does
+    carry and disagrees with.
+
+    Why it exists, measured on this repository's own S1 fixture. ``verify`` answers
+    ``unsupported`` — "the catalog snapshot records no ``'policy_action'`` for this product" —
+    for a key no catalogue was ever going to carry, and :func:`exchange.ranking.features.
+    verified_claim_ratio` counts every ``unsupported`` verdict in its denominator as a cost the
+    store bears. The hosted store agent publishes a ``policy_action`` claim: its own record of
+    the discount decision, which ``trust.scoring.claim_dimension`` already refuses to route to
+    any trust dimension because it is not an assertion about the product or the offer. So a
+    store making THREE true, checked, verified claims plus that one audit record read
+    ``verified_claim_ratio`` 0.75, while a store that answered with nothing at all read the
+    published neutral 0.5 — and a store publishing three pieces of telemetry beside three true
+    claims would have read 0.5 exactly, and less with a fourth. Being richer than silence was
+    a cost. This function is the vocabulary that separates "the catalog says otherwise" (the
+    store's cost, kept) from "this catalog was never able to answer that" (the exchange's own
+    unknown), so only the first is charged.
+
+    Returns:
+        A frozen set of key spellings, compared the same way :func:`_lookup_attribute`
+        compares them: ``str(key)``, no normalisation. Empty is a real answer.
+    """
+    products = _products(catalog_snapshot)
+    if not products:
+        return frozenset()
+    product, unresolved = _resolve_product({}, {"product_ref": product_ref}, products)
+    if unresolved is not None or product is None:
+        return frozenset()
+    keys: set[str] = set()
+    for block in (_get(product, "attributes"), _get(product, "offer")):
+        if isinstance(block, Mapping):
+            keys.update(str(name) for name in block)
+    if isinstance(product, Mapping):
+        keys.update(str(name) for name in product)
+    return frozenset(keys)
 
 
 def _instant(value: Any) -> datetime | None:

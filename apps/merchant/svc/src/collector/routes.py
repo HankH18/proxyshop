@@ -20,6 +20,7 @@ import logging
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
 from merchant_svc.collector import PIXEL_INBOX, PixelEventRejected, accept_pixel_event
+from merchant_svc.composition import publish_pixel_observation
 from merchant_svc.http_limits import BodyTooLarge, read_capped_body
 from merchant_svc.install.config import COLLECTOR_PATH
 
@@ -51,8 +52,13 @@ def _token_digest(token: str) -> str:
 
     A digest keeps the only thing an operator actually needs from this line — whether two
     incomplete beacons are the same checkout — at a width no input can change. The token
-    itself is in :data:`~merchant_svc.collector.PIXEL_INBOX`, which is where E6's reconciler
-    reads it from; the log was never that reader.
+    itself goes two places, neither of which is this log line: the in-process
+    :data:`~merchant_svc.collector.PIXEL_INBOX`, which an operator and a fresh-process probe
+    read, and the ``checkout_pixel`` row
+    :func:`~merchant_svc.composition.publish_pixel_observation` appends to E6's chained
+    ledger, which is where the reconciler actually reads it from. This docstring used to
+    name the ring as that reader; it was not one, and saying so was how the missing hop
+    stayed invisible.
 
     ``surrogatepass`` because a JSON string may decode to a lone surrogate (``"\ud800"``),
     which plain UTF-8 encoding refuses with ``UnicodeEncodeError``. Hashing has to be total
@@ -97,7 +103,16 @@ async def collect_pixel_event(request: Request) -> Response:
             content={"error": "rejected", "detail": str(exc), "refused_fields": len(exc.fields)},
         )
 
+    # THE RING FIRST, AND ALWAYS. Its readback is what a fresh-process hardening probe reads
+    # and what this file's own tests assert on, and it is the only record that survives a
+    # trust service that is not answering. Publishing first would lose the observation on
+    # exactly the occasions an operator needs it most.
     PIXEL_INBOX.record(observation)
+    # ...and then the chained ledger, which is where R4's reconciler actually reads. This
+    # call cannot raise: see `composition.publish_pixel_observation`. It answers False for a
+    # lost write and the 204 below is unconditional either way, because this route is a
+    # beacon from a shopper's checkout page and a trust outage is not that shopper's problem.
+    publish_pixel_observation(observation)
     if observation.gaps:
         # R4: a lossy beacon is recorded WITH its gap, never completed by inference.
         # The digest, never the token: see `_token_digest`. `gaps` is drawn from the fixed

@@ -19,9 +19,13 @@ store agents bid                        ``store_agent.runtime.bid`` — the real
                                         per hosted store, answering the real ``BidRequest``
 a silent store is represented           ``exchange.auction.collect_bids``' R10 list-price fallback,
                                         manufactured by the exchange because the store said nothing
-claims verified                         ``claim_verification.verify`` over each hosted pitch
-                                        against that store's catalogue snapshot
-ranking + shortlist                     ``exchange.ranking.rank`` -> ``shortlist.slots``
+claims verified                         ``exchange.ranking.verification`` inside the route —
+                                        ``claim_verification.verify`` against the catalogue
+                                        snapshot the EXCHANGE was wired with, attested with a
+                                        MAC, and announced as ``claim_verified``
+ranking + shortlist                     ``exchange.ranking.serving.rank_auction`` inside the
+                                        route -> the served ``shortlist.slots``, read back
+                                        through ``GET /auctions/{auction_id}/shortlist``
 acceptance + code + redirect            ``exchange.accept.accept`` in ``CHECKOUT_MODE=redirect``,
                                         i.e. ``SimulatedRedirectProvider``, with the registered-
                                         domain guard armed
@@ -35,28 +39,43 @@ reconciliation                          ``trust.reconcile.reconcile``
 trust projection                        ``trust.scoring.score`` + ``trust.snapshot.build_snapshot``
 ======================================  ==========================================================
 
-What this module has to emit itself, and why
---------------------------------------------
-Three ledger kinds in the S1 chain have **no production emitter anywhere in the tree**, so
-the run constructs those events from the real upstream data rather than pretending they
-appeared. Measured on this tree, not assumed:
+What this module used to do instead, and no longer does
+------------------------------------------------------
+This driver used to carry a SECOND IMPLEMENTATION of the auction's own middle, and the S1
+suite was green because of it rather than in spite of it. It built the ranker's candidate
+list itself (``_candidates``), ran ``claim_verification.verify`` itself over a pitch and a
+snapshot it held privately, called ``rank()`` itself, and emitted ``bid_placed``, ``shown``
+and ``claim_verified`` itself. Meanwhile the SERVED ``POST /auctions`` it had just driven
+answered ``ranked: 0, excluded: 3, shortlist.slots: 0`` — every candidate refused
+``blacklist_unreadable`` and ``off_domain_checkout``, because this module computed the
+catalogue, the trust snapshot and the domain registry and then never bound any of them into
+the app. Roughly 150 lines that made a spine which served nobody look healthy.
 
-* ``shown`` — nothing under ``apps/``, ``packages/`` or ``services/`` writes it; only the
-  frozen payload shape ``("bid_ref", "slot")`` exists. Emitted here once per real shortlist
-  slot that ``rank()`` produced.
+All of it is gone. The collaborators are bound with ``configure_ranking`` and
+``configure_auctions``; the exchange verifies, ranks, shortlists and writes its own ledger
+legs; and what is left here READS what the served request produced — the response body, the
+published ``GET /auctions/{auction_id}/shortlist``, the exchange's own bid book, and the
+``claim_verified`` events its ranker wrote.
+
+What this module still has to emit itself, and why
+--------------------------------------------------
+ONE ledger kind in the S1 chain still has **no production emitter anywhere in the tree**, so
+the run constructs it from the real upstream data rather than pretending it appeared:
+
 * ``checkout_pixel`` — ``pixel/src/`` holds a real Web Pixel extension, but nothing on a
-  served path turns its beacon into a ledger event and
-  ``merchant_svc.collector`` stops at a ``PixelObservation``. Emitted here from the observation
-  the real collector parsed out of the stub's real beacon.
-* ``claim_verified`` — ``claim_verification.verify`` produces verdicts and nothing turns a
-  verdict into a ledger event. Emitted here, one per verdict, with the dimension
-  ``trust.scoring.claim_dimension`` routes it to.
+  served path turns its beacon into a ledger event and ``merchant_svc.collector`` stops at a
+  ``PixelObservation``. Emitted here from the observation the real collector parsed out of the
+  stub's real beacon.
 
-The behaviour is never faked — the shortlist really is what the ranker built, the beacon
-really was posted by the stub, the verdicts really came from the verifier. It is the ledger
-*write* that has no owner yet. ``e2e/test_s1_flow.py`` states this again as a test, so the
-gap is visible in the suite's output rather than only in this docstring, and so the exact
-multiset turns red the moment a production emitter lands and starts double-counting.
+The behaviour is never faked — the beacon really was posted by the stub. It is the ledger
+*write* that has no owner yet. ``e2e/test_s1_flow.py`` states this again as a test, so the gap
+is visible in the suite's output rather than only in this docstring, and so the exact multiset
+turns red the moment a production emitter lands and starts double-counting.
+
+Two seams the run still bridges, each reported as a defect by a test of its own:
+``authorized_checkout_token`` (the exchange's ``checkout_token`` and the merchant's are
+unrelated values) and ``_trust_snapshot``'s ``["stores"]`` unwrap (the exchange has no client
+for trust's served ``GET /snapshot``).
 """
 
 from __future__ import annotations
@@ -71,10 +90,11 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RUN_FIXTURE = Path(__file__).resolve().parent / "run.json"
 
-#: A fixed epoch for the whole run. Nothing here reads a wall clock: the ranker is handed
-#: ``config["now"]``, the auction its deadline, and trust its ``as_of``.
+#: A fixed epoch for the whole run. Nothing here reads a wall clock: the auction is handed its
+#: deadline and trust its ``as_of``. (``T_FUTURE`` is gone with ``_candidates``: the offer's
+#: expiry is now the hosted agent's own ``respond_by``-derived instant, or the exchange's own
+#: for a fallback, rather than a far-future constant this module wrote onto every candidate.)
 T_NOW = 1_700_000_000.0
-T_FUTURE = 2_000_000_000.0
 AS_OF = "2026-01-01T00:00:00Z"
 
 #: The stub's seeded product. The VARIANT is not pinned here: the run reads it out of the
@@ -144,6 +164,16 @@ def _envelope(store: dict[str, Any], cluster_id: str) -> dict[str, Any]:
 def _store_context(store: dict[str, Any], cluster_id: str) -> dict[str, Any]:
     return {
         "store_id": store["store_id"],
+        # The merchant's OWN statement of where its checkout lives. Without it
+        # `AuctionContext.checkout_url_for` answers `None`, the agent bids an offer carrying no
+        # `checkout_url`, and `exchange.ranking.filters.domain_reason` excludes the candidate
+        # `off_domain_checkout` — measured over the served route before this line existed:
+        # `POST /auctions` answered `ranked: 0, slots: 0` with every hosted store refused
+        # "the offer carries no usable checkout URL". It is the STORE's word, not the
+        # platform's: the exchange compares it against the registry it was wired with
+        # (`StaticRegisteredDomains` below), so a store naming somebody else's host is refused
+        # by a real comparison rather than passing a tautology.
+        "store_domain": store_domain(store["store_id"]),
         "envelope": _envelope(store, cluster_id),
         "catalog": {store["product_ref"]: dict(store["catalog"])},
         "live_state": {store["product_ref"]: dict(store["live_state"])},
@@ -282,12 +312,20 @@ class S1Run:
     entries: list[dict[str, Any]] = field(default_factory=list)
     denied: list[dict[str, Any]] = field(default_factory=list)
     bids: dict[str, Any] = field(default_factory=dict)
-    verification: dict[str, Any] = field(default_factory=dict)
+    #: One record per claim the EXCHANGE announced a verdict for — read straight off the
+    #: `claim_verified` events its ranker wrote, never re-decided here.
     asserted_claims: list[dict[str, Any]] = field(default_factory=list)
+    #: The claims a store made that the exchange announced nothing for, by difference.
     unmapped_claims: list[dict[str, Any]] = field(default_factory=list)
+    #: The bids the exchange recorded for this auction, read back off its own book.
     candidates: list[dict[str, Any]] = field(default_factory=list)
-    ranked: dict[str, Any] = field(default_factory=dict)
+    ranked: list[dict[str, Any]] = field(default_factory=list)
+    excluded: list[dict[str, Any]] = field(default_factory=list)
     shortlist: dict[str, Any] = field(default_factory=dict)
+    #: The same object read back through the published `GET /auctions/{id}/shortlist`.
+    served_shortlist: dict[str, Any] = field(default_factory=dict)
+    #: `bid_ref -> store_id`, off the auction's own published ranking.
+    store_by_bid_ref: dict[str, str] = field(default_factory=dict)
     accept_result: Any = None
     minted_code: str = ""
     permalink_url: str = ""
@@ -322,15 +360,20 @@ class S1Run:
         raise KeyError(store_id)
 
     def entry_for_bid_ref(self, bid_ref: str) -> dict[str, Any]:
-        for candidate in self.candidates:
-            if candidate["bid_id"] == bid_ref:
-                return self.entry(candidate["store_id"])
-        raise KeyError(bid_ref)
+        """The collected entry a published ``bid_ref`` names.
+
+        Resolved through :attr:`store_by_bid_ref`, which the run reads off the auction's own
+        ``ranked``/``excluded`` lists — the exchange's attribution of a reference to a store,
+        not a join this module reconstructs.
+        """
+        store_id = self.store_by_bid_ref.get(str(bid_ref))
+        if store_id is None:
+            raise KeyError(bid_ref)
+        return self.entry(store_id)
 
 
 def run_s1_flow() -> S1Run:
     """Drive the whole starting path once and return everything it produced."""
-    from claim_verification import verify
     from contracts.ledger import validate_ledger_payload  # noqa: F401  (used by the tests)
     from exchange.accept import accept
     from exchange.auction import (
@@ -344,10 +387,10 @@ def run_s1_flow() -> S1Run:
     from exchange.checkout.sellers import StaticRegisteredDomains
     from exchange.eligibility import StaticSellerEligibility
     from exchange.main import create_app
-    from exchange.ranking import rank
-    from exchange.retrieval.fit import record_fit_scores
+    from exchange.ranking.serving import configure_ranking
+    from exchange.ranking.verification import StaticCatalogSnapshots
     from fastapi.testclient import TestClient
-    from trust.scoring import UnmappedClaimType, claim_dimension
+    from trust.scoring import claim_dimension
 
     from proxyshop_support.llm_double import LLMDouble
 
@@ -368,82 +411,98 @@ def run_s1_flow() -> S1Run:
 
     app = create_app()
     configure_auctions(app, machine=machine, solicitor=solicitor, eligibility=eligibility)
+    # The ranking's collaborators, BOUND INTO THE APP rather than held privately by this module.
+    # Until this call existed the run computed all of them and then ranked with them itself, so
+    # the SERVED route ranked with the fail-closed defaults instead: measured, `POST /auctions`
+    # answered `ranked: 0, excluded: 3, shortlist.slots: 0`, every candidate refused
+    # `blacklist_unreadable` (no trust snapshot) and `off_domain_checkout` (no registry), while
+    # the suite stayed green because this file re-did the work. Each one is a deployment fact
+    # this run stands in for, and each is the exchange's own to read: the catalogue it grades
+    # claims against, the trust rows it filters on, the platform's store->domain registry, and
+    # the human-approved claim_type -> dimension routing it announces a verdict under (which it
+    # may not hold itself — `exchange.ranking.serving.claim_dimensions_of` says why).
+    run.trust_before = _trust_snapshot(fixture)
+    configure_ranking(
+        app,
+        catalog=StaticCatalogSnapshots(
+            {store["store_id"]: _catalog_snapshot(store) for store in fixture["stores"]}
+        ),
+        trust_snapshot=run.trust_before,
+        registered_domains=StaticRegisteredDomains(
+            {store["store_id"]: store_domain(store["store_id"]) for store in fixture["stores"]}
+        ),
+        claim_dimensions=claim_dimension,
+    )
     with TestClient(app) as client:
         auction_client = _ExchangeAuctionClient(client)
         _confirm(fixture, run.clarification, auction_client)
+        response = auction_client.response or {}
+        run.auction_id = str(response["auction_id"])
+        # The published door onto the same object, driven rather than assumed. `POST /auctions`
+        # returns the shortlist inline and `GET /auctions/{id}/shortlist` re-validates it
+        # through the pinned `Shortlist`; reading both is how the run shows the buyer-facing
+        # route actually serves what the auction produced.
+        served = client.get(f"/auctions/{run.auction_id}/shortlist")
+        if served.status_code != 200:
+            raise AssertionError(
+                f"GET /auctions/{run.auction_id}/shortlist returned {served.status_code}: "
+                f"{served.text}"
+            )
+        run.served_shortlist = served.json()
+        # The bids the exchange itself recorded for this auction, read back off the book
+        # `POST /auctions` wrote (`collected_bid_records`). This is the run's ONLY source of
+        # candidates: it used to build its own list here, which is how a spine that shortlisted
+        # nobody could look healthy.
+        book = app.state.auction_bids
+        run.candidates = [dict(record) for record in book.bids_for(run.auction_id)]
 
-    response = auction_client.response or {}
     run.auction_response = response
-    run.auction_id = str(response["auction_id"])
     run.solicited = list(response["solicited"])
     run.entries = [dict(entry) for entry in response["entries"]]
     run.denied = [dict(denial) for denial in response["denied"]]
     run.bids = dict(solicitor.bids)
+    run.ranked = [dict(row) for row in response["ranked"]]
+    run.excluded = [dict(row) for row in response["excluded"]]
+    run.shortlist = dict(response["shortlist"])
+    # `bid_ref -> store_id`, off the exchange's own published ranking. Every candidate the
+    # auction collected appears in exactly one of `ranked` and `excluded`, so this is the
+    # auction's attribution rather than a join this module invents.
+    run.store_by_bid_ref = {
+        str(row["bid_ref"]): str(row["store_id"]) for row in (*run.ranked, *run.excluded)
+    }
 
-    # -- 2. verification of every hosted pitch ------------------------------------------
-    for store_id, bid in sorted(solicitor.bids.items()):
-        row = next(s for s in fixture["stores"] if s["store_id"] == store_id)
-        pitch = {
-            "pitch_id": f"pitch-{store_id}",
-            "store_id": store_id,
-            "product_ref": row["product_ref"],
-            "text": "",
-            "claims": [
-                dict(claim, claim_ref=f"{store_id}#{index}")
-                for index, claim in enumerate(bid["claims"])
-            ],
-        }
-        result = verify(pitch, _catalog_snapshot(row), fixture["verifier_version"])
-        run.verification[store_id] = result
-        for claim in result["claims"]:
-            record = dict(claim, store_id=store_id)
-            try:
-                record["dim"] = claim_dimension(claim.get("claim_type"))
-            except UnmappedClaimType:
-                run.unmapped_claims.append(record)
-                continue
-            run.asserted_claims.append(record)
-
-    # -- 3. ranking and the shortlist ---------------------------------------------------
-    run.candidates = _candidates(run, fixture)
-    trust_snapshot = _trust_snapshot(fixture)
-    run.trust_before = trust_snapshot
-    run.ranked = rank(
-        run.candidates,
-        fixture["intent"],
-        trust_snapshot,
-        {"now": T_NOW, "auction_id": run.auction_id},
-    )
-    run.shortlist = dict(run.ranked["shortlist"])
-
-    # -- 4. the ledger legs the auction path really writes ------------------------------
-    # `bid_placed`, once per bid the exchange collected. This is the only producer of the
-    # kind in the tree (exchange/retrieval/fit.py:269) and its docstring pins this ticket's
-    # exact-multiset criterion, so nothing else may emit it for this auction.
-    record_fit_scores(recorder, auction_id=run.auction_id, bids=run.candidates, assessments=[])
-
-    # `shown`, once per slot the ranker actually filled. No production emitter exists — see
-    # the module docstring.
-    for slot in run.shortlist["slots"]:
-        recorder.record(
-            "shown",
-            auction_id=run.auction_id,
-            store_id=run.entry_for_bid_ref(slot["bid_ref"])["store_id"],
-            payload={"bid_ref": slot["bid_ref"], "slot": slot["slot"]},
-        )
-
-    # `claim_verified`, once per graded claim that routes into a trust dimension.
-    for claim in run.asserted_claims:
-        recorder.record(
-            "claim_verified",
-            auction_id=run.auction_id,
-            store_id=claim["store_id"],
-            payload={
-                "claim_ref": claim["claim_ref"],
-                "status": claim["status"],
-                "dim": claim["dim"],
+    # -- 2. the verdicts the EXCHANGE minted, read back off the ledger it wrote them to -----
+    # This module used to run `claim_verification.verify` here itself, over a pitch it built
+    # from the store's bid and a snapshot it held privately, and then emit one `claim_verified`
+    # event per verdict. All of that is the exchange's job and the exchange now does it:
+    # `exchange.ranking.verification.attest_candidate_claims` verifies against the catalogue
+    # bound above and announces each verdict as it is minted. What is left here is READING what
+    # the auction produced.
+    run.asserted_claims = [
+        {
+            "store_id": str(event.get("store_id") or ""),
+            **{
+                key: value
+                for key, value in (event.get("payload") or {}).items()
+                if key in ("claim_ref", "status", "dim", "claim_type")
             },
-        )
+        }
+        for event in sink.events
+        if str(event["kind"]) == "claim_verified"
+    ]
+    # The claims a store made that the exchange announced NOTHING for. Derived by DIFFERENCE
+    # against what the ledger carries rather than by re-deciding anything: `claim_ref` is
+    # positional (`{store_id}#{index}` — `exchange.ranking.verification.claim_ref_for`), so a
+    # ref the ledger does not carry names the store's own claim at that position. The exempt
+    # set is asserted to be exactly the agent's policy telemetry, so a genuinely unroutable
+    # PRODUCT claim cannot hide in it.
+    announced = {str(claim["claim_ref"]) for claim in run.asserted_claims}
+    run.unmapped_claims = [
+        {"store_id": store_id, "claim_ref": ref, **dict(claim)}
+        for store_id, bid in sorted(run.bids.items())
+        for index, claim in enumerate(bid.get("claims") or ())
+        if (ref := f"{store_id}#{index}") not in announced
+    ]
 
     # -- 5. acceptance -> code -> simulated redirect ------------------------------------
     winner = run.shortlist["slots"][0]
@@ -530,61 +589,6 @@ def _confirm(fixture: dict[str, Any], clarification: Any, auction_client: Any) -
     )
 
 
-def _candidates(run: S1Run, fixture: dict[str, Any]) -> list[dict[str, Any]]:
-    """The exchange's collected entries, in the shape ``rank()`` reads.
-
-    There is no production adapter for this hop: ``BidEntry`` -> ranker candidate is
-    hand-built by every caller, ``services/sim/src/runner.py`` included. The claims carried
-    here are the store's own, stamped with the status the **verifier** returned — R19's rule
-    that only a verified claim is evidence is enforced by the ranker reading that status.
-    """
-    statuses = {
-        store_id: {claim["claim_ref"]: claim["status"] for claim in result["claims"]}
-        for store_id, result in run.verification.items()
-    }
-    candidates: list[dict[str, Any]] = []
-    for entry in run.entries:
-        store_id = entry["store_id"]
-        row = next(s for s in fixture["stores"] if s["store_id"] == store_id)
-        domain = store_domain(store_id)
-        bid = solicited_bid(run, store_id)
-        claims = []
-        for index, claim in enumerate(bid.get("claims", []) if bid else []):
-            claim_ref = f"{store_id}#{index}"
-            claims.append(
-                dict(claim, claim_ref=claim_ref, status=statuses[store_id].get(claim_ref))
-            )
-        candidates.append(
-            {
-                "bid_id": f"{run.auction_id}-{store_id}",
-                "store_id": store_id,
-                "store_domain": domain,
-                "tier": entry["tier"],
-                "network_fee": 0.0,
-                "fee_rate": 0.0,
-                "envelope_max_discount_pct": 0.0,
-                "envelope_budget_cap": 0.0,
-                "offer": {
-                    "product_ref": row["product_ref"],
-                    "unit_price": float(entry["unit_price"]),
-                    "total_price": float(entry["total_price"]),
-                    # The agent's Offer never carries a checkout_url (store-agent
-                    # runtime/bidding.py builds none), so the platform's registered domain
-                    # supplies it — the same hop services/sim/src/runner.py makes.
-                    "checkout_url": f"https://{domain}/cart/1:1",
-                    "expires_at": T_FUTURE,
-                },
-                "claims": claims,
-            }
-        )
-    return candidates
-
-
-def solicited_bid(run: S1Run, store_id: str) -> dict[str, Any] | None:
-    """The bid the store's own agent returned, or ``None`` for a store that never answered."""
-    return run.bids.get(store_id)
-
-
 def _seeded_blacklist(fixture: dict[str, Any]) -> Any:
     """The blacklist the exchange's gates read, seeded from the run's scenario."""
     from trust.scoring import Blacklist
@@ -642,15 +646,12 @@ def _auction_record(run: S1Run, winning_bid_ref: str) -> dict[str, Any]:
         "accepted_bid_ref": None,
         "now": T_NOW,
         "shortlist": run.shortlist,
-        "bids": [
-            {
-                "bid_id": candidate["bid_id"],
-                "store_id": candidate["store_id"],
-                "store_domain": candidate["store_domain"],
-                "offer": dict(candidate["offer"]),
-            }
-            for candidate in run.candidates
-        ],
+        # The exchange's OWN book, handed back verbatim. `collected_bid_records` already
+        # assembled exactly the four fields `accept()` reads — the minted `bid_id`, the
+        # exchange-attributed `store_id`, the PLATFORM's `store_domain` and the whitelisted
+        # offer — so re-projecting them here would be this module having a second opinion
+        # about a record the auction already wrote.
+        "bids": [dict(candidate) for candidate in run.candidates],
     }
 
 
@@ -701,7 +702,12 @@ async def _drive_merchant(run: S1Run) -> dict[str, Any]:
                         "variant_id": variant_id,
                         "product_id": STUB_PRODUCT_ID,
                         "title": "Heat-exchange espresso machine",
-                        "price": f"{run.candidates[0]['offer']['unit_price']:.2f}",
+                        # The WINNING offer's price, off the exchange's own record of the
+                        # bid the accept door was handed — not `candidates[0]`, which was the
+                        # first row of a list this module used to build for itself and only
+                        # happened to be the winner. The order the stub creates and the offer
+                        # the exchange promised have to be the same money.
+                        "price": f"{accepted_unit_price(run):.2f}",
                         "currency": "USD",
                         "sku": "HX-1",
                     }
@@ -756,6 +762,27 @@ async def _second_redemption(
             "code": code,
         }
     return {"refused": False, "error": "", "completion": completion, "code": code}
+
+
+def accepted_bid(run: S1Run) -> dict[str, Any]:
+    """The exchange's own record of the bid this run accepted.
+
+    Read out of :attr:`S1Run.candidates`, which is the bid book ``POST /auctions`` wrote — so
+    this is the same record the accept door itself looked the reference up in.
+    """
+    winning_bid_ref = str(run.shortlist["slots"][0]["bid_ref"])
+    for candidate in run.candidates:
+        if str(candidate.get("bid_id") or candidate.get("bid_ref") or "") == winning_bid_ref:
+            return candidate
+    raise AssertionError(
+        f"the exchange recorded no bid under {winning_bid_ref!r}, the reference its own "
+        f"shortlist published as slot 0: {[c.get('bid_id') for c in run.candidates]}"
+    )
+
+
+def accepted_unit_price(run: S1Run) -> float:
+    """What the winning offer charges for one unit, as the exchange recorded it."""
+    return float(accepted_bid(run)["offer"]["unit_price"])
 
 
 def authorized_checkout_token(run: S1Run, completion: dict[str, Any]) -> str:

@@ -1,7 +1,21 @@
-"""The merchant composition root: where an authenticated order webhook reaches E6's ledger.
+"""The merchant composition root: where a checkout observation reaches E6's ledger.
 
-WHAT WAS MEASURED, AND WHY THIS MODULE EXISTS
----------------------------------------------
+TWO PRODUCERS, ONE PUBLISHER
+-----------------------------
+This module wires both halves of R4's pixel↔webhook reconciliation into ``apps/trust``:
+
+* the **authoritative** half — an authenticated ``orders/paid`` delivery — through
+  :func:`publish_ledger_record`, which ``install/webhooks.default_sink`` calls;
+* the **lossy** half — a client-side web-pixel beacon — through
+  :func:`publish_pixel_observation`, which ``collector/routes.collect_pixel_event`` calls.
+
+They share ONE :class:`~proxyshop_support.trust_ledger.TrustLedgerPublisher` per process, so
+``ledger_status()`` answers one delivery condition for the service rather than two that can
+disagree, and a trust outage is reported once rather than twice.
+
+
+WHAT WAS MEASURED, AND WHY THIS MODULE EXISTS (the webhook half)
+-----------------------------------------------------------------
 ``install/webhooks.py`` verifies a signed Shopify delivery, de-duplicates it, and builds a
 ledger-shaped record from it — and then handed that record to :func:`~merchant_svc.install.
 webhooks.default_sink`, which appended it to the module-level ``HANDOFF`` ring and stopped.
@@ -20,6 +34,49 @@ completing a real checkout produced::
 R4 makes the order webhook the **authoritative** half of the pixel↔webhook reconciliation,
 and the authoritative half was terminating in a display buffer.
 
+WHAT WAS MEASURED, AND WHY THE PIXEL HALF WAS ADDED (T-051 → E6)
+------------------------------------------------------------------
+The lossy half terminated in a display buffer too, and for longer. ``collector/routes.py``
+accepted a beacon, recorded it into :data:`~merchant_svc.collector.PIXEL_INBOX` — a 512-slot
+in-process ring — and stopped; its own docstring named "E6's reconciler" as the ring's
+reader, which E6 is not and cannot be, since they are separate deployables. Measured on the
+served routes::
+
+    merchant  POST /pixel/collect  -> 204
+    merchant  PIXEL_INBOX          -> one joinable PixelObservation
+    trust     GET  /events         -> {"events":[],"count":0}
+    trust     GET  /reconcile      -> every purchase "pixel_missing": true
+
+So the frozen ledger kind ``checkout_pixel`` had **no producer anywhere in the tree**, and
+``trust.reconcile.engine`` — a THREE-way join over ``accepted`` / ``checkout_pixel`` /
+``order_paid`` — ran permanently on two inputs. :func:`publish_pixel_observation` is the
+missing producer; ``apps/merchant/svc/tests/test_pixel_ledger.py`` is the gate.
+
+THE ONE PINNED KEY THE SHIPPED EMITTER DOES NOT SEND
+------------------------------------------------------
+``LEDGER_PAYLOAD_SHAPES["checkout_pixel"]`` is ``(checkout_token, client_id, total_price)``.
+The extension emits four keys — ``COLLECTOR_BODY_KEYS`` in ``pixel/src/beacon.ts`` is
+``clientId, checkoutToken, orderId, discountApplications`` — and **the order total is not
+one of them**, so measured against the real pixel's real body::
+
+    projected payload  {"checkout_token": "0f3d…", "client_id": "6f1a…",
+                        "total_price": null, "gaps": []}
+    validate_ledger_payload("checkout_pixel", …)
+        -> ["'checkout_pixel' payload is missing published key 'total_price'"]
+
+That is a gap in the EMITTER, not in this projection: the collector's door already accepts
+``totalPrice`` (``collector.CARRIED_FIELDS``), :func:`pixel_ledger_payload` already carries
+it, and with a beacon that sends one the same check returns ``[]``. What it costs while it
+is missing is ``reconciled_event``'s ``pixel_price`` and ``pixel_agrees`` — measured on a
+served ``GET /reconcile``, permanently ``null`` and ``false`` — which is exactly the "is
+this store's pixel integration honest" diagnostic. Closing it is a two-lane change:
+``pixel/src/beacon.ts`` (add ``totalPrice`` from ``data.checkout.totalPrice.amount``, a
+``MoneyV2`` with a NUMERIC amount) plus the recorded fixture and stub payload it is graded
+against, ``services/shopify-stub/fixtures/recorded/web_pixel_checkout_completed.json`` and
+``shopify_stub.telemetry.collector_payload``, neither of which is this lane's to edit.
+``test_a_beacon_that_carries_the_total_makes_pixel_agrees_a_live_diagnostic`` proves the
+whole path works the moment it arrives.
+
 WHAT IT DOES, AND WHAT IT DELIBERATELY DOES NOT
 -----------------------------------------------
 It owns three things and no more:
@@ -31,10 +88,13 @@ It owns three things and no more:
   ``proxyshop_support.trust_ledger``'s own header records as the reason it was lifted out.
 * **The event id.** ``install/webhooks.ledger_record`` deliberately mints none: "E6 owns the
   ledger and its identifiers". A composition root is where a service decides who it is, so
-  the id is minted here — and it is derived from the SIGNED BODY's digest, so it is stable
-  across processes. See :func:`ledger_event_id`.
-* **The projection.** Shopify's vocabulary into ``contracts.ledger``'s frozen one. Not the
-  raw vendor body: see :func:`ledger_payload`.
+  the id is minted here — and it is DERIVED rather than random, so it is stable across
+  processes and a replay collapses to one row in an append-only chain. The webhook's comes
+  from the signed body's digest (:func:`ledger_event_id`); the pixel has no signed bytes, so
+  its comes from the projected body's (:func:`pixel_ledger_event`).
+* **The projection.** Shopify's and the browser's vocabularies into ``contracts.ledger``'s
+  frozen one. Never the raw body: see :func:`ledger_payload` and
+  :data:`PUBLISHED_PIXEL_FIELDS`.
 
 It does not decide whether a delivery is authentic (``install/webhooks.py`` does), it does
 not reconcile anything (``apps/trust``'s ``reconcile`` engine does), and it never fails a
@@ -84,14 +144,19 @@ lazily on first publish, so composing the service still opens no socket.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+import math
 import re
 import threading
 import uuid
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from merchant_svc.collector import GAP_KEYS, MAX_PIXEL_FIELD_CHARS
 from merchant_svc.install.shop import InvalidShopDomain, normalize_shop_domain
 
 from proxyshop_support.trust_ledger import (
@@ -117,18 +182,32 @@ __all__ = [
     "LEDGER_SUBJECT",
     "MAX_DISCOUNT_CODES",
     "MAX_IDENTIFIER_LENGTH",
+    "PIXEL_KIND",
+    "PUBLISHED_PIXEL_FIELDS",
     "TRUST_EVENTS_PATH",
     "ledger_event",
     "ledger_event_id",
     "ledger_payload",
     "ledger_status",
+    "pixel_ledger_event",
+    "pixel_ledger_payload",
     "publish_ledger_record",
+    "publish_pixel_observation",
     "set_trust_publisher",
     "trust_publisher",
 ]
 
 #: How this process names itself in the publisher's two state-change log lines.
-LEDGER_SUBJECT = "merchant order webhooks"
+#:
+#: "checkout observations", not "order webhooks", since the pixel half started publishing
+#: through the same publisher. Measured with the old wording, against a dead trust port::
+#:
+#:     ERROR merchant_svc.composition  merchant order webhooks: http://…/events stopped
+#:     accepting ledger events (ConnectError: …, on a checkout_pixel event)
+#:
+#: — a line that names the wrong producer in its subject and the right one in its detail,
+#: which is exactly the sentence an operator reads twice and then mistrusts.
+LEDGER_SUBJECT = "merchant checkout observations"
 
 #: The first component of every ``event_id`` this service mints. It says which service
 #: authored the row, in a ledger three services write to.
@@ -170,6 +249,59 @@ CLIENT_ID_ATTRIBUTE = "proxyshop_client_id"
 #: join keys and caps each at 255 characters; this caps the count, so a signed body carrying
 #: ten thousand of them cannot push one event past the door's 64 KiB body limit and be lost.
 MAX_DISCOUNT_CODES = 10
+
+#: The frozen ``LedgerEventKind`` a web-pixel observation lands under (C11/D24).
+PIXEL_KIND = "checkout_pixel"
+
+#: Every key :func:`pixel_ledger_payload` may put on a ``checkout_pixel`` row, and no sixth.
+#:
+#: **This is a privacy boundary, not a convenience.** The beacon behind it runs in a
+#: shopper's browser during checkout on the merchant's own store; ``POST /pixel/collect``
+#: takes no credential; and the ledger it lands in is append-only (a ``BEFORE UPDATE OR
+#: DELETE ... ENABLE ALWAYS`` trigger), unauthenticated to read, and therefore public
+#: forever. R5 promises stores never receive buyer identity. A key that reaches this row
+#: cannot be taken back, so the projection is built FROM this list rather than filtered
+#: against it — the same construction, and for the same reason, as
+#: ``merchant_svc.collector.ACCEPTED_FIELDS`` and ``pixel/src/beacon.ts``'s
+#: ``COLLECTOR_BODY_KEYS``. A copy-then-delete accepts every field nobody thought of.
+#:
+#: Why each one is safe to publish:
+#:
+#: ``checkout_token``
+#:     The platform's per-checkout token. Network-issued, scoped to one checkout, names no
+#:     person, and already public on the ``order_paid`` half of the same purchase. It is the
+#:     value both halves share, so it is what makes them meet.
+#: ``client_id``
+#:     D24's pinned join key, and R5's "rotating pseudonym" rather than an identity. The
+#:     ORDER webhook already publishes it (:data:`CLIENT_ID_ATTRIBUTE`, lifted out of the
+#:     cart note attributes); filing the pixel half under any other key would leave the two
+#:     halves of one purchase unable to meet, which is the whole defect being fixed.
+#: ``total_price``
+#:     A fact about an order, not about a person, and the only thing
+#:     ``trust.reconcile.engine.reconciled_event`` reads off a pixel (``pixel_price`` /
+#:     ``pixel_agrees`` — the "is this store's integration honest" diagnostic).
+#: ``gaps``
+#:     Which join keys the beacon did not carry, drawn from the collector's own fixed
+#:     :data:`~merchant_svc.collector.GAP_KEYS` vocabulary. This repository's words, never
+#:     the sender's, and the reason ``PixelObservation.gaps`` exists at all: "a dropped
+#:     beacon is a visible gap, not a default", which is only true if the gap travels with
+#:     the observation.
+#:
+#: **What is deliberately absent**, each for a stated reason:
+#:
+#: * the raw beacon body — the events door refuses >64 KiB and nothing on that router is
+#:   authenticated, so a forwarded body is both sometimes silently lost and permanently
+#:   public. ``contracts.ledger`` says the shape check belongs "at the PRODUCING boundary";
+#:   this is that boundary, exactly as :func:`ledger_payload` is for the webhook.
+#: * ``order_ref`` — see :func:`pixel_ledger_payload`.
+#: * the discount code — ``trust.reconcile.engine`` excludes ``checkout_pixel`` from
+#:   ``_CODE_BEARING_KINDS`` by design ("honouring a code off the pixel would hand a
+#:   client-side beacon the power to decide which order gets graded"), so publishing one
+#:   buys no join at all while putting a live redeemable code on a second public row.
+#: * ``currency`` and ``timestamp`` — accepted at the door and already discarded by
+#:   ``accept_pixel_event``; nothing reads them and the receipt instant is the event's own
+#:   ``ts``.
+PUBLISHED_PIXEL_FIELDS: tuple[str, ...] = ("checkout_token", "client_id", "total_price", "gaps")
 
 #: How a wiring-time log line spells where the address came from.
 _SOURCE_PHRASE = {
@@ -504,6 +636,199 @@ def publish_ledger_record(record: Mapping[str, Any]) -> bool:
             "a %s hand-off record could not be projected into a LedgerEvent; it is NOT in "
             "the chained ledger. The delivery itself stands and is in the in-process ring",
             record.get("topic") or record.get("kind") or "webhook",
+        )
+        return False
+    return trust_publisher().publish(event)
+
+
+# =====================================================================================
+# The pixel half: a browser's checkout observation into the same frozen vocabulary
+# =====================================================================================
+def _pixel_text(value: Any) -> str | None:
+    """One pixel join key as text the ledger can hold, or ``None``.
+
+    Bounded by :data:`~merchant_svc.collector.MAX_PIXEL_FIELD_CHARS` rather than by
+    :data:`MAX_IDENTIFIER_LENGTH`, and the difference is not an oversight. The 128-character
+    bound belongs to the ledger's four TOP-LEVEL identifiers, which are interpolated into a
+    ``Location`` header; these are payload values, and the collector has already refused
+    anything over 512 characters at the door. Restating the collector's own published
+    ceiling keeps one number, and re-checking it here keeps this function total over a
+    record some caller built by hand rather than one ``accept_pixel_event`` produced.
+
+    Dropped rather than truncated, for the reason ``_identifier`` gives: a truncated join key
+    is not a shorter join key, it is a different one, and it joins to nothing or to somebody
+    else's order while still reading as a complete observation.
+
+    A container is ``None`` rather than its ``repr`` — the same rule :func:`_text` follows on
+    the webhook half, and for the same reason: ``str(["PSX-A"])`` is a perfectly good-looking
+    string that would become the join key ``['PSX-A']`` and match nothing. ``bool`` too:
+    ``str(True)`` is ``"True"``, which is a join key that names nothing.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (Mapping, Sequence)) and not isinstance(value, str):
+        return None
+    text = str(value).strip()
+    if not text or len(text) > MAX_PIXEL_FIELD_CHARS:
+        return None
+    return text
+
+
+def _pixel_number(value: Any) -> float | None:
+    """One pixel money field as a finite float, or ``None``.
+
+    ``accept_pixel_event`` already guarantees finiteness; this repeats the check because a
+    non-finite float survives ``json.dumps`` as bare ``Infinity``, which is not JSON, and
+    would poison ``reconciled_event``'s ``pixel_agrees`` comparison if it ever landed.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _pixel_gaps(value: Any) -> list[str]:
+    """The named gaps, filtered to the collector's fixed vocabulary and de-duplicated.
+
+    Filtered rather than forwarded: :data:`~merchant_svc.collector.GAP_KEYS` is four fixed
+    strings this repository chose, so a projection that passes them through unchecked would
+    publish whatever a hand-built observation put there — sender-chosen text on a public,
+    un-evictable row, which is the one thing this whole projection exists to prevent.
+    """
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+        return []
+    named = {str(entry) for entry in value}
+    return [key for key in GAP_KEYS if key in named]
+
+
+def pixel_ledger_payload(observation: Any) -> dict[str, Any]:
+    """The frozen ``checkout_pixel`` body for one accepted beacon.
+
+    Built key by key from :data:`PUBLISHED_PIXEL_FIELDS`, which documents why each of the
+    four is safe to make permanently public and why everything else is not.
+
+    **``order_ref`` is the one absence worth arguing here**, because the beacon does carry it
+    and the ring does keep it. ``trust.reconcile.engine`` unions every identifier an event
+    names, so an event carrying a checkout token AND an order reference teaches the join that
+    those two values name one order. The engine's own comments record what that cost when a
+    *bridge* event was allowed to do it: two unrelated orders merged, "2 reconciled events
+    before the code join, 1 after", and the vanished one's 10x overcharge was never graded.
+
+    ``POST /pixel/collect`` takes no credential and answers a browser, so publishing
+    ``order_ref`` off it would hand that merge to anyone who can reach the collector, at the
+    cost of one request. Publishing only the checkout token bounds the worst case to
+    attaching a bogus pixel to one existing group — and R4 keeps the pixel out of every
+    comparison, so that is a false diagnostic rather than an erased reconciliation. The join
+    loses nothing: the pixel and the webhook share the platform's own checkout token, which
+    is the value they were always meant to meet on (D24).
+    """
+    return {
+        "checkout_token": _pixel_text(getattr(observation, "checkout_token", None)),
+        "client_id": _pixel_text(getattr(observation, "client_id", None)),
+        "total_price": _pixel_number(getattr(observation, "total_price", None)),
+        "gaps": _pixel_gaps(getattr(observation, "gaps", ())),
+    }
+
+
+def _pixel_body_digest(payload: Mapping[str, Any]) -> str:
+    """A digest over the projected body — the pixel's stand-in for a signed delivery.
+
+    ``ensure_ascii`` is left at its default, so the dumped text is pure ASCII and the encode
+    below cannot raise on a lone surrogate — which a JSON body really can decode to, and
+    which the collector really does accept as a join key.
+    """
+    canonical = json.dumps(dict(payload), sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def pixel_ledger_event(observation: Any) -> dict[str, Any]:
+    """One accepted beacon as the ``LedgerEvent`` body ``POST /events`` stores.
+
+    **The id is derived from the projected body, not minted**, and that is what keeps a
+    re-fired beacon from becoming a second un-evictable row. ``keepalive`` requests can be
+    re-issued, a shopper can reload the thank-you page, and nothing between a browser and
+    this route de-duplicates; a random id would put one purchase in an append-only chain
+    twice. The digest is over the PROJECTION rather than over the request body — the webhook
+    half digests the SIGNED bytes, which is stronger, and a beacon has no signed bytes to
+    digest. Over the projection it still has the property that matters: an identical
+    observation collapses to one row (answered ``200 Idempotent-Replay: true``), while a
+    genuinely different one — the beacon that raced order creation, then the one that did
+    not — is its own row rather than being silently dropped in favour of whichever arrived
+    first.
+
+    The digest is deliberately NOT also put in the payload. On the webhook half
+    ``body_digest`` ties the row to bytes an auditor can independently re-hash; here it would
+    be a hash of the very fields sitting beside it, which is decoration, and every extra key
+    on this row is permanently public.
+
+    **No ``store_id`` and no ``order_ref``**, both for the same reason: nothing trustworthy
+    said. The beacon carries no shop domain, the route takes no credential, and
+    ``reconcile`` already handles an unattributed pixel properly — it adopts the store only
+    when exactly one store claims one of its keys, which is the honest answer and better than
+    a guess this module would have to invent. For ``order_ref`` see
+    :func:`pixel_ledger_payload`.
+    """
+    payload = pixel_ledger_payload(observation)
+    received_at = getattr(observation, "received_at", None)
+    ts = received_at.isoformat() if isinstance(received_at, datetime) else str(received_at or "")
+    return {
+        "event_id": ledger_event_id(
+            {"kind": PIXEL_KIND, "body_digest": _pixel_body_digest(payload)}
+        ),
+        "ts": ts,
+        "kind": PIXEL_KIND,
+        "payload": payload,
+    }
+
+
+def publish_pixel_observation(observation: Any) -> bool:
+    """Write one accepted web-pixel observation to the trust ledger. ``True`` when it landed.
+
+    **Never raises, and here that is not a courtesy at all.** The caller is
+    ``collector.routes.collect_pixel_event``, which answers a beacon fired from a shopper's
+    browser during checkout on the merchant's own store. A 500 on that route is a failure on
+    a real customer's purchase page, and it buys nothing — R4 already makes the ``orders/paid``
+    webhook authoritative, so the correct behaviour when the audit write cannot happen is for
+    the write to be lost visibly and the shopper to see nothing at all.
+
+    :meth:`TrustLedgerPublisher.publish` supplies half of that guarantee; this supplies the
+    other half, which that class cannot: the projection above reads an object built from a
+    browser's JSON, and a shape no beacon was expected to produce must be a lost event with a
+    reason attached rather than an exception on a checkout page.
+
+    **A beacon with no checkout token is not published at all.**
+    ``accept_pixel_event`` refuses one before it can get here, so this is belt to that
+    braces — but an event with no token joins to nothing by construction, and an unjoinable
+    row appended to an append-only public ledger from an unauthenticated route is pure
+    permanent noise. Returning ``False`` without appending is the honest outcome, and it is
+    distinguishable in ``ledger_status()`` from a delivery that was attempted and lost only
+    in that it moves no counter — which is right, because nothing was lost.
+
+    **The write is synchronous and inline**, one POST bounded by
+    :data:`~proxyshop_support.trust_ledger.DEFAULT_LEDGER_TIMEOUT_SECONDS` (0.5s), holding
+    the merchant's event loop for that long in the worst case — the same posture, through the
+    same publisher, as the webhook half above. Handing it to the anyio threadpool was
+    considered and rejected: it would let two beacons, or a beacon and a webhook, race
+    :class:`TrustLedgerPublisher`'s unsynchronised ``delivered`` / ``lost`` / ``_delivering``
+    counters, and trading the honesty of the outage signal for latency on the audit write is
+    the wrong trade. The cost is bounded and written down instead.
+    """
+    try:
+        event = pixel_ledger_event(observation)
+    except Exception:  # noqa: BLE001 - see the docstring: this must not reach the route
+        _log.exception(
+            "a web-pixel observation could not be projected into a LedgerEvent; it is NOT in "
+            "the chained ledger. The 204 stands and the observation is in the in-process ring"
+        )
+        return False
+    if not event["payload"].get("checkout_token"):
+        _log.warning(
+            "a web-pixel observation carries no usable checkout_token, so it is not appended "
+            "to the chained ledger: it could never be joined to an order and the ledger "
+            "cannot forget a row"
         )
         return False
     return trust_publisher().publish(event)

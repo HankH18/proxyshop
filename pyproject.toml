@@ -102,6 +102,29 @@ consider_namespace_packages = true
 pythonpath = [".", ".pkgroot"]   # .pkgroot: flat-src import namespaces (R1b)
 testpaths = ["packages","apps","services","pixel","fixtures","e2e","docs","proxyshop_support"]
 norecursedirs = [".*", "node_modules", "dist", "build", ".venv", "*.egg-info", ".swarm-loop"]
+# `.swarm-loop` STAYS in that list, and it is not what hid the frozen acceptance suite.
+#
+# The suite — .swarm-loop/acceptance, 120 tests including the three S8 RELEASE BLOCKERS —
+# was never run by `make verify`, so the build's headline metric was measured over a file
+# set excluding the tests that decide whether the release is allowed. It is fixed in
+# scripts/verify.sh, which now runs it as its OWN pytest process (`verify.sh acceptance`,
+# and inside `all` and `check`), through the frozen suite's own runner.
+#
+# It is NOT fixed here, because this key was never the cause. Measured, with this line
+# exactly as it stands:
+#     pytest --collect-only -q .swarm-loop/acceptance   ->  120 tests collected
+# `norecursedirs` only stops pytest DESCENDING into a directory it is walking; a path named
+# on the command line is collected regardless. What actually kept the suite out of the gate
+# is `testpaths` above — it lists eight directories and none of them is `.swarm-loop` — plus
+# the fact that no step in verify.sh ever named the acceptance directory. Measured:
+# `pytest --collect-only -q` collects 7391 tests, of which exactly 0 are under .swarm-loop.
+#
+# Deleting `.swarm-loop` from this list would therefore fix nothing and break something: the
+# frozen suite produces phantom failures when it shares one pytest session with
+# apps/packages/services, which vanish when it runs alone. The exclusion is what keeps a
+# bare `pytest .` at the repo root from assembling that session by accident.
+# scripts/check_verify_contracts.py asserts both halves of this — that verify.sh still runs
+# the suite, and that this entry is still here.
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 markers = [

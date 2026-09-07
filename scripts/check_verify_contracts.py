@@ -38,10 +38,28 @@ Fatal checks
    conftest-import time and taking down every already-merged ticket's tests in that
    directory. This static check is what makes the defect fatal, in the gate of the ticket
    that introduced it, without any innocent test going red.
+7. **The verify pipeline still runs the release blockers, and still refuses a run that
+   skipped a whole class.** Both of the properties this file's siblings acquired are
+   invisible to every other gate in the repo, and both were absent for the whole build:
+   ``make verify`` never collected ``.swarm-loop/acceptance`` — so the three S8 release
+   blockers, the tests that decide whether the release is allowed, were not in the file set
+   the headline metric is measured over — and a run whose datastores were down reported
+   ``22 passed, 36 skipped`` at exit 0, which is indistinguishable from a full pass. Nothing
+   would notice either one coming back: deleting the ``run_acceptance`` call leaves every
+   test in this repo green, because the deleted thing IS the gate. So the wiring itself is
+   asserted here, statically, against ``scripts/verify.sh`` and the root ``pyproject.toml``.
+
+   ``norecursedirs`` is asserted to KEEP excluding ``.swarm-loop``. That looks backwards
+   until you measure it: ``norecursedirs`` never suppressed the acceptance suite in the
+   first place (``pytest --collect-only .swarm-loop/acceptance`` collects all 120 tests
+   today, because that key only stops *recursion*, never a path named on the command line),
+   and un-excluding it would invite the frozen suite into the same pytest session as
+   ``apps``/``packages``/``services``, where it produces phantom failures that vanish in
+   isolation. The repair is the separate process ``verify.sh`` now runs, not a wider walk.
 
 Non-fatal report
 ----------------
-7. Ticket verify paths that do not exist yet. This is a scaffold sanity check, printed and
+8. Ticket verify paths that do not exist yet. This is a scaffold sanity check, printed and
    never fatal: on a fresh scaffold nearly all of them are legitimately missing.
 
 Note on check 4 vs. the original specification: the intake specified "any ticket whose
@@ -382,6 +400,131 @@ def check_no_duplicate_fixture_names(failures: list[str]) -> None:
 
 # ---------------------------------------------------------------------------- check 7
 
+#: What ``scripts/verify.sh`` must still contain for the two properties above to hold. Each
+#: entry is ``(needle, explanation)``; the needle is matched literally against the script.
+#:
+#: This is a text check on purpose. The alternative — executing the pipeline and asserting on
+#: what it did — is what ``make verify`` already is, and it cannot catch the failure mode
+#: here: a pipeline missing its acceptance step is *green*, because the missing thing is the
+#: gate. The only moment the absence is visible is while reading the wiring, so the wiring is
+#: what gets read. Being text, it is fooled by a caller inside a comment; that is an
+#: acceptable floor for a check whose job is to stop a silent deletion, not a determined one.
+VERIFY_WIRING_CONTRACTS: tuple[tuple[str, str], ...] = (
+    (
+        ".swarm-loop/acceptance/run.py",
+        "verify.sh no longer invokes the frozen acceptance runner, so the three S8 release "
+        "blockers are outside the file set `make verify` measures — the state this contract "
+        "was written to end.",
+    ),
+    (
+        "run_acceptance",
+        "verify.sh defines no run_acceptance step; the frozen acceptance suite is not run "
+        "by the pipeline.",
+    ),
+    (
+        "datastore_coverage_gate",
+        "verify.sh defines no datastore-coverage gate, so a run whose datastores were down "
+        "reports its skipped least-privilege checks as a pass and exits 0.",
+    ),
+    (
+        # Spelled with the call, not the bare module name: `reachability` on its own also
+        # matches the T-109 prose already in that file's comments, so the bare word was
+        # satisfied by the very version of verify.sh that had no probe in it at all.
+        "reachability.unreachable(",
+        "the datastore-coverage gate no longer probes proxyshop_support.reachability, so it "
+        "cannot know whether the docker-marked class ran.",
+    ),
+)
+
+#: Guards that must be reached when ``verify.sh`` runs its ``all`` step. ``all`` is what
+#: ``make verify`` runs and what the frozen ``build_succeeds`` metric scores, so a guard the
+#: ``all`` step does not reach protects nothing.
+VERIFY_ALL_STEP_GUARDS: tuple[str, ...] = ("run_acceptance", "datastore_coverage_gate")
+
+#: How far back from a call site to look for its ``if`` guard. The file's idiom is a
+#: one-line ``if ...; then f; fi``, but the first draft of this check only accepted that
+#: exact shape and reported a correctly-wired multi-line guard as missing — so the lookback
+#: exists because the strict version produced a false positive on its own author's code.
+_GUARD_LOOKBACK = 4
+
+
+def check_verify_runs_the_release_blockers(failures: list[str]) -> None:
+    """``scripts/verify.sh`` still runs the frozen suite and still gates on datastores."""
+    script = ROOT / "scripts" / "verify.sh"
+    if not script.is_file():
+        failures.append("scripts/verify.sh is missing; there is no verification pipeline.")
+        return
+    text = script.read_text(errors="ignore")
+    for needle, explanation in VERIFY_WIRING_CONTRACTS:
+        if needle not in text:
+            failures.append(f"scripts/verify.sh no longer mentions {needle!r}: {explanation}")
+    lines = text.splitlines()
+    for function in VERIFY_ALL_STEP_GUARDS:
+        if not _guarded_call_on_all(lines, function):
+            failures.append(
+                f"scripts/verify.sh never calls {function} on the `all` step. `all` is what "
+                f"`make verify` runs and what the frozen build_succeeds metric scores, so a "
+                f"guard it does not reach protects nothing."
+            )
+
+
+def _guarded_call_on_all(lines: list[str], function: str) -> bool:
+    """True when ``function`` is called under an ``if`` that admits the ``all`` step.
+
+    A call site is any non-comment line naming the function that is neither its ``def`` nor
+    part of the doc block above it. The ``if`` may be on the same line (the file's usual
+    one-liner) or up to :data:`_GUARD_LOOKBACK` lines earlier.
+    """
+    for index, line in enumerate(lines):
+        stripped = line.lstrip()
+        if function not in line or stripped.startswith("#"):
+            continue
+        if stripped.startswith(f"{function}()") or stripped.startswith(f"#{function}"):
+            continue  # the definition, not a call
+        window = lines[max(0, index - _GUARD_LOOKBACK) : index + 1]
+        for candidate in reversed(window):
+            candidate_stripped = candidate.lstrip()
+            if candidate_stripped.startswith("#"):
+                continue
+            if candidate_stripped.startswith("if ") and '"$STEP" = all' in candidate:
+                return True
+    return False
+
+
+def check_acceptance_stays_out_of_the_main_pytest_walk(failures: list[str]) -> None:
+    """The root pytest config still keeps ``.swarm-loop`` out of the main session.
+
+    Deliberately the opposite of what "make the gate see the acceptance suite" sounds like.
+    The suite is run by ``verify.sh`` as its OWN pytest process because sharing a session
+    with ``apps``/``packages``/``services`` yields phantom failures that vanish in isolation.
+    Someone reading only the headline defect could "fix" it by widening the walk, which would
+    trade an invisible suite for a flaky one; this makes that edit fail here instead.
+    """
+    manifest = ROOT / "pyproject.toml"
+    if not manifest.is_file():
+        failures.append("pyproject.toml is missing; there is no pytest configuration.")
+        return
+    text = manifest.read_text(errors="ignore")
+    match = re.search(r"^norecursedirs\s*=\s*\[(.*?)\]", text, re.MULTILINE | re.DOTALL)
+    if match is None:
+        failures.append(
+            "pyproject.toml declares no `norecursedirs`. `.swarm-loop` must stay excluded "
+            "from the main pytest walk: the frozen acceptance suite is run by verify.sh in "
+            "its own process precisely because it cross-contaminates a shared session."
+        )
+        return
+    if ".swarm-loop" not in match.group(1):
+        failures.append(
+            "pyproject.toml's `norecursedirs` no longer excludes `.swarm-loop`. That does "
+            "NOT make `make verify` grade the acceptance suite — `testpaths` never listed "
+            "the directory either — it only lets a bare `pytest .` pull the frozen suite "
+            "into the same session as apps/packages/services, where it produces phantom "
+            "failures. verify.sh runs it as its own process; leave the walk alone."
+        )
+
+
+# ---------------------------------------------------------------------------- check 8
+
 
 def _load_ticket_status() -> dict[str, str]:
     """Return ``{ticket_id: status}`` from whichever status store exists, or ``{}``.
@@ -472,6 +615,8 @@ def main() -> int:
     check_vitest_projects_have_tests(failures)
     check_no_raw_redis_clients(failures)
     check_no_duplicate_fixture_names(failures)
+    check_verify_runs_the_release_blockers(failures)
+    check_acceptance_stays_out_of_the_main_pytest_walk(failures)
     report_missing_verify_paths(_load_ticket_status(), failures)
 
     if failures:
@@ -481,7 +626,8 @@ def main() -> int:
         return 1
     print(
         "  OK: pytest-config, test-path-filter, schema-package, non-empty-test-dir, "
-        "raw-Redis-client and unique-fixture-name contracts all hold."
+        "raw-Redis-client, unique-fixture-name, verify-runs-the-release-blockers and "
+        "acceptance-runs-in-its-own-process contracts all hold."
     )
     return 0
 

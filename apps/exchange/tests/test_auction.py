@@ -593,11 +593,33 @@ def test_post_auctions_runs_the_gate_the_fan_out_and_the_state_machine() -> None
     assert [d["store_id"] for d in body["denied"]] == ["store-black"]
     assert "blacklist" in body["denied"][0]["reason"].lower()
 
-    # The state machine ran, and both transitions reached the ledger.
+    # The state machine ran, and both transitions reached the ledger — with the auction's own
+    # evidence between them. This used to assert the sink held EXACTLY the two transitions,
+    # which was true only because a served auction recorded nothing about what it collected or
+    # what it showed: no `bid_placed` for a bid it received, no `shown` for a slot it filled.
+    # The order below is the sequence the ledger has to read in, and each count is checked, so
+    # this is a stronger statement than the exact list it replaces rather than a relaxed one.
     read_back = client.get(f"/auctions/{body['auction_id']}")
     assert read_back.status_code == 200
     assert read_back.json()["state"] == "closed"
-    assert app.state.auction_machine.ledger.sink.kinds == ["auction_opened", "auction_closed"]
+    kinds = app.state.auction_machine.ledger.sink.kinds
+    assert kinds[0] == "auction_opened"
+    assert kinds.count("auction_opened") == 1
+    assert kinds.count("auction_closed") == 1
+    # One receipt per COLLECTED bid — every store the exchange represented, the R10 list-price
+    # fallbacks included — written before the close.
+    assert kinds.count("bid_placed") == len(body["entries"]) == 3
+    assert kinds.index("bid_placed") < kinds.index("auction_closed")
+    # One `shown` per shortlist slot — which is ZERO here, and that is the point rather than a
+    # gap: this app wires no trust snapshot and no registered domains, so every candidate is
+    # excluded and the auction shows nobody (the sibling test below pins that same fail-closed
+    # behaviour from the response side). An exchange that announced a slot it did not fill
+    # would be announcing something it never served.
+    assert body["shortlist"]["slots"] == []
+    assert kinds.count("shown") == len(body["shortlist"]["slots"]) == 0
+    assert not set(kinds) - {"auction_opened", "bid_placed", "auction_closed", "shown"}, (
+        f"a served auction wrote a ledger kind this test does not account for: {kinds}"
+    )
 
     assert client.get("/auctions/auction-never-existed").status_code == 404
 

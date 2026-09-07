@@ -50,7 +50,42 @@
  * to decide what it will hold.
  */
 
-/** The four keys a collector body may carry, and no fifth. */
+/**
+ * The four keys a collector body may carry, and no fifth.
+ *
+ * ## A fifth is owed, and it is `totalPrice`
+ *
+ * These four are what the collector *accepts by name*, but they are not what the LEDGER pins.
+ * `contracts.ledger.LEDGER_PAYLOAD_SHAPES["checkout_pixel"]` freezes the published body as
+ * `(checkout_token, client_id, total_price)`, and since the collector started publishing to
+ * E6's chained ledger (`merchant_svc.composition.publish_pixel_observation`) that third key
+ * is measurably absent from every real beacon:
+ *
+ * ```
+ * projected payload  {"checkout_token": "0f3d…", "client_id": "6f1a…", "total_price": null}
+ * validate_ledger_payload("checkout_pixel", …)
+ *     -> ["'checkout_pixel' payload is missing published key 'total_price'"]
+ * ```
+ *
+ * What it costs is not the shape check. `trust.reconcile.engine.reconciled_event` reads
+ * exactly one field off a pixel — `total_price` — to compute `pixel_price` and `pixel_agrees`,
+ * the "does this store's own beacon agree with its own webhook" diagnostic. Driven on a served
+ * `GET /reconcile`, both are permanently `null` / `false`.
+ *
+ * The value is right there: `data.checkout.totalPrice` is a `MoneyV2` whose `amount` the Web
+ * Pixels API types as a **number** (unlike REST, which sends a decimal string — see the
+ * recorded fixture's own caveats), and it is a fact about an order rather than about a person,
+ * so it carries none of the identity R5 and C5 keep out of this body. The collector's door
+ * already accepts it: `merchant_svc.collector.CARRIED_FIELDS` lists `totalPrice`, and
+ * `accept_pixel_event` already parses it into `PixelObservation.total_price`.
+ *
+ * It is NOT added here because this file is graded against recordings this lane does not own:
+ * `services/shopify-stub/fixtures/recorded/web_pixel_checkout_completed.json`
+ * (`collector_payload` / `degraded_collector_payload`) and
+ * `shopify_stub.telemetry.collector_payload`, which `test_stub_recordings.py` holds the stub
+ * to. Adding a key here alone turns three green tests red for the wrong reason. The change is
+ * one line of emitter plus those two fixtures, in one lane that owns both.
+ */
 export const COLLECTOR_BODY_KEYS = [
   'clientId',
   'checkoutToken',

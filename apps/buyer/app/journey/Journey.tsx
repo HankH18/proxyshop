@@ -108,7 +108,6 @@
  *    onto their disk to save them retyping one sentence.
  */
 import {
-  Fragment,
   useCallback,
   useEffect,
   useId,
@@ -150,7 +149,6 @@ import {
   describeComponents,
   describeTrust,
   discountCodeFrom,
-  entryForSlot,
   explain,
   instrumentFetcher,
   loadAuction,
@@ -159,7 +157,6 @@ import {
   renderShortlist,
   renderedShortlist,
   storeIdFromBidRef,
-  type AuctionEntry,
   type AuctionRecord,
   type Fetcher,
   type RankedBid,
@@ -168,66 +165,6 @@ import {
 
 /** The browser's own fetch. Relative paths only — the API is served from this origin. */
 const browserFetch: Fetcher = (input, init) => fetch(input, init)
-
-/**
- * What the exchange reported this slot's store bid — the whole of what this page says about
- * price, and none of it arithmetic.
- *
- * The VALUES are printed unaltered — no `toFixed`, no `Intl.NumberFormat`, no currency
- * symbol: `entries[].unit_price` and `total_price` are bare numbers and the report names no
- * currency anywhere, so a page that added a `$` would be telling a buyer something the
- * service did not say. Not the same as byte-fidelity, and worth stating exactly: the wire
- * spells these `78.0`, JSON parses that to the IEEE double 78, and JavaScript renders that
- * as `78`. Nothing was rounded or converted — 78.0 and 78 are one number — but the digits on
- * the page are JavaScript's spelling of it rather than the exchange's. A slot whose store is in no entry, or an entry carrying neither
- * price, says so — never a blank cell and never a zero, because a zero is a price.
- *
- * `fallback` is why the sentence has two forms. The exchange sets it when it stood in for a
- * store instead of quoting a bid that store made, and calling that "the price this store
- * bid" would be this page inventing a bid nobody placed. The stand-in number comes off the
- * caller-supplied `RosterEntry.list_price`, not from the store, so it is not called the
- * store's own price either.
- *
- * A zero gets a sentence of its own, and it is the reason this function is not a one-liner.
- * MEASURED in `apps/exchange/src/auction/routes.py::_entries_out`, which builds this very
- * field: `unit_price=float(offer.get("unit_price", 0.0))`. So an offer that named no price
- * is reported as `0.0`, indistinguishable on the wire from an offer that named zero. This
- * page cannot tell the two apart and does not pretend to — it prints the number the service
- * sent and says what a zero there can also mean, because a bare "unit 0" reads to a buyer
- * as free.
- */
-function bidPrice(entry: AuctionEntry | undefined, noRecord: boolean): string {
-  // Two different absences. With no record kept, `entries` is empty because this service
-  // has nothing to read — blaming that on the exchange would be this page misfiling its
-  // own bookkeeping as a fact about the market.
-  if (entry === undefined) {
-    return noRecord
-      ? 'no price here: this service kept no record of the auction to read one from'
-      : 'price not reported for this slot'
-  }
-  const parts: string[] = []
-  if (entry.unit_price !== undefined) parts.push(`unit ${entry.unit_price}`)
-  if (entry.total_price !== undefined) parts.push(`total ${entry.total_price}`)
-  if (parts.length === 0) return 'price not reported for this slot'
-  // NOT "its own list price". `RosterEntry.list_price` is caller-supplied — the exchange's
-  // own docstring says these "are not facts the exchange holds about a catalog, they are
-  // assertions the caller makes about one" — so attributing it to the store would be this
-  // page vouching for a number nobody authenticated.
-  const provenance = entry.fallback
-    ? 'the store did not bid, so the exchange stood in for it at the list price its roster ' +
-      'row carried'
-    : 'the price this store bid'
-  // The zero means different things on the two paths, so it is not one sentence. A bid that
-  // named no price and a roster row that carried no readable list price are both reported
-  // as `0.0` here, and neither is "free".
-  const zeroed =
-    entry.unit_price === 0 || entry.total_price === 0
-      ? entry.fallback
-        ? ' A zero is also what gets reported when that roster row carried no readable list price.'
-        : ' A zero is also what the exchange reports for an offer that named no price.'
-      : ''
-  return `${parts.join(', ')} — ${provenance}, as the exchange reported this auction.${zeroed}`
-}
 
 /**
  * The exchange's published ranking for one slot, or the plain fact that it published none.
@@ -703,43 +640,32 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
                 <WhyEmpty record={stage.record} />
               ) : (
                 <>
-                  <h3>What each of these stores asked for it</h3>
-                  <dl className="facts" data-testid="slot-prices">
-                    {stage.slots.map((slot) => (
-                      <Fragment key={slot.bid_ref}>
-                        <dt>
-                          {slot.slot} —{' '}
-                          {storeIdFromBidRef(slot.bid_ref, stage.record.auction_id) ?? slot.bid_ref}
-                        </dt>
-                        <dd data-testid={`price-${slot.bid_ref}`}>
-                          {bidPrice(
-                            entryForSlot(stage.record, slot.bid_ref),
-                            stage.record.recorded_at === '',
-                          )}
-                        </dd>
-                      </Fragment>
-                    ))}
-                  </dl>
+                  {/* The prices, the products and the commitments are on the CARDS above,
+                      off each slot's own `price` / `product` / `commitments`, live from the
+                      exchange. There used to be a second price list here, joined out of the
+                      RECORDED `entries[]` by the store id in each bid ref, because the slot
+                      carried no price; that join is gone with the field it stood in for.
+                      `entries[]` is still on this page as what it is — every rostered
+                      store's recorded answer, in the panel below and in the verbatim body. */}
                   <p className="gloss" data-testid="price-provenance">
                     <strong>
-                      These prices are from when the auction opened, not from now.
+                      The price on each card above is the exchange&rsquo;s live answer for
+                      that slot.
                     </strong>{' '}
-                    The exchange&rsquo;s shortlist slot carries no price at all, so they come
-                    from <code>entries[]</code> &mdash; the same HTTP answer, printed below
-                    verbatim, but its <em>recorded</em> half: the buyer service kept it when
-                    it opened the auction, while the slots above were re-fetched from the
-                    exchange for this page. This page joins the two halves by the store id in
-                    each slot&rsquo;s <code>bid_ref</code>; the service itself never joins
-                    them. A price that has moved since would still read here as it did then.
-                    The numbers are the ones the service sent, unrounded and unconverted, and
-                    it names no currency so this page names none &mdash; though where a total
-                    merely equals the unit price, that may be the exchange copying one into
-                    the other rather than the store quoting both.
+                    It comes off the slot itself, in the shortlist this page re-fetched from
+                    the exchange for this request &mdash; not out of the <code>entries[]</code>
+                    report the buyer service recorded when the auction opened, which is a
+                    different clock and is printed separately below. Where a store quoted no
+                    price, the card says so rather than showing a zero. The numbers are the
+                    ones the service sent, unrounded and unconverted, and the card names a
+                    currency only where the exchange named one.
                   </p>
 
                   <ul className="mono provenance-source" aria-label="Where each label came from">
                     {stage.slots.map((slot) => (
                       <li key={slot.bid_ref} data-testid={`labels-source-${slot.bid_ref}`}>
+                        {storeIdFromBidRef(slot.bid_ref, stage.record.auction_id) ?? slot.bid_ref}
+                        {' — '}
                         {slot.bid_ref}: labels_source {slot.labels_source}
                         <br />
                         trust_summary {describeTrust(slot.trust_fields)}
@@ -824,17 +750,23 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
             for scheme and host presence, not pinned to a named store. The host above is shown
             to you for exactly that reason.
           </li>
-          <li data-testid="gap-price">
-            <strong>Price: not on the slot</strong> — the exchange&rsquo;s shortlist slot
-            carries no price field at all, so this page does not read one off it. The prices
-            in step 3 come from <code>entries[]</code> in the same{' '}
-            <code>GET /buyer/auctions/{'{auction_id}'}</code> answer, joined to each slot by
-            the store id inside its <code>bid_ref</code> &mdash; which the exchange mints as{' '}
-            <code>{'{auction_id}:{store_id}'}</code>. That answer has a live half and a
-            recorded half, and the buyer service deliberately never mixes them; this page
-            does, because it is the only way to put a price beside a slot, so it labels every
-            price as recorded rather than current. A slot whose store is in no entry is shown
-            as having no reported price rather than being quietly given one.
+          <li data-testid="gap-fallback">
+            <strong>Whose price it is: not on the slot</strong> &mdash; when a store does not
+            answer, the exchange stands in for it at the list price its roster row carried,
+            and that number reaches the card as the slot&rsquo;s <code>price</code> like any
+            other. The slot carries no <code>fallback</code> flag &mdash;{' '}
+            <code>ShortlistSlot</code> has no such field &mdash; so a card cannot tell you
+            which of the two happened, and this page does not guess. Which stores answered and
+            which were stood in for is in <code>entries[]</code>, stated per store, in the
+            panel that opens when the shortlist is empty and in the verbatim answer.
+          </li>
+          <li data-testid="gap-product-name">
+            <strong>Product: a reference, not a name</strong> &mdash; the slot carries{' '}
+            <code>product_ref</code> (and a <code>variant_ref</code> where the bid named one),
+            which is what the roster and the offer agree on. It is not a title: a title
+            belongs to the store&rsquo;s own catalogue, nothing in this app resolves one, and
+            the exchange does not copy one through. So the card shows the reference the
+            exchange sent rather than a product name this page would have had to invent.
           </li>
           <li data-testid="gap-model">
             <strong>The questions came from no live model</strong> — the buyer service

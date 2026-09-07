@@ -19,10 +19,13 @@ and no extra one. Every stage is the real entry point; the only doubles in the r
 offline LLM double the buyer's clarifier is *designed* to take (D19), and a code-creator
 recorder that the redirect path never calls and which the run asserts was never called.
 
-It does **not** mean the ledger has a production writer for every kind. Three kinds in this
-chain have no emitter anywhere in the tree and the run writes them itself from the real
-upstream data; ``test_the_kinds_with_no_production_emitter_are_the_three_we_know_about``
-states which, so the gap is in the suite's output and not only in a docstring. Nor does it
+It does **not** mean the ledger has a production writer for every kind. ONE kind in this chain
+has no emitter anywhere in the tree and the run writes it itself from the real upstream data;
+``test_the_kinds_with_no_production_emitter_are_the_one_we_know_about`` states which, so the
+gap is in the suite's output and not only in a docstring. It was three:
+``test_the_run_records_the_three_auction_kinds_from_the_exchange_itself`` is the record of
+``bid_placed``, ``shown`` and ``claim_verified`` becoming the served auction's own output, and
+is what stops this driver quietly writing them again. Nor does it
 mean the checkout seam is whole: the exchange's ``checkout_token`` and the merchant's are
 unrelated values, and ``test_the_checkout_token_seam_has_no_production_binding`` pins that
 defect where a reader will find it.
@@ -413,6 +416,120 @@ def test_every_shortlist_slot_was_shown_exactly_once(s1_run) -> None:
         assert event["payload"]["slot"] == slots[event["payload"]["bid_ref"]]
 
 
+def test_every_shortlist_slot_shows_the_product_and_the_price_it_is_offering(
+    s1_run, s1_fixture
+) -> None:
+    """R2's slot: PRODUCT and PRICE, on the object the buyer is actually served.
+
+    **This test exists because deleting the code that builds those fields was SILENT.** Driven
+    as a sabotage: ``ranking/serving.py``'s ``_with_offer_fields`` — the join that puts the
+    candidate's offer onto the rank row's slot — was removed, ``POST /auctions`` answered three
+    slots carrying ``product: null`` and ``price: null``, and the whole S1 suite stayed green.
+    A shortlist slot with no product and no price is not a shortlist; a buyer cannot be shown
+    it, and R2 names both fields.
+
+    Both doors are checked, because the published contract says they serve the same object:
+    the inline ``shortlist`` on the 201, and ``GET /auctions/{auction_id}/shortlist``, which
+    re-validates through the pinned ``Shortlist`` model.
+
+    Values, not merely presence. Each slot's price is joined back to the entry the exchange
+    collected for that store, so a slot showing *a* price rather than *this bid's* price fails
+    here — including the R10 fallback, whose price is the roster's list price because the
+    exchange manufactured the offer.
+    """
+    slots = s1_run.shortlist["slots"]
+    assert slots, "the ranker produced an empty shortlist"
+    assert s1_run.served_shortlist == s1_run.shortlist, (
+        "GET /auctions/{auction_id}/shortlist and the POST body disagree about the same "
+        "auction's shortlist"
+    )
+
+    by_store = {store["store_id"]: store for store in s1_fixture["stores"]}
+    for slot in slots:
+        entry = s1_run.entry_for_bid_ref(slot["bid_ref"])
+        store_id = entry["store_id"]
+        assert slot["product"] is not None, (
+            f"slot {slot['slot']!r} for {store_id} shows no product; R2 wants the buyer to see "
+            "WHICH catalogue thing is being offered"
+        )
+        assert slot["product"]["product_ref"] == by_store[store_id]["product_ref"]
+        assert slot["price"] is not None, f"slot {slot['slot']!r} for {store_id} shows no price"
+        assert slot["price"]["unit_price"] == pytest.approx(entry["unit_price"])
+        assert slot["price"]["total_price"] == pytest.approx(entry["total_price"])
+        assert slot["price"]["currency"] == "USD"
+
+    # …and the fallback's price really is the roster's list price, which is what makes the
+    # join above a check on the exchange's own construction rather than on the store's reply.
+    (silent,) = s1_fixture["expected"]["fallback_stores"]
+    silent_slot = next(
+        slot for slot in slots if s1_run.entry_for_bid_ref(slot["bid_ref"])["store_id"] == silent
+    )
+    assert silent_slot["price"]["unit_price"] == pytest.approx(by_store[silent]["list_price"])
+
+
+def test_the_ranking_moved_on_the_features_the_exchange_computed(s1_run, s1_fixture) -> None:
+    """The published five-term formula ran with real inputs, not with five neutrals.
+
+    **Also written because deleting the producer was SILENT.** Driven as a sabotage:
+    ``ranking/serving.py``'s ``attach_features`` call was removed, every feature became absent
+    on every served candidate, each took its published ``when_absent`` neutral, ``rank_score``
+    collapsed to the one-term ``0.4 + 0.2*trust`` — identical for all three stores — and the
+    S1 suite stayed green, because nothing here read a score or a component.
+
+    The discriminator this run actually has is ``verified_claim_ratio``: two hosted stores made
+    claims the exchange checked against its own catalogue and verified, and the silent store's
+    R10 fallback carries no claims at all, so it takes the neutral. If the exchange's own
+    verdicts are not reaching the formula, those two numbers are equal — which is precisely
+    what the sabotage produced.
+
+    ``components`` and not just ``rank_score``, because a score can coincide; the components
+    are the published per-term breakdown and they say WHICH term did the work.
+    """
+    components = {row["store_id"]: row["components"] for row in s1_run.ranked}
+    scores = {row["store_id"]: row["rank_score"] for row in s1_run.ranked}
+    (silent,) = s1_fixture["expected"]["fallback_stores"]
+
+    assert set(components) == {entry["store_id"] for entry in s1_run.entries}
+    for store_id in s1_fixture["expected"]["hosted_stores"]:
+        assert (
+            components[store_id]["verified_claim_ratio"]
+            > components[silent]["verified_claim_ratio"]
+        ), (
+            f"{store_id} presented claims this exchange verified and scored no better on "
+            f"verified_claim_ratio than {silent}, which presented none: "
+            f"{components[store_id]} vs {components[silent]}"
+        )
+        assert scores[store_id] > scores[silent], (
+            f"the store that answered with a verified pitch ranked no higher than the store "
+            f"that never answered: {scores}"
+        )
+        # And it is not charged for saying MORE than the exchange can check. Each hosted
+        # agent publishes a `policy_action` claim — its own record of the discount decision,
+        # which `trust.scoring.claim_dimension` refuses to route to any trust dimension and
+        # which no catalogue was ever going to carry a reading for. Graded as a failed
+        # product claim it took the ratio to 3/4; a store publishing three such records
+        # beside three true ones would have landed on exactly the 0.5 neutral the SILENT
+        # store gets for free, and a fourth would have put an honest store below silence.
+        # The ratio is 1.0 here, which is twice that neutral.
+        assert components[store_id]["verified_claim_ratio"] == pytest.approx(
+            2 * components[silent]["verified_claim_ratio"]
+        ), (
+            "a hosted store's verified_claim_ratio is not the full 1.0 against the silent "
+            "store's 0.5 neutral, so something it said that this exchange could not check "
+            f"was counted against it: {components[store_id]} vs {components[silent]}"
+        )
+    # The exchange's OWN verdicts are what moved it — one `claim_verified` per counted claim,
+    # and none for the store that made none.
+    verdicts = Counter(
+        str(event["store_id"])
+        for event in s1_run.events
+        if event["kind"] == "claim_verified" and event["payload"]["status"] == "verified"
+    )
+    for store_id in s1_fixture["expected"]["hosted_stores"]:
+        assert verdicts[store_id] > 0
+    assert verdicts[silent] == 0
+
+
 def test_the_accepted_offer_is_the_top_shortlist_slot(s1_run, s1_fixture) -> None:
     """Acceptance follows the shortlist rather than reaching past it."""
     top = s1_run.shortlist["slots"][0]
@@ -535,17 +652,37 @@ def test_the_known_nonconforming_emitters_are_still_exactly_the_two_reported(s1_
 # --------------------------------------------------------------------------------------
 # 7 — what this run had to supply itself, stated as tests so it cannot be forgotten
 # --------------------------------------------------------------------------------------
-def test_the_kinds_with_no_production_emitter_are_the_three_we_know_about(s1_run) -> None:
-    """``shown``, ``checkout_pixel`` and ``claim_verified`` have no writer in the tree.
+def _ledger_emitters(kind: str) -> list[str]:
+    r"""Every product source that emits ``kind`` — by AST, not by grepping for a literal.
 
-    The run builds these three from real upstream data — the ranker's real slots, the stub's
-    real beacon, the verifier's real verdicts — because nothing under ``apps/``, ``packages/``
-    or ``services/`` writes them. This test is the visible record of that: it searches the
-    source tree for a producer, and turns red when one appears, at which point the run must
-    stop emitting its own or the exact multiset will double-count.
+    **This function is the repair of a gate that was measured VACUOUS**, and the measurement is
+    written here because the failure is the interesting part. Its predecessor was a regex,
+    ``(?:\.record|build_event)\(\s*["']<kind>["']``, and it was blind in two directions at once:
+
+    * ``apps/trust/src/claims/routes.py`` has served ``POST /claims/verifications`` — which
+      persists a verification and then appends a ``claim_verified`` event — for as long as this
+      test has existed, and the regex never saw it, because that route names the kind in a
+      module constant and appends through ``trust.events.append`` rather than ``.record``. So
+      the test asserted "``claim_verified`` has no producer anywhere in the tree" while a
+      producer sat in the tree, served, on a published route;
+    * when ``apps/exchange`` gained its own emitters for ``bid_placed``, ``shown`` and
+      ``claim_verified``, every one of them named its kind in a module constant
+      (``BID_PLACED_KIND``, ``SHOWN_KIND``, ``CLAIM_VERIFIED_KIND``) — house style in this
+      repo — and the regex stayed green through all three. A gate that a variable name can
+      switch off is not a gate.
+
+    So the search parses each module and resolves a ``Name`` argument back to a module-level
+    string constant, and it recognises the two emission shapes this tree actually uses: a call
+    to ``recorder.record(<kind>, ...)`` / ``build_event(<kind>, ...)``, and an ``append(...)``
+    of a dict literal carrying ``"kind": <kind>``.
+
+    It is still a proxy for "is there a producer", and its remaining blind spots are named
+    rather than left to be discovered: a kind assembled from a non-constant expression, one
+    read out of a config file, and one emitted by a service that is not under ``apps/``,
+    ``packages/`` or ``services/``. The direct measurement of a producer is a served request,
+    which is what ``test_the_run_records_the_three_auction_kinds_from_the_exchange_itself``
+    below does for the three kinds this run no longer writes for itself.
     """
-    import re
-
     roots = [REPO_ROOT / "apps", REPO_ROOT / "packages", REPO_ROOT / "services"]
     sources = {
         path.relative_to(REPO_ROOT).as_posix(): path.read_text(encoding="utf-8")
@@ -556,19 +693,132 @@ def test_the_kinds_with_no_production_emitter_are_the_three_we_know_about(s1_run
     assert len(sources) > 50, (
         f"only {len(sources)} product sources found; the search would pass vacuously"
     )
+    return _emitters_in(sources, kind)
 
-    # A ledger write in this codebase is `recorder.record("<kind>", ...)` or
-    # `build_event("<kind>", ...)`. Matching the call and the literal together is what keeps
-    # the frozen vocabulary lists — which name every kind and emit none — out of the result.
-    for kind in ("shown", "checkout_pixel", "claim_verified"):
-        pattern = re.compile(rf"""(?:\.record|build_event)\(\s*["']{kind}["']""")
-        emitters = sorted(name for name, text in sources.items() if pattern.search(text))
+
+def _emitters_in(sources: dict[str, str], kind: str) -> list[str]:
+    """Which of ``sources`` emit ``kind``. The parse :func:`_ledger_emitters` describes."""
+    import ast
+
+    emitters: list[str] = []
+    for name, text in sorted(sources.items()):
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:  # pragma: no cover - a module that does not parse emits nothing
+            continue
+        constants = {
+            target.id: node.value.value
+            for node in tree.body
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+            for target in node.targets
+            if isinstance(target, ast.Name) and isinstance(node.value.value, str)
+        }
+
+        def names(value: ast.AST | None, table: dict[str, str] = constants) -> str | None:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                return value.value
+            if isinstance(value, ast.Name):
+                return table.get(value.id)
+            return None
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if called in ("record", "build_event") and node.args:
+                if names(node.args[0]) == kind:
+                    emitters.append(name)
+                    break
+            if called == "append":
+                for argument in node.args:
+                    if not isinstance(argument, ast.Dict):
+                        continue
+                    for key, value in zip(argument.keys, argument.values, strict=True):
+                        if names(key) == "kind" and names(value) == kind:
+                            emitters.append(name)
+                            break
+    return sorted(set(emitters))
+
+
+#: The kinds the S1 chain needs that STILL have no production emitter, so the run writes them
+#: itself from real upstream data. It was three; ``shown`` and ``claim_verified`` left when
+#: ``apps/exchange`` started producing them on the served auction path, and the test below is
+#: what holds the list to what is actually true.
+KINDS_THE_RUN_STILL_EMITS_ITSELF = ("checkout_pixel",)
+
+#: The kinds the SERVED auction path produces for itself, which the run must therefore not
+#: write. Each maps to the module that has to contain the producer.
+EXCHANGE_PRODUCED_KINDS = {
+    "bid_placed": "apps/exchange/src/auction/routes.py",
+    "shown": "apps/exchange/src/ranking/serving.py",
+    "claim_verified": "apps/exchange/src/ranking/verification.py",
+}
+
+
+def test_the_kinds_with_no_production_emitter_are_the_one_we_know_about(s1_run) -> None:
+    """``checkout_pixel`` has no writer in the tree; the run builds it from the real beacon.
+
+    This list used to be three. ``shown`` and ``claim_verified`` are gone from it because the
+    exchange now writes both on the served auction path, which is what the previous version of
+    this test asked for in as many words — "delete the run's emission in
+    e2e/support/s1/flow.py and drive that emitter instead". That is what happened, and the
+    test's other half now lives in
+    ``test_the_run_records_the_three_auction_kinds_from_the_exchange_itself``.
+
+    ``checkout_pixel`` remains: ``pixel/src/`` holds a real Web Pixel extension, but nothing on
+    a served path turns its beacon into a ledger event — ``merchant_svc.collector`` stops at a
+    ``PixelObservation``. The run emits one from the observation the real collector parsed out
+    of the stub's real beacon, and this test turns red the moment a producer appears, at which
+    point the run must stop emitting its own or the exact multiset will double-count.
+    """
+    for kind in KINDS_THE_RUN_STILL_EMITS_ITSELF:
+        emitters = _ledger_emitters(kind)
         assert not emitters, (
             f"{kind!r} now has a production emitter ({emitters}). The S1 run emits its own, "
             "so the exact per-kind multiset is about to double-count: delete the run's "
             "emission in e2e/support/s1/flow.py and drive that emitter instead."
         )
         assert s1_run.kind_counts.get(kind, 0) > 0, f"the run produced no {kind} events at all"
+
+
+def test_the_run_records_the_three_auction_kinds_from_the_exchange_itself(s1_run) -> None:
+    """``bid_placed``, ``shown`` and ``claim_verified`` come from the SERVED auction, not here.
+
+    The counterpart of the test above, and the reason the S1 suite can be trusted about the
+    auction path at all. This file's own driver used to compute the candidates, run the claim
+    verifier and emit all three of these kinds itself — roughly 150 lines that made a served
+    ``POST /auctions`` returning ``ranked: 0, slots: 0`` look like a healthy spine. Two
+    assertions, and neither is satisfiable by the harness doing the work:
+
+    * a producer for each kind exists in the module that owns that stage; and
+    * ``e2e/support/s1/flow.py`` emits none of the three, so every one in the run's ledger came
+      out of the exchange.
+
+    The counts are then the exchange's own answer, cross-checked against the auction's
+    published response in
+    ``test_the_run_covers_every_frozen_ledger_kind_with_an_exact_count``.
+    """
+    harness_path = "e2e/support/s1/flow.py"
+    harness = (REPO_ROOT / harness_path).read_text(encoding="utf-8")
+    for kind, owner in EXCHANGE_PRODUCED_KINDS.items():
+        emitters = _ledger_emitters(kind)
+        assert owner in emitters, (
+            f"{kind!r} has no producer in {owner}; the served auction path stopped recording "
+            f"it. Found in: {emitters or 'nowhere in the tree'}"
+        )
+        assert s1_run.kind_counts.get(kind, 0) > 0, (
+            f"the exchange produced no {kind!r} events for a served auction that ranked "
+            f"{len(s1_run.ranked)} candidates and filled "
+            f"{len(s1_run.shortlist['slots'])} slots"
+        )
+        # The harness may READ these events back — that is the whole point of the run now —
+        # but it must not WRITE one. Measured with the same parse, so "the driver emits it"
+        # is decided the same way "the product emits it" is.
+        assert not _emitters_in({harness_path: harness}, kind), (
+            f"e2e/support/s1/flow.py emits {kind!r} itself; the run must not write a kind the "
+            f"exchange produces, or the exact per-kind multiset double-counts"
+        )
 
 
 def test_the_checkout_token_seam_has_no_production_binding(s1_run) -> None:

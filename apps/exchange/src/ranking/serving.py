@@ -64,11 +64,14 @@ from .verification import NoCatalogSnapshots, attest_candidates, declared_attrib
 __all__ = [
     "DEFAULT_SHORTLIST_CAPACITY",
     "ENV_RANKING_WEIGHTS",
+    "SHOWN_KIND",
     "SLOT_OFFER_FIELDS",
     "ShortlistStore",
     "catalog_of",
+    "claim_dimensions_of",
     "configure_ranking",
     "rank_auction",
+    "record_shown",
     "registered_domains_of",
     "shortlist_commitments",
     "shortlist_price",
@@ -77,6 +80,9 @@ __all__ = [
     "trust_snapshot_of",
     "weights_of",
 ]
+
+#: The frozen ledger kind a filled shortlist slot is announced under.
+SHOWN_KIND = "shown"
 
 #: The three R2 fields this module adds to a slot, on top of the five the ranker already builds.
 #:
@@ -183,8 +189,15 @@ def configure_ranking(
     shortlists: ShortlistStore | None = None,
     weights: RankingWeights | None = None,
     catalog: Any = None,
+    claim_dimensions: Any = None,
 ) -> None:
-    """Wire an app's ranking collaborators. Anything omitted keeps what is already there."""
+    """Wire an app's ranking collaborators. Anything omitted keeps what is already there.
+
+    ``claim_dimensions`` is the ``claim_type -> trust dimension`` routing the exchange
+    announces a minted verdict under — see :func:`claim_dimensions_of` for why it has to be
+    injected rather than held here, and :func:`~.verification.attest_candidate_claims` for what
+    an exchange without one does instead.
+    """
     if trust_snapshot is not None:
         app.state.trust_snapshot = trust_snapshot
     if registered_domains is not None:
@@ -195,6 +208,8 @@ def configure_ranking(
         app.state.ranking_weights = weights
     if catalog is not None:
         app.state.ranking_catalog = catalog
+    if claim_dimensions is not None:
+        app.state.ranking_claim_dimensions = claim_dimensions
 
 
 def shortlist_store(app: Any) -> ShortlistStore:
@@ -261,6 +276,25 @@ def catalog_of(app: Any) -> Any:
         catalog = NoCatalogSnapshots()
         app.state.ranking_catalog = catalog
     return catalog
+
+
+def claim_dimensions_of(app: Any) -> Any:
+    """This app's ``claim_type -> trust dimension`` routing, or ``None``.
+
+    ``None`` is the DEFAULT and it is not an oversight: this exchange announces no
+    ``claim_verified`` event until a deployment hands it the routing. The frozen payload for
+    that kind is ``(claim_ref, status, dim)``; the table that produces ``dim`` is human-approved
+    ground truth (``fixtures/manifest.json``, T-080/D18) which ``apps/trust`` consumes
+    read-only, and the exchange imports nothing from ``trust`` — its image ships neither
+    ``trust`` nor ``fixtures/``. So the only two options here are "be given the table" and
+    "invent one", and inventing a routing nobody approved is precisely the failure
+    ``trust.scoring.claim_dimension`` raises rather than defaults through. Announcing nothing is
+    the same direction :func:`trust_snapshot_of` and :func:`catalog_of` fail in.
+
+    Either shape works: a callable ``claim_type -> dimension`` (``trust.scoring.claim_dimension``
+    itself is one, and raising for an unmapped type is handled) or a plain mapping.
+    """
+    return getattr(app.state, "ranking_claim_dimensions", None)
 
 
 def weights_of(app: Any) -> RankingWeights:
@@ -480,6 +514,65 @@ def _with_offer_fields(shortlist: Mapping[str, Any], candidates: Sequence[Any]) 
     return Shortlist.model_validate({**shortlist, "slots": slots}).model_dump(mode="json")
 
 
+def record_shown(
+    recorder: Any,
+    candidates: Sequence[Any],
+    *,
+    auction_id: str,
+    shortlist: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Announce one ``shown`` event per shortlist slot this auction actually filled.
+
+    **The kind existed and nothing wrote it.** D34 freezes ``shown`` with the payload
+    ``(bid_ref, slot)`` — a bid, and which of the four differentiated slots it was awarded —
+    and until this function the only thing in the tree that emitted one was the S1 end-to-end
+    harness, writing it for itself out of a shortlist it had also ranked itself. A shortlist
+    the exchange served and did not record is an exchange that cannot say afterwards what it
+    put in front of a buyer, which is the whole point of an append-only ledger on this path.
+
+    Emitted where the shortlist is STORED, so what is announced is what a reader of
+    ``GET /auctions/{auction_id}/shortlist`` will be served, not a candidate list that might
+    still be filtered. One event per slot, and slots are unique per auction by construction
+    (``ranking.shortlist.build`` keeps one bid per store and assigns each name once).
+
+    ``candidates`` supplies the ``store_id`` for the event's own top-level field: a slot
+    carries ``bid_ref`` and no store, and the ledger's ``store_id`` must be the exchange's
+    attribution rather than anything read off a bid. A slot whose ``bid_ref`` matches no
+    candidate is announced with no store rather than dropped — the slot WAS shown, and losing
+    the record of it to a join miss would be the worse error.
+
+    The payload's two published keys are the slot's own, and the shortlist has already been
+    through ``Shortlist.model_validate`` in :func:`_with_offer_fields`, so the frozen shape is
+    guaranteed upstream rather than re-checked here.
+
+    Returns:
+        The events emitted, in slot order. Never raises: an audit trail must not be able to
+        fail a live auction.
+    """
+    record = getattr(recorder, "record", None)
+    if not callable(record):
+        return []
+    store_by_bid: dict[str, str] = {}
+    for candidate in candidates or ():
+        bid_id = str(read(candidate, "bid_id", "") or "")
+        if bid_id and bid_id not in store_by_bid:
+            store_by_bid[bid_id] = str(read(candidate, "store_id", "") or "")
+
+    events: list[dict[str, Any]] = []
+    for slot in shortlist.get("slots", ()) or ():
+        bid_ref = str(read(slot, "bid_ref", "") or "")
+        payload = {"bid_ref": bid_ref, "slot": read(slot, "slot", None)}
+        events.append(
+            record(
+                SHOWN_KIND,
+                auction_id=auction_id,
+                store_id=store_by_bid.get(bid_ref) or None,
+                payload=payload,
+            )
+        )
+    return events
+
+
 def rank_auction(
     entries: Sequence[Any],
     *,
@@ -491,6 +584,8 @@ def rank_auction(
     weights: RankingWeights | None = None,
     catalog: Any = None,
     product_refs: Any = None,
+    recorder: Any = None,
+    claim_dimensions: Any = None,
 ) -> dict[str, Any]:
     """Rank one closed auction's collected bids and build its shortlist.
 
@@ -524,7 +619,19 @@ def rank_auction(
         auction_id=auction_id,
         registered_domains=registered_domains,
     )
-    candidates = attest_candidates(candidates, catalog=catalog, product_refs=product_refs)
+    # `recorder` and `claim_dimensions` are what turn the attestation into a RECORD. Without
+    # them a served auction ran the claim verifier over every candidate, decided hard
+    # constraints and `verified_claim_ratio` on the answers, and then dropped every verdict
+    # when the request ended — nothing in the ledger said a claim had ever been checked. Both
+    # are no-ops when omitted: see `verification.attest_candidate_claims`.
+    candidates = attest_candidates(
+        candidates,
+        catalog=catalog,
+        product_refs=product_refs,
+        recorder=recorder,
+        auction_id=auction_id,
+        dimensions=claim_dimensions,
+    )
     # The published formula's INPUTS, and the reason this line is not optional: without it
     # four of the five features are absent on every served candidate, each takes its published
     # neutral, and `rank_score` is `0.4 + 0.2*trust` — a one-term formula wearing a five-term
