@@ -248,7 +248,14 @@ penalises — price claims → `price_honored`, shipping claims → `shipped_on_
 `HALF_LIFE` and the new-store prior N are likewise manifest constants, not trust-engine config (this
 is what keeps S2 checkable "against the manifest, not the trust engine's own config").
 
-## D19 — Embeddings: `HashEmbedding` is the configured default in every environment, not a test-only fallback
+## D19 — Embeddings: `HashEmbedding` is the configured default in every environment, not a test-only fallback **[the DEFAULT clause is amended by D56; every other clause stands]**
+
+> **Pointer, added by D56.** The sentence "`EMBEDDING_PROVIDER` defaults to `hash`" is
+> superseded: the default is now `lexical`. Everything else below — the 1024-d L2-normalised
+> requirement, the reason it exists, the +679 MB / ~2.2 GB objection, `local_bge` as an
+> optional extra, `make e2e-live` — is unchanged and still binding. D56 also scopes what the
+> "so the real cosine index (D6) is exercised" clause ever claimed. Read D56 before quoting
+> this section.
 
 `EMBEDDING_PROVIDER` defaults to `hash`. `HashEmbedding` must emit **L2-normalised 1024-d float
 vectors** so the real cosine index (D6) is exercised. `torch`/`sentence-transformers` are an
@@ -1042,3 +1049,108 @@ Read that way, several things stop being open questions:
 * It also settles what a shop is BUYING, which the earlier framing left vague: not visibility, and
   not a better score. Visibility is organic and earned by matching. What is bought is the right to
   make the case in one's own voice, and the loop that improves it.
+
+## D56 — The default embedding provider is `lexical`; D19's index-coverage promise is kept, and its ranking promise never existed **[amends D19's default clause only]**
+
+D19 said `EMBEDDING_PROVIDER` defaults to `hash` and that `HashEmbedding` must emit
+L2-normalised 1024-d float vectors "so the real cosine index (D6) is exercised". That promise
+is about **index coverage**, and it is kept in full. **It never said anything about ranking
+quality, and six downstream tickets have been reading ranking quality out of it.**
+
+**The scoping sentence, which matters as much as the swap.** *Exercising the index* and
+*ranking the catalogue* are two different claims, and only the first was ever true of `hash`.
+D19 guaranteed that a real 1024-d cosine index gets real unit vectors written into it and
+really answers top-k — the write path, the width, the rescaling, the HNSW traversal, all
+genuinely driven rather than stubbed. It did not guarantee, and could not have guaranteed,
+that the ORDER that index returns means anything. Any ticket, test or design note that cited
+D19 as authority for a retrieval ORDER was citing a claim D19 does not contain.
+
+**What was measured** (gate landed in `342a8fb`,
+`services/ingest/tests/test_embedding_ranking_gate.py`: 5 shopper queries x 3 relevant x 3
+irrelevant = 45 ordered pairs, threshold `MIN_SPREAD = 0.20` on the per-query mean-relevant
+minus mean-irrelevant spread):
+
+| provider | inversions | worst per-query spread |
+| --- | --- | --- |
+| `hash` (the D19 default) | **28 of 45** | **-0.0250**, and all five spreads negative |
+| `er.similarity.text_similarity` (positive control) | 0 of 45 | +0.4728 |
+| `lexical` (the new default) | **0 of 45** | **+0.4936** |
+
+Concretely: against the query `"running shoes"`, `hash` scores `"espresso machine"` at
+`+0.063` and `"trail running shoe"` at `-0.008`. The query's own singular, `"running shoe"`,
+scores `-0.035`. An espresso machine outranks a trail running shoe, and one character of
+difference is indistinguishable from a different product category — because `hash_embed` is
+SHA-256 bytes reshaped into floats and its cosine measures byte identity. Driven through the
+real Neo4j `vector-2.0` 1024-d cosine index, `queryNodes("running shoes", k=3)` under `hash`
+returns a coffee grinder, a sunscreen and an espresso machine; under `lexical` it returns the
+three running shoes, in order. `hash_embedding.py`'s docstring used to claim the opposite
+("a ranking measured against this provider is a ranking, not a fill") and has been corrected.
+
+**Why this is a completion of D19 rather than a reversal.** Every constraint D19 imposed on the
+default is satisfied unchanged by the replacement:
+
+- L2-normalised, exactly 1024-d, builtin floats — the same vectors into the same D6 index, so
+  index coverage is identical and the re-embed/rebuild machinery is untouched;
+- dependency-free and offline — no new wheels, no model weights, no network, stdlib only, so
+  C9 holds and D19's measured +679 MB / ~2.2 GB objection is untouched;
+- deterministic across processes, machines and runs — SHA-256 feature placement, no `hash()`
+  and no `set` iteration anywhere in the path, so it does not move with `PYTHONHASHSEED`
+  (verified across separate interpreter invocations, byte-identical vectors);
+- `LocalBgeEmbedding` is untouched and remains the real-model option under
+  `EMBEDDING_PROVIDER=local_bge`; `make e2e-live` still sets it.
+
+**Ruling.**
+
+1. `DEFAULT_PROVIDER = "lexical"`. `LexicalEmbedding` lives at
+   `services/ingest/src/embeddings/lexical.py` and delegates to
+   `proxyshop_support.embedding.lexical_embed`, which is the single shared definition — the
+   same one-definition rule `hash_embed` has, and for the same reason: two independently
+   derived schemes would put seeded vectors and query vectors in different spaces and
+   retrieval would score noise while both halves passed their own tests.
+2. **`hash` stays registered and selectable.** Deleting it would strand the gate that measures
+   it, and its byte-identity behaviour is genuinely the right instrument wherever a test needs
+   two unrelated texts to land near-orthogonal. `hash_embed` itself is **unchanged, byte for
+   byte** — the frozen acceptance test grades `HashEmbedding` against it, the root
+   `conftest.py`'s `hash_embedding` fixture is still that function, and amending a decision is
+   not licence to move the thing the decision was measured on.
+3. The registry is `{lexical, hash, local_bge}` and `get_embedding_provider` still refuses an
+   unknown name rather than falling back.
+
+**What `lexical` is, in one line:** folded words and per-word padded character trigrams, each
+bag hashed into 1024 signed buckets, L2-normalised separately and blended 0.6 / 0.4 — the same
+split and the same weights as `ingest.er.similarity.text_similarity`, which is why its cosine
+tracks that measure.
+
+**BE CLEAR ABOUT WHAT IT CANNOT DO. `lexical` has no semantics. It compares surfaces.** It
+will not match "sneakers" to "running shoes" through meaning; the example to keep in mind is
+`"laptop"` against `"notebook computer"`, which scores **exactly +0.0000** — identical to an
+unrelated product — so a shopper asking for a laptop retrieves nothing unless the catalogue
+itself says "laptop". (`"sneakers"` scores `+0.068` against `"running shoes"`, barely above the
+`+0.000` it gives `"espresso machine"`, and that margin is shared letters, not shared meaning.)
+What it does handle is the plural, the hyphen, the spelling variant and the word-order change:
+`"running shoes"` against `"trail running shoe"` scores `+0.509`. Closing the semantic gap needs
+`local_bge` or a query-expansion step in front of retrieval. **Overclaiming here is exactly the
+defect that made the previous default untrustworthy — do not repeat it.** The limitation is
+asserted by tests, not just documented, so a future swap to a real model fails a test that then
+tells the reader the caveat can come out.
+
+**Why now, and not when D19 was written.** D55 made graph retrieval the spine of the product:
+the shortlist is assembled by MATCHING and the shops then compete on persuasion, so an
+organic result that ranks noise is not a cosmetic defect — it is the product's first step
+returning the wrong shops. Under the auction framing a bad retrieval order was masked by the
+bid ranking downstream of it. It is not masked any more.
+
+**Consequence for anything already built.** A catalogue embedded under `hash` and queried
+under `lexical` is a provider mismatch, which `candidate_products` already refuses loudly
+(`EmbeddingProviderMismatch`, on the `EmbeddingRun` marker `reembed_products` stamps) rather
+than answering with a silently re-ranked shortlist. The migration is one command —
+`python -m ingest.graph.reembed` — with no index rebuild, because the width did not change.
+
+**Two `hash` pins outside this ruling's scope that must move with it, or the swap is
+config-only everywhere except where it counts** (both are HELD files at the time of writing
+and are called out rather than edited): `apps/exchange/compose.yaml` sets
+`EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-hash}"`, and
+`apps/exchange/src/retrieval/sources.py:165` reads `resolved = provider or HashEmbedding()` —
+a concrete provider class named at a call site, which `test_graph.py`'s
+`test_no_caller_names_a_concrete_provider_class` cannot see because it scans
+`services/ingest/src` only.

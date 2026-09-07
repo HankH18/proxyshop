@@ -7,10 +7,25 @@ product_near_zero_cosine``), a structured-path candidate reports ``cosine is Non
 satisfies every one of those. Not one assertion anywhere said **a relevant document must
 outrank an irrelevant one**, which is the only property a retrieval ranking is actually for.
 
-WHAT IS TRUE OF THE DEFAULT PROVIDER, measured here and reproduced by the tests below.
-``EMBEDDING_PROVIDER`` defaults to ``hash`` (D19) and ``hash_embed`` is SHA-256 bytes reshaped
-into 1024 floats, so its cosine is a function of *byte identity*, not of meaning. Against the
-query ``"running shoes"``:
+WHAT THIS FILE MEASURED, AND WHAT CHANGED BECAUSE OF IT. When this gate landed,
+``EMBEDDING_PROVIDER`` defaulted to ``hash`` and the gate stood as a ``strict`` xfail against
+it. D19's amendment (see ``.swarm-loop/decisions.md``) has since made ``lexical`` the default:
+same 1024-d L2-normalised vectors, same cosine index, an order that means something. **The
+xfail therefore evaporates rather than flips** — its condition is ``provider.name == "hash"``,
+so under the default this is an ordinary hard gate, and under ``EMBEDDING_PROVIDER=hash`` it
+is still the strict xfail that says what that provider cannot do. Measured on this corpus:
+
+===============================  =============  ==================
+ provider                         inversions     worst spread
+===============================  =============  ==================
+ ``lexical`` (the default)         0 / 45         **+0.4936**
+ ``er.similarity.text_similarity`` 0 / 45         +0.4728
+ ``hash``                          28 / 45        -0.0250
+===============================  =============  ==================
+
+WHAT IS TRUE OF THE ``hash`` PROVIDER, measured here and reproduced by the tests below.
+``hash_embed`` is SHA-256 bytes reshaped into 1024 floats, so its cosine is a function of
+*byte identity*, not of meaning. Against the query ``"running shoes"``:
 
 ===========  ==============================
  cosine       document
@@ -40,12 +55,18 @@ sets ``EMBEDDING_PROVIDER`` to anything else the marker evaporates and this is a
 hard gate. The xfail asserts one measured fact — *this* provider cannot rank — and asserts it
 in the direction that fails loudly if it stops being true.
 
-``pytest --runxfail services/ingest/tests/test_embedding_ranking_gate.py`` reports the
-underlying failures as ordinary failures; that is the red this file is evidence of.
+``EMBEDDING_PROVIDER=hash pytest --runxfail
+services/ingest/tests/test_embedding_ranking_gate.py`` reports the underlying failures as
+ordinary failures; that is the red this file was originally evidence of.
 
-WHAT IT DOES NOT DO. It does not change the default. D19 is frozen and distributed to six
-tickets through the root ``conftest.py``; swapping the provider is an amendment, not a test
-edit. The report accompanying this file states what such an amendment would have to say.
+WHAT IT STILL DOES NOT DO. It does not assert that retrieval *understands* anything. The
+default provider is lexical: it compares words and character trigrams, so it ranks
+``"trail running shoe"`` above ``"espresso machine"`` for ``"running shoes"`` and ranks
+``"notebook computer"`` at exactly ``+0.0000`` for ``"laptop"`` — the same as an unrelated
+product. This corpus is deliberately built so a lexical measure CAN satisfy it (see
+:class:`RankingCase`), which is what makes the positive control possible and what keeps the
+gate honest about its own scope: passing it means relevant beats irrelevant on surface
+agreement, and nothing more.
 """
 
 from __future__ import annotations
@@ -241,14 +262,17 @@ def embedding_measure(provider: EmbeddingProvider) -> Measure:
 #: configured, even if something mutates the environment mid-session.
 CONFIGURED_PROVIDER = get_embedding_provider()
 
-#: The whole reason the gate below is xfailed rather than simply absent. Kept as a constant
-#: so the reason string cannot drift away from the condition that triggers it.
+#: The whole reason the gate below is xfailed rather than simply absent — and, since D19's
+#: amendment, a marker nothing reaches unless someone deliberately selects ``hash``. Kept as a
+#: constant so the reason string cannot drift away from the condition that triggers it.
 HASH_CANNOT_RANK = (
     "EMBEDDING_PROVIDER is 'hash'. hash_embed is SHA-256 bytes reshaped into 1024 floats, so "
     "its cosine measures byte identity, not meaning: over this corpus it inverts 28 of 45 "
-    "relevant/irrelevant pairs and every per-query spread is negative. D19 makes that the "
-    "production default and is frozen, so this cannot be fixed by a test edit — it needs an "
-    "amendment. strict=True: if hash ever satisfies this corpus, THIS TEST FAILS."
+    "relevant/irrelevant pairs and every per-query spread is negative. That is why 'hash' is "
+    "no longer the default (D19, amended) — 'lexical' clears this corpus with 0 inversions "
+    "and a worst spread of +0.4936. Selecting 'hash' is still legitimate for byte-identity "
+    "work; ranking is not what it is for. strict=True: if hash ever satisfies this corpus, "
+    "THIS TEST FAILS."
 )
 
 
@@ -364,6 +388,41 @@ def test_the_hash_provider_ranks_by_bytes_and_the_numbers_say_so() -> None:
     )
 
 
+def test_the_lexical_provider_ranks_and_the_numbers_say_so() -> None:
+    """The measurement the amendment was made ON, pinned by name rather than by environment.
+
+    The gate above runs whatever ``EMBEDDING_PROVIDER`` selects, so on its own it could be
+    satisfied by exporting a variable. This asks ``lexical`` for its numbers directly: 0 of 45
+    pairs inverted, every per-query spread positive, worst spread +0.4936 — comfortably past
+    :data:`MIN_SPREAD` and slightly ahead of ``text_similarity``'s own +0.4728.
+
+    It also pins the LIMIT, in the same breath and on purpose. ``"notebook computer"`` scores
+    exactly ``+0.0000`` against ``"laptop"`` — identical to an unrelated product — because
+    there are no semantics in a lexical measure, only surface. Anyone reading the spread above
+    as evidence that retrieval understands the catalogue is reading it wrong, and this
+    assertion is here so that misreading fails a test rather than a shortlist.
+    """
+    provider = get_embedding_provider("lexical")
+    measure = embedding_measure(provider)
+
+    assert measure("running shoes", "running shoes") == pytest.approx(1.0)
+    trail = measure("running shoes", "trail running shoe")
+    espresso = measure("running shoes", "espresso machine")
+    assert trail > 0.4, f"the plural/singular/word-order case scored {trail:+.4f}"
+    assert trail > espresso, f"trail {trail:+.4f} vs espresso {espresso:+.4f}"
+
+    report = evaluate(measure)
+    assert report.inversions == (), report.summary()
+    assert report.worst_spread == pytest.approx(0.4936, abs=5e-4), report.summary()
+    assert min(report.spreads.values()) > 0.0, report.spreads
+
+    # The honest limitation, asserted rather than promised in prose.
+    assert measure("laptop", "notebook computer") == pytest.approx(0.0, abs=1e-9), (
+        "a lexical measure has no semantics: a synonym sharing no surface with the query is "
+        "indistinguishable from an unrelated product, and that must stay visible here"
+    )
+
+
 # =======================================================================================
 # 3. The same gate, driven through the real Neo4j vector index
 # =======================================================================================
@@ -387,6 +446,14 @@ def _seed_corpus(session: Any) -> dict[str, str]:
     ``reembed.embedding_text`` composes exactly the ``canonical_name``, so the vector in the
     index is the vector of the corpus document and nothing else. Any ranking failure here is
     the provider's, not the document builder's.
+
+    The write side embeds with :data:`CONFIGURED_PROVIDER`, not with a named one, and that is
+    load-bearing rather than tidy. ``candidate_products`` below reads with the configured
+    provider, and ``reembed_products`` stamps the index with whichever provider wrote it, so a
+    hard-coded ``get_embedding_provider("hash")`` here would have written one vector space and
+    queried another the moment the default stopped being ``hash`` — ``EmbeddingProviderMismatch``
+    at best, and a silently re-ranked shortlist if that guard ever lapsed. One provider, both
+    sides, named nowhere.
     """
     documents = sorted(
         {doc for case in RANKING_CORPUS for doc in (*case.relevant, *case.irrelevant)}
@@ -397,7 +464,7 @@ def _seed_corpus(session: Any) -> dict[str, str]:
         [{"product_id": pid, "canonical_name": doc} for doc, pid in ids.items()],
         source=CORPUS_SOURCE,
     )
-    reembed_products(session, get_embedding_provider("hash"))
+    reembed_products(session, CONFIGURED_PROVIDER)
     return ids
 
 
@@ -409,26 +476,80 @@ def test_the_served_vector_index_ranks_a_relevant_product_above_an_irrelevant_on
 ) -> None:
     """The same gate on the path production actually uses: ``db.index.vector.queryNodes``.
 
-    The arithmetic gate above could in principle be satisfied while the served retrieval
-    still ranked badly — different oversampling, different rescaling, a different vector in
-    the index than the one the measure computed. This drives the real index, through the real
-    :func:`~ingest.graph.candidate_products`, and asks the one question that matters: for
-    each corpus query, does the top-ranked product belong to that query's relevant set?
+    The arithmetic gate above could in principle be satisfied while the served retrieval still
+    ranked badly — different oversampling, different rescaling, a different vector in the index
+    than the one the measure computed. This drives the real index, through the real
+    :func:`~ingest.graph.candidate_products`, over the WHOLE seeded catalogue, and asks the
+    ranking question directly: does every document labelled relevant for this query outrank
+    every document labelled a distractor for it, on the scores Neo4j returned?
+
+    WHY THIS IS NOT "IS RANK 1 IN THE RELEVANT SET?", WHICH IS WHAT IT USED TO ASK. That
+    assertion is **unsatisfiable by any correct ranker over this corpus**, and it was never
+    caught because it lived behind a ``strict`` xfail: a strict xfail requires the test to
+    fail, and never checks that it failed for the stated reason. Under ``hash`` it failed
+    because ``hash`` cannot rank. It would ALSO have failed if the assertion were nonsense —
+    and it was.
+
+    The corpus cross-references on purpose: one query's distractors are another query's
+    targets, so ``_seed_corpus`` seeds the union of all 24 documents. Two of those documents
+    fold to a string byte-identical to a query: ``"Espresso Machine"`` (a distractor for
+    ``"running shoes"``) IS the query ``"espresso machine"``, and ``"Wool Winter Scarf"`` IS
+    the query ``"wool winter scarf"``. Each scores an exact ``+1.0000`` and is **unlabelled**
+    for that query — neither in its ``relevant`` tuple nor in its ``irrelevant`` one. So
+    "rank 1 must be in ``relevant``" demanded that an exact title match rank below three
+    partial matches.
+
+    Measured, and this is the decisive part: the file's OWN positive control fails it.
+    ``ingest.er.similarity.text_similarity`` — the measure this file certifies the corpus as
+    satisfiable by, which clears the pairwise gate with 0 inversions — puts an unlabelled
+    document at rank 1 for **three of the five** queries (``"Running Shoe Insoles"`` for
+    ``"running shoes"``, plus the two exact matches). A gate that its own positive control
+    cannot pass is not measuring the provider.
+
+    So the question is asked over the labels that exist. ``relevant`` beats ``irrelevant``,
+    pairwise, on served scores; and rank 1 is not a labelled distractor. An unlabelled
+    document ranking first is not evidence of anything, because the corpus never said where
+    it belongs for that query.
     """
     ids = _seed_corpus(graph_schema_session)
+    inversions: list[str] = []
     misses: list[str] = []
     for case in RANKING_CORPUS:
         results = candidate_products(
-            graph_schema_session, query_text=case.query, status=None, limit=3
+            graph_schema_session, query_text=case.query, status=None, limit=len(ids)
         )
-        assert results, f"no candidate at all for {case.query!r}"
-        relevant_ids = {ids[doc] for doc in case.relevant}
+        assert len(results) == len(ids), (
+            f"{case.query!r} retrieved {len(results)} of {len(ids)} seeded products; the "
+            f"ranking below is only meaningful over the whole catalogue"
+        )
+        for candidate in results:
+            assert candidate.scored and candidate.cosine is not None, (
+                f"{case.query!r} came back off the STRUCTURED path (score 0.0, cosine None, "
+                f"order by product_id). That ordering would satisfy this test by accident on "
+                f"any corpus whose relevant documents happen to sort first — the vector index "
+                f"must be what ranked these"
+            )
+        served = {candidate.product_id: candidate.cosine for candidate in results}
+
+        for relevant_doc in case.relevant:
+            for irrelevant_doc in case.irrelevant:
+                good, bad = served[ids[relevant_doc]], served[ids[irrelevant_doc]]
+                assert good is not None and bad is not None
+                if good <= bad:
+                    inversions.append(
+                        f"  {case.query!r}: {irrelevant_doc!r} ({bad:+.4f}) ranks at or above "
+                        f"{relevant_doc!r} ({good:+.4f})"
+                    )
+
         top = results[0]
-        if top.product_id not in relevant_ids:
+        if top.product_id in {ids[doc] for doc in case.irrelevant}:
             misses.append(
                 f"  {case.query!r}: rank 1 is {top.canonical_name!r} "
-                f"(cosine {top.cosine:+.4f}), which is not in the relevant set"
+                f"(cosine {top.cosine:+.4f}), which is one of this query's distractors"
             )
-    assert not misses, "the served vector index ranked an irrelevant product first:\n" + "\n".join(
-        misses
+
+    assert not inversions, (
+        f"the served vector index inverted {len(inversions)} relevant/distractor pairs:\n"
+        + "\n".join(inversions[:12])
     )
+    assert not misses, "the served vector index ranked a distractor first:\n" + "\n".join(misses)

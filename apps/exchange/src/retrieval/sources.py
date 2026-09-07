@@ -26,7 +26,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Protocol
 
-from ingest.embeddings import EmbeddingProvider, HashEmbedding
+from ingest.embeddings import EmbeddingProvider, get_embedding_provider
 from ingest.graph import Candidate, candidate_products
 from ingest.graph.query import DEFAULT_OVERSAMPLE
 
@@ -160,7 +160,13 @@ def make_candidate(
     elif similarity is not None:
         score = (1.0 + float(similarity)) / 2.0
     else:
-        resolved = provider or HashEmbedding()
+        # Resolve through the registry rather than naming a class. A concrete provider
+        # named at a call site is invisible to `test_no_caller_names_a_concrete_provider_class`,
+        # which scans `services/ingest/src` only -- so this line silently pinned the exchange
+        # to the hash provider while the configured default moved to `lexical` (D56). That
+        # would have made the swap config-only everywhere except the one place a shopper's
+        # query is actually scored.
+        resolved = provider or get_embedding_provider()
         score = (
             1.0 + _cosine(resolved.embed(query_text), resolved.embed(str(record["canonical_name"])))
         ) / 2.0
@@ -260,7 +266,7 @@ class InMemoryCandidateSource:
     ) -> None:
         self.records = [dict(record) for record in records]
         self.scored = scored
-        self.provider = provider or HashEmbedding()
+        self.provider = provider or get_embedding_provider()
         #: Every query this source was asked, in order — so a test can assert on the
         #: pushdown without needing a graph to observe it.
         self.queries: list[RetrievalQuery] = []

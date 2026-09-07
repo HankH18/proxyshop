@@ -1,6 +1,6 @@
 """Embedding providers for the catalog graph (T-012; C2/C4; D6; D19).
 
-The public surface is the :class:`EmbeddingProvider` port, its two implementations, and
+The public surface is the :class:`EmbeddingProvider` port, its three implementations, and
 :func:`get_embedding_provider` — the *only* place in the codebase that reads
 ``EMBEDDING_PROVIDER``. That is what makes D19's "provider swap is config-only" a
 mechanical property rather than a promise: no caller names a concrete provider class, so
@@ -14,6 +14,22 @@ changing one environment variable changes every embedding in the system.
 
 D6 pins the index this feeds: 1024 dimensions, cosine similarity. Every registered provider
 returns vectors of :data:`EMBEDDING_DIM` floats with unit L2 norm.
+
+Three providers, and the difference between the first two is *ranking*, not shape:
+
+``lexical`` (:class:`LexicalEmbedding`)
+    The default (D19 as amended). Hashed word and character-trigram features; its cosine
+    tracks ``ingest.er.similarity.text_similarity``. Offline, dependency-free, deterministic,
+    and — this is the point — it puts relevant documents above irrelevant ones. It has no
+    semantics; read its module docstring for what that costs.
+``hash`` (:class:`HashEmbedding`)
+    Still registered, still selectable, no longer the default. SHA-256 bytes reshaped into
+    floats: its cosine measures byte identity, which makes it the right instrument for a
+    test that wants two unrelated texts to land near-orthogonal, and the wrong one for any
+    order that is supposed to mean something.
+``local_bge`` (:class:`LocalBgeEmbedding`)
+    The real model, behind the optional ``embeddings`` extra that D19 keeps uninstalled.
+    Untouched by the amendment, and still the only provider here with actual semantics.
 """
 
 from __future__ import annotations
@@ -27,14 +43,20 @@ from .base import (
     UnknownEmbeddingProvider,
 )
 from .hash_embedding import HashEmbedding
+from .lexical import LexicalEmbedding
 from .local_bge import LocalBgeEmbedding
 
-#: D19: ``hash`` in every environment unless ``EMBEDDING_PROVIDER`` says otherwise.
-DEFAULT_PROVIDER = "hash"
+#: D19 as amended: ``lexical`` in every environment unless ``EMBEDDING_PROVIDER`` says
+#: otherwise. It was ``hash`` until the ranking gate measured that provider inverting 28 of
+#: 45 relevant/irrelevant pairs; ``lexical`` inverts none. Both emit L2-normalised 1024-d
+#: vectors, so D19's actual promise — that the default exercises D6's cosine index for real
+#: — is unchanged, and the swap costs a re-embed, not a rebuild.
+DEFAULT_PROVIDER = "lexical"
 
 #: ``EMBEDDING_PROVIDER`` value -> implementation. Adding a provider is a registry entry
 #: plus a class; it is never a change at a call site.
 PROVIDERS: dict[str, type[EmbeddingProvider]] = {
+    LexicalEmbedding.name: LexicalEmbedding,
     HashEmbedding.name: HashEmbedding,
     LocalBgeEmbedding.name: LocalBgeEmbedding,
 }
@@ -54,8 +76,8 @@ def get_embedding_provider(name: str | None = None) -> EmbeddingProvider:
 
     Raises:
         UnknownEmbeddingProvider: ``name`` (or ``EMBEDDING_PROVIDER``) is not registered.
-            Failing loudly beats falling back to ``hash``, which would silently embed a
-            production run with the double.
+            Failing loudly beats falling back to :data:`DEFAULT_PROVIDER`, which would
+            silently embed a production run with something other than what was asked for.
     """
     requested = name if name is not None else os.environ.get("EMBEDDING_PROVIDER")
     key = (requested or DEFAULT_PROVIDER).strip().lower()
@@ -76,6 +98,7 @@ __all__ = [
     "EmbeddingProviderUnavailable",
     "UnknownEmbeddingProvider",
     "HashEmbedding",
+    "LexicalEmbedding",
     "LocalBgeEmbedding",
     "get_embedding_provider",
 ]

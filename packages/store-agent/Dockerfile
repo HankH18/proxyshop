@@ -98,6 +98,19 @@ COPY packages/contracts/generated/python/ /app/packages/contracts/generated/pyth
 COPY proxyshop_support/             /app/proxyshop_support/
 COPY packages/store-agent/src/   /app/packages/store-agent/src/
 
+# The store-side advocate (D55) imports `llm` at MODULE SCOPE -- runtime/pitch.py and
+# solicitation/copywriter.py reach `llm.prompting`, `llm.client`, `llm.config` and
+# `llm.doubles` -- so an image without this package cannot import the bidding runtime at
+# all. It shipped without it and `test_artifact_copyset` caught it: the advocate was
+# tested, served and unshippable, which is this repo's signature defect wearing a
+# deployment hat.
+#
+# `fixtures/` is not optional either: the offline copywriter path resolves its recorded
+# replies out of `packages/llm/fixtures/recorded/`, and a deployment with no API key is
+# the DEFAULT configuration, not an edge case.
+COPY packages/llm/src/              /app/packages/llm/src/
+COPY packages/llm/fixtures/         /app/packages/llm/fixtures/
+
 # `.pkgroot/<pkg> -> <member>/src` is what makes the FLAT layout importable (R1b/D42).
 # The repo tracks these as git symlinks; the image RECREATES them instead of copying them
 # so the build never depends on how a daemon happens to treat symlinks in a context tar.
@@ -113,7 +126,8 @@ COPY packages/store-agent/src/   /app/packages/store-agent/src/
 # straight to /app (see the COPY above), which is a PYTHONPATH root in its own right.
 RUN mkdir -p /app/.pkgroot \
  && ln -s ../packages/contracts/src /app/.pkgroot/contracts \
- && ln -s ../packages/store-agent/src /app/.pkgroot/store_agent
+ && ln -s ../packages/store-agent/src /app/.pkgroot/store_agent \
+ && ln -s ../packages/llm/src /app/.pkgroot/llm
 
 # Non-root: nothing in these services writes to the filesystem, so there is no reason for
 # the process to be able to.

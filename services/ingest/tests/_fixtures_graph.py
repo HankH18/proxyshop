@@ -179,8 +179,16 @@ def graph_seeded_catalog(graph_schema_session: Any, graph_source: Any) -> dict[s
     from ingest.embeddings import get_embedding_provider
     from ingest.graph import reembed_products, seed_products
 
+    # The CONFIGURED provider, named nowhere. This used to pin ``get_embedding_provider("hash")``,
+    # which was invisible for as long as ``hash`` WAS the default and became a 22-test failure the
+    # moment D56 made it ``lexical``: ``reembed_products`` stamps the index with the provider that
+    # wrote it, and every read in this suite that does not name a provider reads with the
+    # configured one — so the fixture wrote one vector space and the tests queried another, and
+    # ``EmbeddingProviderMismatch`` said so on every one of them. A shared catalogue fixture has no
+    # business pinning a provider: it should be in whatever space the system is configured for, and
+    # the handful of tests that genuinely need a *different* space build one explicitly.
     product_ids = seed_products(graph_schema_session, _sample_records(), source=graph_source)
-    report = reembed_products(graph_schema_session, get_embedding_provider("hash"))
+    report = reembed_products(graph_schema_session, get_embedding_provider())
     return {
         "session": graph_schema_session,
         "source": graph_source,

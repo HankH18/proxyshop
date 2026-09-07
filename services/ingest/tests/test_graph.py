@@ -40,6 +40,7 @@ from ingest.embeddings import (
     EmbeddingProvider,
     EmbeddingProviderUnavailable,
     HashEmbedding,
+    LexicalEmbedding,
     LocalBgeEmbedding,
     UnknownEmbeddingProvider,
     get_embedding_provider,
@@ -127,9 +128,23 @@ SCANNED_SOURCES = tuple(
 PROBE_A = "gentle vitamin c serum for sensitive skin"
 PROBE_B = "heavy fragranced night cream for dry face"
 
-#: ``db.index.vector.queryNodes`` rescales cosine into [0, 1] and the index quantizes to
-#: float32 by default, so an exact self-match scores ~0.99997 rather than exactly 1.0.
-QUANTIZATION_TOLERANCE = 1e-3
+#: ``db.index.vector.queryNodes`` rescales cosine into [0, 1] and the ``vector-2.0`` index
+#: ships with ``vector.quantization.enabled: true``, so an exact self-match scores just under
+#: 1.0 rather than exactly 1.0.
+#:
+#: SET FROM MEASUREMENT, and the number moved with D56 because the residue depends on how
+#: DENSE the vectors are, not on anything about correctness. Measured on this host over the
+#: four sample products, worst case of each:
+#:
+#:   * ``hash``    — 1024 of 1024 components non-zero — ``1 - cos = 7.0e-05``
+#:   * ``lexical`` — 98 to 171 of 1024 non-zero      — ``1 - cos = 1.8e-03``
+#:
+#: A sparse vector puts the same unit norm into ~15% as many components, so each surviving
+#: component is larger and the quantizer's error on it does not average down across as many
+#: terms. 5e-3 is ~3x the measured worst case. It does not weaken what the exact-match test
+#: discriminates: the next-best candidate for a product's own text scores ~0.53, so anything
+#: below ~0.4 separates a self-match from a non-match identically.
+QUANTIZATION_TOLERANCE = 5e-3
 
 
 # =======================================================================================
@@ -156,15 +171,16 @@ def test_the_embedding_port_publishes_exactly_embed_and_embed_batch() -> None:
     assert "register" not in dir(EmbeddingProvider), "EmbeddingProvider must not be an abc.ABC"
 
 
-@pytest.mark.parametrize("implementation", [HashEmbedding, LocalBgeEmbedding])
+@pytest.mark.parametrize("implementation", [LexicalEmbedding, HashEmbedding, LocalBgeEmbedding])
 def test_every_provider_matches_the_port_signature_member_for_member(
     implementation: type,
 ) -> None:
     """Signature identity for every published member — the frozen assertion, widened.
 
-    The frozen test checks ``HashEmbedding`` only. ``LocalBgeEmbedding`` is checked here
-    because D19 makes it a real, selectable provider: a divergent signature there would
-    surface as a ``TypeError`` in an operator's re-embed run rather than in any gate.
+    The frozen test checks ``HashEmbedding`` only. The other two are checked here because
+    D19 makes each a real, selectable provider — and ``LexicalEmbedding`` is now the
+    *default*, so a divergent signature there would surface as a ``TypeError`` in every
+    re-embed run rather than in any gate.
     """
     for name in sorted(_public_callables(EmbeddingProvider)):
         assert hasattr(implementation, name)
@@ -282,22 +298,30 @@ def test_the_two_import_paths_to_the_embeddings_package_are_the_same_file() -> N
 # =======================================================================================
 
 
-def test_provider_selection_defaults_to_hash_in_every_environment(
+def test_provider_selection_defaults_to_lexical_in_every_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """D19: ``hash`` is the configured default, not a test-only fallback."""
+    """D19 as amended: ``lexical`` is the configured default, not a test-only fallback.
+
+    It was ``hash`` until ``test_embedding_ranking_gate.py`` measured that provider inverting
+    28 of 45 relevant/irrelevant pairs with every per-query spread negative. The amendment
+    swapped the default and kept everything D19 actually promised: 1024-d, L2-normalised,
+    offline, dependency-free, no model weights. ``hash`` stays registered and selectable.
+    """
     monkeypatch.delenv("EMBEDDING_PROVIDER", raising=False)
-    assert DEFAULT_PROVIDER == "hash"
-    assert isinstance(get_embedding_provider(), HashEmbedding)
+    assert DEFAULT_PROVIDER == "lexical"
+    assert isinstance(get_embedding_provider(), LexicalEmbedding)
     monkeypatch.setenv("EMBEDDING_PROVIDER", "")
-    assert isinstance(get_embedding_provider(), HashEmbedding)
+    assert isinstance(get_embedding_provider(), LexicalEmbedding)
 
 
 @pytest.mark.parametrize(
     ("configured", "expected"),
     [
+        ("lexical", LexicalEmbedding),
         ("hash", HashEmbedding),
         ("local_bge", LocalBgeEmbedding),
+        ("  LEXICAL  ", LexicalEmbedding),
         ("  HASH  ", HashEmbedding),
         ("Local_BGE", LocalBgeEmbedding),
     ],
@@ -315,23 +339,30 @@ def test_provider_swap_is_config_only(
     monkeypatch.setenv("EMBEDDING_PROVIDER", configured)
     provider = get_embedding_provider()
     assert isinstance(provider, expected)
-    assert provider.dimension == 1024, "both providers feed one 1024-d index (D6)"
+    assert provider.dimension == 1024, "every provider feeds one 1024-d index (D6)"
 
 
 def test_no_caller_names_a_concrete_provider_class() -> None:
     """The registry is the only switch: no module outside the embeddings package
-    constructs ``HashEmbedding()`` or ``LocalBgeEmbedding()`` directly.
+    constructs ``HashEmbedding()``, ``LexicalEmbedding()`` or ``LocalBgeEmbedding()`` directly.
 
     A single ``HashEmbedding()`` at a call site would make that call site immune to
     ``EMBEDDING_PROVIDER`` while every gate stayed green, and the swap would be
-    config-only everywhere except the one place that mattered.
+    config-only everywhere except the one place that mattered. That is not hypothetical: the
+    D19 amendment found exactly this shape at ``apps/exchange/src/retrieval/sources.py:165``
+    (``resolved = provider or HashEmbedding()``), which this scan cannot see because it walks
+    ``services/ingest/src`` only.
     """
     offenders = []
     for path in SCANNED_SOURCES:
         if path.parent.name == "embeddings":
             continue  # the package that defines them is where they are allowed to be named
         source = path.read_text(encoding="utf-8")
-        for pattern in (r"\bHashEmbedding\s*\(", r"\bLocalBgeEmbedding\s*\("):
+        for pattern in (
+            r"\bHashEmbedding\s*\(",
+            r"\bLexicalEmbedding\s*\(",
+            r"\bLocalBgeEmbedding\s*\(",
+        ):
             if re.search(pattern, source):
                 offenders.append(f"{path.relative_to(INGEST_SRC)}: {pattern}")
     assert not offenders, f"every caller must go through get_embedding_provider(): {offenders}"
@@ -346,11 +377,18 @@ def test_an_unknown_provider_fails_loudly_instead_of_falling_back(
         get_embedding_provider()
     assert "bge-m3" in str(excinfo.value)
     assert "hash" in str(excinfo.value), "the error should list what is registered"
+    assert "lexical" in str(excinfo.value), "the error should list what is registered"
 
 
-def test_registered_providers_are_exactly_hash_and_local_bge() -> None:
-    """The registry and the classes' own ``name`` attributes cannot drift apart."""
-    assert set(PROVIDERS) == {"hash", "local_bge"}
+def test_registered_providers_are_exactly_lexical_hash_and_local_bge() -> None:
+    """The registry and the classes' own ``name`` attributes cannot drift apart.
+
+    ``hash`` is listed deliberately. The D19 amendment demoted it from default; deleting it
+    would have stranded ``test_embedding_ranking_gate.py``'s measurement of what it does, and
+    its byte-identity behaviour is the right instrument for tests that need two unrelated
+    texts to land near-orthogonal.
+    """
+    assert set(PROVIDERS) == {"lexical", "hash", "local_bge"}
     for name, provider_class in PROVIDERS.items():
         assert provider_class.name == name
 
@@ -1248,9 +1286,7 @@ def test_the_vector_index_returns_a_near_one_cosine_for_an_exact_match(
     session = graph_seeded_catalog["session"]
     for row in read_products(session, limit=100):
         text = embedding_text(row)
-        results = candidate_products(
-            session, query_text=text, provider=HashEmbedding(), status=None, limit=4
-        )
+        results = candidate_products(session, query_text=text, status=None, limit=4)
         assert results, f"no candidate for {row['product_id']}"
         assert results[0].product_id == row["product_id"]
         assert cosine_from_score(results[0].score) == pytest.approx(
@@ -1270,8 +1306,20 @@ def test_the_vector_index_scores_an_unrelated_product_near_zero_cosine(
     — ``HashEmbedding`` is content-addressed, not semantic, and that assertion would be
     false. What the cosine index has to do is separate identical from non-identical, and
     that is what is measured here.
+
+    PINNED TO ``hash`` ON PURPOSE, and re-embedded into that space rather than reusing the
+    fixture's. "Unrelated text scores ~0" is a property of a CONTENT-ADDRESSED embedding and
+    of nothing else. Under the ``lexical`` default (D56) the floor sits well above zero —
+    measured 0.14 to 0.27 against these composed documents — because ``embedding_text``
+    surrounds the content with boilerplate ("brand:", "categories:", "ingredients:") and
+    because unrelated English shares letter runs, which ``er/similarity.py``'s own docstring
+    says outright. Rewriting this test's bound to accommodate that would have quietly
+    replaced a real measurement of ``hash`` with a weaker claim about something else. The
+    ranking property that IS true of the default is measured where it belongs, in
+    ``test_embedding_ranking_gate.py``, on this same served index.
     """
     session = graph_seeded_catalog["session"]
+    reembed_products(session, HashEmbedding())  # move this catalogue into the hash space
     results = candidate_products(
         session, query_text=PROBE_A, provider=HashEmbedding(), status=None, limit=10
     )
@@ -1480,7 +1528,7 @@ def test_vector_path_recall_is_bounded_by_the_index_fetch_and_the_structured_pat
         ],
         source=graph_source,
     )
-    reembed_products(graph_schema_session, HashEmbedding())
+    reembed_products(graph_schema_session, get_embedding_provider())
     half = [AttributeFilter("half", value_bool=True)]
 
     matching = candidate_products(graph_schema_session, attribute_filters=half, limit=200)
@@ -1553,7 +1601,7 @@ def test_a_precomputed_embedding_takes_precedence_over_query_text(
 ) -> None:
     """T-031 embeds once per intent and reuses the vector across stores; that has to work."""
     session = graph_seeded_catalog["session"]
-    vector = HashEmbedding().embed(PROBE_A)
+    vector = get_embedding_provider().embed(PROBE_A)
     by_vector = candidate_products(session, embedding=vector, limit=10)
     by_text = candidate_products(session, query_text=PROBE_A, limit=10)
     assert [(c.product_id, round(c.score, 6)) for c in by_vector] == [
@@ -1604,7 +1652,7 @@ def test_reembed_passes_on_the_sample_catalog_and_leaves_nothing_unembedded(
 ) -> None:
     """Acceptance 3: the re-embed script passes on sample data."""
     report = graph_seeded_catalog["report"]
-    assert report.provider == "hash"
+    assert report.provider == get_embedding_provider().name
     assert report.dimension == 1024
     assert report.products == len(graph_seeded_catalog["product_ids"]) == 4
     assert report.embedded == report.products
@@ -1623,7 +1671,7 @@ def test_reembed_is_deterministic_and_converges(graph_seeded_catalog: dict[str, 
             "MATCH (p:Product) RETURN p.product_id AS id, p.embedding AS embedding"
         ).values()
     )
-    second = reembed_products(session, HashEmbedding())
+    second = reembed_products(session, get_embedding_provider())
     after = dict(
         session.run(
             "MATCH (p:Product) RETURN p.product_id AS id, p.embedding AS embedding"
@@ -2095,8 +2143,9 @@ def test_the_query_predicate_indexes_match_what_the_query_actually_compares(
 class _SecondProvider(EmbeddingProvider):
     """A second, entirely valid, 1024-d provider — the shape of the ``local_bge`` swap.
 
-    ``.env.example`` sets ``EMBEDDING_PROVIDER=hash`` and ``make e2e-live`` sets
-    ``local_bge``; both declare ``EMBEDDING_DIM``. So the width guard in ``reembed_products``
+    ``.env.example`` leaves ``EMBEDDING_PROVIDER`` blank (falling through to ``lexical``, D56)
+    and ``make e2e-live`` sets ``local_bge``; both declare ``EMBEDDING_DIM``, as does the
+    demoted ``hash``. So the width guard in ``reembed_products``
     is structurally incapable of noticing the swap, and a double that declares a *different*
     width would not reproduce the defect at all.
     """
@@ -2142,7 +2191,7 @@ def test_a_completed_reembed_records_which_provider_wrote_the_vectors(
     run = embedding_run(graph_seeded_catalog["session"])
     assert run is not None, "a completed re-embed must leave a marker"
     assert run.index == VECTOR_INDEX_NAME
-    assert run.provider == "hash"
+    assert run.provider == get_embedding_provider().name
     assert run.dimension == VECTOR_INDEX_DIMENSIONS
     assert run.state == EMBEDDING_RUN_COMPLETE
     assert run.complete is True
@@ -2615,7 +2664,7 @@ def test_a_measured_zero_score_is_distinguishable_from_no_measurement(
     """
     session = graph_seeded_catalog["session"]
     row = read_products(session, limit=1)[0]
-    antipodal = [-component for component in HashEmbedding().embed(embedding_text(row))]
+    antipodal = [-component for component in get_embedding_provider().embed(embedding_text(row))]
 
     measured = candidate_products(session, embedding=antipodal, status=None, limit=10)
     worst = next(c for c in measured if c.product_id == row["product_id"])
@@ -2813,7 +2862,7 @@ def test_a_product_with_no_status_is_invisible_but_detectable(
         "CREATE (p)-[:SUPPORTED_BY]->(src)",
         sid=graph_source.source_id,
     ).consume()
-    reembed_products(session, HashEmbedding())
+    reembed_products(session, get_embedding_provider())
 
     assert provenance_violations(session) == [], "it is sourced — the provenance audit is clean"
     assert products_missing_embeddings(session) == [], "and embedded"

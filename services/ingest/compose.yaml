@@ -18,12 +18,20 @@ services:
       - "${INGEST_PORT:-8085}:8085"
     environment:
       PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
-      # D18: the hash embedding, never the local BGE model. The image deliberately does not
-      # install sentence-transformers/torch (they are an optional extra in the root manifest
-      # and NEVER installed by default), and embeddings/local_bge.py:93 defers that import
-      # into _load(), so selecting `local_bge` here would fail at first use rather than at
-      # startup. `hash` is the provider this deployable is built for.
-      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-hash}"
+      # D19/D56: an offline, dependency-free embedding, never the local BGE model. The image
+      # deliberately does not install sentence-transformers/torch (they are an optional extra
+      # in the root manifest and NEVER installed by default), and embeddings/local_bge.py:93
+      # defers that import into _load(), so selecting `local_bge` here would fail at first use
+      # rather than at startup.
+      #
+      # The fallback is EMPTY, not a provider name, and that is the point. It used to read
+      # `${EMBEDDING_PROVIDER:-hash}`, which duplicated the default into a second place — so
+      # D56's swap of DEFAULT_PROVIDER from `hash` to `lexical` would have changed the code,
+      # the tests and nothing that actually runs in compose. `get_embedding_provider` treats
+      # unset and blank identically and falls through to DEFAULT_PROVIDER, so the registry in
+      # `services/ingest/src/embeddings/__init__.py` is now the single source of truth and an
+      # operator can still override by exporting the variable.
+      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-}"
       # graph/reembed.py:377,391 read these when graph_driver() opens the bolt session.
       # Inside the compose network `neo4j` is the host, not localhost — a .env copied from
       # .env.example is written for the HOST side and must not leak in here.

@@ -46,7 +46,10 @@ services:
       # apps/exchange/src` is empty). The line that used to stand here set a variable no
       # process in this container could read. `resolve_provider` in `exchange.checkout` is a
       # CHECKOUT provider and reads CHECKOUT_MODE below; it has nothing to do with a model.
-      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-hash}"
+      # Empty, not "hash": an unset value takes `ingest.embeddings.DEFAULT_PROVIDER`, so the
+      # configured default lives in ONE place. Pinning "hash" here re-pinned the exchange to a
+      # provider measured at 28/45 inverted relevance pairs (D56), independently of the swap.
+      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-}"
       # T-310. This block used to be a single `RANKING_WEIGHTS=w_m=0.35,w_e=0.20,...` and
       # NOTHING read it — measured: `git grep RANKING_WEIGHTS` outside .swarm-loop returned
       # this line and one in `.env.example` and no reader at all. `.env.example` has since
