@@ -87,15 +87,17 @@ make deps-up
 Postgres, Neo4j and Redis, waits for them to report healthy, and then initialises this
 worker's database.
 
-`deps-up` creates that database **empty** — it applies no migrations, and nothing else in the
-repo did either outside the test fixtures, so a stack brought up this way used to answer 503
-on every database-backed route. Apply the schema:
+`deps-up` used to create that database **empty** — it applied no migrations, and nothing else
+in the repo did either outside the test fixtures, so a stack brought up this way answered 503
+on every database-backed route. The schema step was then a path an operator typed by hand,
+and re-typed after every `make deps-down` (which destroys the volumes). `deps-up` runs it
+itself now. It is still a target of its own, for a database that predates a new migration:
 
 ```bash
-./.venv/bin/python scripts/db_migrate.py
+make db-migrate
 ```
 
-Idempotent; run it again after any `make deps-down`, which destroys the volumes.
+Idempotent, advisory-locked, and safe to run from several workers at once.
 
 The merchant stub is not started by `deps-up` — it carries the `e2e`
 compose profile, because the tests build it in-process on an ephemeral port instead. For the

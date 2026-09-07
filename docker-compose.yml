@@ -32,6 +32,27 @@ services:
     # second copy of the dev password, and an empty one falls through to the single
     # coalesce(nullif(current_setting('proxyshop.role_password', true), ''), 'x') in
     # 00-roles.sql. proxyshop_support/postgres.py reads the same variable to connect.
+    #
+    # WHAT THE EMPTY DEFAULT ACTUALLY MEANS, said out loud rather than left to be traced
+    # through two files: on the documented path (`cp .env.example .env`, `make deps-up`) this
+    # variable is blank, and the four least-privilege roles are created with the DEV DEFAULT
+    # `x`. That literal lives in exactly two places and they are the same expression --
+    # db/init/00-roles.sql's coalesce, and proxyshop_support.postgres.DEV_ROLE_PASSWORD, which
+    # is what the services connect with -- so the seed side and the connect side agree, and
+    # the stack works with nothing exported. It is a dev cluster credential on a loopback
+    # port; it is not a secret and it is not pretending to be one.
+    #
+    # THE TRAP, which is why this is now stated here and announced by the container itself:
+    # the initdb hook runs ONCE, when the pgdata volume is created. Exporting your own
+    # PROXYSHOP_ROLE_PASSWORD afterwards moves only the CONNECT side -- the roles keep the
+    # password they were seeded with -- and every service then fails authentication against a
+    # database that reports healthy. 00-roles.sql now RAISE NOTICEs which source won, so the
+    # `docker compose logs postgres` of a fresh volume says which credential is in force
+    # (never the value itself). To use your own: export it, then `make deps-down` (which
+    # destroys the volume) and `make deps-up`.
+    #
+    # The default stays EMPTY rather than `:-x` for the reason above: two copies of one
+    # password is how the seed side and the connect side stopped agreeing the first time.
     environment: { POSTGRES_USER: proxyshop, POSTGRES_PASSWORD: proxyshop_dev_pw,
                    POSTGRES_DB: proxyshop_template,
                    PROXYSHOP_ROLE_PASSWORD: "${PROXYSHOP_ROLE_PASSWORD:-}" }

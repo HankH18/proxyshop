@@ -51,7 +51,7 @@ failure matters more than any one of them:
 
 ## What is deployable
 
-`docker compose config --services` names nine services in one project (`name: proxyshop`,
+`docker compose config --services` names eleven unprofiled services in one project (`name: proxyshop`,
 pinned in the root file so a worktree cannot spawn its own stack):
 
 | service            | port (env override)         | image built from               | entrypoint              |
@@ -71,6 +71,15 @@ pinned in the root file so a worktree cannot spawn its own stack):
 `docker compose run --rm sim` / `--rm seller-reference`. Every port above is in
 `.env.example` now; they used to be documented only on this page.
 
+**Six more services sit behind two profiles**, and they are the shopper demo rather than the
+platform. `--profile demo` adds `buyer-web` (8080, `BUYER_WEB_PORT`) and four configured
+store agents — `store-agent-gaiaherbs` (8090), `store-agent-toniiq` (8091),
+`store-agent-paradiseherbs` (8092), `store-agent-oregonswildharvest` (8093), all on container
+port 8086 and all built from the one store-agent image. `--profile corpus` adds
+`corpus-loader`, a run-to-completion job that replays the recorded real catalogues into Neo4j.
+The unprofiled `store-agent` above stays the unconfigured template it always was.
+`docs/demo/shopper-demo.md` is the runbook for all of it.
+
 ## Bringing it up
 
 ```bash
@@ -85,15 +94,24 @@ set -a && . ./.env && set +a
 # 1. The datastores, healthchecked, plus this worker's database.
 make deps-up
 
-# 2. The schema. `make deps-up` creates an EMPTY database; this is the step that was
-#    missing from every revision of this runbook.
-./.venv/bin/python scripts/db_migrate.py
+# 2. The schema. `make deps-up` creates an EMPTY database, and this is the step that was
+#    missing from every revision of this runbook. It is no longer a line to type: step 1
+#    runs it, and this target stays for a database that predates a new migration.
+make db-migrate
 
 # 3. The services.
 docker compose up -d --build buyer-svc merchant-svc exchange trust ingest
 
 docker compose ps          # every row (healthy) — and it now means something
 ```
+
+**`(healthy)` is not "the demo works", and the gap is bigger than a probe can close.** The
+stack above is CONFIGURED now — `apps/exchange/compose.yaml` mounts a real deployment
+document and switches the graph roster on, `apps/buyer/compose.yaml` mounts the buyer's — but
+it holds an EMPTY Neo4j and serves no shopper page until two more steps run. For the whole
+shopper journey, follow `docs/demo/shopper-demo.md`, which adds the corpus load, the SPA
+build, the `demo` compose profile that starts four real store agents, and an after-deploy
+probe that drives a real auction rather than reading a health column.
 
 Take it down with `docker compose down`. Note that `make deps-down` is
 `docker compose down -v`, which destroys the pgdata and neo4jdata volumes.
@@ -729,6 +747,27 @@ is a code change with a review, not a capacity decision.
    buyer-svc crash-looped on a dependency no `import` statement mentions. It is pinned in
    the shared pip layer now.
 
+## Closed since this page was written
+
+* **The exchange's neo4j dependency is probed.** `apps/exchange/Dockerfile` installs the
+  `neo4j` driver in a layer of its own, `apps/exchange/compose.yaml` declares
+  `depends_on: neo4j` and carries `--neo4j` in its readiness line, and it hands the container
+  `NEO4J_URI`/`NEO4J_USER`/`NEO4J_PASSWORD` — without which the driver defaults to the
+  container's own loopback. The probe is not decoration: `EXCHANGE_SHOP_ROSTER` now defaults
+  to `graph`, so an exchange that cannot open a bolt session cannot answer a roster-less
+  auction.
+* **The SPA has a server.** `buyer-web` is in `apps/buyer/compose.yaml` under the `demo`
+  profile: nginx serving the vite bundle and reverse-proxying `/buyer/` to `buyer-svc`, so
+  the page and the API are one origin (every endpoint in the SPA is a bare relative path and
+  the buyer service installs no CORS middleware) and deep links resolve through a `try_files`
+  fallback that a static mount on the API could not have.
+* **Compose can express N store agents.** Four named services, four mounted context files —
+  not one service scaled, because replicas share a service's environment and volumes and
+  would all advocate for the same store.
+* **Deployment documents ship.** `deploy/demo/`, generated from the recorded real catalogues
+  by `scripts/build_demo_deployment.py`, and mounted read-only into the exchange and the
+  buyer. `EXCHANGE_DEPLOYMENT` and `BUYER_DEPLOYMENT` default to them.
+
 ## Still not done
 
 * **`packages/store-agent/compose.yaml` still probes `/openapi.json`**, and is deliberately
@@ -737,21 +776,11 @@ is a code change with a review, not a capacity decision.
   probe proves, so it is not currently lying — but the moment that service reaches a
   datastore, its probe needs the same treatment. Same for `services/shopify-stub`, which
   already probes its own real `/healthz`.
-* **The exchange's neo4j dependency is unprobed.** `exchange/retrieval/sources.py` names a
-  neo4j source, but `apps/exchange/Dockerfile` ships `ingest.graph` **without** the `neo4j`
-  driver (lazily imported at `graph/reembed.py:386`, installed only in the ingest image), so
-  a `--neo4j` check there would fail on the import rather than on the datastore. Fixing it
-  means adding the driver to the exchange image — an image change owed to the exchange lane,
-  not a compose change.
-* **`apps/merchant/app/`** is a TypeScript scaffold with no build script and no entrypoint, so
-  the merchant web app is not containerised. `apps/merchant/package.json` declares dependencies
-  and no `scripts` block at all. When it grows a build it becomes a second service in the same
-  fragment (`merchant-web`).
-* **`apps/buyer/app/` builds, and is still not containerised.** That half of this bullet is
-  closed: `apps/buyer/package.json` has `build:ui` (`vite build --config vite.config.ts`), the
-  `demo` script runs it before the devstack, and `apps/buyer/dist/` is a real bundle. What is
-  missing is a compose service for it — the built SPA is served by the buyer app in the devstack
-  launcher, and no fragment publishes it as `buyer-web`.
+* **`apps/merchant/app/` is not containerised.** When it grows an entrypoint it becomes a
+  second service in the same fragment (`merchant-web`), the way `buyer-web` now is in
+  `apps/buyer/compose.yaml`.
+* **`apps/merchant/app/`'s bullet above is itself half stale**: `apps/merchant/package.json`
+  does now declare a `build:ui`. What is still missing there is the compose service.
 * **Images have never been pushed anywhere**; `docker compose` builds them locally by name.
 * **No test reaches a running container.** The readiness logic is covered by
   `proxyshop_support/tests/test_deploy_readiness.py` — static checks over the compose

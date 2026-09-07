@@ -1,0 +1,16 @@
+{
+  "exchange_url": "http://exchange:8083",
+  "request_timeout_seconds": 30.0,
+  "registered_domains": {
+    "gaiaherbs.com": "gaiaherbs.com",
+    "bulksupplements.com": "bulksupplements.com",
+    "nutricost.com": "nutricost.com",
+    "oregonswildharvest.com": "oregonswildharvest.com",
+    "toniiq.com": "toniiq.com",
+    "doublewoodsupplements.com": "doublewoodsupplements.com",
+    "purebulk.com": "purebulk.com",
+    "paradiseherbs.com": "paradiseherbs.com",
+    "livemomentous.com": "livemomentous.com",
+    "nakednutrition.com": "nakednutrition.com"
+  }
+}

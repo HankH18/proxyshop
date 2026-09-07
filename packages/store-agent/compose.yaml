@@ -10,14 +10,16 @@
 # anywhere under that tree and this container was an HTTP server with an empty route table;
 # the warning that used to stand here said so.
 #
-# ⚠️ IT STILL NEEDS A STORE. A hosted agent process advocates for exactly one store, and the
-# `BidRequest` on the wire does not name one — the exchange chooses which agent to POST to.
-# So the store context is deployment configuration. With none set the agent answers every
-# solicitation `204 store_context_unconfigured`, which is fail-closed and correct — an agent
-# with no approved envelope has no authorization to offer anything, and `collect_bids`
-# represents a silent store at catalogue list price (R10) — but it is not a store bidding.
+# ⚠️ THE `store-agent` SERVICE BELOW STILL NEEDS A STORE. A hosted agent process advocates for
+# exactly one store, and the `BidRequest` on the wire does not name one — the exchange chooses
+# which agent to POST to. So the store context is deployment configuration. With none set the
+# agent answers every solicitation `204 store_context_unconfigured`, which is fail-closed and
+# correct — an agent with no approved envelope has no authorization to offer anything, and
+# `collect_bids` represents a silent store at catalogue list price (R10) — but it is not a
+# store bidding. That unconfigured service is kept as the template it always was; the four
+# CONFIGURED agents are below it, under the `demo` profile.
 #
-# To make it bid, an operator adds BOTH halves — the file has to be inside the container, so
+# To make one bid, an operator adds BOTH halves — the file has to be inside the container, so
 # the env var alone does nothing:
 #
 #     volumes:
@@ -26,10 +28,44 @@
 #       STORE_AGENT_CONTEXT: /srv/store-context.json
 #       STORE_AGENT_STORE_DOMAIN: store-alpha.example.com
 #
-# There is no default `volumes:` entry on purpose: a default path would mount a store this
-# deployment never approved. The domain matters more than it looks — an offer with no
-# `checkout_url` is dropped from every shortlist by the exchange's C10 check, and the agent
-# will not synthesise a host it was not given.
+# There is no default `volumes:` entry on THAT service on purpose: a default path would mount
+# a store this deployment never approved. The domain matters more than it looks — an offer
+# with no `checkout_url` is dropped from every shortlist by the exchange's C10 check, and the
+# agent will not synthesise a host it was not given.
+#
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# HOW N STORES ARE EXPRESSED, and why it is N SERVICES rather than one scaled service.
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# A market with one merchant in it is not a market, and until now compose could not express a
+# second one at all. The reason is structural rather than an oversight, and `apps/buyer/
+# devstack/run.py` states it where it works around it: "`configure_solicitation(app,
+# context=...)`, NOT `STORE_AGENT_CONTEXT`. That env var is process-wide and names exactly one
+# file, so it cannot describe three stores." The devstack escapes by building three app
+# objects in ONE interpreter and configuring each in memory — a seam a container cannot use,
+# because its CMD is `uvicorn store_agent.main:app` and nothing on that path can call a
+# configure function.
+#
+# So a store agent's identity is: one process, one context FILE, one `store_id` inside it.
+# That rules out `deploy.replicas` / `docker compose up --scale`: replicas of a service share
+# its environment and its volumes byte for byte, so N replicas would be N processes all
+# advocating for the SAME store — which is worse than one, because the exchange would collect
+# the same bid N times believing it had found N merchants.
+#
+# What varies per store, and therefore what has to be per SERVICE:
+#   * the mounted context file       — `deploy/demo/store-contexts/<host>.json`
+#   * STORE_AGENT_CONTEXT            — where that file lands inside the container
+#   * STORE_AGENT_STORE_DOMAIN       — the registered host the checkout_url is built on
+#   * the published host port        — so a human can curl one agent directly
+# What does NOT vary: the image (one build, four containers) and the CONTAINER port, which is
+# a literal 8086 in `packages/store-agent/Dockerfile` (EXPOSE and the uvicorn line both) with
+# no env var that moves it. Peers therefore address an agent as `http://<service>:8086`, and
+# `deploy/demo/exchange-deployment.json` writes exactly those URLs into `sellers[].
+# bid_endpoint`. The service names below and `scripts/build_demo_deployment.py`'s
+# `agent_service()` have to agree; that function is the one place the mapping lives.
+#
+# YAML anchors carry the shared half so the four blocks differ only in what genuinely differs.
+# Compose merges `<<:` before it validates, so this is one image and four configurations, not
+# four opportunities to drift.
 #
 # ⚠️ THE HEALTHCHECK BELOW DOES NOT PROVE THE AGENT CAN BID. It probes /openapi.json, which
 # answers 200 whether or not a store context was resolved — so a container whose
@@ -39,6 +75,35 @@
 # one operation the contract publishes (T-309), so there is no /healthz to add without
 # breaking that gate. Read "healthy" as "the process is up", never as "the store is bidding";
 # the honest check is one real POST /v1/bid-requests after deploy.
+# The half every hosted agent shares: one image, one container port, one policy about what
+# this image may read. Defined as a compose extension field (`x-`) BEFORE `services:` so the
+# frozen textual compose parser in `.swarm-loop/acceptance/test_spec_criteria.py`, which stops
+# at the first column-0 key after `services:`, still reads the service list whole.
+x-store-agent-base: &store-agent-base
+  build:
+    # Relative to THIS file's directory, so the context is the repo root.
+    context: ../..
+    dockerfile: packages/store-agent/Dockerfile
+  # No depends_on: an agent opens no socket of its own and touches no datastore. It waits to
+  # be dialled by the exchange, and a dependency on postgres or redis here would be decoration.
+  healthcheck:
+    # ⚠️ Still only "the process is up" — see the warning below. The honest check that a store
+    # can bid is one real POST /v1/bid-requests, which the runbook does.
+    test: ["CMD", "python", "-c",
+           "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8086/openapi.json').status==200 else 1)"]
+    interval: 10s
+    timeout: 5s
+    retries: 6
+    start_period: 10s
+  mem_limit: 256m       # D10
+  stop_grace_period: 10s
+  restart: unless-stopped
+  # `demo` on every hosted agent, so the default `docker compose up` is the same lean stack it
+  # always was and `--profile demo` is what turns the market on. Four extra containers is 1 GiB
+  # of cap against a measured ~4.85 GiB of headroom, which is affordable when asked for and
+  # wasteful when not.
+  profiles: ["demo"]
+
 services:
   store-agent:
     build:
@@ -73,3 +138,93 @@ services:
     mem_limit: 256m       # D10
     stop_grace_period: 10s
     restart: unless-stopped
+
+  # ── THE FOUR HOSTED STORE AGENTS ────────────────────────────────────────────────────────
+  # Real storefronts out of `fixtures/real-catalogs/`, one container each. Their contexts are
+  # generated by `scripts/build_demo_deployment.py` and tracked in `deploy/demo/store-contexts/`
+  # — each carries that store's whole priced catalogue (not just the lead product: an agent
+  # whose catalogue lacks the `product_ref` the graph rostered declines `no_matching_product`,
+  # which would read as "this store does not stock it" when the truth is "this file was
+  # trimmed"), an approved envelope naming the one intent cluster the exchange's deployment
+  # document defines, and per-product live state.
+  #
+  # The other six storefronts in the corpus get NO agent, and that is the point rather than a
+  # shortcut: the exchange still finds them in the graph and still rosters them, nobody answers
+  # their bid door, and `collect_bids` represents each at its catalogue list price. Both halves
+  # of R10 are on screen in one run — a store that bids and a store that is spoken for.
+
+  store-agent-gaiaherbs:
+    <<: *store-agent-base
+    # 111 products; the corpus's most claim-rich storefront, and the one the liver-support
+     # query leads with.
+    ports:
+      - "${STORE_AGENT_GAIAHERBS_PORT:-8090}:8086"
+    volumes:
+      # The whole directory read-only rather than the one file, so a regenerated corpus does
+      # not need the mount rewritten. The env var below is what picks this store out of it.
+      - ../../deploy/demo/store-contexts:/srv/store-contexts:ro
+    environment:
+      PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
+      # The document names `store_id` and `store_domain` itself; the domain is repeated here
+      # because `solicitation.serving` reads the env var when the context states none, and a
+      # store with no domain emits no `checkout_url` and is dropped from every shortlist by
+      # the exchange's C10 check.
+      STORE_AGENT_CONTEXT: /srv/store-contexts/gaiaherbs.com.json
+      STORE_AGENT_STORE_DOMAIN: gaiaherbs.com
+
+  store-agent-toniiq:
+    <<: *store-agent-base
+    # 103 products, and the deepest approved discount depth of the four (20%), so the
+     # ranker's `discount` term has something to separate.
+    ports:
+      - "${STORE_AGENT_TONIIQ_PORT:-8091}:8086"
+    volumes:
+      # The whole directory read-only rather than the one file, so a regenerated corpus does
+      # not need the mount rewritten. The env var below is what picks this store out of it.
+      - ../../deploy/demo/store-contexts:/srv/store-contexts:ro
+    environment:
+      PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
+      # The document names `store_id` and `store_domain` itself; the domain is repeated here
+      # because `solicitation.serving` reads the env var when the context states none, and a
+      # store with no domain emits no `checkout_url` and is dropped from every shortlist by
+      # the exchange's C10 check.
+      STORE_AGENT_CONTEXT: /srv/store-contexts/toniiq.com.json
+      STORE_AGENT_STORE_DOMAIN: toniiq.com
+
+  store-agent-paradiseherbs:
+    <<: *store-agent-base
+    # 90 products, the shallowest depth (12%): a store that competes on trust rather than
+     # on price.
+    ports:
+      - "${STORE_AGENT_PARADISEHERBS_PORT:-8092}:8086"
+    volumes:
+      # The whole directory read-only rather than the one file, so a regenerated corpus does
+      # not need the mount rewritten. The env var below is what picks this store out of it.
+      - ../../deploy/demo/store-contexts:/srv/store-contexts:ro
+    environment:
+      PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
+      # The document names `store_id` and `store_domain` itself; the domain is repeated here
+      # because `solicitation.serving` reads the env var when the context states none, and a
+      # store with no domain emits no `checkout_url` and is dropped from every shortlist by
+      # the exchange's C10 check.
+      STORE_AGENT_CONTEXT: /srv/store-contexts/paradiseherbs.com.json
+      STORE_AGENT_STORE_DOMAIN: paradiseherbs.com
+
+  store-agent-oregonswildharvest:
+    <<: *store-agent-base
+    # 189 products, the widest catalogue here — the store most likely to hold whatever the
+     # graph rosters.
+    ports:
+      - "${STORE_AGENT_OREGONSWILDHARVEST_PORT:-8093}:8086"
+    volumes:
+      # The whole directory read-only rather than the one file, so a regenerated corpus does
+      # not need the mount rewritten. The env var below is what picks this store out of it.
+      - ../../deploy/demo/store-contexts:/srv/store-contexts:ro
+    environment:
+      PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
+      # The document names `store_id` and `store_domain` itself; the domain is repeated here
+      # because `solicitation.serving` reads the env var when the context states none, and a
+      # store with no domain emits no `checkout_url` and is dropped from every shortlist by
+      # the exchange's C10 check.
+      STORE_AGENT_CONTEXT: /srv/store-contexts/oregonswildharvest.com.json
+      STORE_AGENT_STORE_DOMAIN: oregonswildharvest.com

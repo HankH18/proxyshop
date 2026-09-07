@@ -1,0 +1,1384 @@
+{
+  "store_id": "gaiaherbs.com",
+  "store_domain": "gaiaherbs.com",
+  "envelope": {
+    "store_id": "gaiaherbs.com",
+    "version": "demo-1",
+    "floors": [
+      {
+        "product_ref": null,
+        "min_price": 1.0
+      },
+      {
+        "product_ref": "prod_5b3100b381998843c2f732f147e632d0",
+        "min_price": 17.84
+      }
+    ],
+    "max_discount_pct": 15.0,
+    "budget_cap": 5000.0,
+    "pursue_clusters": [
+      "cluster-liver-support"
+    ],
+    "standing_commitments": [
+      {
+        "key": "free_returns",
+        "value": "30 return window",
+        "provenance": {
+          "source": "owner_statement",
+          "ref": "envelope:gaiaherbs.com:demo-1#free_returns",
+          "observed_at": "2026-01-01T00:00:00Z",
+          "authority_rank": 1
+        }
+      }
+    ],
+    "activation": "active"
+  },
+  "catalog": {
+    "prod_192326f5cf09d3e8d9cfcd92a9b7c285": {
+      "product_ref": "prod_192326f5cf09d3e8d9cfcd92a9b7c285",
+      "list_price": 29.97,
+      "title": "Reflux Relief®",
+      "brand": "Gaia Herbs",
+      "product_type": "Tablets",
+      "currency": "USD"
+    },
+    "prod_66c5c2954133b21d5f38cd24877d085b": {
+      "product_ref": "prod_66c5c2954133b21d5f38cd24877d085b",
+      "list_price": 33.29,
+      "title": "Tremella Mushroom Powder",
+      "brand": "Gaia Herbs",
+      "product_type": "Powders",
+      "currency": "USD"
+    },
+    "prod_4b0f572e9a4473cb12fc96e7b78478ca": {
+      "product_ref": "prod_4b0f572e9a4473cb12fc96e7b78478ca",
+      "list_price": 221.34,
+      "title": "Employee Wellness Bundle",
+      "brand": "Gaia Herbs",
+      "product_type": "Bundle",
+      "currency": "USD"
+    },
+    "prod_554c5c0a6b83a0aa7a8f400f5e9af629": {
+      "product_ref": "prod_554c5c0a6b83a0aa7a8f400f5e9af629",
+      "list_price": 19.79,
+      "title": "Milky Oats & Skullcap",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Extracts",
+      "currency": "USD"
+    },
+    "prod_b11ea9e4f9363199262d013d8ffe9cae": {
+      "product_ref": "prod_b11ea9e4f9363199262d013d8ffe9cae",
+      "list_price": 19.79,
+      "title": "Valerian & Poppy",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Extracts",
+      "currency": "USD"
+    },
+    "prod_15d5adcde0a107bef4b7162fb99a6215": {
+      "product_ref": "prod_15d5adcde0a107bef4b7162fb99a6215",
+      "list_price": 19.79,
+      "title": "Lemon Balm & Ginkgo",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Extracts",
+      "currency": "USD"
+    },
+    "prod_78899d8540dd08b56d66df96ba2746b7": {
+      "product_ref": "prod_78899d8540dd08b56d66df96ba2746b7",
+      "list_price": 19.79,
+      "title": "Hawthorn & Ginkgo",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Extracts",
+      "currency": "USD"
+    },
+    "prod_fe931955518347526d6f4b7c2311cec8": {
+      "product_ref": "prod_fe931955518347526d6f4b7c2311cec8",
+      "list_price": 19.79,
+      "title": "Echinacea Supreme",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Extracts",
+      "currency": "USD"
+    },
+    "prod_4f44b610d94aa018e943d884b3edba2a": {
+      "product_ref": "prod_4f44b610d94aa018e943d884b3edba2a",
+      "list_price": 35.99,
+      "title": "Berberine & Milk Thistle",
+      "brand": "Gaia Herbs",
+      "product_type": "Powder Capsules",
+      "currency": "USD"
+    },
+    "prod_3faf6851b306332b8fc309299ca3c6f6": {
+      "product_ref": "prod_3faf6851b306332b8fc309299ca3c6f6",
+      "list_price": 26.99,
+      "title": "Lion's Mane Mushroom Gummies",
+      "brand": "Gaia Herbs",
+      "product_type": "Gummies",
+      "currency": "USD"
+    },
+    "prod_e8cdd01150a8c0e1ffadd3aea0eb9c59": {
+      "product_ref": "prod_e8cdd01150a8c0e1ffadd3aea0eb9c59",
+      "list_price": 20.69,
+      "title": "Natural Laxative",
+      "brand": "Gaia Herbs",
+      "product_type": "Tablets",
+      "currency": "USD"
+    },
+    "prod_6ccc4057b112533086b018bb1a3778fb": {
+      "product_ref": "prod_6ccc4057b112533086b018bb1a3778fb",
+      "list_price": 41.39,
+      "title": "Turmeric Supreme® Ache PM",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_5259afd6cd2d160af13cbfc28aaed480": {
+      "product_ref": "prod_5259afd6cd2d160af13cbfc28aaed480",
+      "list_price": 33.74,
+      "title": "Kava Root",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_12e5a204945147bca2590e2ed5296603": {
+      "product_ref": "prod_12e5a204945147bca2590e2ed5296603",
+      "list_price": 35.09,
+      "title": "Kava Root",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Extracts",
+      "currency": "USD"
+    },
+    "prod_5b3100b381998843c2f732f147e632d0": {
+      "product_ref": "prod_5b3100b381998843c2f732f147e632d0",
+      "list_price": 25.49,
+      "title": "Milk Thistle Gummies",
+      "brand": "Gaia Herbs",
+      "product_type": "Gummies",
+      "currency": "USD"
+    },
+    "prod_795061189deaba4e904a9937907c6181": {
+      "product_ref": "prod_795061189deaba4e904a9937907c6181",
+      "list_price": 25.49,
+      "title": "Metabolic Activator",
+      "brand": "Gaia Herbs",
+      "product_type": "Powder Capsules",
+      "currency": "USD"
+    },
+    "prod_11002ff8a18d22fc071a2264c6e3f7b1": {
+      "product_ref": "prod_11002ff8a18d22fc071a2264c6e3f7b1",
+      "list_price": 33.99,
+      "title": "Gut Revival",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_c99a85f94daf38feb04f8d0ef234b1dc": {
+      "product_ref": "prod_c99a85f94daf38feb04f8d0ef234b1dc",
+      "list_price": 25.49,
+      "title": "Sauerkraut Postbiotic",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_4ee51ecc695e77b0c0fb089c566ba974": {
+      "product_ref": "prod_4ee51ecc695e77b0c0fb089c566ba974",
+      "list_price": 25.49,
+      "title": "Ginger-Turmeric Postbiotic",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_dacdc7afbb519be2d31eb495fbf53e31": {
+      "product_ref": "prod_dacdc7afbb519be2d31eb495fbf53e31",
+      "list_price": 28.04,
+      "title": "Period Cramp Relief",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_93a302d76c626f729c648d899a660ca7": {
+      "product_ref": "prod_93a302d76c626f729c648d899a660ca7",
+      "list_price": 28.04,
+      "title": "Period Cycle Support",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_1ed8a98adb91505e84e62bea3ab2a7bb": {
+      "product_ref": "prod_1ed8a98adb91505e84e62bea3ab2a7bb",
+      "list_price": 28.04,
+      "title": "Cycle Serenity",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_bd2b844badcadd9121258a5aeea85f44": {
+      "product_ref": "prod_bd2b844badcadd9121258a5aeea85f44",
+      "list_price": 28.79,
+      "title": "Turmeric Supreme® Gummies Extra Strength",
+      "brand": "Gaia Herbs",
+      "product_type": "Gummies",
+      "currency": "USD"
+    },
+    "prod_d16b4cb1c1aacb9cd625427cf092ca80": {
+      "product_ref": "prod_d16b4cb1c1aacb9cd625427cf092ca80",
+      "list_price": 30.59,
+      "title": "Menopause Support Daytime",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_a72ac89c214df10d68c008e801790e5d": {
+      "product_ref": "prod_a72ac89c214df10d68c008e801790e5d",
+      "list_price": 33.29,
+      "title": "Quercetin Synergy",
+      "brand": "Gaia Herbs",
+      "product_type": "Powder Capsules",
+      "currency": "USD"
+    },
+    "prod_aed09015b84632cac0d0a6e0bd8bf98c": {
+      "product_ref": "prod_aed09015b84632cac0d0a6e0bd8bf98c",
+      "list_price": 23.84,
+      "title": "Nausea Gummies",
+      "brand": "Gaia Herbs",
+      "product_type": "Gummies",
+      "currency": "USD"
+    },
+    "prod_2a54527f3143f3c71d866fad5410768c": {
+      "product_ref": "prod_2a54527f3143f3c71d866fad5410768c",
+      "list_price": 23.84,
+      "title": "Rapid Defense Gummies",
+      "brand": "Gaia Herbs",
+      "product_type": "Gummies",
+      "currency": "USD"
+    },
+    "prod_cf40eb0e89b9cc1b886ccd4b5c667121": {
+      "product_ref": "prod_cf40eb0e89b9cc1b886ccd4b5c667121",
+      "list_price": 14.39,
+      "title": "Cough Syrup",
+      "brand": "Gaia Herbs",
+      "product_type": "Syrups",
+      "currency": "USD"
+    },
+    "prod_5b61ea1bb0eb0264c291528df14494e7": {
+      "product_ref": "prod_5b61ea1bb0eb0264c291528df14494e7",
+      "list_price": 31.94,
+      "title": "Adrenal Health® Daily Support",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_0df23a63be06836e03d59ad352add794": {
+      "product_ref": "prod_0df23a63be06836e03d59ad352add794",
+      "list_price": 17.99,
+      "title": "Sleep Gummies",
+      "brand": "Gaia Herbs",
+      "product_type": "Gummies",
+      "currency": "USD"
+    },
+    "prod_ab9a9d8304cbb5042da41c1230f1ed2c": {
+      "product_ref": "prod_ab9a9d8304cbb5042da41c1230f1ed2c",
+      "list_price": 17.99,
+      "title": "Relax Gummies",
+      "brand": "Gaia Herbs",
+      "product_type": "Gummies",
+      "currency": "USD"
+    },
+    "prod_315e80bb4ed11bdf51ec442013c5525e": {
+      "product_ref": "prod_315e80bb4ed11bdf51ec442013c5525e",
+      "list_price": 14.84,
+      "title": "Ashwagandha Gummies",
+      "brand": "Gaia Herbs",
+      "product_type": "Gummies",
+      "currency": "USD"
+    },
+    "prod_a96dfdb0292809df1f36b56b3111849a": {
+      "product_ref": "prod_a96dfdb0292809df1f36b56b3111849a",
+      "list_price": 31.49,
+      "title": "Sinus & Lung Supreme™",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_80b6d367a9b2beced0580fc428c1299c": {
+      "product_ref": "prod_80b6d367a9b2beced0580fc428c1299c",
+      "list_price": 20.69,
+      "title": "Turmeric Supreme® Gummies Adult Daily",
+      "brand": "Gaia Herbs",
+      "product_type": "Gummies",
+      "currency": "USD"
+    },
+    "prod_988f6237d4f8d15b4f92aa54a50b4b30": {
+      "product_ref": "prod_988f6237d4f8d15b4f92aa54a50b4b30",
+      "list_price": 29.69,
+      "title": "Cordyceps Mushroom",
+      "brand": "Gaia Herbs",
+      "product_type": "Powder Capsules",
+      "currency": "USD"
+    },
+    "prod_7e26e1e2e681f02f9b17661b6bede873": {
+      "product_ref": "prod_7e26e1e2e681f02f9b17661b6bede873",
+      "list_price": 29.69,
+      "title": "Turkey Tail Mushroom",
+      "brand": "Gaia Herbs",
+      "product_type": "Powder Capsules",
+      "currency": "USD"
+    },
+    "prod_ff97ebfa498614748f647be57c6c434f": {
+      "product_ref": "prod_ff97ebfa498614748f647be57c6c434f",
+      "list_price": 29.69,
+      "title": "Reishi Mushroom",
+      "brand": "Gaia Herbs",
+      "product_type": "Powder Capsules",
+      "currency": "USD"
+    },
+    "prod_6102bca01dc0a94051b94937ab2a2507": {
+      "product_ref": "prod_6102bca01dc0a94051b94937ab2a2507",
+      "list_price": 29.69,
+      "title": "Reishi & Cordyceps",
+      "brand": "Gaia Herbs",
+      "product_type": "Powder Capsules",
+      "currency": "USD"
+    },
+    "prod_195d9736493897b2bfc0f1bfc53e6541": {
+      "product_ref": "prod_195d9736493897b2bfc0f1bfc53e6541",
+      "list_price": 29.69,
+      "title": "Lion's Mane Mushroom",
+      "brand": "Gaia Herbs",
+      "product_type": "Powder Capsules",
+      "currency": "USD"
+    },
+    "prod_76aee6418cb3b37030231c2791a84493": {
+      "product_ref": "prod_76aee6418cb3b37030231c2791a84493",
+      "list_price": 29.69,
+      "title": "Everyday Mushrooms",
+      "brand": "Gaia Herbs",
+      "product_type": "Powder Capsules",
+      "currency": "USD"
+    },
+    "prod_07654914729e9d0821e40a5b6492547c": {
+      "product_ref": "prod_07654914729e9d0821e40a5b6492547c",
+      "list_price": 30.59,
+      "title": "Black Seed Oil",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_03a22eb85b082fb1241fc4cedae4b012": {
+      "product_ref": "prod_03a22eb85b082fb1241fc4cedae4b012",
+      "list_price": 31.49,
+      "title": "Mighty Lungs™",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_f2d33215e32eef3501d657d52d3c86ac": {
+      "product_ref": "prod_f2d33215e32eef3501d657d52d3c86ac",
+      "list_price": 15.29,
+      "title": "Black Elderberry Gummies Kids Daily",
+      "brand": "Gaia Herbs",
+      "product_type": "Gummies",
+      "currency": "USD"
+    },
+    "prod_58d6e4d926b94e7ba175523b1dae042c": {
+      "product_ref": "prod_58d6e4d926b94e7ba175523b1dae042c",
+      "list_price": 17.99,
+      "title": "Black Elderberry Gummies Extra Strength",
+      "brand": "Gaia Herbs",
+      "product_type": "Gummies",
+      "currency": "USD"
+    },
+    "prod_abc2b6d2d55e00e43ddc479f21edd032": {
+      "product_ref": "prod_abc2b6d2d55e00e43ddc479f21edd032",
+      "list_price": 36.89,
+      "title": "Microbiome Cleanse",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_eaa9b04234486f1dc990b361948e0fdf": {
+      "product_ref": "prod_eaa9b04234486f1dc990b361948e0fdf",
+      "list_price": 30.59,
+      "title": "Menopause Support Nighttime",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_95a03a62a7c68638592b3d78670a11a4": {
+      "product_ref": "prod_95a03a62a7c68638592b3d78670a11a4",
+      "list_price": 34.64,
+      "title": "Fertility Support",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_7011bfef57f77d2b182bbdd5b7ddd5b3": {
+      "product_ref": "prod_7011bfef57f77d2b182bbdd5b7ddd5b3",
+      "list_price": 31.49,
+      "title": "Echinacea Goldenseal",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_6def39a61127a2ad9e941ec425a7a8b5": {
+      "product_ref": "prod_6def39a61127a2ad9e941ec425a7a8b5",
+      "list_price": 30.59,
+      "title": "Cranberry Concentrate",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_aa079bf7d6d67053050aa43f035cb4c8": {
+      "product_ref": "prod_aa079bf7d6d67053050aa43f035cb4c8",
+      "list_price": 31.49,
+      "title": "Calm A.S.A.P.®",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_d07bfac1843af19d1631194968a0cc96": {
+      "product_ref": "prod_d07bfac1843af19d1631194968a0cc96",
+      "list_price": 26.09,
+      "title": "Bronchial Wellness Syrup",
+      "brand": "Gaia Herbs",
+      "product_type": "Syrups",
+      "currency": "USD"
+    },
+    "prod_ee45c9e84d6d5d6a0d30cead6aa094ee": {
+      "product_ref": "prod_ee45c9e84d6d5d6a0d30cead6aa094ee",
+      "list_price": 22.94,
+      "title": "Black Elderberry Syrup Extra Strength",
+      "brand": "Gaia Herbs",
+      "product_type": "Syrups",
+      "currency": "USD"
+    },
+    "prod_a9ddfd23a7b8be4c81ea6fb9401af957": {
+      "product_ref": "prod_a9ddfd23a7b8be4c81ea6fb9401af957",
+      "list_price": 29.69,
+      "title": "Black Elderberry",
+      "brand": "Gaia Herbs",
+      "product_type": "Powder Capsules",
+      "currency": "USD"
+    },
+    "prod_baceb26dfeb6ea85706fe3192bb9816b": {
+      "product_ref": "prod_baceb26dfeb6ea85706fe3192bb9816b",
+      "list_price": 29.69,
+      "title": "Black Cohosh",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_e22313245a8c5fcbe2803a011095612c": {
+      "product_ref": "prod_e22313245a8c5fcbe2803a011095612c",
+      "list_price": 18.89,
+      "title": "Bacopa",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_62dae668aa90ad76cc72947630a9a68b": {
+      "product_ref": "prod_62dae668aa90ad76cc72947630a9a68b",
+      "list_price": 31.49,
+      "title": "Astragalus Supreme",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_5bf92a7d123f7710d79bd6dff72b2071": {
+      "product_ref": "prod_5bf92a7d123f7710d79bd6dff72b2071",
+      "list_price": 25.19,
+      "title": "Ashwagandha Root",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_129096ff8ad505ecab1fe4644b6dbfe1": {
+      "product_ref": "prod_129096ff8ad505ecab1fe4644b6dbfe1",
+      "list_price": 44.09,
+      "title": "Agile Mind®",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_f679823b9b58c1560e3986f00cb9dd8f": {
+      "product_ref": "prod_f679823b9b58c1560e3986f00cb9dd8f",
+      "list_price": 31.94,
+      "title": "Adrenal Health® Nightly Restore",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_ac46ffdd648c482ebbbbc257f104189e": {
+      "product_ref": "prod_ac46ffdd648c482ebbbbc257f104189e",
+      "list_price": 37.34,
+      "title": "Adrenal Health® Jumpstart",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_6265d1b6f6f8e2c3719e2e5b121bdf75": {
+      "product_ref": "prod_6265d1b6f6f8e2c3719e2e5b121bdf75",
+      "list_price": 17.99,
+      "title": "Wormwood Black Walnut Supreme",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Extracts",
+      "currency": "USD"
+    },
+    "prod_0c861056ce22f2644d64f050fff0070a": {
+      "product_ref": "prod_0c861056ce22f2644d64f050fff0070a",
+      "list_price": 31.49,
+      "title": "Women's Libido",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_0e91bb4026ab179e61db02327f716e8a": {
+      "product_ref": "prod_0e91bb4026ab179e61db02327f716e8a",
+      "list_price": 19.79,
+      "title": "Vitex Berry",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_395f41df5b45d57efe83d721f27bba06": {
+      "product_ref": "prod_395f41df5b45d57efe83d721f27bba06",
+      "list_price": 15.29,
+      "title": "Valerian Root, Certified Organic",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Extracts",
+      "currency": "USD"
+    },
+    "prod_b3cfc3ad03554fb0ab93328eb9840207": {
+      "product_ref": "prod_b3cfc3ad03554fb0ab93328eb9840207",
+      "list_price": 29.69,
+      "title": "Valerian Root",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_a01f6fa190e7e0da3c3c275e6a4389a4": {
+      "product_ref": "prod_a01f6fa190e7e0da3c3c275e6a4389a4",
+      "list_price": 29.69,
+      "title": "Turmeric Supreme® Ache",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_05cd7a07b58a6ec4038b1e694bf4115d": {
+      "product_ref": "prod_05cd7a07b58a6ec4038b1e694bf4115d",
+      "list_price": 29.69,
+      "title": "Turmeric Supreme® Joint Health",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_d5584d1fcddf17bf111fb7c2bb339571": {
+      "product_ref": "prod_d5584d1fcddf17bf111fb7c2bb339571",
+      "list_price": 29.69,
+      "title": "Turmeric Supreme® Extra Strength",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_3832deaf1d487045eb4daf8ab6f4b494": {
+      "product_ref": "prod_3832deaf1d487045eb4daf8ab6f4b494",
+      "list_price": 29.69,
+      "title": "Turmeric Supreme® Sinus Support",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_e6362c27286b4f62caaf2d458ea87e5c": {
+      "product_ref": "prod_e6362c27286b4f62caaf2d458ea87e5c",
+      "list_price": 30.59,
+      "title": "Thyroid Support",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_9f52c3eb3f831a8b107cbf55776072c3": {
+      "product_ref": "prod_9f52c3eb3f831a8b107cbf55776072c3",
+      "list_price": 18.89,
+      "title": "Stress Response®",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_77ea9c11fd51cedc9f7f4500d9e91f69": {
+      "product_ref": "prod_77ea9c11fd51cedc9f7f4500d9e91f69",
+      "list_price": 30.59,
+      "title": "St. John's Wort",
+      "brand": "Gaia Herbs",
+      "product_type": "Powder Capsules",
+      "currency": "USD"
+    },
+    "prod_963eafe38b3c127c2ddb75637805e547": {
+      "product_ref": "prod_963eafe38b3c127c2ddb75637805e547",
+      "list_price": 30.59,
+      "title": "Sound Sleep®",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_37a202e5865d3c3ff3d597d17275959a": {
+      "product_ref": "prod_37a202e5865d3c3ff3d597d17275959a",
+      "list_price": 32.39,
+      "title": "SleepThru®",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_a7ed4eac9b3c33f53fdfb11d8a92100a": {
+      "product_ref": "prod_a7ed4eac9b3c33f53fdfb11d8a92100a",
+      "list_price": 31.49,
+      "title": "Saw Palmetto",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_4d376345aa5ed1f41642bb7ed02ad3ec": {
+      "product_ref": "prod_4d376345aa5ed1f41642bb7ed02ad3ec",
+      "list_price": 30.59,
+      "title": "Rhodiola Rosea",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_c3cd92244dc537903c60063bb7004adc": {
+      "product_ref": "prod_c3cd92244dc537903c60063bb7004adc",
+      "list_price": 25.64,
+      "title": "Resveratrol",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_dfb1ff55c562d1ba806f695fa57a2466": {
+      "product_ref": "prod_dfb1ff55c562d1ba806f695fa57a2466",
+      "list_price": 25.64,
+      "title": "Quick Defense®",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_c465206280a6512ea5bd278f55ec170a": {
+      "product_ref": "prod_c465206280a6512ea5bd278f55ec170a",
+      "list_price": 34.19,
+      "title": "Prostate Health",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_680b74ad3578ec6c92d83b9c8e8160d3": {
+      "product_ref": "prod_680b74ad3578ec6c92d83b9c8e8160d3",
+      "list_price": 15.29,
+      "title": "Oregano Leaf, Certified Organic",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Extracts",
+      "currency": "USD"
+    },
+    "prod_0916f8575a1c478a7c4ebb72d475e6bb": {
+      "product_ref": "prod_0916f8575a1c478a7c4ebb72d475e6bb",
+      "list_price": 16.19,
+      "title": "Olive Leaf Extract, Certified Organic",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Extracts",
+      "currency": "USD"
+    },
+    "prod_207035633db64f0193d50314728cfc7e": {
+      "product_ref": "prod_207035633db64f0193d50314728cfc7e",
+      "list_price": 28.34,
+      "title": "Olive Leaf",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_717e890e3ad38612eb3a96dc6a0010e0": {
+      "product_ref": "prod_717e890e3ad38612eb3a96dc6a0010e0",
+      "list_price": 27.89,
+      "title": "Oil of Oregano",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_965bffe860aa783ad657c1b58929dc9a": {
+      "product_ref": "prod_965bffe860aa783ad657c1b58929dc9a",
+      "list_price": 36.89,
+      "title": "Nootropic Focus™",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_8ae420efc7de6044c6c00e95212aa54a": {
+      "product_ref": "prod_8ae420efc7de6044c6c00e95212aa54a",
+      "list_price": 30.59,
+      "title": "Nettle Leaf",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_a75dc416b8e02f5949afa9cd94786d09": {
+      "product_ref": "prod_a75dc416b8e02f5949afa9cd94786d09",
+      "list_price": 37.79,
+      "title": "Everyday Mushrooms & Herbs",
+      "brand": "Gaia Herbs",
+      "product_type": "Powder Capsules",
+      "currency": "USD"
+    },
+    "prod_0b6ac4d521dc87da9eaff906366ae9b7": {
+      "product_ref": "prod_0b6ac4d521dc87da9eaff906366ae9b7",
+      "list_price": 33.74,
+      "title": "Ashwagandha & Cordyceps",
+      "brand": "Gaia Herbs",
+      "product_type": "Powder Capsules",
+      "currency": "USD"
+    },
+    "prod_987f79043b18581fc4956be37b8022be": {
+      "product_ref": "prod_987f79043b18581fc4956be37b8022be",
+      "list_price": 31.49,
+      "title": "Steady Mind™",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_56c4f9d62cb732d653acf62e4235cbab": {
+      "product_ref": "prod_56c4f9d62cb732d653acf62e4235cbab",
+      "list_price": 30.59,
+      "title": "Milk Thistle",
+      "brand": "Gaia Herbs",
+      "product_type": "Powder Capsules",
+      "currency": "USD"
+    },
+    "prod_d1e1f88031352b67a7c88f6ba52d7a50": {
+      "product_ref": "prod_d1e1f88031352b67a7c88f6ba52d7a50",
+      "list_price": 31.49,
+      "title": "Mental Alertness",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_da2266ea6c028c75cdc2c2a8fa9b1aaa": {
+      "product_ref": "prod_da2266ea6c028c75cdc2c2a8fa9b1aaa",
+      "list_price": 31.49,
+      "title": "Male Libido",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_cd04ea3ffbc75fdfe1f2b13ad2bc8912": {
+      "product_ref": "prod_cd04ea3ffbc75fdfe1f2b13ad2bc8912",
+      "list_price": 21.59,
+      "title": "Maca Root",
+      "brand": "Gaia Herbs",
+      "product_type": "Powder Capsules",
+      "currency": "USD"
+    },
+    "prod_390271c987e9d664ae07669e4e7acc32": {
+      "product_ref": "prod_390271c987e9d664ae07669e4e7acc32",
+      "list_price": 18.89,
+      "title": "Maca Powder",
+      "brand": "Gaia Herbs",
+      "product_type": "Powders",
+      "currency": "USD"
+    },
+    "prod_3f815bc2eedd9ec0712660b138686ed5": {
+      "product_ref": "prod_3f815bc2eedd9ec0712660b138686ed5",
+      "list_price": 31.49,
+      "title": "Liver Health",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_816ab44e798854b7070045c6d99c2521": {
+      "product_ref": "prod_816ab44e798854b7070045c6d99c2521",
+      "list_price": 31.49,
+      "title": "Liver Cleanse",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_2beacbb133e2acb6dc30fbfe92f26240": {
+      "product_ref": "prod_2beacbb133e2acb6dc30fbfe92f26240",
+      "list_price": 27.44,
+      "title": "Lactation Support™",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_edc3dfd704e8bf140beb21dfff1ce389": {
+      "product_ref": "prod_edc3dfd704e8bf140beb21dfff1ce389",
+      "list_price": 30.59,
+      "title": "Holy Basil Leaf",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_658cb92d6a4d28e14dc800832e71c44a": {
+      "product_ref": "prod_658cb92d6a4d28e14dc800832e71c44a",
+      "list_price": 31.49,
+      "title": "Hawthorn Supreme",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_7bb593e7549c99253d4e5cd63dd24ac9": {
+      "product_ref": "prod_7bb593e7549c99253d4e5cd63dd24ac9",
+      "list_price": 31.49,
+      "title": "Hair, Skin & Nails",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_113c678748233cc8d237a6d5a62ba183": {
+      "product_ref": "prod_113c678748233cc8d237a6d5a62ba183",
+      "list_price": 28.34,
+      "title": "Green Tea",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_1f6d9411713f6d94fbd4258f0e547b93": {
+      "product_ref": "prod_1f6d9411713f6d94fbd4258f0e547b93",
+      "list_price": 32.84,
+      "title": "Ginkgo Leaf",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_76fdef8334a826cbf2c39e674b074868": {
+      "product_ref": "prod_76fdef8334a826cbf2c39e674b074868",
+      "list_price": 38.69,
+      "title": "Ginger Supreme",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_fe006379facb273770550e8768dc73a7": {
+      "product_ref": "prod_fe006379facb273770550e8768dc73a7",
+      "list_price": 26.98,
+      "title": "Gas & Bloating™",
+      "brand": "Gaia Herbs",
+      "product_type": "Powder Capsules",
+      "currency": "USD"
+    },
+    "prod_b0997ffc915aaf566c900b9f2d4bd188": {
+      "product_ref": "prod_b0997ffc915aaf566c900b9f2d4bd188",
+      "list_price": 21.14,
+      "title": "Bronchial Wellness Syrup Kids",
+      "brand": "Gaia Herbs",
+      "product_type": "Syrups",
+      "currency": "USD"
+    },
+    "prod_48f059bc44de31dbeb1f23bf56c4bc8d": {
+      "product_ref": "prod_48f059bc44de31dbeb1f23bf56c4bc8d",
+      "list_price": 19.79,
+      "title": "Black Elderberry Syrup Kids Daily",
+      "brand": "Gaia Herbs",
+      "product_type": "Syrups",
+      "currency": "USD"
+    },
+    "prod_34e6a9f61059674f44b5fad7eb21f586": {
+      "product_ref": "prod_34e6a9f61059674f44b5fad7eb21f586",
+      "list_price": 29.69,
+      "title": "Fenugreek Seed",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_33cfd719eb80b174f2b115cd991721c8": {
+      "product_ref": "prod_33cfd719eb80b174f2b115cd991721c8",
+      "list_price": 30.59,
+      "title": "Eleuthero Root",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_258d82e49b657aae59a9a994a9283c5f": {
+      "product_ref": "prod_258d82e49b657aae59a9a994a9283c5f",
+      "list_price": 31.49,
+      "title": "Echinacea Supreme",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Phyto-Caps®",
+      "currency": "USD"
+    },
+    "prod_54c0eba5411f3bda4a5c7e4a02c79543": {
+      "product_ref": "prod_54c0eba5411f3bda4a5c7e4a02c79543",
+      "list_price": 15.29,
+      "title": "Echinacea Goldenseal Supreme",
+      "brand": "Gaia Herbs",
+      "product_type": "Liquid Extracts",
+      "currency": "USD"
+    },
+    "prod_850cac7274a46af52a70d9d5a068f617": {
+      "product_ref": "prod_850cac7274a46af52a70d9d5a068f617",
+      "list_price": 15.29,
+      "title": "Echinacea Goldenseal Propolis Throat Spray",
+      "brand": "Gaia Herbs",
+      "product_type": "Sprays",
+      "currency": "USD"
+    },
+    "prod_f664161a446cb586281b412b40fa7872": {
+      "product_ref": "prod_f664161a446cb586281b412b40fa7872",
+      "list_price": 22.94,
+      "title": "Golden Milk",
+      "brand": "Gaia Herbs",
+      "product_type": "Powders",
+      "currency": "USD"
+    }
+  },
+  "live_state": {
+    "prod_192326f5cf09d3e8d9cfcd92a9b7c285": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_66c5c2954133b21d5f38cd24877d085b": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_4b0f572e9a4473cb12fc96e7b78478ca": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_554c5c0a6b83a0aa7a8f400f5e9af629": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_b11ea9e4f9363199262d013d8ffe9cae": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_15d5adcde0a107bef4b7162fb99a6215": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_78899d8540dd08b56d66df96ba2746b7": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_fe931955518347526d6f4b7c2311cec8": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_4f44b610d94aa018e943d884b3edba2a": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_3faf6851b306332b8fc309299ca3c6f6": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_e8cdd01150a8c0e1ffadd3aea0eb9c59": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_6ccc4057b112533086b018bb1a3778fb": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_5259afd6cd2d160af13cbfc28aaed480": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_12e5a204945147bca2590e2ed5296603": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_5b3100b381998843c2f732f147e632d0": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_795061189deaba4e904a9937907c6181": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_11002ff8a18d22fc071a2264c6e3f7b1": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_c99a85f94daf38feb04f8d0ef234b1dc": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_4ee51ecc695e77b0c0fb089c566ba974": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_dacdc7afbb519be2d31eb495fbf53e31": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_93a302d76c626f729c648d899a660ca7": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_1ed8a98adb91505e84e62bea3ab2a7bb": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_bd2b844badcadd9121258a5aeea85f44": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_d16b4cb1c1aacb9cd625427cf092ca80": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_a72ac89c214df10d68c008e801790e5d": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_aed09015b84632cac0d0a6e0bd8bf98c": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_2a54527f3143f3c71d866fad5410768c": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_cf40eb0e89b9cc1b886ccd4b5c667121": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_5b61ea1bb0eb0264c291528df14494e7": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_0df23a63be06836e03d59ad352add794": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_ab9a9d8304cbb5042da41c1230f1ed2c": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_315e80bb4ed11bdf51ec442013c5525e": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_a96dfdb0292809df1f36b56b3111849a": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_80b6d367a9b2beced0580fc428c1299c": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_988f6237d4f8d15b4f92aa54a50b4b30": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_7e26e1e2e681f02f9b17661b6bede873": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_ff97ebfa498614748f647be57c6c434f": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_6102bca01dc0a94051b94937ab2a2507": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_195d9736493897b2bfc0f1bfc53e6541": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_76aee6418cb3b37030231c2791a84493": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_07654914729e9d0821e40a5b6492547c": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_03a22eb85b082fb1241fc4cedae4b012": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_f2d33215e32eef3501d657d52d3c86ac": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_58d6e4d926b94e7ba175523b1dae042c": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_abc2b6d2d55e00e43ddc479f21edd032": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_eaa9b04234486f1dc990b361948e0fdf": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_95a03a62a7c68638592b3d78670a11a4": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_7011bfef57f77d2b182bbdd5b7ddd5b3": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_6def39a61127a2ad9e941ec425a7a8b5": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_aa079bf7d6d67053050aa43f035cb4c8": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_d07bfac1843af19d1631194968a0cc96": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_ee45c9e84d6d5d6a0d30cead6aa094ee": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_a9ddfd23a7b8be4c81ea6fb9401af957": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_baceb26dfeb6ea85706fe3192bb9816b": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_e22313245a8c5fcbe2803a011095612c": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_62dae668aa90ad76cc72947630a9a68b": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_5bf92a7d123f7710d79bd6dff72b2071": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_129096ff8ad505ecab1fe4644b6dbfe1": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_f679823b9b58c1560e3986f00cb9dd8f": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_ac46ffdd648c482ebbbbc257f104189e": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_6265d1b6f6f8e2c3719e2e5b121bdf75": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_0c861056ce22f2644d64f050fff0070a": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_0e91bb4026ab179e61db02327f716e8a": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_395f41df5b45d57efe83d721f27bba06": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_b3cfc3ad03554fb0ab93328eb9840207": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_a01f6fa190e7e0da3c3c275e6a4389a4": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_05cd7a07b58a6ec4038b1e694bf4115d": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_d5584d1fcddf17bf111fb7c2bb339571": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_3832deaf1d487045eb4daf8ab6f4b494": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_e6362c27286b4f62caaf2d458ea87e5c": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_9f52c3eb3f831a8b107cbf55776072c3": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_77ea9c11fd51cedc9f7f4500d9e91f69": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_963eafe38b3c127c2ddb75637805e547": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_37a202e5865d3c3ff3d597d17275959a": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_a7ed4eac9b3c33f53fdfb11d8a92100a": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_4d376345aa5ed1f41642bb7ed02ad3ec": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_c3cd92244dc537903c60063bb7004adc": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_dfb1ff55c562d1ba806f695fa57a2466": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_c465206280a6512ea5bd278f55ec170a": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_680b74ad3578ec6c92d83b9c8e8160d3": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_0916f8575a1c478a7c4ebb72d475e6bb": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_207035633db64f0193d50314728cfc7e": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_717e890e3ad38612eb3a96dc6a0010e0": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_965bffe860aa783ad657c1b58929dc9a": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_8ae420efc7de6044c6c00e95212aa54a": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_a75dc416b8e02f5949afa9cd94786d09": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_0b6ac4d521dc87da9eaff906366ae9b7": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_987f79043b18581fc4956be37b8022be": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_56c4f9d62cb732d653acf62e4235cbab": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_d1e1f88031352b67a7c88f6ba52d7a50": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_da2266ea6c028c75cdc2c2a8fa9b1aaa": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_cd04ea3ffbc75fdfe1f2b13ad2bc8912": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_390271c987e9d664ae07669e4e7acc32": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_3f815bc2eedd9ec0712660b138686ed5": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_816ab44e798854b7070045c6d99c2521": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_2beacbb133e2acb6dc30fbfe92f26240": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_edc3dfd704e8bf140beb21dfff1ce389": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_658cb92d6a4d28e14dc800832e71c44a": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_7bb593e7549c99253d4e5cd63dd24ac9": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_113c678748233cc8d237a6d5a62ba183": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_1f6d9411713f6d94fbd4258f0e547b93": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_76fdef8334a826cbf2c39e674b074868": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_fe006379facb273770550e8768dc73a7": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_b0997ffc915aaf566c900b9f2d4bd188": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_48f059bc44de31dbeb1f23bf56c4bc8d": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_34e6a9f61059674f44b5fad7eb21f586": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_33cfd719eb80b174f2b115cd991721c8": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_258d82e49b657aae59a9a994a9283c5f": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_54c0eba5411f3bda4a5c7e4a02c79543": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_850cac7274a46af52a70d9d5a068f617": {
+      "in_stock": true,
+      "units_left": 12
+    },
+    "prod_f664161a446cb586281b412b40fa7872": {
+      "in_stock": true,
+      "units_left": 12
+    }
+  },
+  "learned_policy": null,
+  "network_priors": {
+    "cluster-liver-support": {
+      "depth_buckets": [
+        0.0,
+        0.05,
+        0.1,
+        0.15,
+        0.2
+      ]
+    }
+  }
+}

@@ -89,3 +89,62 @@ services:
     mem_limit: 256m
     stop_grace_period: 10s
     restart: unless-stopped
+
+  # THE ONE-SHOT CORPUS LOADER. `make deps-up` starts an EMPTY Neo4j, and nothing in the
+  # repository ever put the ten recorded storefronts in `fixtures/real-catalogs/` into it —
+  # `ingest.scheduler.load_corpus` had no make target, no script, no compose service and no
+  # caller anywhere outside two tests. So the exchange's graph roster, once switched on, walked
+  # a graph with no products in it and correctly found nobody.
+  #
+  # Its own profile, not `demo`. It runs for MINUTES (44,803 graph writes over 3,093 products)
+  # and then exits, so a `--profile demo up -d --wait` that carried it would sit on a container
+  # that is supposed to stop. It is invoked once, explicitly, by `make demo-corpus`.
+  #
+  # It is a SEPARATE service rather than a `docker compose exec` into `ingest`, for two
+  # measured reasons: `ingest`'s healthcheck requires its HTTP server to be answering, so
+  # replacing that container's command with the loader would make it permanently unhealthy and
+  # `restart: unless-stopped` would re-run the whole load in a loop; and `ingest`'s 256 MiB cap
+  # is well under what reassembling 20 MB of recorded pages and embedding in batches of 200
+  # needs.
+  corpus-loader:
+    profiles: ["corpus"]
+    build:
+      context: ../..
+      dockerfile: services/ingest/Dockerfile
+    # ⚠️ THE MOUNT IS NOT OPTIONAL. `services/ingest/Dockerfile` copies the source, support and
+    # llm packages and NOT `fixtures/`, and `adapters/recorded.default_corpus_dir()` resolves
+    # the default to `/app/fixtures/real-catalogs` from its own `__file__`. Without this line
+    # the loader dies on its first call with a FileNotFoundError naming that path. Read-only:
+    # the corpus is a recording and the loader has no business writing to it.
+    volumes:
+      # `../../`: a relative bind source in an included fragment resolves against THIS
+      # file's directory. `./fixtures/real-catalogs` became `services/ingest/fixtures/
+      # real-catalogs`, Docker created it empty, and the loader died on a FileNotFoundError
+      # naming a path that looked right.
+      - ../../fixtures/real-catalogs:/app/fixtures/real-catalogs:ro
+    environment:
+      PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
+      NEO4J_URI: "bolt://neo4j:7687"
+      NEO4J_USER: "${NEO4J_USER:-neo4j}"
+      NEO4J_PASSWORD: "${NEO4J_PASSWORD:-proxyshop_dev_pw}"
+      # LEAVE THIS EMPTY, and leave the exchange's empty too. Both fall through to
+      # `ingest.embeddings.DEFAULT_PROVIDER` (`lexical`), and the graph query REFUSES to read
+      # vectors written under a different provider than the one asking —
+      # `EmbeddingProviderMismatch` comes back as an empty roster naming both names. Two
+      # fragments agreeing by both saying nothing is the only way that cannot drift.
+      EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-}"
+      LLM_PROVIDER: "${LLM_PROVIDER:-double}"
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    # `--all`: every recorded store, which is what makes the graph a market rather than a
+    # sample. `--no-lock`: the D37 flock is `/tmp/proxyshop-neo4j.lock` inside the CONTAINER's
+    # own filesystem, so taking it here protects nothing that a host-side graph test could see
+    # and only risks a wait on a lock nobody else can hold.
+    command: ["python", "-m", "ingest.scheduler.load_corpus", "--all", "--no-lock",
+              "--probe", "milk thistle silymarin liver support extract"]
+    # NO healthcheck and `restart: "no"`: this is a job. A healthcheck on a container that is
+    # supposed to exit is a contradiction, and a restart policy on one is an infinite loop.
+    restart: "no"
+    mem_limit: 1g
+    stop_grace_period: 30s

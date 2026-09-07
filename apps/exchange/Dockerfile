@@ -62,11 +62,21 @@ RUN pip install --no-cache-dir \
 # `services/ingest/Dockerfile` uses for its four extras).
 #
 # ONE wheel, and it exists because D55 made the catalogue graph part of a SERVED request.
-# `exchange.retrieval.roster.graph_roster_from_env` opens a `neo4j.Driver` when the operator
-# sets `EXCHANGE_SHOP_ROSTER=graph`; that is how `POST /auctions` answers a request naming no
+# `exchange.retrieval.roster.graph_roster_from_env` opens a `neo4j.Driver` when
+# `EXCHANGE_SHOP_ROSTER=graph`; that is how `POST /auctions` answers a request naming no
 # roster, which is the organic half of the market. DESIGN.md:23-24 already has EXC->NEO as an
 # independent edge, so this is the driver catching up with the architecture rather than a new
 # dependency direction.
+#
+# WHO ACTUALLY SETS THAT VARIABLE, because this comment previously implied an operator
+# somewhere did and nobody did. When the wheel landed, `EXCHANGE_SHOP_ROSTER` appeared in
+# exactly four places in the whole repository -- this comment, the composition branch that
+# calls the factory, and the two lines of `retrieval/roster.py` that read it. No compose
+# fragment, no `.env.example` entry, no runbook and no script set it, so the driver installed
+# here was never constructed in any deployment and the graph door was shut everywhere. It is
+# set now, by `apps/exchange/compose.yaml`, which defaults it to `graph` and hands the
+# container NEO4J_URI/USER/PASSWORD and a `depends_on: neo4j` beside it. Change one and the
+# other stops meaning anything.
 #
 # The import is LAZY (inside the factory, exactly as `ingest.graph.reembed.graph_driver`'s
 # is), so an import scan cannot see it and `test_artifact_copyset.py` counts it as an indented
@@ -76,12 +86,13 @@ RUN pip install --no-cache-dir \
 # reason names `ModuleNotFoundError: No module named 'neo4j'`. "Built, tested, and reachable
 # by nobody" is the failure this line exists to avoid.
 #
-# NOTE for the next reader of `apps/exchange/compose.yaml`: the healthcheck block there says
-# this image ships `ingest.graph` "but NOT the `neo4j` driver". That half of the sentence is
-# superseded by this layer. Its CONCLUSION still stands and should not be revisited on this
-# evidence alone — there is deliberately no `--neo4j` in the exchange's readiness probe,
-# because the graph roster is opt-in and an exchange that has not opted in must not be marked
-# unhealthy when Neo4j is down.
+# NOTE for the next reader of `apps/exchange/compose.yaml`: that file used to say this image
+# ships `ingest.graph` "but NOT the `neo4j` driver", and used that to justify having no
+# `--neo4j` in the exchange's readiness probe. Both halves are settled now and the fragment
+# says so itself: the wheel is this layer, and the probe carries `--neo4j` because the roster
+# is no longer opt-in — the fragment defaults `EXCHANGE_SHOP_ROSTER` to `graph`, so an
+# exchange that cannot open a bolt session cannot answer a roster-less auction and must not
+# report ready.
 RUN pip install --no-cache-dir "neo4j==5.28.5"
 
 # The repo layout is reproduced VERBATIM rather than flattened into /app, because

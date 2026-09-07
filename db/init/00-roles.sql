@@ -76,6 +76,28 @@ DECLARE
     nullif(current_setting('proxyshop.role_password', true), ''), 'x'
   );
 BEGIN
+  -- SAY WHICH CREDENTIAL SEEDED THIS CLUSTER, in the container's own init log.
+  --
+  -- The variable's compose default is deliberately EMPTY, so the ordinary path -- `cp
+  -- .env.example .env`, `make deps-up` -- falls through the coalesce above to the literal
+  -- and nothing anywhere says so. That silence is the whole problem: a hard-coded dev
+  -- credential nobody is told about reads exactly like a configured one, and the FIRST time
+  -- anyone finds out is when they set the variable on a volume that already exists and every
+  -- service starts failing `fe_sendauth`. The password itself is never printed on either
+  -- branch -- only WHICH SOURCE won, which is the fact an operator needs and the one thing
+  -- the log could not previously tell them.
+  IF nullif(current_setting('proxyshop.role_password', true), '') IS NULL THEN
+    RAISE NOTICE
+      'proxyshop: PROXYSHOP_ROLE_PASSWORD is unset or empty; seeding the four '
+      'least-privilege roles with the documented dev default. This is a DEV cluster '
+      'credential and it is not a secret. Set PROXYSHOP_ROLE_PASSWORD before the pgdata '
+      'volume is created to use your own -- this hook runs ONCE, so setting it afterwards '
+      'moves only the connect side and every service will fail authentication.';
+  ELSE
+    RAISE NOTICE
+      'proxyshop: seeding the four least-privilege roles from PROXYSHOP_ROLE_PASSWORD.';
+  END IF;
+
   FOREACH role_name IN ARRAY ARRAY['exchange', 'trust_rw', 'buyer_vault', 'app'] LOOP
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = role_name) THEN
       EXECUTE format(
