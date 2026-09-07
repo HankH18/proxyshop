@@ -69,6 +69,7 @@ __all__ = [
     "reconcile",
     "reconciled_event",
     "reconciled_observations",
+    "unjoinable_webhook",
 ]
 
 #: The three input kinds, and the one output kind. All four are already in the frozen
@@ -536,6 +537,32 @@ def _token_key(event: Any) -> tuple[str, ...]:
     if not text:
         return ()
     return (f"{_TOKEN_NAMESPACE}{_SCOPE_SEPARATOR}{_key_component(text)}",)
+
+
+def unjoinable_webhook(event: Any) -> bool:
+    """Whether ``event`` is the one input :func:`reconcile` refuses outright.
+
+    An ``order_paid`` carrying no ``checkout_token``, ``order_ref`` or ``order_id`` cannot be
+    attributed to an order, and :func:`reconcile` raises :class:`ReconciliationInputError`
+    rather than dropping it — because a store that could escape reconciliation by omitting a
+    field would be a hole in R4 that costs nothing to walk through.
+
+    That refusal is right and it is also, on its own, a denial of service. ``POST /events``
+    admits such a webhook (it screens identifiers for length and renderability, not for
+    joinability), the ledger's append-only trigger makes the row un-evictable, and the fold
+    is over the WHOLE chain — so one unauthenticated append would stop every later purchase
+    in that ledger from ever grading. Measured before this existed: one poison row, and a
+    served ``POST /reconcile`` answered 500 forever.
+
+    So a caller that folds a whole ledger asks this FIRST, sets the offenders aside, and
+    reports how many it set aside. The refusal is kept — it is a number in a served response
+    rather than a silent drop — and the door stays available for the honest traffic behind
+    it. A caller holding a curated triple should not use this: for that caller the raise is
+    the right answer, because there is nothing else in the stream to protect.
+    """
+    if str(_field(event, "kind", "")) != WEBHOOK_KIND:
+        return False
+    return not _join_keys(event)
 
 
 def _bridge_keys(event: Any) -> tuple[str, ...]:

@@ -1307,3 +1307,64 @@ def test_a_price_that_cannot_be_read_is_unknown_and_not_a_verdict(
         payload["price_comparable"],
         payload["price_honored"],
     ) == expected
+
+
+# =====================================================================================
+# The bridge is necessary and it is not SUFFICIENT: the two halves also name the store
+# differently, and every key this file is about is namespaced by store.
+#
+# Measured on a real served purchase (see
+# ``apps/trust/tests/test_reconciliation.py::test_the_two_halves_of_a_real_checkout_share_no_
+# token_and_no_store_name``): the exchange stamps its platform ``store_id``, and
+# ``merchant_svc.composition._store_id`` writes the SHOP DOMAIN, because an unsigned
+# ``X-Shopify-Shop-Domain`` header is the only shop identity a signed delivery carries. The
+# code bridge above is unaffected — the code really is on both halves — and the join still
+# finds nothing, because a bridge can only join keys that share a scope.
+# =====================================================================================
+
+#: What the merchant writes as ``store_id``: the shop's own domain, not the platform's name
+#: for the seller. Verbatim from a served run through the merchant stub.
+SHOP_DOMAIN = "proxyshop-demo.myshopify.com"
+
+
+def test_the_code_bridge_cannot_join_two_halves_that_name_the_store_differently() -> None:
+    """The bridge holds and the join still collapses. This is a SECOND blocker, not the same one.
+
+    Every key in this module is scoped by store before it is unioned
+    (``engine._scoped_keys``), and it has to be: a Shopify ``order_id`` is a per-shop number,
+    so joining one unscoped merges two shops' orders and makes one of them disappear. The
+    consequence is that "which store is this" has to be answered the SAME WAY on both halves
+    of a checkout, and on a real served run it is not.
+    """
+    offer = accepted(store=STORE)
+    bridge = code_created(store=STORE)
+    order = order_paid(store=SHOP_DOMAIN)
+
+    assert discount_codes_of(bridge) == discount_codes_of(order) == (CODE,), (
+        "the bridge itself is intact, so what follows is about the store name and nothing else"
+    )
+    assert reconcile([offer, bridge, order]) == []
+
+    # The control: the same three events with one name for the store, which is what resolving
+    # the platform roster produces (`trust.reconcile.routes.resolve_store_aliases`).
+    (event,) = reconcile([offer, bridge, order_paid(store=STORE)])
+    assert event["payload"]["price_honored"] is True
+    assert event["store_id"] == STORE
+
+
+def test_renaming_the_order_to_a_store_that_did_not_take_it_grades_the_wrong_promise() -> None:
+    """Why the alias resolution refuses an ambiguous domain instead of picking one.
+
+    The rename is a real capability and it points at real money: with the order filed under
+    the wrong platform store, the wrong store's promise is the one graded. That is why
+    ``resolve_store_aliases`` maps a domain only when exactly ONE seller claims it, and why an
+    unrecognised name is left alone rather than guessed at.
+    """
+    rival = "store-rival"
+    offer = accepted(store=rival, offer={**OFFER, "total_price": 9000.0, "unit_price": 9000.0})
+    bridge = code_created(store=rival)
+    # The order really cost 389 and really redeemed this code; filed under `rival` it grades
+    # against a 9000 promise it has nothing to do with, and reads as a kept one.
+    (event,) = reconcile([offer, bridge, order_paid(store=rival)])
+    assert event["payload"]["price_honored"] is True
+    assert event["payload"]["promised_price"] == 9000.0

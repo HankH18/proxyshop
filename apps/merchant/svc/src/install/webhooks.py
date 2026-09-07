@@ -82,6 +82,11 @@ HEADER_API_VERSION = "X-Shopify-API-Version"
 HEADER_WEBHOOK_ID = "X-Shopify-Webhook-Id"
 HEADER_TRIGGERED_AT = "X-Shopify-Triggered-At"
 
+#: The Admin GraphQL id prefix of an ORDER, and the way to tell one from a refund's own id.
+#: Every subscribed topic's body carries ``admin_graphql_api_id``; only two of the three
+#: describe an order. See :attr:`ReceivedWebhook.order_ref`.
+ORDER_GID_PREFIX = "gid://shopify/Order/"
+
 #: How many delivered webhooks the default in-process sink keeps.
 INBOX_CAPACITY = 512
 
@@ -177,13 +182,39 @@ class ReceivedWebhook:
 
     @property
     def order_ref(self) -> str | None:
-        """The order's Admin GraphQL id, when the payload carries one."""
-        for key in ("admin_graphql_api_id", "admin_graphql_api_order_id"):
+        """The **order's** Admin GraphQL id, when the payload names one.
+
+        ``admin_graphql_api_id`` is the id of *the resource the body describes*, and only
+        two of the three subscribed topics describe an order. Measured on a real
+        ``refunds/create`` delivery from ``services/shopify-stub``, before the prefix check
+        below existed::
+
+            payload["admin_graphql_api_id"] -> "gid://shopify/Refund/8800000000001"
+            payload["order_id"]             ->  5500000000001
+            order_ref                       -> "gid://shopify/Refund/8800000000001"
+
+        A refund filed under a refund's own id joins to nothing: ``trust.reconcile.engine``
+        groups a store's events by ``checkout_token``/``order_ref``/``order_id``, a refund
+        body carries no checkout token, and so the one event that says money went back to a
+        buyer sat in its own component and reached no reconciliation. The order is named in
+        that same body, twice, and was never read.
+
+        So the resource id is used only when it IS an order, and the explicit
+        ``admin_graphql_api_order_id`` — Shopify's own spelling on child resources — outranks
+        it. The numeric ``order_id`` is preferred over the bare ``id`` for the same reason,
+        and ``id`` remains the last resort because on an order body it is the order.
+        """
+        explicit = self.payload.get("admin_graphql_api_order_id")
+        if isinstance(explicit, str) and explicit:
+            return explicit
+        own = self.payload.get("admin_graphql_api_id")
+        if isinstance(own, str) and own.startswith(ORDER_GID_PREFIX):
+            return own
+        for key in ("order_id", "id"):
             value = self.payload.get(key)
-            if isinstance(value, str) and value:
-                return value
-        order_id = self.payload.get("order_id", self.payload.get("id"))
-        return f"gid://shopify/Order/{order_id}" if order_id is not None else None
+            if value is not None:
+                return f"{ORDER_GID_PREFIX}{value}"
+        return None
 
     @property
     def checkout_token(self) -> str | None:
@@ -320,8 +351,7 @@ class WebhookInbox:
         self._seen.clear()
 
 
-#: The default sink. Downstream lanes (E6's ledger writer) replace it with
-#: :func:`set_webhook_sink` rather than editing this module.
+#: The process-wide inbox: the replay guard and the display ring for served deliveries.
 INBOX = WebhookInbox()
 
 #: The ``LedgerEvent.kind`` each subscribed topic becomes on the way downstream. The names
@@ -362,12 +392,20 @@ def ledger_record(event: ReceivedWebhook) -> dict[str, Any]:
 
 
 class WebhookHandoff:
-    """The bounded buffer the default sink writes to, and the seam E6 replaces.
+    """The bounded in-process readback of what was handed on. **No longer the terminus.**
 
-    It exists because "no sink configured" was silently equivalent to "throw the delivery
-    away". A default that keeps the authenticated, de-duplicated, ledger-shaped record —
-    and says so in the log — makes an unwired downstream a *visible* gap rather than an
-    invisible one, which is the same rule R4 applies to a dropped pixel event.
+    It was written when E6 was not deployed and "no sink configured" was silently equivalent
+    to throwing the delivery away: keeping the authenticated, de-duplicated, ledger-shaped
+    record made an unwired downstream a *visible* gap rather than an invisible one.
+
+    E6 is deployed, and :func:`default_sink` now writes each record to the trust service's
+    chained ledger as well. This ring is KEPT rather than replaced, for the same reason the
+    exchange's ``HttpTrustLedgerSink`` subclasses its in-memory one instead of replacing it:
+    live tests read the buffer back off the served app — ``test_merchant_hardening.py``'s
+    fresh-process probe reads ``HANDOFF.records()`` over an ASGI transport — and a
+    cross-process write is not something a served request can read back for itself. What
+    changed is what the ring MEANS: it is now a readback of what was published, not the
+    place a delivery stops.
     """
 
     def __init__(self, capacity: int = HANDOFF_CAPACITY) -> None:
@@ -394,18 +432,43 @@ HANDOFF = WebhookHandoff()
 
 
 def default_sink(event: ReceivedWebhook) -> None:
-    """The sink a service with no downstream wired still gets.
+    """The boot sink: the in-process ring **and** E6's chained ledger.
 
-    Never raises. A sink that raises is answered 500 so Shopify retries (see
-    :func:`handle_delivery`), and a *default* that could do that would turn "E6 is not
-    deployed yet" into "every order webhook is retried forever".
+    It used to be "the sink a service with no downstream wired still gets" — it appended to
+    :data:`HANDOFF` and stopped, because E6 was not deployed. E6 is deployed, and R4 makes
+    this delivery the AUTHORITATIVE half of the pixel↔webhook reconciliation, so a sink that
+    ends in a display buffer is the authoritative half reaching no ledger. Measured before
+    this line existed, across four processes on loopback: a completed checkout's
+    ``orders/paid`` was answered ``200 {"status":"recorded"}`` by the served merchant while
+    the served trust service reported ``GET /events -> {"events":[],"count":0}``.
+
+    Both halves, in this order, and the order matters: the ring is filled first so the
+    in-process readback holds the record whether or not the cross-process write lands.
+
+    **Still never raises**, which is what makes publishing here safe at all. A sink that
+    raises is answered 500 by :func:`handle_delivery` so Shopify retries — for up to 48
+    hours — and a *default* that could do that would turn a trust-service outage into every
+    order webhook being retried forever. ``publish_ledger_record`` carries that guarantee
+    explicitly (transport failures are counted by the shared publisher, projection failures
+    are caught around it), so a lost audit record is a lost audit record and never a refused
+    delivery. What it must never become is silent: the loss is counted, logged on the
+    transition, and readable afterwards through ``composition.ledger_status()``.
+
+    The import is deferred because ``merchant_svc.composition`` imports
+    ``merchant_svc.install.shop``, which loads ``merchant_svc.install``, which loads this
+    module — a cycle at import time and not at call time.
     """
-    HANDOFF.append(ledger_record(event))
+    record = ledger_record(event)
+    HANDOFF.append(record)
+    from merchant_svc.composition import publish_ledger_record  # noqa: PLC0415 - see above
+
+    delivered = publish_ledger_record(record)
     _log.info(
-        "webhook %s handed to the default sink (order=%s checkout=%s)",
+        "webhook %s recorded (order=%s checkout=%s); trust ledger: %s",
         event.topic,
         event.order_ref or "<none>",
         event.checkout_token or "<none>",
+        "written" if delivered else "NOT written, counted as lost",
     )
 
 
@@ -416,6 +479,11 @@ def inbox_only_sink(event: ReceivedWebhook) -> None:
     for by name**. It is a real function rather than ``None`` for one reason: ``None`` is
     what a caller passes when it means "I have nothing in particular to say", and the state
     it used to select is the single worst state this module can be in.
+
+    Now that :func:`default_sink` writes to the trust ledger, selecting this one also means
+    "no audit trail for this process" — not merely "no hand-off ring". It is still the right
+    thing to pass in a test that is measuring the receiver and not the ledger; it is never
+    the right thing for a deployment.
     """
     _log.info(
         "webhook %s recorded in the inbox only; no downstream is installed (order=%s)",
@@ -438,6 +506,12 @@ def inbox_only_sink(event: ReceivedWebhook) -> None:
 #: So ``None`` now means **restore the boot default**, and handing deliveries to nobody is
 #: spelled :func:`inbox_only_sink` — a deliberate act with a name, which is what it always
 #: claimed to be.
+#:
+#: Booting to :func:`default_sink` is what makes the ledger write reach the *deployment* and
+#: not just a wired test. ``main.create_app`` is frozen, so had the ledger write been
+#: installed by an explicit ``set_webhook_sink`` call, the production path would have been
+#: the one path that never made it — which is the whole of the bug the paragraph above
+#: records, one layer up. The boot default publishes; no caller has to remember.
 _sink: Callable[[ReceivedWebhook], None] = default_sink
 
 

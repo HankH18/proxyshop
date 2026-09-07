@@ -12,6 +12,9 @@ the bottom makes both spellings resolve to the same objects — see :mod:`trust.
 :func:`reconciled_observations`  those verdicts -> the trust observations the scorer reads.
 :func:`observation_events`   the same, as ``offer_integrity`` events the ledger replays.
 :func:`discount_codes_of`    the single-use codes an event names, in every real spelling.
+:func:`unjoinable_webhook`   the one input :func:`reconcile` refuses, asked BEFORE folding.
+:mod:`.routes`               ``GET``/``POST /reconcile`` — the served trigger and the write
+                             back into the trust score (S1 links 7c and 9).
 :data:`CODE_BRIDGE_KINDS`    ``code_created`` / ``checkout_redirect`` — read for a join key
                              and nothing else.
 ===========================  ===========================================================
@@ -75,6 +78,7 @@ from .engine import (  # noqa: E402
     reconcile,
     reconciled_event,
     reconciled_observations,
+    unjoinable_webhook,
 )
 
 __all__ = [
@@ -96,6 +100,7 @@ __all__ = [
     "reconcile",
     "reconciled_event",
     "reconciled_observations",
+    "unjoinable_webhook",
 ]
 
 
