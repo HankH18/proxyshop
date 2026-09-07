@@ -52,7 +52,6 @@ import uuid
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any, Final
 
-from contracts.protocol import Shortlist
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -63,22 +62,18 @@ from pydantic import BaseModel, Field
 from .. import redact_addresses
 from ..eligibility import StaticSellerEligibility
 from ..orchestration import solicit_bids
-from ..ranking import rank
 from ..ranking.candidates import mint_bid_id
 from ..ranking.serving import (
+    bandit_posteriors_of,
     catalog_of,
     claim_dimensions_of,
     rank_auction,
     record_shown,
     registered_domains_of,
-    shortlist_commitments,
-    shortlist_price,
-    shortlist_product,
     shortlist_store,
     trust_snapshot_of,
     weights_of,
 )
-from ..ranking.verification import declared_attributes
 from ..reports.log import record_losses
 from ..reports.routes import loss_log_of
 from ..retrieval.clusters import assign_cluster, configure_clusters, intent_clusters_of
@@ -689,6 +684,40 @@ class RelaxedConstraintOut(BaseModel):
     reason: str
 
 
+class ExplorationOut(BaseModel):
+    """The one shortlist slot R12's exploration slice spent, and the bid that paid for it.
+
+    **Published because the alternative is a cost nobody can see.** Exploration shows a shopper
+    a candidate the ranking did not put there — that is the whole mechanism, and it is what
+    stops a saturating score plus a slow trust signal from locking the market to whoever
+    transacted first (see :mod:`exchange.policy.exploration`). A slot moved for that reason and
+    reported as if it had been earned would be the exchange quietly overriding its own published
+    ranking, which is the thing R11's determinism exists to make impossible.
+
+    It appears HERE rather than on the slot for the same reason ``relaxed_constraints`` does:
+    ``ShortlistSlot`` is a pinned ``additionalProperties: false`` contract, and a fact that
+    reached the buyer only through a schema change would not have reached them at all.
+
+    ``null`` on every auction that explored nothing, which is most of them — an auction whose
+    eligible stores all fit in the shortlist has no slot to spend, and one with no low-data
+    candidate below the cut has nobody to spend it on.
+    """
+
+    #: The promoted bid, and the slot it ended up holding. The name is whichever dimension it
+    #: leads on among the pool it joined (D29), not a fifth slot type.
+    bid_ref: str
+    store_id: str
+    slot: str | None = None
+    #: The bandit's own probability-of-being-best for this store in this intent cluster, at this
+    #: auction's seed — the number that chose it from among the low-data candidates.
+    exposure_share: float
+    #: WHAT IT COST, named: the candidate that would have held that slot on rank alone. It is
+    #: always the last of the slots that would have been filled; the ranking's leader and
+    #: runners-up are not reachable from the slice.
+    displaced_bid_ref: str
+    displaced_store_id: str
+
+
 class CreateAuctionResponse(BaseModel):
     auction_id: str
     state: str
@@ -708,6 +737,8 @@ class CreateAuctionResponse(BaseModel):
     #: pinned two-field contract (``extra="forbid"``), and a reason that reached the buyer
     #: only through a schema change would not have reached them at all.
     relaxed_constraints: list[RelaxedConstraintOut] = Field(default_factory=list)
+    #: The shortlist slot R12's exploration slice spent, or ``null``. See :class:`ExplorationOut`.
+    exploration: ExplorationOut | None = None
     #: WHERE THIS AUCTION'S ROSTER CAME FROM, and — when the exchange found nobody — why.
     #:
     #: ``source`` is ``"request"`` when the body named the stores, and otherwise the name of
@@ -942,151 +973,6 @@ def _bounded(found: ShopRoster) -> ShopRoster:
         elapsed_ms=found.elapsed_ms,
         fit=found.fit,
     )
-
-
-def _slot_offer_fields(offer: Any) -> dict[str, Any]:
-    """The three R2 fields an offer can support, with the ones it cannot left out.
-
-    Built from ``ranking.serving``'s three PUBLISHED readers rather than from its own private
-    helper, so this route reaches into nothing — and pinned against that helper by
-    ``test_graph_auction.py::test_the_refit_shortlist_is_the_object_rank_auction_would_have_built``,
-    which drives both over the same candidates and asserts they agree. Restating the three
-    keys without that pin is how the two doors would drift.
-    """
-    fields = {
-        "product": shortlist_product(offer),
-        "price": shortlist_price(offer),
-        "commitments": shortlist_commitments(offer),
-    }
-    return {key: value for key, value in fields.items() if value is not None}
-
-
-def _with_offer_fields(shortlist: Mapping[str, Any], candidates: Sequence[Any]) -> dict[str, Any]:
-    """``shortlist`` with each slot carrying its candidate's product, price and commitments.
-
-    The same additive join ``rank_auction`` applies to the shortlist it returns, re-applied
-    here because a re-ranked auction has a NEW shortlist and the join is keyed on ``bid_ref``.
-    Re-validated through the pinned ``Shortlist`` model for the reason ``ranking.serving``
-    documents at length: ``GET /auctions/{auction_id}/shortlist`` declares
-    ``response_model=Shortlist`` and serializes the MODEL, so a stored slot that is not
-    already a fixed point of ``Shortlist.model_validate(...).model_dump(mode="json")`` is
-    served in two different spellings by two routes that claim to serve the same object.
-    """
-    by_bid_id: dict[str, Any] = {}
-    for candidate in candidates:
-        bid_id = str(candidate.get("bid_id", "") or "") if isinstance(candidate, Mapping) else ""
-        if bid_id and bid_id not in by_bid_id:
-            by_bid_id[bid_id] = candidate
-
-    slots: list[dict[str, Any]] = []
-    for slot in shortlist.get("slots", ()) or ():
-        enriched = dict(slot)
-        candidate = by_bid_id.get(str(enriched.get("bid_ref", "")))
-        offer = candidate.get("offer") if isinstance(candidate, Mapping) else None
-        for key, value in _slot_offer_fields(offer).items():
-            if enriched.get(key) is None:
-                enriched[key] = value
-        slots.append(enriched)
-    return Shortlist.model_validate({**shortlist, "slots": slots}).model_dump(mode="json")
-
-
-def _with_graph_fit(
-    ranking: Mapping[str, Any],
-    *,
-    fit: Mapping[str, float],
-    intent: Any,
-    now: float,
-    auction_id: str,
-    trust_snapshot: Any,
-    weights: Any,
-    catalog: Any,
-    product_refs: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Re-score this auction with ``intent_match`` measured, instead of absent.
-
-    **What this closes.** ``intent_match`` carries ``w_m = 0.35``, the largest weight in the
-    published formula, and until a graph reached the auction route NOTHING produced it: every
-    candidate on every served auction took ``INTENT_MATCH_WHEN_ABSENT`` (0.5), so more than a
-    third of the score was a constant and the "best fit" shortlist slot — which
-    ``ranking/shortlist.py`` awards on exactly this feature — was decided by the tie-breaks.
-    ``ranking/candidates.py`` said so in a comment: "a served auction has no retrieval source".
-    Now one does, and this is where its answer enters the score.
-
-    **Why it is a re-score rather than an argument to** :func:`~..ranking.serving.rank_auction`.
-    That function builds its candidates internally from ``BidEntry`` objects through a
-    projection that NAMES its fields and deliberately copies no published feature — which is
-    the R11 property that stops a bidder writing ``intent_match: 1.0`` into its own reply — so
-    there is no seam on it through which a caller can supply the term. The right long-term
-    shape is a one-line ``intent_match`` argument on ``rank_auction`` itself; this lane's file
-    scope does not include ``apps/exchange/src/ranking/**``, so the term is applied here, to
-    the candidates that function already returns under ``projected``.
-
-    **What it costs, stated rather than hidden.** :func:`~..ranking.rank` runs a second time.
-    It is pure — no I/O, no ledger writes, no HTTP — and it is O(candidates x constraints),
-    both of which are already capped (:data:`MAX_ROSTER_ENTRIES`,
-    :data:`MAX_HARD_CONSTRAINTS`). The EXPENSIVE half of ``rank_auction``, the claim
-    attestation that runs a verifier over every candidate and writes ``claim_verified`` to the
-    ledger, is **not** repeated: it already ran, its verdicts are on ``projected``, and the
-    candidates handed here are those same attested records. So this adds no event, no
-    verification and no network call to the auction.
-
-    **It is a no-op unless a graph actually measured something.** ``fit`` is empty for every
-    auction whose roster came from the request body and for every deployment with no graph
-    wired, and then ``ranking`` is returned unchanged — byte-identical to what
-    ``rank_auction`` produced.
-
-    Args:
-        ranking: what :func:`~..ranking.serving.rank_auction` returned.
-        fit: ``{store_id: intent_match}``, the retrieval's per-shop measurement.
-        intent: the buyer's intent, as handed to the first ranking.
-        now: the auction's close instant — the SAME one, so the expiry filter cannot decide
-            differently on the second pass than it did on the first.
-        auction_id: this auction.
-        trust_snapshot: the published four-argument trust surface.
-        weights: the weight set this auction is ranked under.
-        catalog: this exchange's catalogue snapshots, for ``network_attributes``.
-        product_refs: ``{store_id: product_ref}`` off the roster.
-
-    Returns:
-        A ranking dict of the same shape, with ``ranked``, ``candidates``, ``shortlist``,
-        ``relaxed_constraints`` and ``projected`` all re-derived under the measured feature.
-    """
-    projected = list(ranking.get("projected") or ())
-    if not fit or not projected:
-        return dict(ranking)
-
-    refitted: list[Any] = []
-    for candidate in projected:
-        if not isinstance(candidate, Mapping):
-            refitted.append(candidate)
-            continue
-        measured = fit.get(str(candidate.get("store_id") or ""))
-        # A candidate the retrieval did not measure keeps the ABSENT term and reads its
-        # published neutral, exactly as it does today. Writing a number for it would be the
-        # fabrication `ranking/features.py` refuses on this feature's behalf; the store is on
-        # the roster (a request body may mix sources, and a fallback may be minted for a store
-        # the graph never scored), and "we did not measure this one" is a true thing to say.
-        refitted.append(
-            dict(candidate) if measured is None else {**candidate, "intent_match": measured}
-        )
-
-    reranked = rank(
-        refitted,
-        intent,
-        trust_snapshot,
-        {"now": float(now), "auction_id": auction_id},
-        weights=weights,
-        network_attributes=declared_attributes(
-            catalog,
-            [c.get("store_id") if isinstance(c, Mapping) else None for c in refitted],
-            product_refs=dict(product_refs),
-        ),
-    )
-    return {
-        **reranked,
-        "shortlist": _with_offer_fields(reranked["shortlist"], refitted),
-        "projected": refitted,
-    }
 
 
 def _bind_the_deployment(request: Request) -> None:
@@ -1649,6 +1535,26 @@ def _relaxed_out(entries: Sequence[Mapping[str, Any]]) -> list[RelaxedConstraint
     ]
 
 
+def _exploration_out(record: Any) -> ExplorationOut | None:
+    """The exploration slice for the response, or ``None`` when the auction explored nothing.
+
+    Every field is the EXCHANGE's own: two minted ``bid_id``s, two store ids the exchange
+    attributed, and a share the sampler computed. Nothing here is read off a bid, so there is
+    no caller-chosen string to bound or redact the way ``_exclusion_reasons_out`` has to.
+    """
+    if not isinstance(record, Mapping):
+        return None
+    slot = record.get("slot")
+    return ExplorationOut(
+        bid_ref=str(record.get("bid_ref") or ""),
+        store_id=str(record.get("store_id") or ""),
+        slot=None if slot is None else str(slot),
+        exposure_share=float(record.get("exposure_share") or 0.0),
+        displaced_bid_ref=str(record.get("displaced_bid_ref") or ""),
+        displaced_store_id=str(record.get("displaced_store_id") or ""),
+    )
+
+
 def _refuse_an_oversized_intent(intent: Any) -> None:
     """422 an intent carrying more hard constraints than :data:`MAX_HARD_CONSTRAINTS`.
 
@@ -1938,21 +1844,21 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
         # including for why an exchange with no `claim_dimensions` wired announces nothing.
         recorder=machine.ledger,
         claim_dimensions=claim_dimensions_of(request.app),
-    )
-    # `intent_match` — w_m = 0.35, the largest term in the published formula — stops being a
-    # constant here, and ONLY here, because this is the first place in the service's history
-    # that holds both a ranked auction and a retrieval measurement for it. A no-op whenever
-    # the roster came from the request body or no graph is wired; see `_with_graph_fit`.
-    ranking = _with_graph_fit(
-        ranking,
-        fit=found.intent_match_by_store,
-        intent=intent,
-        now=closed_at,
-        auction_id=auction_id,
-        trust_snapshot=trust_snapshot,
-        weights=weights,
-        catalog=catalog,
-        product_refs=product_refs,
+        # `intent_match` — w_m = 0.35, the largest term in the published formula — stops being
+        # a constant here, because this is the first place in the service's history that holds
+        # both an auction and a retrieval measurement for it. `{}` whenever the roster came
+        # from the request body or no graph is wired, and then every candidate keeps the
+        # published neutral exactly as it did before.
+        #
+        # It goes in as an ARGUMENT rather than being applied to the answer. The route used to
+        # call the published `rank()` a second time over the candidates `rank_auction` had
+        # already returned — correct, and a whole second filter/score/shortlist pass per served
+        # auction, plus a second copy of the shortlist's offer-field join living in this file.
+        # Both are gone; `ranking.serving.with_intent_match` is the seam.
+        intent_match=found.intent_match_by_store,
+        # R12's exploration slice: the read half of the loop `POST /internal/outcomes` writes.
+        # The book is READ and never created here — see `bandit_posteriors_of`.
+        bandit_posteriors=bandit_posteriors_of(request.app),
     )
     shortlist = ranking["shortlist"]
     shortlist_store(request.app).put(auction_id, shortlist, now=closed_at)
@@ -2025,6 +1931,7 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
         excluded=_excluded_out(ranking["candidates"]),
         shortlist=shortlist,
         relaxed_constraints=_relaxed_out(ranking.get("relaxed_constraints") or ()),
+        exploration=_exploration_out(ranking.get("exploration")),
         # ``shops`` is the roster this auction actually ran, so it is the same number on both
         # doors: for a graph-sourced roster ``roster is found.rows``, and for a stated one it
         # is what the caller sent. Everything else on the payload is the source's own report.

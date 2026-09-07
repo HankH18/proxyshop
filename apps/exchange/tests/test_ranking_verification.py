@@ -26,7 +26,14 @@ What is asserted here, in the order the build had to happen:
    feeding ``verified_claim_ratio``, a ``contradicted`` one costing the published
    ``contradicted_claim`` penalty.
 3. **Served (§3).** ``POST /auctions`` on the real app: two stores whose bids differ in nothing
-   but their prose, one of them lying, and the liar ranks below.
+   but their prose, one of them lying, and the liar ranks below. §3 used to depend on a
+   monkeypatch fixture, ``the_projection_carries_the_pitch``, because
+   ``ranking/candidates.py`` — another lane's file at the time — projected a ``BidEntry`` onto
+   five keys and ``Bid.message`` was not among them, so the pitch was dropped one frame above
+   the module that grades it. That line has landed (``CANDIDATE_FIELDS`` now names ``message``,
+   and that module's header carries the argument for why bidder-written PROSE is safe on a
+   projection built to refuse bidder-written NUMBERS), so the fixture is deleted exactly as its
+   own docstring said to and §3 drives the real projection.
 4. **Honest traffic is not punished (§4).** This repository's own seller-reference personas go
    through the real decomposer and still bid; unparseable prose mints nothing; an injected
    instruction leaves every verdict byte-identical.
@@ -44,7 +51,6 @@ from exchange.auction.routes import configure_auctions
 from exchange.eligibility import ELIGIBLE, StaticSellerEligibility
 from exchange.main import create_app
 from exchange.ranking.attestation import ATTESTATION_FIELD
-from exchange.ranking.candidates import candidate_from_entry
 from exchange.ranking.serving import configure_ranking
 from exchange.ranking.verification import (
     StaticCatalogSnapshots,
@@ -194,37 +200,6 @@ def _wired_app(bidders: Bidders, stores: tuple[str, ...] = (HONEST, LIAR)) -> An
         catalog=_catalog(stores),
     )
     return app
-
-
-@pytest.fixture
-def the_projection_carries_the_pitch(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The ONE line this lane's file scope cannot write, applied for the served run.
-
-    ``exchange/ranking/candidates.py:293`` projects a ``BidEntry`` onto the five keys
-    ``CANDIDATE_FIELDS`` names — ``bid_id``, ``store_id``, ``store_domain``, ``offer``,
-    ``claims`` — and ``Bid.message`` is not among them, so the pitch is dropped one frame
-    ABOVE the module that would grade it. That file belongs to another lane in this cycle and
-    is explicitly outside this worker's scope, so the integration is a fixture here and a
-    hand-off note rather than an edit: add ``"message": read(bid, "message", None)`` to
-    ``candidate_from_entry``'s returned mapping (and to ``CANDIDATE_FIELDS``) and this fixture
-    becomes unnecessary.
-
-    Everything else in §3 is real: the route, the solicitor, the auction state machine, the
-    catalogue, the verifier, the attestation MAC, the published weights and the ranker. What
-    is simulated is one key on one dict.
-    """
-    real = candidate_from_entry
-
-    def with_the_message(entry: Any, **kwargs: Any) -> dict[str, Any]:
-        record = real(entry, **kwargs)
-        bid = getattr(entry, "bid", None)
-        if isinstance(bid, dict):
-            record["message"] = bid.get("message")
-        return record
-
-    monkeypatch.setattr(
-        "exchange.ranking.candidates.candidate_from_entry", with_the_message, raising=True
-    )
 
 
 def _post(app: Any, roster: list[dict[str, Any]]) -> dict[str, Any]:
@@ -385,9 +360,7 @@ def test_attest_candidates_reads_the_pitch_off_the_candidate_and_off_the_auction
 # =====================================================================================
 # 3. SERVED — two stores pitch, one lies, and the liar ranks below
 # =====================================================================================
-def test_the_liar_ranks_below_the_honest_store_over_a_served_auction(
-    the_projection_carries_the_pitch,
-) -> None:
+def test_the_liar_ranks_below_the_honest_store_over_a_served_auction() -> None:
     """``POST /auctions`` on the real app. The bids differ only in one word of prose.
 
     This is the property D55 rests on and it had never happened in this repository: a store's
@@ -418,9 +391,7 @@ def test_the_liar_ranks_below_the_honest_store_over_a_served_auction(
     )
 
 
-def test_two_identical_bids_with_identical_prose_score_identically(
-    the_projection_carries_the_pitch,
-) -> None:
+def test_two_identical_bids_with_identical_prose_score_identically() -> None:
     """The arming control for the test above.
 
     Without it, "the liar ranked below" is worth nothing: any accidental asymmetry between the
@@ -441,9 +412,7 @@ def test_two_identical_bids_with_identical_prose_score_identically(
     assert scores[HONEST] == scores[LIAR], body["ranked"]
 
 
-def test_the_verdicts_a_served_auction_reached_on_the_prose_are_the_exchanges_own(
-    the_projection_carries_the_pitch,
-) -> None:
+def test_the_verdicts_a_served_auction_reached_on_the_prose_are_the_exchanges_own() -> None:
     """The per-claim record, read back off the served response's projection.
 
     A rank gap is only evidence if the verdicts behind it are legible; this asserts the

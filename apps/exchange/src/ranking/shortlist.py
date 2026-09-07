@@ -158,11 +158,35 @@ def assign_slot_names(pool: Sequence[dict[str, Any]]) -> list[str | None]:
     return names
 
 
+def slot_pool(
+    ranked: Sequence[dict[str, Any]], *, max_slots: int = MAX_SLOTS
+) -> list[dict[str, Any]]:
+    """The rows that will actually FILL slots, in rank order — one store each, capped.
+
+    Named and exported because a second reader needs the same answer: R12's exploration slice
+    (:mod:`exchange.policy.exploration`) decides whether to spend the last of these on a
+    low-data store, and it can only do that if "which rows would have been shown" is a question
+    with one published answer rather than two implementations of the same slice arithmetic.
+    """
+    return _best_bid_per_store(ranked)[: min(max_slots, len(SLOT_NAMES))]
+
+
+def bench(ranked: Sequence[dict[str, Any]], *, max_slots: int = MAX_SLOTS) -> list[dict[str, Any]]:
+    """The eligible rows :func:`slot_pool` leaves out — one per store, in rank order.
+
+    The complement of the pool over the SAME deduplication, so a store's second bid is never
+    offered as a candidate for a slot its first bid already lost: a shortlist naming one store
+    twice is the thing ``_best_bid_per_store`` exists to prevent, and exploration must not be
+    the door that reintroduces it.
+    """
+    return _best_bid_per_store(ranked)[min(max_slots, len(SLOT_NAMES)) :]
+
+
 def build(
     ranked: Sequence[dict[str, Any]], auction_id: str, *, max_slots: int = MAX_SLOTS
 ) -> dict[str, Any]:
     """The shortlist for one ranking, as plain data validated against the contract type."""
-    pool = _best_bid_per_store(ranked)[: min(max_slots, len(SLOT_NAMES))]
+    pool = slot_pool(ranked, max_slots=max_slots)
     names = assign_slot_names(pool)
 
     slots = [
@@ -184,7 +208,9 @@ __all__ = [
     "SLOT_DIMENSIONS",
     "SLOT_NAMES",
     "assign_slot_names",
+    "bench",
     "build",
     "provenance_labels",
+    "slot_pool",
     "trust_summary",
 ]

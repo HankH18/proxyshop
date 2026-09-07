@@ -569,45 +569,40 @@ def test_the_bid_receipt_carries_the_fit_that_produced_the_placement() -> None:
     assert "fit_unavailable" in receipts[0]["payload"], receipts
 
 
-def test_the_refit_shortlist_is_the_object_rank_auction_would_have_built() -> None:
-    """The drift guard on this route's copy of the offer-field join.
+def test_the_route_holds_no_second_ranking_pass_and_no_second_shortlist_join() -> None:
+    """The drift guard, now that there is only one implementation to drift from.
 
-    ``auction/routes.py`` re-applies the product/price/commitments merge because a re-ranked
-    auction has a NEW shortlist, and it builds it from ``ranking.serving``'s three PUBLISHED
-    readers rather than reaching into that module's private helper. Restating those three keys
-    with no pin is how two doors that claim to serve "the same object" would drift, so the two
-    implementations are driven over the same inputs and asserted equal.
+    This used to compare ``auction/routes.py``'s own copy of the offer-field join against
+    ``ranking.serving``'s and assert they agreed — the honest thing to do while the route was
+    re-ranking. Both copies existed because ``rank_auction`` had no seam for ``intent_match``,
+    so the route applied the term by calling the published ``rank()`` a SECOND time over the
+    candidates that function had already returned, and a re-ranked auction has a NEW shortlist
+    that needs the join re-applied.
+
+    ``rank_auction(..., intent_match=...)`` is that seam, so the second pass and its join are
+    deleted rather than pinned. What is asserted is the stronger property the pin was standing
+    in for: the route holds no copy at all, and the published readers it used to build one from
+    are no longer even imported here.
     """
-    from exchange.auction.routes import _with_offer_fields as route_join
-    from exchange.ranking.serving import _with_offer_fields as ranking_join
+    from exchange.auction import routes
+    from exchange.ranking import serving
 
-    candidates = [
-        {
-            "bid_id": "auction-1:shop-alpha",
-            "store_id": "shop-alpha",
-            "offer": _bid("shop-alpha", 95.0)["offer"],
-        },
-        {"bid_id": "auction-1:shop-bravo", "store_id": "shop-bravo", "offer": {}},
-    ]
-
-    def slot(name, bid_ref):
-        return {
-            "slot": name,
-            "bid_ref": bid_ref,
-            "fit_score": 0.5,
-            "trust_summary": {"score": 0.6},
-            "provenance_labels": ["store-confirmed"],
-        }
-
-    shortlist = {
-        "auction_id": "auction-1",
-        "slots": [
-            slot("fit", "auction-1:shop-alpha"),
-            slot("value", "auction-1:shop-bravo"),
-            slot("reliability", "auction-1:nobody"),
-        ],
-    }
-    assert route_join(shortlist, candidates) == ranking_join(shortlist, candidates)
+    for gone in (
+        "_with_graph_fit",
+        "_with_offer_fields",
+        "_slot_offer_fields",
+        "rank",
+        "shortlist_product",
+        "shortlist_price",
+        "shortlist_commitments",
+        "declared_attributes",
+        "Shortlist",
+    ):
+        assert not hasattr(routes, gone), (
+            f"auction/routes.py still holds {gone!r}; the second ranking pass is back"
+        )
+    # And the one implementation is where it always should have been.
+    assert callable(serving._with_offer_fields)
 
 
 # =====================================================================================

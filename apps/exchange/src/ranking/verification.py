@@ -575,14 +575,16 @@ def claim_ref_for(store_id: Any, index: int) -> str:
 #: the structured claims it had selected for itself. Choosing what to be graded on is not being
 #: graded.
 #:
-#: **Known gap, stated here rather than left to be discovered.**
-#: ``exchange.ranking.candidates.candidate_from_entry`` projects a ``BidEntry`` onto the five
-#: keys ``CANDIDATE_FIELDS`` names and ``message`` is not among them, so on the ``POST
-#: /auctions`` path the pitch is dropped one frame ABOVE this module. Everything below is live
-#: the moment that projection carries the field, and ``attest_candidates`` also accepts the
-#: text directly (``messages=``) for a caller that holds the entries. The evidence that the
-#: pointer survived while the document did not is already in the tree: every ``Claim`` on a bid
-#: carries a ``source_span`` indexing into a pitch nothing kept.
+#: **The gap this used to name is CLOSED.** ``exchange.ranking.candidates.candidate_from_entry``
+#: projected a ``BidEntry`` onto five keys and ``message`` was not among them, so on the ``POST
+#: /auctions`` path the pitch was dropped one frame ABOVE this module and the served exchange
+#: graded every bidder only on the structured claims it had selected for itself. The projection
+#: now carries the field — see that module's "Why ``message`` is on this deliberately narrow
+#: list" for why bidder-written prose is safe on a projection built to refuse bidder-written
+#: numbers — so everything below runs on a served auction. ``attest_candidates`` still accepts
+#: the text directly (``messages=``), which remains the stronger statement for a caller holding
+#: the auction's own entries: what a store said is the exchange's record of the reply, not a
+#: field a downstream projection is free to rewrite.
 PITCH_FIELD = "message"
 
 

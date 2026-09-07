@@ -93,6 +93,50 @@ The five published FEATURES are the part this module does close, and the claim i
 store moves ``price_value`` by charging less and ``delivery_fit`` by promising sooner, which is
 what bidding IS. What it cannot do is assert the score itself, and the difference between
 stating an offer and grading one is the whole of R11's blindness.
+
+Why ``message`` is on this deliberately narrow list, when a feature key is not
+------------------------------------------------------------------------------
+``message`` is the seller's PITCH (``Bid.message``) and it is the only key here that is
+free-form, bidder-written PROSE. Adding it to a projection whose entire purpose is to refuse
+what a bidder writes deserves the argument spelled out rather than assumed.
+
+**It is admitted as an ASSERTION TO CHECK, never as evidence.** D55 is explicit about the
+asymmetry: the platform's own rendering of its crawl is constrained to facts it already holds,
+while *"a seller's purchased message carries the seller's motive and is therefore the one that
+gets adversarially checked against the snapshot"*. Nothing downstream reads this string as a
+fact. Its one and only consumer is :func:`.verification.pitch_text_of`, which hands it to
+:func:`claim_verification.decompose_pitch`; the claims that come back are stamped
+``seller_asserted`` — never ``scraped``, which would launder an assertion into an observation
+the platform vouches for — and each is then verified against the catalogue snapshot THIS
+EXCHANGE holds and attested with a MAC the bidder cannot compute
+(:mod:`.attestation`). A pitch sentence therefore earns exactly what a structured claim earns:
+``verified`` feeds ``verified_claim_ratio``, ``contradicted`` costs the published
+``contradicted_claim`` penalty, and ``unsupported``/``ambiguous`` are worth what silence is
+worth. **A store cannot score by writing prose; it can only be graded on it.**
+
+**The contrast with a feature key is the point.** ``intent_match: 1.0`` would be a NUMBER read
+straight into the formula by a producer that is the bidder. ``"a five-year warranty"`` is a
+sentence with no path into ``rank_score`` except through a verifier holding the platform's own
+catalogue — and against a 24-month catalogue row that sentence is a *cost*, which is the exact
+inversion of what a lever is.
+
+**Three properties that keep it that way, each checkable:**
+
+* the field is read from the bid and written under its own name, so it can never be mistaken
+  for one of the five: :data:`CANDIDATE_FIELDS` is asserted exactly, and ``message`` is not in
+  ``contracts.ranking.RANK_FEATURES``;
+* :func:`.features.attach_features` neither reads nor produces it, so it is not an input to any
+  published term. The pitch reaches the score only via the attested verdicts computed one step
+  earlier, which is why :func:`.serving.rank_auction` runs the attestation BEFORE the features;
+* it is not re-published. ``collected_bid_records`` builds the accept-path record from four
+  named keys (``bid_id``, ``store_id``, ``offer``, ``store_domain``) and this is not among them,
+  and neither ``_ranked_out`` nor ``_excluded_out`` nor the shortlist carries it — so admitting
+  the prose here does not turn the auction response into a reflector for a store's text.
+
+**What it costs in memory: nothing new.** The string is already retained for the auction's TTL
+inside ``BidEntry.bid`` — bounded at collection by ``MAX_BID_RESPONSE_BYTES`` — and the
+decomposer bounds what it will read from it (``MAX_PITCH_CHARS`` / ``MAX_PITCH_CLAIMS``). This
+line adds a reference to a string the exchange already holds, not a second copy of it.
 """
 
 from __future__ import annotations
@@ -118,6 +162,7 @@ CANDIDATE_FIELDS: tuple[str, ...] = (
     "store_domain",
     "offer",
     "claims",
+    "message",
 )
 
 
@@ -296,6 +341,10 @@ def candidate_from_entry(
         "store_domain": store_domain,
         "offer": offer,
         "claims": list(claims or ()),
+        # `Bid.message` — the seller's PITCH, and the one field on this projection that is
+        # bidder-written PROSE. See the module header's "Why prose is safe here and a feature
+        # key is not" for why widening the projection by this one key does not widen R11.
+        "message": read(bid, "message", None),
     }
 
 

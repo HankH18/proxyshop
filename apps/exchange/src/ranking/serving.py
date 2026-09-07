@@ -47,7 +47,7 @@ from collections import OrderedDict
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 from contracts.protocol import Claim, Discount, Shortlist
 from contracts.ranking import RankingWeights
@@ -55,10 +55,12 @@ from pydantic import ValidationError
 
 from ..auction.state import AUCTION_TTL_SECONDS
 from ..checkout.codes import UnusableOffer, expiry_epoch
+from ..policy.exploration import exposure_shares, plan_exploration
 from . import rank
+from . import shortlist as _shortlist
 from .candidates import candidates_from_entries
 from .features import attach_features
-from .filters import read
+from .filters import read, trust_row
 from .verification import NoCatalogSnapshots, attest_candidates, declared_attributes
 
 __all__ = [
@@ -67,6 +69,7 @@ __all__ = [
     "SHOWN_KIND",
     "SLOT_OFFER_FIELDS",
     "ShortlistStore",
+    "bandit_posteriors_of",
     "catalog_of",
     "claim_dimensions_of",
     "configure_ranking",
@@ -79,6 +82,7 @@ __all__ = [
     "shortlist_store",
     "trust_snapshot_of",
     "weights_of",
+    "with_intent_match",
 ]
 
 #: The frozen ledger kind a filled shortlist slot is announced under.
@@ -295,6 +299,25 @@ def claim_dimensions_of(app: Any) -> Any:
     itself is one, and raising for an unmapped type is handled) or a plain mapping.
     """
     return getattr(app.state, "ranking_claim_dimensions", None)
+
+
+def bandit_posteriors_of(app: Any) -> Any:
+    """This app's bandit posterior book, or ``None`` — the SAME object the outcomes door writes.
+
+    ``app.state.bandit_posteriors`` is the key :mod:`exchange.policy.routes` records into; read
+    here so the exploration slice on a served auction consumes the state ``POST
+    /internal/outcomes`` produced, rather than a second model that would learn nothing.
+
+    **Read, never created.** ``policy/routes.py``'s own accessor builds the book on first use
+    because refusing to *record* is not a safety property; a READER that manufactured one would
+    put an empty model into ``app.state`` as a side effect of ranking, so a process that had
+    only ever served auctions would report a posterior book it had never written to.
+
+    ``None`` does not disable the slice. The trust-seeded prior is what a posterior is before any
+    outcome exists, and a deployment that has taken no outcomes yet is exactly the one where a
+    newcomer can never earn any — see :mod:`exchange.policy.exploration`.
+    """
+    return getattr(app.state, "bandit_posteriors", None)
 
 
 def weights_of(app: Any) -> RankingWeights:
@@ -573,6 +596,168 @@ def record_shown(
     return events
 
 
+def with_intent_match(candidates: Sequence[Any], measured: Mapping[str, float] | None) -> list[Any]:
+    """Every candidate carrying the PLATFORM's fit measurement for its store, where there is one.
+
+    New records, never mutated ones — :func:`rank` promises its inputs are never written to, and
+    :func:`~.features.attach_features` one line above keeps the same promise.
+
+    ``intent_match`` is the one published feature no module in this package can COMPUTE:
+    DESIGN.md:132 says it comes from retrieval+rerank, and a served auction is handed a roster
+    rather than a query against an index. So it arrives from the caller that ran the retrieval,
+    and the only question this function answers is what to do with what it was handed.
+
+    **An unreadable measurement is ABSENT, not scored.** ``None``, ``NaN``, ``inf``, a string, a
+    list, a bool — anything that is not a finite ``int``/``float`` — leaves the key off the record
+    entirely, so :func:`.scoring.feature_vector` applies the published ``INTENT_MATCH_WHEN_ABSENT``.
+    That is the same rule ``.features`` applies to every feature it cannot compute, and the reason
+    is the same: writing a number for "we do not know" moves rankings for a reason nobody could
+    audit. Refusing it HERE rather than relying on the scorer's own NaN guard matters because
+    absence and unreadability are then the same state on the record itself, so a reader of
+    ``projected`` sees what the scorer saw.
+
+    **Stricter than** :func:`.scoring._number`, deliberately: that function accepts ``"0.99"``
+    because it reads whatever reached a candidate record, while this map is a PLATFORM-INTERNAL
+    answer from the retrieval, which states floats. A string arriving here means something upstream
+    is not the component it claims to be, and coercing it would be this seam repairing a producer
+    it cannot see and then vouching for the repair — the same refusal
+    :func:`.candidates.fallback_checkout_url` makes about a malformed registry row.
+
+    A store the map does not name keeps the absent term too. A roster may mix sources — a request
+    body naming stores the graph never scored, an R10 fallback minted for a silent one — and "we
+    did not measure this one" is a true thing to say about it.
+
+    Clamping is deliberately NOT done here: ``feature_vector`` clamps every feature to the
+    published normalization bounds, and a second clamp in a second place is how two readings of
+    one bound drift apart.
+    """
+    records = [dict(c) if isinstance(c, Mapping) else c for c in candidates or ()]
+    if not measured:
+        return records
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        raw = measured.get(str(record.get("store_id") or ""))
+        # `bool` is an `int`, and `True` would score 1.0 — a perfect fit minted by a producer
+        # that meant "yes". Excluded by name rather than left to the isinstance below.
+        if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            continue
+        fit = float(raw)
+        if math.isfinite(fit):
+            record["intent_match"] = fit
+    return records
+
+
+class _Explored(NamedTuple):
+    """The shortlist an exploration slice produced, and the record of what it cost."""
+
+    shortlist: Mapping[str, Any]
+    payload: dict[str, Any]
+
+
+def _promoted_order(
+    rows: Sequence[dict[str, Any]], *, promote: str, displace: str
+) -> list[dict[str, Any]]:
+    """``rows`` with the promoted bid moved to sit where the displaced bid sits.
+
+    Reordering the input to :func:`~.shortlist.build` rather than editing the shortlist it
+    produced, because the slot NAMES are assigned by leading dimension over the pool
+    (:func:`~.shortlist.assign_slot_names`) — swapping a ``bid_ref`` inside a finished shortlist
+    would leave the promoted candidate wearing a label that was computed for somebody else.
+    """
+    promoted = next((row for row in rows if str(row.get("bid_id") or "") == promote), None)
+    if promoted is None:
+        return list(rows)
+    kept = [row for row in rows if row is not promoted]
+    at = next(
+        (index for index, row in enumerate(kept) if str(row.get("bid_id") or "") == displace),
+        None,
+    )
+    if at is None:
+        return list(rows)
+    return [*kept[:at], promoted, *kept[at:]]
+
+
+def _explore(
+    ranked: Mapping[str, Any],
+    *,
+    auction_id: str,
+    intent: Any,
+    trust_snapshot: Any,
+    book: Any,
+) -> _Explored | None:
+    """R12's exploration slice for one ranked auction, or ``None`` to leave the shortlist alone.
+
+    The whole of the policy — how many slots, which candidates may be promoted, which one is —
+    lives in :mod:`exchange.policy.exploration`. This function is the join: it is the only place
+    holding the ranked rows, the trust snapshot they were scored against, and the auction id that
+    seeds the sampler.
+
+    **Never raises.** An exploration slice is an improvement to what a buyer is shown, and an
+    improvement that can 500 a live auction is not one. Anything that goes wrong leaves the
+    published shortlist exactly as ``rank()`` built it.
+    """
+    rows = list(ranked.get("ranked") or ())
+    if not rows:
+        return None
+    try:
+        pool = _shortlist.slot_pool(rows)
+        bench = _shortlist.bench(rows)
+        if not bench:
+            return None
+
+        # Handed as a CALLABLE, not as a computed map, and the difference is measured rather
+        # than stylistic: the sampler draws 512 joint samples with one `betavariate` per store
+        # per draw, inside R10's synchronous window — 2.5 ms over 5 stores, 24 ms over 50,
+        # 250 ms over 500, against a `MAX_ROSTER_ENTRIES` of 500. `plan_exploration` decides
+        # every cheap structural clause first and then asks for exactly the stores that could
+        # decide the slot. Measured end to end over 500 candidates, on this tree: `rank_auction`
+        # costs 18 ms with nothing to explore, 20 ms with one low-data challenger and 52 ms with
+        # all 500 low-data — against 330 ms for the draft that sampled before deciding.
+        def sampled(stores: Sequence[str]) -> Mapping[str, float]:
+            return exposure_shares(
+                book,
+                stores=stores,
+                cluster_id=str(read(intent, "cluster_id", "") or ""),
+                # The SAME rows the ranker scored against, read through the same accessor, so
+                # the blacklist and the `low_data` mark the slice is decided on cannot disagree
+                # with the ones the shortlist's own trust summary published.
+                trust_snapshot={
+                    str(row.get("store_id") or ""): trust_row(
+                        str(row.get("store_id") or ""), trust_snapshot
+                    )
+                    for row in rows
+                },
+                seed=auction_id,
+            )
+
+        plan = plan_exploration(pool, bench, sampled)
+        if plan is None:
+            return None
+        promoted = _shortlist.build(
+            _promoted_order(rows, promote=plan.bid_id, displace=plan.displaced_bid_id),
+            str(ranked["shortlist"].get("auction_id") or auction_id),
+        )
+        # The slot NAME is resolved off the shortlist that was actually built, never predicted:
+        # a promoted candidate takes whichever dimension it leads on, which is not knowable
+        # before the pool it joined is known.
+        slot = next(
+            (
+                s.get("slot")
+                for s in promoted.get("slots", ())
+                if str(s.get("bid_ref") or "") == plan.bid_id
+            ),
+            None,
+        )
+        if slot is None:
+            # The promotion did not actually fill a slot. Nothing is published and nothing is
+            # changed: a report of a cost nobody paid is worse than no report.
+            return None
+        return _Explored(shortlist=promoted, payload=plan.as_payload(slot))
+    except Exception:  # noqa: BLE001 - an audit-and-exposure improvement must not fail an auction
+        return None
+
+
 def rank_auction(
     entries: Sequence[Any],
     *,
@@ -586,6 +771,8 @@ def rank_auction(
     product_refs: Any = None,
     recorder: Any = None,
     claim_dimensions: Any = None,
+    intent_match: Mapping[str, float] | None = None,
+    bandit_posteriors: Any = None,
 ) -> dict[str, Any]:
     """Rank one closed auction's collected bids and build its shortlist.
 
@@ -613,6 +800,32 @@ def rank_auction(
     catalogue entry a store's claims are graded against is the auction's fact rather than the
     bidder's. Without it a store bidding one product could have its claims verified against
     another product in its own catalogue — a real verdict about the wrong thing.
+
+    ``intent_match`` is ``{store_id: fit}``, **the platform's own retrieval measurement**, and it
+    is the seam that closes the largest published term. ``w_m = 0.35`` and until a graph reached
+    the auction route nothing produced it, so every candidate of every served auction took
+    ``INTENT_MATCH_WHEN_ABSENT`` and more than a third of the score was a constant. There was no
+    seam because the projection in :mod:`.candidates` names its fields and copies no published
+    feature — the R11 property that stops a bidder writing ``intent_match: 1.0`` into its own
+    reply — so ``auction/routes.py`` applied the term by calling the public :func:`rank` a SECOND
+    time over the candidates this function had already returned. This parameter replaces that:
+    correct either way, but one filter/score/shortlist pass instead of two.
+
+    **Adding it does not weaken R11**, and the ordering is what makes that true rather than the
+    intent. The map arrives as a keyword argument from the CALLER — the auction route, out of the
+    retrieval's per-shop answer — and is applied AFTER :func:`attach_features`, so the last writer
+    of the key is the platform. Nothing a bidder sends can reach it: the projection never copies
+    the name, ``Bid`` is ``additionalProperties: false`` and declares no feature fields, and a
+    store not named in the map keeps the ABSENT term rather than a fabricated one.
+
+    ``bandit_posteriors`` is R12's exploration slice, and it is the READ half of the loop
+    ``POST /internal/outcomes`` writes. See :mod:`exchange.policy.exploration` for the bound —
+    at most one of the four slots, never the leader, never past eligibility — and for why a
+    saturating score plus a slow trust signal makes the guarantee load-bearing rather than
+    decorative. ``None`` is not "off": the trust-seeded prior IS the posterior before any
+    outcome exists, which is exactly the deployment where a newcomer would otherwise be locked
+    out permanently. What genuinely turns it off is an auction with no low-data candidate below
+    the cut, and then the shortlist is byte-identical to what it was before this parameter.
     """
     candidates = candidates_from_entries(
         entries,
@@ -652,6 +865,9 @@ def rank_auction(
     # goes flat, which is the defect the redefinition exists to close. Only the intent's asks
     # are read; `Intent.preferences[].weight` never touches the published weights (D50).
     candidates = attach_features(candidates, entries, intent=intent)
+    # The PLATFORM's fit measurement, applied last so it is the last writer of the key. See
+    # `with_intent_match` for what an unreadable measurement does and why it is refused here.
+    candidates = with_intent_match(candidates, intent_match)
     ranked = rank(
         candidates,
         intent,
@@ -688,8 +904,25 @@ def rank_auction(
     # `store_id`, `rank_score`, the trust summary and the provenance labels, and nothing else
     # about what was offered. This function holds the built shortlist and the projected
     # candidates at the same time, so it is the only place the join is available.
+    # R12's exploration slice, applied to the SHORTLIST and to nothing else. `ranked["ranked"]`
+    # — the published order, the scores and every component — is returned exactly as `rank()`
+    # produced it, which is `policy/bandit.py`'s own rule stated as code: the bandit "adjusts
+    # exposure and exploration only ... it never touches rank".
+    explored = _explore(
+        ranked,
+        auction_id=auction_id,
+        intent=intent,
+        trust_snapshot=trust_snapshot,
+        book=bandit_posteriors,
+    )
+    shortlist = ranked["shortlist"] if explored is None else explored.shortlist
     return {
         **ranked,
-        "shortlist": _with_offer_fields(ranked["shortlist"], candidates),
+        "shortlist": _with_offer_fields(shortlist, candidates),
         "projected": list(candidates),
+        # `None` on every auction that explored nothing, which is most of them. Published on
+        # the RESPONSE rather than on the slot for the reason `relaxed_constraints` is:
+        # `ShortlistSlot` is a pinned `additionalProperties: false` contract, and a fact that
+        # reached the buyer only through a schema change would not have reached them at all.
+        "exploration": None if explored is None else explored.payload,
     }
