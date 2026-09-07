@@ -3118,14 +3118,12 @@ def _t256_calls(source: str, name: str) -> bool:
     literal equally well, so it cannot tell a caller from a definition. Only an
     :class:`ast.Call` whose callee resolves to that identifier counts.
     """
-    import warnings
-
+    # The `simplefilter("ignore", SyntaxWarning)` that used to wrap this parse is gone. It was
+    # added because a product docstring carried a regex escape in a non-raw string; ruff now
+    # selects `W`, so W605 refuses that at lint time and the tree emits no SyntaxWarning at all
+    # to suppress. A mute that can no longer hide anything is a mute that will hide the next one.
     try:
-        with warnings.catch_warnings():
-            # Product sources carry regexes written as plain strings; parsing them here
-            # re-emits their SyntaxWarnings against `<unknown>`, which is noise this gate adds.
-            warnings.simplefilter("ignore", SyntaxWarning)
-            tree = ast.parse(source)
+        tree = ast.parse(source)
     except SyntaxError:
         return False
     for node in ast.walk(tree):
@@ -4898,15 +4896,10 @@ def _t302_kinds_named_in(source: str) -> set[str]:
     under-report absence, so anything it reports as unproduced really is — which is the
     direction a gate must err in.
     """
-    import warnings
-
+    # No SyntaxWarning mute here either, for the reason `_t256_calls` states: ruff's `W`
+    # selection refuses W605 at lint time, so there is nothing left for this to swallow.
     try:
-        with warnings.catch_warnings():
-            # Product sources carry regexes written as plain strings; parsing them here
-            # re-emits their SyntaxWarnings against `<unknown>`, which is noise this sweep
-            # adds to every run. Same suppression `_t256_calls` already makes.
-            warnings.simplefilter("ignore", SyntaxWarning)
-            tree = ast.parse(source)
+        tree = ast.parse(source)
     except SyntaxError:
         return set()
     named: set[str] = set()
