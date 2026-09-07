@@ -9,17 +9,41 @@
       "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/c21-contracts",
       "branch": "task/c21-contracts"
     },
-    "11": {
-      "claimed_at": "2026-09-07T04:48:01",
-      "agent_ref": "lexical-embedding"
+    "3": {
+      "claimed_at": "2026-09-07T13:09:57",
+      "agent_ref": "learning-loop"
     },
-    "12": {
-      "claimed_at": "2026-09-07T05:51:04",
-      "agent_ref": "publish-reports"
+    "4": {
+      "claimed_at": "2026-09-07T13:09:57",
+      "agent_ref": "graph-into-auction"
+    },
+    "5": {
+      "claimed_at": "2026-09-07T13:09:57",
+      "agent_ref": "pitch-verification"
+    },
+    "6": {
+      "claimed_at": "2026-09-07T13:14:19",
+      "agent_ref": "buyer-side-agent"
+    },
+    "7": {
+      "claimed_at": "2026-09-07T13:14:19",
+      "agent_ref": "fill-the-graph"
+    },
+    "8": {
+      "claimed_at": "2026-09-07T13:29:50",
+      "agent_ref": "trust-observations"
+    },
+    "9": {
+      "claimed_at": "2026-09-07T13:29:50",
+      "agent_ref": "merchant-dashboard"
+    },
+    "10": {
+      "claimed_at": "2026-09-07T13:29:51",
+      "agent_ref": "ci-pipeline"
     },
     "2": {
-      "claimed_at": "2026-09-07T06:10:42",
-      "agent_ref": "phase2-mechanism"
+      "claimed_at": "2026-09-07T13:53:44",
+      "agent_ref": "real-corpus"
     }
   }
 }
