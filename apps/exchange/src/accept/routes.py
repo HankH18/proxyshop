@@ -597,6 +597,28 @@ def _checkout_mode(request: Request) -> str:
     return str(os.environ.get(CHECKOUT_MODE_ENV) or DEFAULT_CHECKOUT_MODE)
 
 
+def _accepted_store(result: Any) -> str | None:
+    """The store the checkout port itself named on its ``accepted`` event.
+
+    Read back off ``result.events`` for the same reason :func:`_accepted_offer` is: a
+    second reading of the bid could disagree with the one the checkout was actually made
+    against, and the two bridge events the port stamps are scoped to THIS value. The
+    envelope and its bridges must land in one scope or the offer cannot be joined to the
+    order at all -- ``reconcile`` namespaces every join key by store, because a Shopify
+    ``order_id`` is only unique within one shop.
+
+    ``None`` when the port emitted no ``accepted`` event, which is not something to invent
+    a substitute for -- an invented store is worse than an unattributed one, because it
+    files a real promise under a shop that did not make it.
+    """
+    for event in getattr(result, "events", ()) or ():
+        if not isinstance(event, Mapping) or str(event.get("kind", "")) != ACCEPTED:
+            continue
+        store_id = event.get("store_id")
+        return str(store_id) if store_id is not None else None
+    return None
+
+
 def _accepted_offer(result: Any) -> Mapping[str, Any] | None:
     """The offer body the checkout port already built for its own ``accepted`` event.
 
@@ -807,6 +829,7 @@ async def accept_bid(auction_id: str, body: AcceptBidRequest, request: Request) 
             now=now,
             checkout_token=result.checkout_token,
             offer=_accepted_offer(result),
+            store_id=_accepted_store(result),
         )
     except IllegalAuctionTransition as exc:
         # NOT the T-158 window any more: the acceptance claim inside `accept()` is what makes

@@ -45,24 +45,26 @@ kept here because it is the seam between what this route emits and what that fol
 and because it is the reason the exchange must keep emitting the platform's name rather than
 inventing a domain to match the merchant's.
 
-THE ONE BLOCKER FORWARDING THE BRIDGE DOES NOT CLOSE, MEASURED HERE
+THE STORE ON THE ENVELOPE, AND WHY IT WAS THE SECOND HALF
 --------------------------------------------------------------------
 ``reconcile`` scopes every join key — the code key included — by the store the event names,
-and the ``accepted`` event the ledger receives names **no store at all**:
-``AuctionStateMachine._transition`` calls ``self.ledger.record(kind, auction_id=…,
-payload=…)`` and passes no ``store_id``, so ``apps/exchange/src/auction/state.py`` has no
-occurrence of that field anywhere. The auction is not the wrong place for that to be missing
-— an auction has a roster of many stores and only the accept knows the winner — but the
-consequence is exact: the offer lands in the unattributed scope while its own bridges land
-under ``store-a``, and the code that joins them can only link keys inside one scope.
-Measured on this route's real output, ``reconcile`` returns 0 with the served
-``accepted`` and 1 with the same event carrying ``store_id``.
+so the ``accepted`` event must land in the same scope as the two bridges beside it. It did
+not: ``AuctionStateMachine._transition`` recorded every transition with no ``store_id``, so
+the offer sat in the unattributed scope while its own bridges sat under the store, and a key
+in one scope cannot reach a key in the other.
 
-So the events below are attributed by :func:`attributed`, which is labelled where it is used
-and is NOT a convenience: it stands in for the one field the exchange still does not put on
-that envelope. :func:`test_the_join_needs_the_offer_to_name_the_store_its_order_names`
-measures that rule directly, so it keeps saying something true whether or not the state
-machine is ever given the store to stamp.
+``accept`` now takes the winning store and ``_transition`` puts it on the envelope, sourced
+from the port's own ``accepted`` event rather than a second reading of the bid — the same
+reason :func:`_accepted_offer` reads it back. The published ``accepted`` BODY is unchanged;
+this is the envelope field. The auction was never the wrong place for it to be absent — an
+auction has a roster of many stores and only the accept knows the winner — but nothing was
+supplying it.
+
+The tests below therefore run against the chain the ledger actually receives, with no
+attribution helper standing in for a missing field.
+:func:`test_the_join_needs_the_offer_to_name_the_store_its_order_names` builds its
+unattributed case explicitly, so it keeps measuring the reconciler's rule rather than the
+exchange's current behaviour.
 """
 
 from __future__ import annotations
@@ -131,22 +133,6 @@ def paid_webhook(code: str, *, store_id: str, total_price: float = 100.0) -> dic
             "discount_codes": [{"code": code}],
         },
     }
-
-
-def attributed(event: dict[str, Any], store_id: str = "store-a") -> dict[str, Any]:
-    """The same event with the store named on its envelope.
-
-    Used on the ``accepted`` event only, and it stands in for the one thing the exchange
-    still does not emit — see this module's last docstring section. It is applied by the
-    tests that are measuring the CODE bridge, so that the store-scope blocker is held
-    constant instead of hiding whether the bridge works.
-    """
-    return {**event, "store_id": store_id}
-
-
-def with_offer_attributed(chain: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """``chain`` with only its ``accepted`` event attributed; the bridges already are."""
-    return [attributed(e) if str(e["kind"]) == "accepted" else e for e in chain]
 
 
 def served_accept() -> tuple[InMemoryLedgerSink, str]:
@@ -258,7 +244,7 @@ def test_every_forwarded_event_keeps_its_own_identity(unwired: None) -> None:
 def test_reconcile_joins_the_offer_to_the_order_through_the_code(unwired: None) -> None:
     """The purchase reconciles although the two halves name two different checkout tokens."""
     sink, auction_id = served_accept()
-    chain = with_offer_attributed(checkout_events(sink, auction_id))
+    chain = checkout_events(sink, auction_id)
     webhook = paid_webhook(RecordingCodeCreator.code, store_id="store-a")
 
     emitted = reconcile([*chain, webhook])
@@ -282,7 +268,7 @@ def test_control_without_the_bridge_the_same_purchase_reconciles_to_nothing(
     discount code is the only value both halves carry.
     """
     sink, auction_id = served_accept()
-    chain = with_offer_attributed(checkout_events(sink, auction_id))
+    chain = checkout_events(sink, auction_id)
     unbridged = [event for event in chain if str(event["kind"]) not in CODE_BRIDGE_KINDS]
     webhook = paid_webhook(RecordingCodeCreator.code, store_id="store-a")
 
@@ -293,7 +279,7 @@ def test_control_without_the_bridge_the_same_purchase_reconciles_to_nothing(
 def test_an_overcharge_is_caught_only_because_the_bridge_travelled(unwired: None) -> None:
     """The point of the join: the order says 130 against a promise of 100."""
     sink, auction_id = served_accept()
-    chain = with_offer_attributed(checkout_events(sink, auction_id))
+    chain = checkout_events(sink, auction_id)
     webhook = paid_webhook(RecordingCodeCreator.code, store_id="store-a", total_price=130.0)
 
     payload = reconcile([*chain, webhook])[0]["payload"]
@@ -316,11 +302,11 @@ def test_the_join_needs_the_offer_to_name_the_store_its_order_names(unwired: Non
     ``0`` verdicts with the ``accepted`` event exactly as the ledger received it, ``1`` with
     the same event carrying the store the two bridges beside it already carry.
 
-    The exchange's half of that is ``AuctionStateMachine._transition``, which records every
-    transition with no ``store_id`` at all. As this file was written that made the first
-    assertion below the SERVED chain verbatim and the second one the repair; both are written
-    against the same real trio either way, so this keeps measuring the reconciler's rule once
-    the state machine is given a store to stamp.
+    The exchange's half has since landed — ``accept`` passes the winning store and
+    ``_transition`` stamps it — so the second assertion is now simply the served chain. The
+    first builds its unattributed event explicitly rather than relying on the exchange to
+    omit one, which is what keeps this test measuring the RECONCILER's rule instead of
+    silently becoming a duplicate of the emit test above it.
     """
     sink, auction_id = served_accept()
     chain = checkout_events(sink, auction_id)
@@ -335,7 +321,7 @@ def test_the_join_needs_the_offer_to_name_the_store_its_order_names(unwired: Non
         "an offer that names no store must not join an order that does: keys are namespaced "
         "by store because a Shopify order_id is a per-shop number"
     )
-    assert len(reconcile([*with_offer_attributed(chain), webhook])) == 1
+    assert len(reconcile([*chain, webhook])) == 1
 
 
 def test_the_store_alias_is_what_lets_the_two_names_meet(unwired: None) -> None:
@@ -349,7 +335,7 @@ def test_the_store_alias_is_what_lets_the_two_names_meet(unwired: None) -> None:
     side and needs no new field from the exchange.
     """
     sink, auction_id = served_accept()
-    chain = with_offer_attributed(checkout_events(sink, auction_id))
+    chain = checkout_events(sink, auction_id)
     webhook = paid_webhook(RecordingCodeCreator.code, store_id=SHOP_DOMAIN)
 
     assert reconcile([*chain, webhook]) == [], (
@@ -364,3 +350,50 @@ def test_the_store_alias_is_what_lets_the_two_names_meet(unwired: None) -> None:
     emitted = reconcile([*chain, aliased])
     assert len(emitted) == 1, "the roster alias did not bring the two names together"
     assert emitted[0]["payload"]["price_honored"] is True
+
+
+# =====================================================================================
+# the store on the envelope — the last scope blocker
+# =====================================================================================
+def test_the_accepted_event_names_the_store_that_won(unwired: None) -> None:
+    """The `accepted` envelope must carry the winning store, like its two bridges do.
+
+    This is the last link in the chain and the reason it stayed broken is that every
+    piece around it looked right. The route forwards all three C11 events; the bridges
+    are scoped to the store because the checkout port stamps them; and reconcile
+    namespaces every join key BY STORE, because a Shopify order_id is only unique within
+    one shop. So an `accepted` event with `store_id: None` files the offer in the
+    unattributed scope while its own two bridges sit in the store's, and a key in one
+    scope cannot join a key in the other — no matter how good the bridge is.
+
+    Measured on the real demo chain before this fix: as served 0 verdicts, the shop-domain
+    alias alone 0, the store named alone 0, and BOTH 1. Two independent halves, both
+    required, which is why fixing either one on its own kept reading as "still broken".
+
+    `build_event` has always accepted `store_id` on the envelope, and the published
+    `accepted` BODY is unchanged by this — it is the envelope field, not a payload key.
+    """
+    sink, auction_id = served_accept()
+    accepted = [e for e in sink.for_auction(auction_id) if str(e["kind"]) == "accepted"]
+    assert len(accepted) == 1, f"expected exactly one accepted event, got {len(accepted)}"
+
+    assert accepted[0].get("store_id") == "store-a", (
+        "the served accept filed an `accepted` event whose envelope names no store "
+        f"(store_id={accepted[0].get('store_id')!r}); its own code_created and "
+        "checkout_redirect bridges ARE store-scoped, so reconcile cannot join them"
+    )
+
+
+def test_the_whole_trio_agrees_on_the_store(unwired: None) -> None:
+    """All three C11 events name the same store, so the scope is one and not three.
+
+    Guards the failure mode where the envelope is populated from a second reading of the
+    bid rather than from the offer the checkout was actually made against — which could
+    disagree with the bridges the port stamped.
+    """
+    sink, auction_id = served_accept()
+    stores = {str(e["kind"]): e.get("store_id") for e in checkout_events(sink, auction_id)}
+    assert set(stores) == set(CHECKOUT_EVENT_KINDS), stores
+    assert set(stores.values()) == {"store-a"}, (
+        f"the three checkout events disagree about which store won: {stores}"
+    )

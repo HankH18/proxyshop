@@ -430,6 +430,7 @@ class AuctionStateMachine:
         now: float | None = None,
         checkout_token: str | None = None,
         offer: Mapping[str, Any] | None = None,
+        store_id: str | None = None,
     ) -> AuctionRecord:
         """Stamp the auction accepted and record the ``accepted`` event (D24's body).
 
@@ -457,6 +458,7 @@ class AuctionStateMachine:
                 "offer": dict(offer) if offer is not None else None,
             },
             bid_ref=bid_ref,
+            store_id=store_id,
         )
 
     def _transition(
@@ -467,6 +469,7 @@ class AuctionStateMachine:
         now: float | None = None,
         payload: Mapping[str, Any] | None = None,
         bid_ref: str | None = None,
+        store_id: str | None = None,
     ) -> AuctionRecord:
         record = self.get(auction_id)
         allowed = TRANSITIONS.get(record.state, frozenset())
@@ -526,6 +529,7 @@ class AuctionStateMachine:
         self.ledger.record(
             _TRANSITION_KIND[target],
             auction_id=auction_id,
+            store_id=store_id,
             payload={
                 "state": target,
                 "intent_id": record.intent_id,
