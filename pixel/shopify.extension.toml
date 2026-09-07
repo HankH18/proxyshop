@@ -1,0 +1,44 @@
+# The web pixel app extension (SPEC C5 — the only checkout observation path).
+#
+# This manifest is what `shopify app deploy` reads to build and ship `src/index.ts` into the
+# checkout sandbox. It is NOT what activates the pixel on a shop: that is the `webPixelCreate`
+# Admin mutation the merchant app issues at install time
+# (`merchant_svc.install.config.web_pixel_settings`). Both halves are required, and the settings
+# below are the contract between them — Shopify validates the `settings` object a `webPixelCreate`
+# carries against the fields declared here, so a key the app sends and this file does not declare
+# is a failed install, not a missing value at runtime. `tests/manifest.test.ts` holds the two sides
+# to each other.
+
+api_version = "2026-07"
+
+[[extensions]]
+type = "web_pixel_extension"
+name = "ProxyShop checkout observer"
+handle = "proxyshop-checkout-observer"
+
+# `strict`, not `lax`: the strict sandbox has no DOM access and no access to the storefront's
+# cookies or globals. The extension needs none of them — it reads the event the API hands it and
+# POSTs four join keys — and C5 grants this app no protected-customer-data scope, so running in
+# the context that *cannot* read customer data is the enforcement of that, not just the claim.
+runtime_context = "strict"
+
+[extensions.settings]
+type = "object"
+
+[extensions.settings.fields.collectorUrl]
+name = "Collector URL"
+description = "Absolute URL of the merchant app's pixel collector, i.e. {app_url}/pixel/collect."
+type = "single_line_text_field"
+validations = [{ name = "min", value = "1" }]
+
+[extensions.settings.fields.shopDomain]
+name = "Shop domain"
+description = "The myshopify.com domain this pixel was installed on."
+type = "single_line_text_field"
+validations = [{ name = "min", value = "1" }]
+
+[extensions.settings.fields.apiVersion]
+name = "Admin API version"
+description = "The Admin API version the installing app pinned."
+type = "single_line_text_field"
+validations = [{ name = "min", value = "1" }]

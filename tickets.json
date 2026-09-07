@@ -2621,7 +2621,7 @@
       "defect": "publish_profile \u2014 the only writer of app.buyer_accounts, described as 'the store-visible working set' \u2014 has zero production call sites, and no code outside the buyer service consumes BuyerProfile or reads app.buyer_accounts. The R5 deliverable 'the BuyerProfile handed to stores' is never handed to a store: GET /buyer/profile requires an X-Buyer-Session header, which only the buyer holds. The hardening commit names publish_profile as dead code but its fix wires only PostgresPseudonymStore, leaving publish_profile dead.",
       "finding_id": "beaddb94fcb3a85224c9b9604a7e0ae380187f47f9e963111df5d971038acbab",
       "reproduction": "codegraph explore 'publish_profile callers' -> 'publish_profile (apps/buyer/svc/src/profile/__init__.py:492) \u2014 1 caller; tests: apps/buyer/svc/tests/test_auth_vault.py'. grep -rn 'BuyerProfile|buyer_accounts' over apps/packages/db/services/e2e (excluding generated/): the only non-buyer hits are apps/trust/tests/* listing the table name in a schema-grant fixture.",
-      "status": "closed",
+      "status": "open",
       "status_evidence": "REFUTED by the cycle-10 triage: 'apps/buyer/svc/src/profile/__init__.py:492 \u2014 publish_profile as dead code'; the triage also records that the finding's location was wrong regardless."
     },
     {

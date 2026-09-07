@@ -45,6 +45,7 @@ from typing import Any
 from ..profile import coarsen_budget_band
 from .errors import InvalidConstraint, InvalidPreference
 from .models import BUDGET_BAND_UNSPECIFIED, HardConstraint, Preference
+from .vocabulary import UnsatisfiableConstraint, unspeakable_reason
 
 __all__ = [
     "GAP_BUDGET",
@@ -81,16 +82,96 @@ GAP_ORDER: tuple[str, ...] = (GAP_USE_CASE, GAP_BUDGET, GAP_CONSTRAINTS)
 # money
 # --------------------------------------------------------------------------------------
 
-_AMOUNT = r"(\d{1,7}(?:\.\d{1,2})?)"
+_DIGIT_AMOUNT = r"\d{1,7}(?:\.\d{1,2})?"
+
+#: English number words, and only these. A shopper says "about five hundred dollars" at
+#: least as often as "$500" — measured: the S1 run fixture's own shopper says exactly that,
+#: and every digit-only pattern in this module read it as *nothing*, so the clarifier
+#: answered ``budget_band: "unspecified"`` and then spent all THREE of R1's questions asking
+#: for a number it had already been given.
+#:
+#: The table is closed on purpose, like the rest of this lexicon. What it covers is written
+#: down beside :func:`read_budget`; what it does not is written down there too.
+_NUMBER_WORDS: dict[str, int] = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+}
+
+#: The multipliers. ``hundred`` scales what is being accumulated; ``thousand`` banks it.
+_SCALE_WORDS: dict[str, int] = {"hundred": 100, "thousand": 1000}
+
+#: Longest-first so ``nineteen`` is never matched as ``nine`` with a stray ``teen`` left
+#: behind — the classic way a number-word alternation reads 19 as 9.
+_NUMBER_WORD_ALTERNATION = "|".join(sorted((*_NUMBER_WORDS, *_SCALE_WORDS), key=len, reverse=True))
+
+#: ``five hundred``, ``twenty five``, ``a hundred``, ``two hundred and fifty``.
+_WORD_AMOUNT = (
+    rf"(?:an?\s+)?(?:{_NUMBER_WORD_ALTERNATION})"
+    rf"(?:[\s-]+(?:and[\s-]+)?(?:{_NUMBER_WORD_ALTERNATION}))*"
+)
+
+#: Either spelling of an amount. One capturing group, so the callers below read ``group(...)``
+#: the way they always did.
+_AMOUNT = rf"({_DIGIT_AMOUNT}|{_WORD_AMOUNT})"
+_AMOUNT_LOW = rf"(?P<low>{_DIGIT_AMOUNT}|{_WORD_AMOUNT})"
+_AMOUNT_HIGH = rf"(?P<high>{_DIGIT_AMOUNT}|{_WORD_AMOUNT})"
+_AMOUNT_NAMED = rf"(?P<amount>{_DIGIT_AMOUNT}|{_WORD_AMOUNT})"
+
+#: The hedges that turn an amount into a TARGET rather than a bound. See
+#: :data:`_APPROX_RE`; the rule is the module's own and predates this list.
+_APPROXIMATOR = r"around|about|roughly|approximately|approx|nearly|almost|ballpark|near|close to|~"
+
+#: What a person writes after a number when they mean money and do not reach for ``$``.
+_CURRENCY_WORD = r"dollars?|bucks?|usd|quid"
 
 #: ``$20-$50``, ``between $20 and 50``. Anchored on a ``$`` so "size 8 to 10" is not money.
 _RANGE_RE = re.compile(rf"(?:between\s+)?\$\s*{_AMOUNT}\s*(?:-|–|—|to|and)\s*\$?\s*{_AMOUNT}")
 
-#: ``under $20``, ``no more than 20``, ``budget of $20``.
+#: ``between 300 and 500`` — "between" is the money cue that the missing ``$`` was.
+_BETWEEN_RANGE_RE = re.compile(rf"between\s+\$?\s*{_AMOUNT}\s*(?:-|–|—|to|and)\s*\$?\s*{_AMOUNT}")
+
+#: ``300 to 500``, ``300-500``. Read as money ONLY while the buyer is answering the budget
+#: question, for the same reason :data:`_BARE_NUMBER_RE` is: outside that turn it is a size
+#: run, a quantity or a model number.
+_PLAIN_RANGE_RE = re.compile(rf"{_AMOUNT_LOW}\s*(?:-|–|—|to|and)\s*{_AMOUNT_HIGH}")
+
+#: ``under $20``, ``no more than 20``, ``budget of $20``, ``up to about five hundred``.
+#:
+#: The optional ``approx`` group is the whole of the "up to about" fix. A hedge sitting
+#: between the cue and the amount is not noise to be skipped over: it says the shopper's
+#: ceiling is soft, and this module has always read a hedged amount as a target that fixes
+#: the band and rules nothing out ("around $40" does not exclude $42). A ceiling cue in
+#: front of the hedge does not make the number exact again.
 _CEILING_RE = re.compile(
     r"(?:under|below|less than|lower than|no more than|not more than|at most|up to|"
     r"cheaper than|within|max|maximum|max of|maximum of|budget of|budget is|spend)"
-    rf"\s+\$?\s*{_AMOUNT}"
+    rf"\s+(?:(?P<approx>{_APPROXIMATOR})\s*)?\$?\s*{_AMOUNT_NAMED}"
 )
 
 #: ``over $50``, ``at least $50``, ``starting at $50``.
@@ -99,19 +180,62 @@ _FLOOR_RE = re.compile(
 )
 
 #: ``around $40`` — a target, not a ceiling. Sets the band and states no filter.
-_APPROX_RE = re.compile(
-    rf"(?:around|about|roughly|approximately|~|near|close to|ballpark)\s*\$?\s*{_AMOUNT}"
-)
+_APPROX_RE = re.compile(rf"(?:{_APPROXIMATOR})\s*\$?\s*{_AMOUNT}")
+
+#: ``500ish``, ``500-ish``. The same hedge with the same meaning, written as a suffix — and
+#: invisible to every other pattern here, because :data:`_BARE_NUMBER_RE`'s trailing
+#: ``(?![\w.])`` refuses it and ``$`` is absent.
+_ISH_RE = re.compile(rf"{_AMOUNT}\s*-?\s*ish\b")
 
 #: A bare ``$40``.
 _DOLLARS_RE = re.compile(rf"\$\s*{_AMOUNT}")
 
+#: ``500 dollars``, ``five hundred bucks``. The currency word is the money cue the ``$``
+#: would have been.
+_CURRENCY_SUFFIX_RE = re.compile(rf"{_AMOUNT}\s*(?:{_CURRENCY_WORD})\b")
+
 #: A bare ``40``. Only read as money when the buyer is answering the budget question.
-_BARE_NUMBER_RE = re.compile(rf"(?<![\w.]){_AMOUNT}(?![\w.])")
+_BARE_NUMBER_RE = re.compile(rf"(?<![\w.])({_DIGIT_AMOUNT})(?![\w.])")
+
+#: A bare ``fifty``, same rule. Split from :data:`_BARE_NUMBER_RE` because a word amount has
+#: no ``(?<![\w.])`` to lean on.
+_BARE_WORD_AMOUNT_RE = re.compile(rf"\b{_AMOUNT}\b")
+
+#: Number words that are ordinary English before they are amounts, so a BARE one of them is
+#: not money. Measured: "one of those cheap ones", answered to the budget question, read as
+#: a ``price_usd lte 1.0`` ceiling — a budget nobody stated, which is the exact failure the
+#: bare-number rule exists to prevent. ``$1`` and "one dollar" still work: this only refuses
+#: the word standing alone with no currency marker and no scale beside it.
+_AMBIGUOUS_ALONE: frozenset[str] = frozenset({"one", "zero", "a", "an"})
 
 #: Every pattern whose matched span must be blanked before the word lexicon runs, so a
-#: price can never be re-read as a size, a quantity or a model number.
-_MONEY_SPANS = (_RANGE_RE, _CEILING_RE, _FLOOR_RE, _APPROX_RE, _DOLLARS_RE)
+#: price can never be re-read as a size, a quantity or a model number — nor its number words
+#: ("five hundred dollars") counted as the content tokens that make an utterance specific.
+_MONEY_SPANS = (
+    _RANGE_RE,
+    _BETWEEN_RANGE_RE,
+    _CEILING_RE,
+    _FLOOR_RE,
+    _APPROX_RE,
+    _ISH_RE,
+    _DOLLARS_RE,
+    _CURRENCY_SUFFIX_RE,
+)
+
+
+#: ``size 10``, ``US 9.5``.
+_SIZE_RE = re.compile(r"\bsize\s+(\d{1,2}(?:\.\d)?)\b")
+_REGION_SIZE_RE = re.compile(r"\b(?:us|uk|eu)\s*(\d{1,2}(?:\.\d)?)\b")
+
+#: A whole size phrase INCLUDING a run ("size 8 to 10"), for blanking only — no capture, and
+#: never used to mint a constraint. :func:`read_budget` needs it because a buyer answering
+#: "what's your budget?" with "size 8 to 10" is stating a size, and the bare-number rule
+#: below reads a lone number as dollars. Measured at HEAD, before this existed: that answer
+#: produced ``price_usd lte 8.0`` and no size at all. Blanking only the ``size 8`` half is
+#: not enough — the trailing ``10`` is still a lone number.
+_SIZE_SPAN_RE = re.compile(
+    r"\b(?:size|us|uk|eu)\s*\d{1,2}(?:\.\d)?(?:\s*(?:-|–|—|to|and)\s*\d{1,2}(?:\.\d)?)?\b"
+)
 
 
 @dataclass(frozen=True)
@@ -138,21 +262,98 @@ def band_for_amount(amount: float) -> str:
     return band or BUDGET_BAND_UNSPECIFIED
 
 
+def _parse_number_words(phrase: str) -> float | None:
+    """``"two hundred and fifty"`` -> ``250.0``; anything outside the table -> ``None``.
+
+    The ordinary accumulate: units and tens add into ``current``, ``hundred`` scales it,
+    ``thousand`` banks it. ``a``/``an`` in front of a scale is the ``one`` a person leaves
+    out ("a hundred"), and ``and`` is punctuation.
+    """
+    total = 0.0
+    current = 0.0
+    seen = False
+    for token in re.findall(r"[a-z]+", phrase.casefold()):
+        if token in ("and", "a", "an"):
+            continue
+        if token in _NUMBER_WORDS:
+            current += _NUMBER_WORDS[token]
+            seen = True
+            continue
+        if token in _SCALE_WORDS:
+            scale = _SCALE_WORDS[token]
+            if current == 0.0:
+                current = 1.0
+            if scale == 100:
+                current *= 100.0
+            else:
+                total += current * scale
+                current = 0.0
+            seen = True
+            continue
+        return None
+    return total + current if seen else None
+
+
+def _amount_value(raw: str | None) -> float | None:
+    """One matched amount as a number, whichever spelling it arrived in."""
+    if raw is None:
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    if re.fullmatch(_DIGIT_AMOUNT, text):
+        return float(text)
+    return _parse_number_words(text)
+
+
+def _is_scaled_words(raw: str | None) -> bool:
+    """Does this amount carry ``hundred``/``thousand``?
+
+    The bar a WORD amount has to clear before a hedge alone is allowed to read it as money.
+    ``about five hundred`` is unmistakably an amount; ``about one`` is a turn of phrase, and
+    inventing a ``0-50`` budget out of it is exactly the failure the ``allow_bare_number``
+    rule already exists to prevent one number-spelling further down.
+    """
+    if raw is None:
+        return False
+    return any(word in raw.casefold() for word in _SCALE_WORDS)
+
+
 def read_budget(text: str, *, allow_bare_number: bool = False) -> tuple[BudgetReading, str]:
     """Read money out of ``text``; return the reading and the text with money blanked out.
 
     ``allow_bare_number`` is on only while the buyer is answering the budget question,
     where a lone "40" is unambiguous. Everywhere else a lone number is a size, a quantity
     or a model number and reading it as dollars is how a clarifier invents a budget.
+
+    What this reads
+    ---------------
+    ``under 500`` · ``no more than 500`` · ``up to $500`` · ``budget of 500`` · ``$500`` ·
+    ``500 dollars`` · ``five hundred dollars`` · ``twelve hundred`` · ``two hundred fifty``
+    · ``a hundred bucks`` · ``between $60 and $120`` · ``300 to 500`` (budget answers only) ·
+    and, as **targets that fix the band and state no filter**, ``around $40`` · ``about five
+    hundred`` · ``up to about five hundred`` · ``500ish``.
+
+    What it deliberately does not
+    -----------------------------
+    ``two fifty`` for 250 (indistinguishable from a 2 and a 50 in the same breath), ``5k``,
+    ``half a grand``, ``a couple hundred``, ``mid three figures``, number words outside
+    English, any currency but USD, and a second amount in the same sentence — the first cue
+    still wins, exactly as before. Each of those is a guess, and this module's whole
+    contract is that it reports only what the buyer actually typed.
     """
     ceiling: float | None = None
     floor: float | None = None
     band: str | None = None
 
-    range_match = _RANGE_RE.search(text)
-    if range_match:
-        low, high = sorted((float(range_match.group(1)), float(range_match.group(2))))
-        floor, ceiling = low, high
+    range_match = _RANGE_RE.search(text) or _BETWEEN_RANGE_RE.search(text)
+    range_values = (
+        (_amount_value(range_match.group(1)), _amount_value(range_match.group(2)))
+        if range_match
+        else (None, None)
+    )
+    if range_values[0] is not None and range_values[1] is not None:
+        floor, ceiling = sorted((range_values[0], range_values[1]))
     else:
         # The ceiling is read FIRST and its span is blanked before the floor is looked
         # for. Measured: "no more than $25 a bag" matched the ceiling pattern on
@@ -163,34 +364,83 @@ def read_budget(text: str, *, allow_bare_number: bool = False) -> tuple[BudgetRe
         work = text
         ceiling_match = _CEILING_RE.search(work)
         if ceiling_match:
-            ceiling = float(ceiling_match.group(1))
-            work = _blank(work, [ceiling_match.span()])
+            amount = _amount_value(ceiling_match.group("amount"))
+            if amount is not None:
+                if ceiling_match.group("approx"):
+                    # "up to about five hundred": the hedge is the operative word. It fixes
+                    # the band and rules nothing out, because a shopper who says "about"
+                    # would not reject a $510 machine — and a filter they would not have
+                    # asked for is the difference between a narrowed shortlist and an empty
+                    # one.
+                    band = band_for_amount(amount)
+                else:
+                    ceiling = amount
+                work = _blank(work, [ceiling_match.span()])
         floor_match = _FLOOR_RE.search(work)
         if floor_match:
-            floor = float(floor_match.group(1))
-        if ceiling is None and floor is None:
-            approx = _APPROX_RE.search(text)
-            if approx:
-                # A target is not a filter: it fixes the band and states no constraint,
-                # because "around $40" does not rule out $42.
-                band = band_for_amount(float(approx.group(1)))
-            else:
-                dollars = _DOLLARS_RE.search(text)
-                if dollars:
-                    ceiling = float(dollars.group(1))
+            floor = _amount_value(floor_match.group(1))
+        if ceiling is None and floor is None and band is None:
+            band, ceiling = _read_uncued_money(text)
 
     blanked = _blank_money(text)
     if ceiling is None and floor is None and band is None and allow_bare_number:
-        bare = _BARE_NUMBER_RE.search(blanked)
-        if bare:
-            ceiling = float(bare.group(1))
-            blanked = _blank(blanked, [bare.span()])
+        ceiling, floor, blanked = _read_bare_money(blanked)
 
     if band is None:
         anchor = ceiling if ceiling is not None else floor
         if anchor is not None:
             band = band_for_amount(anchor)
     return BudgetReading(ceiling=ceiling, floor=floor, band=band), blanked
+
+
+def _read_uncued_money(text: str) -> tuple[str | None, float | None]:
+    """``(band, ceiling)`` for money written without a ceiling or floor cue."""
+    approx = _APPROX_RE.search(text)
+    if approx:
+        amount = _amount_value(approx.group(1))
+        if amount is not None and (
+            _is_scaled_words(approx.group(1))
+            or re.fullmatch(_DIGIT_AMOUNT, approx.group(1).strip())
+        ):
+            # A target is not a filter: it fixes the band and states no constraint,
+            # because "around $40" does not rule out $42.
+            return band_for_amount(amount), None
+    ish = _ISH_RE.search(text)
+    if ish:
+        amount = _amount_value(ish.group(1))
+        if amount is not None:
+            return band_for_amount(amount), None
+    for pattern in (_DOLLARS_RE, _CURRENCY_SUFFIX_RE):
+        match = pattern.search(text)
+        if match:
+            amount = _amount_value(match.group(1))
+            if amount is not None:
+                return None, amount
+    return None, None
+
+
+def _read_bare_money(blanked: str) -> tuple[float | None, float | None, str]:
+    """``(ceiling, floor, blanked)`` for a budget ANSWER that names bare numbers.
+
+    Sizes are blanked out of the working copy first: "size 8 to 10" is an answer a shopper
+    really gives, and both the bare range and the bare number would otherwise turn it into a
+    price of $8.
+    """
+    work = _blank(blanked, [match.span() for match in _SIZE_SPAN_RE.finditer(blanked)])
+    span = _PLAIN_RANGE_RE.search(work)
+    if span:
+        low, high = _amount_value(span.group("low")), _amount_value(span.group("high"))
+        if low is not None and high is not None:
+            floor, ceiling = sorted((low, high))
+            return ceiling, floor, _blank(blanked, [span.span()])
+    for pattern in (_BARE_NUMBER_RE, _BARE_WORD_AMOUNT_RE):
+        for match in pattern.finditer(work):
+            if match.group(1).strip().casefold() in _AMBIGUOUS_ALONE:
+                continue
+            amount = _amount_value(match.group(1))
+            if amount is not None:
+                return amount, None, _blank(blanked, [match.span()])
+    return None, None, blanked
 
 
 def _blank_money(text: str) -> str:
@@ -382,9 +632,19 @@ _FILLER: frozenset[str] = frozenset(
         "at",
         "be",
         "been",
+        # Money words that survive the blanking above when the sentence names no amount
+        # this module can read ("my budget is tight"). They describe the transaction, never
+        # the product, so counting them as content words made a moneyed hedge look like a
+        # stated need.
+        "buck",
+        "bucks",
+        "budget",
         "but",
         "buy",
         "by",
+        "cost",
+        "dollar",
+        "dollars",
         "can",
         "could",
         "did",
@@ -458,6 +718,7 @@ _FILLER: frozenset[str] = frozenset(
         "too",
         "up",
         "us",
+        "usd",
         "very",
         "want",
         "wanted",
@@ -477,8 +738,6 @@ _FILLER: frozenset[str] = frozenset(
     }
 )
 
-_SIZE_RE = re.compile(r"\bsize\s+(\d{1,2}(?:\.\d)?)\b")
-_REGION_SIZE_RE = re.compile(r"\b(?:us|uk|eu)\s*(\d{1,2}(?:\.\d)?)\b")
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 #: Apostrophes are removed rather than split on, so "I'd" is the single token ``id`` and
@@ -826,6 +1085,11 @@ class IntentDraft:
     budget_band: str | None = None
     specific: bool = False
     dropped: list[str] = field(default_factory=list)
+    #: Filters this draft refused to emit because no catalogue for its category carries the
+    #: attribute they name. See :mod:`buyer_svc.intent.vocabulary`; the short version is
+    #: that R19 decides a hard constraint on verified evidence, so a constraint no evidence
+    #: can exist for excludes every candidate instead of narrowing anything.
+    unsatisfiable: list[UnsatisfiableConstraint] = field(default_factory=list)
 
     def absorb(self, utterance: str, *, gap: str | None = None) -> Extraction:
         """Fold one buyer turn into the draft.
@@ -847,8 +1111,7 @@ class IntentDraft:
             self.need_utterances.append(text)
         if reading.specific:
             self.specific = True
-        if self.category is None and reading.category is not None:
-            self.category = reading.category
+        self._learn_category(reading.category)
         for constraint in reading.constraints:
             self._add_constraint(constraint, authoritative=True)
         for preference in reading.preferences:
@@ -859,8 +1122,7 @@ class IntentDraft:
     def absorb_proposal(self, proposal: LLMProposal) -> None:
         """Fold a model proposal in **additively**; it never overwrites the buyer."""
         self.dropped.extend(proposal.dropped)
-        if self.category is None and proposal.category is not None:
-            self.category = proposal.category
+        self._learn_category(proposal.category)
         for constraint in proposal.constraints:
             self._add_constraint(constraint, authoritative=False)
         for preference in proposal.preferences:
@@ -868,7 +1130,33 @@ class IntentDraft:
         if self.budget_band is None and proposal.budget_band:
             self.budget_band = proposal.budget_band
 
+    def _learn_category(self, category: str | None) -> None:
+        """Take the first category anybody names, and re-judge what is already on file.
+
+        The re-judge is not tidiness. A constraint absorbed while the category was still
+        unknown was admitted because nothing could yet prove it unsatisfiable; the moment
+        the category arrives, that proof may exist. Without this, "waterproof, and it's for
+        coffee" and "coffee, and waterproof" would produce different filters from the same
+        two facts.
+        """
+        if self.category is not None or category is None:
+            return
+        self.category = category
+        for key, constraint in list(self.constraints.items()):
+            reason = unspeakable_reason(self.category, constraint.field)
+            if reason is not None:
+                del self.constraints[key]
+                self._note_unsatisfiable(constraint, reason)
+
     def _add_constraint(self, constraint: HardConstraint, *, authoritative: bool) -> None:
+        reason = unspeakable_reason(self.category, constraint.field)
+        if reason is not None:
+            # Recorded, never silent, and never emitted as a filter: see
+            # `buyer_svc.intent.vocabulary`. The rule applies to a model proposal on exactly
+            # the same terms as to the buyer's own words — the model is the likelier source
+            # of invented vocabulary, not the safer one.
+            self._note_unsatisfiable(constraint, reason)
+            return
         existing = self.constraints.get(constraint.key)
         if existing is not None and not authoritative:
             return
@@ -879,6 +1167,19 @@ class IntentDraft:
             self._note_budget(BudgetReading(ceiling=_as_float(constraint.value)))
         elif constraint.field == "price_usd" and constraint.op == "gte":
             self._note_budget(BudgetReading(floor=_as_float(constraint.value)))
+
+    def _note_unsatisfiable(self, constraint: HardConstraint, reason: str) -> None:
+        """Record a refused filter once, keyed the way a filter is keyed."""
+        if any(item.key == constraint.key for item in self.unsatisfiable):
+            return
+        self.unsatisfiable.append(
+            UnsatisfiableConstraint(
+                field=constraint.field,
+                op=constraint.op,
+                value=constraint.value,
+                reason=reason,
+            )
+        )
 
     def _add_preference(self, preference: Preference, *, authoritative: bool) -> None:
         existing = self.preferences.get(preference.key)

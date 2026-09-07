@@ -45,8 +45,30 @@ both halves of the buyer↔exchange seam learns one convention:
     it. Reading it is the difference between a correct composition root and one the shipped
     ``docker compose up`` cannot reach: with it, the stack in ``docs/deploy.md`` carries a
     confirmed intent to the exchange with no operator action at all.
+``BUYER_ROSTER``
+    Path to a JSON document holding the ROSTER alone — the candidate set every auction is
+    opened over. Read only when the deployment document states no ``roster`` of its own, so
+    the order is document → environment, which is the order ``exchange.composition`` already
+    resolves ``trust_url`` in.
 
-None of the three set is **exactly today's behaviour**: nothing is bound, both defaults above stand, and
+    It exists because ``EXCHANGE_URL`` says where the exchange is and nothing about who
+    competes, and a bare-``EXCHANGE_URL`` deployment is what the shipped compose stack IS.
+    MEASURED on that deployment, buyer and exchange each a real ``uvicorn`` on loopback::
+
+        POST /buyer/intent/confirm            -> 201 {"auction_id": "auction-945c2dd0-..."}
+        GET  /buyer/auctions/auction-945c...  -> 200
+        {"solicited": [], "entries": [], "ranked": [], "denied": [], "slots": 0}
+
+    A shopper cannot tell that from "no store had anything for you", so it is now a **503**
+    naming both variables (:class:`NoRosterBound`) and nothing reaches the exchange. With the
+    roster stated, the same two requests on the same two processes answer ``solicited`` of
+    three stores, three ``entries``, three ``ranked`` and three ``slots``.
+``BUYER_ROSTER_JSON``
+    The same roster, inline. ``BUYER_ROSTER`` wins if both are set. Either accepts a bare
+    ``[...]`` or a ``{"roster": [...]}`` wrapper, so one file serves both variables and both
+    spellings.
+
+None of the five set is **exactly today's behaviour**: nothing is bound, both defaults above stand, and
 both routes answer 503 with the message they answer today. That is deliberate and it is the
 one property this module may not break — a buyer service nobody has configured must not
 quietly invent an exchange to send a confirmed intent to.
@@ -58,7 +80,8 @@ The document
 
     {
       "exchange_url": "http://exchange:8083",
-      "roster": [{"store_id": "demo-woolworks", "tier": 1, "product_ref": "beanie-1"}],
+      "roster": [{"store_id": "demo-woolworks", "tier": 1,
+                  "product_ref": "beanie-1", "list_price": 80.0}],
       "request_timeout_seconds": 15.0
     }
 
@@ -73,15 +96,21 @@ The document
     exchange and accept an offer on another — a shortlist whose auction the accepting process
     has never heard of.
 ``roster``
-    Optional. The platform's candidate set — the stores the exchange is asked to solicit.
+    The platform's candidate set — the stores the exchange is asked to solicit, each row a
+    ``store_id`` and a ``list_price`` above zero (the exchange's own ``RosterEntry`` requires
+    both; a row missing the price is a 422 on every confirmation).
     It is **deployment data**, and that is the whole reason it is here rather than left to
     the caller: ``POST /buyer/intent/confirm`` takes a ``ConfirmBody.roster`` straight off
     the wire, so without this field a browser is the author of the list of merchants that
     compete for its own buyer. :meth:`HttpExchangeClient.create_auction` fills it in only
     when the caller's payload carries none, so a test or a devstack that means to drive a
-    different candidate set still can. A document with no ``roster`` key is legal and
-    changes nothing: an auction is opened with whatever roster the caller sent, exactly as
-    before this field existed.
+    different candidate set still can.
+
+    Optional **in this document** and not optional in a deployment: a document with no
+    ``roster`` falls through to ``BUYER_ROSTER`` / ``BUYER_ROSTER_JSON``, and a deployment
+    that resolves none from any of the three refuses the confirmations that do not carry one
+    — see :class:`NoRosterBound`, and the note above :func:`read_roster` for why a roster
+    typed into a document is an interim rather than the answer.
 ``request_timeout_seconds``
     Optional; how long one call to the exchange may take. Defaults to
     :data:`DEFAULT_EXCHANGE_TIMEOUT_SECONDS`.
@@ -100,10 +129,14 @@ a 503 or a 502 that looks like the exchange's fault:
 * a ``request_timeout_seconds`` that is not a positive, finite number is refused, ``True``
   included: ``isinstance(True, int)`` is ``True`` in Python, so ``{"request_timeout_seconds":
   true}`` would otherwise configure a one-second exchange timeout out of a boolean;
-* a ``roster`` that is not a list of objects each naming a non-empty ``store_id`` is
-  refused, and one longer than :data:`MAX_ROSTER_ENTRIES` is refused here rather than as a
-  422 on every confirmation. A row naming no store solicits nobody while making the roster
-  look one entry longer than it is;
+* a ``roster`` that is not a list of objects each naming a non-empty ``store_id`` **and a
+  positive, finite ``list_price``** is refused, and one longer than
+  :data:`MAX_ROSTER_ENTRIES` is refused here rather than as a 422 on every confirmation. A
+  row naming no store solicits nobody while making the roster look one entry longer than it
+  is; a row naming no price is a store the operator believes is competing and which the
+  exchange refuses on arrival, in a 502 quoting a pydantic error about a service the operator
+  did not write. Wherever the roster came from — this document or ``BUYER_ROSTER*`` — it goes
+  through the same validator, so the two sources cannot disagree about what a legal row is;
 * an unrecognised key is refused, naming it. The exchange's document has five keys and a typo
   in one still leaves four working; every key of this one is load-bearing, so
   ``{"exchange_uri": ...}`` is a deployment that reads as configured and behaves as
@@ -170,11 +203,19 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlsplit
+
+# The ONE import from a sibling package at module scope, and it is cycle-free by inspection:
+# `intent/__init__.py` imports `clarifier`, `confirmation`, `errors`, `extraction` and
+# `models`, and `routes.py` — the only file under `intent/` that imports THIS module — is not
+# among them (it binds itself at the bottom of its own file, which is what keeps FastAPI out
+# of importing that package). `NoRosterBound` needs the class at definition time, so it cannot
+# be deferred to the bottom the way `bind_spellings` is. See that class for why it inherits.
+from .intent.errors import AuctionClientUnusable
 
 _log = logging.getLogger(__name__)
 
@@ -185,23 +226,28 @@ __all__ = [
     "ENV_DEPLOYMENT",
     "ENV_DEPLOYMENT_JSON",
     "ENV_EXCHANGE_URL",
+    "ENV_ROSTER",
+    "ENV_ROSTER_JSON",
     "ENV_UI_DIST",
     "EXCHANGE_CLIENT_ATTR",
     "MAX_DEPLOYMENT_BYTES",
     "MAX_EXCHANGE_RESPONSE_BYTES",
     "MAX_EXCHANGE_WALL_CLOCK_SECONDS",
     "MAX_RECORDED_AUCTIONS",
+    "MAX_ROSTER_BYTES",
     "MAX_ROSTER_ENTRIES",
     "STATE_FLAG",
     "Deployment",
     "DeploymentConfigurationError",
     "ExchangeCallFailed",
     "HttpExchangeClient",
+    "NoRosterBound",
     "configure_buyer",
     "ensure_configured",
     "mount_ui",
     "parse_deployment",
     "read_deployment",
+    "read_roster",
 ]
 
 #: Path to the deployment document.
@@ -211,6 +257,22 @@ ENV_DEPLOYMENT_JSON = "BUYER_DEPLOYMENT_JSON"
 #: Just the exchange's origin, with no document around it — the variable the compose fragment
 #: already sets and nothing has ever read. Lowest precedence of the three.
 ENV_EXCHANGE_URL = "EXCHANGE_URL"
+
+#: Path to a JSON document holding the ROSTER alone — the candidate set this deployment opens
+#: every auction over. Read only when the deployment document states none, so the precedence
+#: is document → environment, which is the order ``exchange.composition`` already resolves its
+#: own addresses in (``trust_url``, then ``TRUST_URL``, then the default).
+#:
+#: It is a second variable rather than a second key because a roster is *data*, not settings:
+#: it carries a row per store and the exchange accepts up to
+#: :data:`MAX_ROSTER_ENTRIES` of them, so it is mounted the way
+#: ``EXCHANGE_DEPLOYMENT`` is mounted. Without it the only way to name a candidate set is to
+#: write a whole deployment document, and ``EXCHANGE_URL`` — the variable the shipped compose
+#: stack actually sets — becomes unusable the moment a roster is needed, which is always.
+ENV_ROSTER = "BUYER_ROSTER"
+#: The same roster, inline. :data:`ENV_ROSTER` outranks it, exactly as ``BUYER_DEPLOYMENT``
+#: outranks ``BUYER_DEPLOYMENT_JSON``.
+ENV_ROSTER_JSON = "BUYER_ROSTER_JSON"
 #: Directory of the built UI. Optional, read by :func:`mount_ui` alone, and read by nothing
 #: on the request path — an API deployment that never calls that function never looks at it.
 ENV_UI_DIST = "BUYER_UI_DIST"
@@ -291,6 +353,18 @@ MAX_EXCHANGE_WALL_CLOCK_SECONDS = 30.0
 #: a mounted file that is not the file they meant — rather than against an adversary.
 MAX_DEPLOYMENT_BYTES = 64 * 1024
 
+#: The most bytes a ROSTER document may occupy, read from :data:`ENV_ROSTER` /
+#: :data:`ENV_ROSTER_JSON`.
+#:
+#: Deliberately larger than :data:`MAX_DEPLOYMENT_BYTES`, because it is holding a different
+#: kind of thing: the deployment document carries one url and one number, while this carries
+#: up to :data:`MAX_ROSTER_ENTRIES` rows, each a store id, a product ref, a price and a cap.
+#: A realistic 500-row roster measured ~60 KiB, which the 64 KiB deployment ceiling would
+#: refuse at full length — a cap that makes the documented maximum unreachable is a cap that
+#: is wrong. 512 KiB is an order of magnitude above the largest legal roster and is still a
+#: guard against an operator mounting the file they did not mean.
+MAX_ROSTER_BYTES = 512 * 1024
+
 
 class DeploymentConfigurationError(RuntimeError):
     """The deployment document is missing, unreadable, or says something unusable.
@@ -318,6 +392,35 @@ class ExchangeCallFailed(RuntimeError):
         self.status_code = status_code
 
 
+class NoRosterBound(AuctionClientUnusable):
+    """This deployment resolved no roster, so the auction it would open solicits nobody.
+
+    **Why this is an error at all.** MEASURED on the served path, buyer and exchange each a
+    real ``uvicorn`` process on loopback, the buyer configured with ``EXCHANGE_URL`` and
+    nothing else — which is exactly what ``apps/buyer/compose.yaml`` hands the shipped stack::
+
+        POST /buyer/intent/confirm            -> 201 {"auction_id": "auction-945c2dd0-..."}
+        GET  /buyer/auctions/auction-945c...  -> 200
+        {"solicited": [], "entries": [], "ranked": [], "denied": [], "slots": 0}
+
+    A shopper cannot tell that from "no store had anything for you". It is not a degraded
+    shortlist, it is an auction nobody was invited to, reported as a success. So it is refused
+    **before the socket is opened**: nothing is sent to the exchange, no auction id exists, and
+    the confirmation ledger's claim is released by ``confirm``'s own ``except`` — so an
+    operator who fixes the deployment serves the same shopper's need rather than a 409.
+
+    **Why it is an** :class:`~buyer_svc.intent.errors.AuctionClientUnusable`, which is a
+    deliberate choice and not an accident of convenience. ``buyer_svc.intent.routes`` — frozen
+    to another lane — answers ``AuctionClientUnusable`` with **503** and
+    :class:`ExchangeCallFailed` with **502**. This condition is *this service's configuration*
+    and says nothing at all about the exchange's health, so 503 is the honest status and 502
+    would send an operator to read the exchange's logs about a buyer-side mistake. The base
+    class's own sentence — "the confirmed intent has nowhere to go" — is literally what has
+    happened: there is no store for it to go to. ``tests/test_composition_wiring.py`` pins the
+    inheritance so that answer cannot silently become a 502.
+    """
+
+
 # =====================================================================================
 # The document
 # =====================================================================================
@@ -327,9 +430,17 @@ class Deployment:
 
     source: str
     exchange_url: str
-    #: The platform's candidate set, as the deployment states it. Empty when the document
-    #: named none, which is a legal document and means "send whatever roster the caller sent".
+    #: The platform's candidate set, as this deployment resolved it: the document's ``roster``
+    #: if it stated one, else :data:`ENV_ROSTER` / :data:`ENV_ROSTER_JSON`. Empty when no
+    #: source named one — which is a legal *document* and an incomplete *deployment*, and is
+    #: refused at the moment it would open an auction rather than here. See
+    #: :class:`NoRosterBound` for why the refusal is there and not at bind time: a
+    #: confirmation that carries its own roster is entitled to be served.
     roster: tuple[Mapping[str, Any], ...] = ()
+    #: Where :attr:`roster` came from, for the wiring log and for the refusal's message —
+    #: ``""`` when nothing named one. A bare url is not enough to tell an operator which of
+    #: three places to edit.
+    roster_source: str = ""
     request_timeout_seconds: float = DEFAULT_EXCHANGE_TIMEOUT_SECONDS
 
 
@@ -411,8 +522,77 @@ def _roster(raw: Any, source: str) -> tuple[Mapping[str, Any], ...]:
                 f"stores the exchange solicits, and a row naming no store solicits nobody "
                 f"while making the roster look one entry longer than it is."
             )
+        _roster_price(row, index, source)
+        _roster_discount_cap(row, index, source)
         rows.append(dict(row))
     return tuple(rows)
+
+
+def _roster_price(row: Mapping[str, Any], index: int, source: str) -> None:
+    """``list_price`` — REQUIRED, and strictly above zero, because the exchange requires it.
+
+    This is the half of "validated the way the exchange will read it" that was missing, and
+    its absence was invisible for the same reason every finding in this batch was: a roster of
+    id-only rows parses here, binds here, and is a **422 on every confirmation** from a service
+    that looks configured, answered to the buyer as a 502 quoting a pydantic error about a
+    service the operator did not write.
+
+    ``apps/exchange/src/auction/routes.py``::
+
+        class RosterEntry(BaseModel):
+            store_id: str = Field(min_length=1, max_length=MAX_IDENTIFIER_LENGTH)
+            list_price: float = Field(gt=0.0, allow_inf_nan=False)
+
+    ``gt``, ``allow_inf_nan`` and the ``bool`` rejection are that field's rules restated, not
+    invented: the exchange's own docstring records that a zero minted a free item and that an
+    ``inf`` switched the price wall off on the row carrying it. A buyer service that forwards
+    either is handing an unauthenticated body's worth of trust to its own deployment document.
+    """
+    if "list_price" not in row:
+        raise DeploymentConfigurationError(
+            f"{source}: roster[{index}] ({str(row.get('store_id')).strip()!r}) states no "
+            f"list_price. The exchange's RosterEntry requires one — a store whose product is "
+            f"priced at nothing has nothing to auction — so a row without it is a 422 on "
+            f"every confirmation, from a buyer service that boots and looks configured."
+        )
+    price = row["list_price"]
+    # `bool` FIRST: `isinstance(True, int)` is True, so `list_price: true` would otherwise
+    # pass every numeric check below and price a product at 1.00.
+    if isinstance(price, bool) or not isinstance(price, (int, float)):
+        raise DeploymentConfigurationError(
+            f"{source}: roster[{index}] states list_price {price!r} "
+            f"({type(price).__name__}); it must be a number. A price the exchange cannot read "
+            f"is a row it refuses, not a store that competes at an unknown price."
+        )
+    if not math.isfinite(float(price)) or float(price) <= 0:
+        raise DeploymentConfigurationError(
+            f"{source}: roster[{index}] states list_price {price!r}; it must be a positive, "
+            f"finite number. The exchange refuses this row (Field(gt=0.0, "
+            f"allow_inf_nan=False)), and a zero or an infinity there is how a free item gets "
+            f"minted rather than how a cheap one is offered."
+        )
+
+
+def _roster_discount_cap(row: Mapping[str, Any], index: int, source: str) -> None:
+    """``max_discount_pct`` — optional, and refused when it is outside the exchange's range.
+
+    ``Field(default=None, ge=0.0, le=100.0)`` there. Omitting it costs an auction its
+    discounted bids and never its safety, so absence is fine; a 150 is a 422 on every
+    confirmation and is refused here, once, with the row named.
+    """
+    if row.get("max_discount_pct") is None:
+        return
+    cap = row["max_discount_pct"]
+    if isinstance(cap, bool) or not isinstance(cap, (int, float)):
+        raise DeploymentConfigurationError(
+            f"{source}: roster[{index}] states max_discount_pct {cap!r} "
+            f"({type(cap).__name__}); it must be a number of percent."
+        )
+    if not math.isfinite(float(cap)) or not (0.0 <= float(cap) <= 100.0):
+        raise DeploymentConfigurationError(
+            f"{source}: roster[{index}] states max_discount_pct {cap!r}; the exchange accepts "
+            f"0 to 100 inclusive, so this row is a 422 on every confirmation."
+        )
 
 
 def _timeout_seconds(raw: Any, source: str) -> float:
@@ -469,14 +649,139 @@ def parse_deployment(document: Any, *, source: str) -> Deployment:
         source=source,
         exchange_url=exchange_url,
         roster=roster,
+        # Empty is "this document named none", not "this document named nobody": an empty
+        # roster is not a statement a deployment makes on purpose (it is the defect), and
+        # reading it as one would shadow the environment rung with a typo.
+        roster_source=source if roster else "",
         request_timeout_seconds=timeout,
     )
 
 
-def read_deployment(env: Mapping[str, str] | None = None) -> Deployment | None:
-    """The configured deployment, or ``None`` when this buyer service was given none."""
+# =====================================================================================
+# The roster, and where it should really come from
+# =====================================================================================
+# WHAT THIS IS AN INTERIM FOR, written here rather than left for the next reader to discover.
+#
+# A roster is not settings. Every row states a store id, a product ref and that product's
+# list price, so a roster typed into a deployment document is a person transcribing the
+# catalogue — the same class of thing as `proxyshop_demo/s1.py`'s trust scores (0.86 / 0.58)
+# standing in for the trust engine's output. It works for a demo; it is not a product. Two
+# things are wrong with it and both are structural rather than stylistic:
+#
+#   * it goes stale silently. Nothing revalidates it, so a price that moved, a store that was
+#     delisted or a product that went out of stock is a row this buyer keeps soliciting.
+#   * the buyer should not know the merchants at all. Which stores compete for one intent is
+#     a *retrieval* question over the catalogue, and D5 keeps buyer-side knowledge minimal.
+#
+# THE RIGHT ANSWER IS THAT THE EXCHANGE BUILDS THE ROSTER, and the machinery for it is already
+# written and already has no caller on this path. `exchange.retrieval.CandidateRetrieval`
+# (`apps/exchange/src/retrieval/service.py`) is a whole pipeline — translate the intent, fetch
+# from the graph source, re-decide every hard constraint locally, measure features, rerank,
+# order by fit, truncate to a limit — and `apps/exchange/src/auction/routes.py` imports from
+# `..retrieval` exactly two things: `MAX_CANDIDATE_LIMIT` and the cluster helpers. It never
+# retrieves a candidate. So `POST /auctions` requires its caller to name the field of stores,
+# every caller in this repository is therefore transcribing one, and the buyer's roster
+# configuration exists only because the exchange declines to answer a question it can answer.
+#
+# That fix belongs to the exchange lane, not to this file: it is a change to `POST /auctions`
+# (retrieve when the request names no roster) plus the catalogue wiring behind it. Until it
+# lands, a buyer deployment MUST be able to state a candidate set or the whole platform serves
+# empty shortlists — so this module resolves one, in the document → environment order its
+# sibling composition root already uses, and refuses loudly when it resolves none.
+
+
+def _roster_document(raw: Any, source: str) -> Any:
+    """Accept ``[...]`` and ``{"roster": [...]}`` as the same statement.
+
+    One file has to serve both variables and both spellings: an operator who lifted the
+    ``roster`` key straight out of a deployment document into its own file is being
+    consistent, and answering that with a 503 would punish the consistency this module asks
+    for everywhere else. Anything else falls through to :func:`_roster`, which names what it
+    got and where it came from.
+    """
+    if isinstance(raw, Mapping) and "roster" in raw:
+        unknown = sorted(str(key) for key in raw if str(key) != "roster")
+        if unknown:
+            raise DeploymentConfigurationError(
+                f"{source}: a roster document states {unknown} beside 'roster'; this file "
+                f"holds the candidate set and nothing else. Deployment settings go in the "
+                f"deployment document ({ENV_DEPLOYMENT} / {ENV_DEPLOYMENT_JSON})."
+            )
+        return raw["roster"]
+    return raw
+
+
+def read_roster(
+    env: Mapping[str, str] | None = None,
+) -> tuple[tuple[Mapping[str, Any], ...], str]:
+    """``(roster, source)`` from the environment, or ``((), "")`` when it names none.
+
+    :data:`ENV_ROSTER` (a path) outranks :data:`ENV_ROSTER_JSON` (the same document inline),
+    the same way the deployment document's two variables rank. Validated through the very
+    same :func:`_roster` the document goes through, so a row that would be a 422 on the
+    exchange's door is a 503 here whichever variable it was written into.
+    """
     environ = os.environ if env is None else env
 
+    path = str(environ.get(ENV_ROSTER) or "").strip()
+    if path:
+        source = f"{ENV_ROSTER}={path}"
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except OSError as exc:
+            raise DeploymentConfigurationError(
+                f"{source}: the roster document could not be read ({exc.__class__.__name__}: "
+                f"{exc}). A named-but-missing file is a misconfiguration, not a deployment "
+                f"that stated no roster, so it is refused rather than answered fail-closed"
+            ) from exc
+    else:
+        inline = str(environ.get(ENV_ROSTER_JSON) or "").strip()
+        if not inline:
+            return (), ""
+        source, text = ENV_ROSTER_JSON, inline
+
+    if len(text) > MAX_ROSTER_BYTES:
+        raise DeploymentConfigurationError(
+            f"{source}: the roster document is {len(text)} bytes; this buyer service reads at "
+            f"most {MAX_ROSTER_BYTES}. It is parsed on the request path, so its size is time "
+            f"a buyer waits"
+        )
+    try:
+        document = json.loads(text)
+    except Exception as exc:
+        # NOT `except ValueError` — see `read_deployment` for the RecursionError this catches.
+        raise DeploymentConfigurationError(
+            f"{source}: not valid JSON ({type(exc).__name__}: {exc})"
+        ) from exc
+    return _roster(_roster_document(document, source), source), source
+
+
+def read_deployment(env: Mapping[str, str] | None = None) -> Deployment | None:
+    """The configured deployment, or ``None`` when this buyer service was given none.
+
+    Two independent resolutions, in this order, and neither invents a value:
+
+    1. WHERE THE EXCHANGE IS — the deployment document (:data:`ENV_DEPLOYMENT`, then
+       :data:`ENV_DEPLOYMENT_JSON`), then the bare :data:`ENV_EXCHANGE_URL`. Nothing at all
+       means this service is unconfigured and every confirmation is the 503 it always was.
+    2. WHO COMPETES — the document's ``roster`` if it stated one, then :func:`read_roster`'s
+       :data:`ENV_ROSTER` / :data:`ENV_ROSTER_JSON`. There is no third rung and there must not
+       be one: a default roster would be a list of store ids invented by this service.
+    """
+    environ = os.environ if env is None else env
+    deployment = _stated_deployment(environ)
+    if deployment is None:
+        return None
+    if deployment.roster:
+        return deployment
+    roster, roster_source = read_roster(environ)
+    if not roster:
+        return deployment
+    return replace(deployment, roster=roster, roster_source=roster_source)
+
+
+def _stated_deployment(environ: Mapping[str, str]) -> Deployment | None:
+    """Where this service sends a confirmed intent, from the three places one may say so."""
     path = str(environ.get(ENV_DEPLOYMENT) or "").strip()
     if path:
         source = f"{ENV_DEPLOYMENT}={path}"
@@ -608,11 +913,25 @@ class HttpExchangeClient:
         base_url: str,
         *,
         roster: Sequence[Mapping[str, Any]] = (),
+        deployment_source: str = "",
         timeout: float = DEFAULT_EXCHANGE_TIMEOUT_SECONDS,
         client: Any | None = None,
     ) -> None:
         self._base_url = str(base_url).rstrip("/")
         self._roster: tuple[dict[str, Any], ...] = tuple(dict(row) for row in roster)
+        #: The :attr:`Deployment.source` of the deployment that built this client, or ``""``
+        #: for one somebody constructed by hand.
+        #:
+        #: This is provenance, not a switch, and it is what makes :class:`NoRosterBound`
+        #: reachable from a deployment and ONLY from a deployment. The distinction is real:
+        #: this class is the transport that knows the exchange's routing, and judging whether
+        #: a *deployment* is complete enough to open an auction is not the transport's job.
+        #: A client a caller composed itself keeps the pass-through behaviour it always had —
+        #: ``test_composition.py::test_a_client_with_no_deployment_roster_adds_no_roster_key
+        #: _at_all`` is that contract — while every client :func:`configure_buyer` builds
+        #: carries the string, so a served deployment that named nobody is refused and can
+        #: say which of three places to edit.
+        self._deployment_source = str(deployment_source)
         self._timeout = float(timeout)
         self._client = client
         #: The exchange's `POST /auctions` answers, newest last. Bounded; see
@@ -626,6 +945,16 @@ class HttpExchangeClient:
     @property
     def base_url(self) -> str:
         return self._base_url
+
+    @property
+    def deployment_source(self) -> str:
+        """The deployment that built this client, or ``""`` for a hand-built one."""
+        return self._deployment_source
+
+    @property
+    def roster(self) -> tuple[Mapping[str, Any], ...]:
+        """The candidate set this client fills a roster-less payload in with."""
+        return self._roster
 
     # -- the two doors ---------------------------------------------------------------
     def create_auction(self, payload: Mapping[str, Any]) -> Any:
@@ -646,10 +975,27 @@ class HttpExchangeClient:
         ``solicited`` diagnostics in this body are published exactly once and survive nowhere
         else. Without the record, a buyer whose shortlist came back empty cannot be told which
         stores were asked, which declined, and why.
+
+        **And a deployment that resolved no roster is refused here**, before the socket, with
+        :class:`NoRosterBound` — see that class for the measurement. The three-way test below
+        is the whole rule: the caller named nobody, this deployment names nobody, and there is
+        a deployment to blame. A hand-built client keeps sending what it was given.
         """
         body = dict(payload)
-        if not body.get("roster") and self._roster:
-            body["roster"] = [dict(row) for row in self._roster]
+        if not body.get("roster"):
+            if self._roster:
+                body["roster"] = [dict(row) for row in self._roster]
+            elif self._deployment_source:
+                raise NoRosterBound(
+                    f"{self._deployment_source}: this buyer deployment resolved no roster, so "
+                    f"the auction it would open solicits nobody and the shopper is handed an "
+                    f"empty shortlist that reads exactly like 'no store had anything for "
+                    f"you'. Nothing was sent to the exchange. Name the candidate set as "
+                    f"'roster' in the deployment document, or in {ENV_ROSTER} (a path to a "
+                    f"JSON document) / {ENV_ROSTER_JSON} (the same document inline); each row "
+                    f"needs a store_id and a list_price. A confirmation that carries its own "
+                    f"roster is unaffected."
+                )
 
         answer = self._post("/auctions", body, what="POST /auctions")
         auction_id = str(answer.get("auction_id") or "").strip()
@@ -902,13 +1248,39 @@ def configure_buyer(app: Any, deployment: Deployment) -> tuple[str, ...]:
         """
         return not hasattr(app.state, name)
 
+    def superseded(name: str) -> bool:
+        """A client THIS function bound from a deployment that has since named a roster.
+
+        The ONE case in which an already-bound attribute is replaced, and it is deliberately
+        narrow: the object there must be one of ours (``deployment_source`` is set only by
+        the branch below), it must be holding no roster, and the deployment now being applied
+        must hold one. A client somebody else wired — a test's double, a deployment that
+        composed its own — has no ``deployment_source`` and is never touched, which is the
+        property the docstring above promises.
+
+        It exists because this module also promises that a failure is not cached, and a bind
+        that resolved no roster is a failure by that standard: every confirmation it serves
+        is a :class:`NoRosterBound` refusal. Without this, an operator who adds the roster to
+        a mounted document has to restart the process to be served — for a repair the module
+        elsewhere says takes effect on the next request. :func:`ensure_configured` is the
+        other half: it does not remember a roster-less bind.
+        """
+        existing = getattr(app.state, name, None)
+        return (
+            isinstance(existing, HttpExchangeClient)
+            and bool(existing.deployment_source)
+            and not existing.roster
+            and bool(deployment.roster)
+        )
+
     client = HttpExchangeClient(
         deployment.exchange_url,
         roster=deployment.roster,
+        deployment_source=deployment.source,
         timeout=deployment.request_timeout_seconds,
     )
     for attr in (AUCTION_CLIENT_ATTR, EXCHANGE_CLIENT_ATTR):
-        if unset(attr):
+        if unset(attr) or superseded(attr):
             setattr(app.state, attr, client)
             bound.append(attr)
 
@@ -919,6 +1291,29 @@ def configure_buyer(app: Any, deployment: Deployment) -> tuple[str, ...]:
             deployment.exchange_url,
             deployment.source,
         )
+        # A SECOND line, at wiring time, and it is the one an operator needs most: "which
+        # stores will this service ask, and did anybody choose them" is a configuration
+        # question with a settled answer the moment the seam is bound, in the same house
+        # style as `exchange.composition.bind_ledger_sink`'s. WARNING rather than INFO when
+        # nothing named a roster, because that deployment is incomplete — every confirmation
+        # that does not carry its own roster is about to be refused, and the operator should
+        # learn that at start-up rather than from the first shopper.
+        if deployment.roster:
+            _log.info(
+                "buyer composition: auctions will solicit %d store(s) — %s (from %s)",
+                len(deployment.roster),
+                ", ".join(str(row.get("store_id")) for row in deployment.roster[:10]),
+                deployment.roster_source,
+            )
+        else:
+            _log.warning(
+                "buyer composition: this deployment names NO roster, so every confirmed "
+                "intent that does not carry one of its own will be refused rather than "
+                "opening an auction that solicits nobody. State it as 'roster' in the "
+                "deployment document, or in %s / %s",
+                ENV_ROSTER,
+                ENV_ROSTER_JSON,
+            )
     return tuple(bound)
 
 
@@ -930,7 +1325,12 @@ def ensure_configured(app: Any, env: Mapping[str, str] | None = None) -> tuple[s
     (which is every test module in this repository) are configured independently.
 
     A failure is **not** cached: the flag is set only on success, so an operator who fixes a
-    malformed document is served by the next request without restarting the process.
+    malformed document is served by the next request without restarting the process. A
+    deployment that resolved no ROSTER counts as one of those failures — it binds a client
+    (so a confirmation carrying its own roster is still served) but is not remembered, so the
+    roster an operator adds afterwards is picked up by the next request rather than by the
+    next restart. See :func:`configure_buyer`'s ``superseded``, which is the half that then
+    replaces the client this one bound.
     """
     already = getattr(app.state, STATE_FLAG, None)
     if already is not None:
@@ -944,7 +1344,8 @@ def ensure_configured(app: Any, env: Mapping[str, str] | None = None) -> tuple[s
         # next request.
         return ()
     bound = configure_buyer(app, deployment)
-    setattr(app.state, STATE_FLAG, bound)
+    if deployment.roster:
+        setattr(app.state, STATE_FLAG, bound)
     return bound
 
 

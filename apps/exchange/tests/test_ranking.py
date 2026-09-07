@@ -868,3 +868,605 @@ def test_a_nan_candidate_cannot_make_the_order_depend_on_input_position():
     assert next(iter(orders))[0] == "bid-best", (
         "the genuinely best candidate must lead; a poisoned one must not outrank it"
     )
+
+
+# =====================================================================================
+# R11 — the formula's INPUTS arrive on the served path
+#
+# Everything above grades `rank()` as a library, handing it candidates that already carry
+# the five published features. That is precisely how R11 went inert without anything going
+# red: `exchange.ranking.candidates` produced NO feature at all, so on a served request four
+# of the five terms took their neutral value and `rank_score` was `0.4 + 0.2*trust`. Measured
+# over a real socket before this section existed, three stores bidding 90/100/90 against a
+# roster listing 100/200/300 all came back `rank_score=0.52`, and INVERTING every list price
+# on the roster returned bit-identical scores and the identical shortlist.
+#
+# So these tests drive the SERVED route — `POST /auctions` through the app object
+# `uvicorn exchange.main:app` builds — and assert on the JSON that comes back. A unit test on
+# the feature functions cannot see this defect, for the same reason the suite could not see
+# it the first time.
+# =====================================================================================
+SERVED_STORES = ("store-a", "store-b", "store-c")
+
+
+def _served_domain(store_id):
+    return f"{store_id}.example.com"
+
+
+def _served_claim(key, value):
+    """A claim exactly as a BIDDER writes it — no verdict on it (ESC-020)."""
+    return {
+        "key": key,
+        "value": value,
+        "provenance": {"source": "owner_statement", "ref": f"ref:{key}", "authority_rank": 1},
+    }
+
+
+def _served_bid(store_id, price, *, claims=None, delivery_days=None, offer_extra=None, extra=None):
+    import time
+
+    offer = {
+        "product_ref": "product-1",
+        "unit_price": price,
+        "total_price": price,
+        "currency": "USD",
+        "checkout_url": f"https://{_served_domain(store_id)}/cart/1:1",
+        "expires_at": time.time() + 3600.0,
+    }
+    if delivery_days is not None:
+        offer["delivery_estimate_days"] = delivery_days
+    offer.update(offer_extra or {})
+    bid = {
+        "auction_id": None,
+        "store_id": store_id,
+        "offer": offer,
+        "claims": [_served_claim("capacity_l", 35)] if claims is None else list(claims),
+        "agent_version": "1.0.0",
+        "schema_version": "1.0.0",
+    }
+    bid.update(extra or {})
+    return bid
+
+
+def _served_app(bids, *, trust=None, stores=SERVED_STORES, capacity_l=35, catalog=None):
+    """A fully wired exchange, answering from `bids` (`{store_id: bid}`).
+
+    `catalog` overrides the wired snapshot source. `None` means the one built below — a
+    snapshot per store, which is what almost every test here wants. Pass
+    `NoCatalogSnapshots()` for the deployment that wired none, which is a supported
+    configuration rather than a broken one and has its own ranking behaviour to pin.
+    """
+    import time
+
+    from exchange.auction.routes import configure_auctions
+    from exchange.checkout.sellers import StaticRegisteredDomains
+    from exchange.eligibility import ELIGIBLE, StaticSellerEligibility
+    from exchange.main import create_app
+    from exchange.ranking.serving import configure_ranking
+    from exchange.ranking.verification import StaticCatalogSnapshots
+
+    def solicit(store):
+        store_id = str(store["store_id"])
+        bid = bids.get(store_id)
+        if bid is None:
+            return None
+        return {"store_id": store_id, "received_at": time.time(), "bid": dict(bid)}
+
+    app = create_app()
+    configure_auctions(
+        app,
+        solicitor=solicit,
+        eligibility=StaticSellerEligibility({store: ELIGIBLE for store in stores}),
+    )
+    configure_ranking(
+        app,
+        trust_snapshot={
+            store: {"blacklisted": False, "score": float((trust or {}).get(store, 0.6))}
+            for store in stores
+        },
+        registered_domains=StaticRegisteredDomains(
+            {store: _served_domain(store) for store in stores}
+        ),
+        catalog=StaticCatalogSnapshots(
+            {
+                store: {
+                    "snapshot_id": f"snap-{store}",
+                    "products": [
+                        {
+                            "product_ref": "product-1",
+                            "canonical_name": "product-1",
+                            "evidence_ref": f"snap-{store}#product-1",
+                            "attributes": {"capacity_l": {"value": capacity_l}},
+                        }
+                    ],
+                }
+                for store in stores
+            }
+        )
+        if catalog is None
+        else catalog,
+    )
+    return app
+
+
+def _served_roster(list_prices, *, tier=1, extra=None):
+    return [
+        {
+            "store_id": store_id,
+            "tier": tier,
+            "product_ref": "product-1",
+            "list_price": float(list_price),
+            **(extra or {}),
+        }
+        for store_id, list_price in list_prices.items()
+    ]
+
+
+def _served_post(app, roster, *, intent=None):
+    from fastapi.testclient import TestClient
+
+    response = TestClient(app).post(
+        "/auctions",
+        json={
+            "intent": {
+                "intent_id": "intent-1",
+                "cluster_id": "cluster-1",
+                "hard_constraints": [{"field": "capacity_l", "op": "gte", "value": 30}],
+            }
+            if intent is None
+            else intent,
+            "roster": roster,
+            "bid_timeout_seconds": 2.0,
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def _served_scores(body):
+    return {row["store_id"]: row["rank_score"] for row in body["ranked"]}
+
+
+def _served_order(body):
+    return [row["store_id"] for row in body["ranked"]]
+
+
+def _served_slot_stores(body):
+    """The shortlist's slots as store ids — the minted `bid_ref` is `{auction_id}:{store_id}`
+    and the auction id is new on every request."""
+    return [slot["bid_ref"].split(":", 1)[1] for slot in body["shortlist"]["slots"]]
+
+
+def _served_features(body):
+    """`{store_id: features}` — read off the served response's own component map.
+
+    `components[name] / weight` recovers the feature, and the response publishes the
+    components rather than the features, which is the only reason the division is here.
+    """
+    from contracts.ranking import DEFAULT_RANKING_WEIGHTS
+
+    weights = DEFAULT_RANKING_WEIGHTS.feature_weights
+    return {
+        row["store_id"]: {
+            name: row["components"][name] / weights[name] for name in weights if weights[name]
+        }
+        for row in body["ranked"]
+    }
+
+
+def test_inverting_every_list_price_changes_the_served_scores_and_the_shortlist():
+    """The auditor's own experiment, rerun. THE gate for R11 on the served path.
+
+    Three stores bid 90/100/90 and those bids are held constant. The only thing that moves
+    between the two requests is the roster's list prices, inverted end to end. Before the
+    fix both requests answered `rank_score=0.52` for all three and published the identical
+    shortlist; after it the shortlist reverses, because `price_value` is
+    `clamp((list_price - total_price)/list_price, 0, 1)` and the roster is where
+    `list_price` lives.
+    """
+    bids = {
+        store: _served_bid(store, price)
+        for store, price in (("store-a", 90.0), ("store-b", 100.0), ("store-c", 90.0))
+    }
+
+    upright = _served_post(
+        _served_app(bids), _served_roster({"store-a": 100.0, "store-b": 200.0, "store-c": 300.0})
+    )
+    inverted = _served_post(
+        _served_app(bids), _served_roster({"store-a": 300.0, "store-b": 200.0, "store-c": 100.0})
+    )
+
+    assert upright["excluded"] == [], upright["excluded"]
+    assert inverted["excluded"] == [], inverted["excluded"]
+
+    # price_value: a=(100-90)/100=0.10  b=(200-100)/200=0.50  c=(300-90)/300=0.70
+    assert _served_order(upright) == ["store-c", "store-b", "store-a"], upright["ranked"]
+    # inverted: a=(300-90)/300=0.70  b=0.50  c=(100-90)/100=0.10
+    assert _served_order(inverted) == ["store-a", "store-b", "store-c"], inverted["ranked"]
+
+    assert _served_scores(upright) != _served_scores(inverted), (
+        "inverting every list price left the served rank scores bit-identical — the "
+        "published formula is inert on the served path (R11)"
+    )
+    assert _served_slot_stores(upright) == ["store-c", "store-b", "store-a"], upright["shortlist"]
+    assert _served_slot_stores(inverted) == ["store-a", "store-b", "store-c"], inverted["shortlist"]
+
+    # And the number is the published formula's, not merely "different": every non-price
+    # feature is equal across these three stores, so the score gap is w_v times the
+    # price_value gap and nothing else.
+    from contracts.ranking import DEFAULT_RANKING_WEIGHTS
+
+    w_v = DEFAULT_RANKING_WEIGHTS.feature_weights["price_value"]
+    scores = _served_scores(upright)
+    assert scores["store-c"] - scores["store-a"] == pytest.approx(w_v * (0.70 - 0.10))
+
+
+def test_the_served_price_value_is_the_published_formula_over_the_rosters_list_price():
+    """`price_value = clamp((list_price - total_price)/list_price, 0, 1)` (DESIGN.md:127).
+
+    Asserted per candidate off the served response, including both clamps: a store bidding
+    ABOVE its list price shows no saving (0.0, never negative), and a store bidding at its
+    list price shows exactly 0.0 — which is the positive control for the whole batch. A fix
+    that returned results by admitting everything would show a flattering number here.
+    """
+    bids = {
+        "store-a": _served_bid("store-a", 50.0),  # half of a 100 list price
+        "store-b": _served_bid("store-b", 100.0),  # exactly its list price
+        "store-c": _served_bid("store-c", 150.0),  # ABOVE its list price
+    }
+    body = _served_post(
+        _served_app(bids),
+        _served_roster({"store-a": 100.0, "store-b": 100.0, "store-c": 100.0}),
+    )
+    features = _served_features(body)
+
+    assert features["store-a"]["price_value"] == pytest.approx(0.50)
+    assert features["store-b"]["price_value"] == pytest.approx(0.0)
+    assert features["store-c"]["price_value"] == pytest.approx(0.0), (
+        "a bid ABOVE the list price produced a negative price_value; the published clamp is [0, 1]"
+    )
+
+
+def test_the_served_verified_claim_ratio_is_the_exchanges_own_verdicts():
+    """`verified_claim_ratio` is a count over the verdicts THIS exchange attested.
+
+    Driven on an intent with no hard constraint, so that a store presenting no claim at all
+    is still eligible and its feature can be read: a claimless store has no ratio to take,
+    so the feature is absent and reads the published neutral rather than 0.0 — scoring
+    silence as zero is the D13/D14 bias this codebase refuses everywhere else. Every store
+    bids the same price against the same list price, so `price_value` is 0.0 for all three
+    and this term is the only one that can separate them.
+    """
+    bids = {
+        "store-a": _served_bid(
+            "store-a",
+            100.0,
+            claims=[_served_claim("capacity_l", 35), _served_claim("colour", "black")],
+        ),
+        "store-b": _served_bid(
+            "store-b",
+            100.0,
+            claims=[_served_claim("capacity_l", 35), _served_claim("capacity_l", 35.0)],
+        ),
+        "store-c": _served_bid("store-c", 100.0, claims=[]),
+    }
+    body = _served_post(
+        _served_app(bids),
+        _served_roster({"store-a": 100.0, "store-b": 100.0, "store-c": 100.0}),
+        intent={"intent_id": "intent-1", "cluster_id": "cluster-1", "hard_constraints": []},
+    )
+    features = _served_features(body)
+
+    # `colour` is not in the catalogue snapshot at all -> `unsupported`, which is not
+    # verified: 1 of 2.
+    assert features["store-a"]["verified_claim_ratio"] == pytest.approx(0.5)
+    # Both claims agree with the catalogue: 2 of 2.
+    assert features["store-b"]["verified_claim_ratio"] == pytest.approx(1.0)
+    # No claims at all: absent, therefore the published neutral.
+    assert features["store-c"]["verified_claim_ratio"] == pytest.approx(0.5)
+    assert _served_order(body)[0] == "store-b", body["ranked"]
+
+
+def test_an_exchange_with_no_catalog_does_not_rank_the_store_that_bid_below_the_one_that_did_not():
+    """A claim this exchange could NOT check is undecided, not failed.
+
+    An exchange with no catalog wired holds no snapshot for anybody, so
+    `attest_candidate_claims` attests every claim `ambiguous` with the reason "the exchange
+    holds no catalog snapshot for this store, so its claims could not be checked". Counting
+    those in the ratio's denominator scores 0.0 for "we do not know" — the D13/D14 bias this
+    codebase refuses everywhere else — and it does it to the stores that ANSWERED, because a
+    candidate with no claims at all (an R10 fallback, by construction) has no ratio to take
+    and therefore reads the published neutral.
+
+    That is not a hypothetical ordering. It is what the S1 demo produced the day
+    `ranking/features.py` landed: two hosted stores bid over real sockets, read 0.0 on this
+    term, and the silent store's list-price fallback read 0.5 and took the top slot off both
+    of them — and accepting a fallback is a handoff that mints no discount code, so the whole
+    journey ended with `code=''`.
+
+    Both halves are asserted. The feature, because that is the defect; and the ORDER, because
+    a feature that reads correctly and still leaves the non-bidder on top would have fixed
+    nothing. `store-b` never answers, so its entry is the exchange's own R10 fallback.
+    """
+    from exchange.ranking.verification import NoCatalogSnapshots
+
+    bids = {"store-a": _served_bid("store-a", 100.0, claims=[_served_claim("capacity_l", 35)])}
+    body = _served_post(
+        _served_app(
+            bids,
+            stores=("store-a", "store-b"),
+            trust={"store-a": 0.8, "store-b": 0.6},
+            catalog=NoCatalogSnapshots(),
+        ),
+        _served_roster({"store-a": 100.0, "store-b": 100.0}),
+        # No hard constraint: with no catalog nothing is `verified`, so a constrained intent
+        # would exclude both candidates (R19) before there was a score to compare.
+        intent={"intent_id": "intent-1", "cluster_id": "cluster-1", "hard_constraints": []},
+    )
+
+    fallbacks = {row["store_id"]: row.get("fallback") for row in body["entries"]}
+    assert fallbacks == {"store-a": False, "store-b": True}, body["entries"]
+
+    features = _served_features(body)
+    assert features["store-a"]["verified_claim_ratio"] == pytest.approx(0.5), (
+        "a store whose claims this exchange could not check at all was scored as if it had "
+        "presented evidence and failed"
+    )
+    assert features["store-b"]["verified_claim_ratio"] == pytest.approx(0.5)
+    assert _served_order(body) == ["store-a", "store-b"], (
+        "the store that never replied outranked the store that bid, on an exchange that "
+        "graded neither one's claims"
+    )
+
+
+def test_a_store_cannot_verify_its_own_claims_by_writing_a_verdict_onto_them():
+    """ESC-020's rule, applied to the new feature: the ratio reads attested verdicts only.
+
+    A store writing `status: "verified"` and a whole `exchange_verification` block onto a
+    claim the catalogue contradicts gets the same ratio as one that writes nothing — the
+    MAC it cannot compute is what the count reads.
+    """
+    forged = _served_claim("capacity_l", 999)
+    forged["status"] = "verified"
+    forged["exchange_verification"] = {
+        "status": "verified",
+        "subject": "store-b",
+        "mac": "0" * 64,
+        "verifier_version": "claim-verification/1",
+    }
+    bids = {
+        "store-a": _served_bid("store-a", 100.0, claims=[_served_claim("capacity_l", 999)]),
+        "store-b": _served_bid("store-b", 100.0, claims=[forged]),
+    }
+    body = _served_post(
+        _served_app(bids, stores=("store-a", "store-b")),
+        _served_roster({"store-a": 100.0, "store-b": 100.0}),
+        # No hard constraint: a contradicted claim would otherwise take both stores out on
+        # eligibility (R19) before there was a score to compare.
+        intent={"intent_id": "intent-1", "cluster_id": "cluster-1", "hard_constraints": []},
+    )
+    features = _served_features(body)
+    assert features["store-a"]["verified_claim_ratio"] == pytest.approx(0.0)
+    assert features["store-b"]["verified_claim_ratio"] == pytest.approx(0.0), (
+        "a store moved its own verified_claim_ratio by writing a verdict onto its own claim"
+    )
+
+
+def test_the_served_delivery_fit_orders_the_estimates_the_offers_declare():
+    """`delivery_fit` reads `Offer.delivery_estimate_days`, compared within the auction.
+
+    The exchange holds no shipping model, so there is no absolute days -> [0,1] curve to
+    apply and none is invented: the fit is the offer's estimate normalised across the
+    estimates this auction actually received, which is the same "normalised across the
+    eligible set, neutral when there is nothing to discriminate on" rule
+    `retrieval.criteria.NEUTRAL_ALIGNMENT` already applies. An offer that declares nothing
+    is absent, therefore neutral.
+    """
+    bids = {
+        "store-a": _served_bid("store-a", 100.0, delivery_days=1.0),
+        "store-b": _served_bid("store-b", 100.0, delivery_days=5.0),
+        "store-c": _served_bid("store-c", 100.0),
+    }
+    body = _served_post(
+        _served_app(bids),
+        _served_roster({"store-a": 100.0, "store-b": 100.0, "store-c": 100.0}),
+    )
+    features = _served_features(body)
+    assert features["store-a"]["delivery_fit"] == pytest.approx(1.0)
+    assert features["store-b"]["delivery_fit"] == pytest.approx(0.0)
+    assert features["store-c"]["delivery_fit"] == pytest.approx(0.5)
+    assert _served_order(body)[0] == "store-a", body["ranked"]
+
+
+def test_one_delivery_estimate_in_an_auction_discriminates_nothing():
+    """A degenerate range is not a ranking signal, and must not be read as one.
+
+    With a single declared estimate there is no comparison to make, so every candidate reads
+    the published neutral and the delivery term cannot move the order. This is the positive
+    control against a normalisation that hands the only declarant a free 1.0.
+    """
+    bids = {
+        "store-a": _served_bid("store-a", 100.0, delivery_days=3.0),
+        "store-b": _served_bid("store-b", 100.0),
+    }
+    body = _served_post(
+        _served_app(bids, stores=("store-a", "store-b")),
+        _served_roster({"store-a": 100.0, "store-b": 100.0}),
+    )
+    features = _served_features(body)
+    assert features["store-a"]["delivery_fit"] == pytest.approx(0.5)
+    assert features["store-b"]["delivery_fit"] == pytest.approx(0.5)
+
+
+def test_an_unreadable_delivery_estimate_is_absent_rather_than_the_fastest():
+    """A negative or non-finite estimate is not an estimate.
+
+    Read as a number it would be the SMALLEST in the auction and would therefore win the
+    delivery term outright — a store promising `-1000` days is not promising anything.
+    """
+    bids = {
+        "store-a": _served_bid("store-a", 100.0, delivery_days=-1000.0),
+        "store-b": _served_bid("store-b", 100.0, delivery_days=2.0),
+        "store-c": _served_bid("store-c", 100.0, delivery_days=4.0),
+    }
+    body = _served_post(
+        _served_app(bids),
+        _served_roster({"store-a": 100.0, "store-b": 100.0, "store-c": 100.0}),
+    )
+    features = _served_features(body)
+    assert features["store-a"]["delivery_fit"] == pytest.approx(0.5)
+    assert features["store-b"]["delivery_fit"] == pytest.approx(1.0)
+    assert features["store-c"]["delivery_fit"] == pytest.approx(0.0)
+
+
+def test_trust_still_moves_a_served_ranking_with_price_held_constant():
+    """The second direction, and the fix is not demonstrated without it.
+
+    Every store bids its own list price, so `price_value` is 0.0 for all three and the only
+    thing left to separate them is the trust snapshot. The gap is exactly `w_t` times the
+    trust gap: the other four terms are equal, so nothing else contributed.
+    """
+    from contracts.ranking import DEFAULT_RANKING_WEIGHTS
+
+    bids = {store: _served_bid(store, 100.0) for store in SERVED_STORES}
+    body = _served_post(
+        _served_app(bids, trust={"store-a": 0.2, "store-b": 0.9, "store-c": 0.5}),
+        _served_roster({"store-a": 100.0, "store-b": 100.0, "store-c": 100.0}),
+    )
+
+    assert _served_order(body) == ["store-b", "store-c", "store-a"], body["ranked"]
+    scores = _served_scores(body)
+    w_t = DEFAULT_RANKING_WEIGHTS.feature_weights["trust"]
+    assert scores["store-b"] - scores["store-a"] == pytest.approx(w_t * (0.9 - 0.2))
+
+
+def test_the_served_ranking_stays_blind_to_fee_tier_and_envelope():
+    """R11's other half, re-measured now that the features are live.
+
+    Adding features is exactly when blindness gets broken by accident, so the same auction
+    is driven twice: once plain, once with a network fee and a fee rate on the bid, an
+    envelope's commitments and discount ceiling on the offer, and a different (still
+    agent-bearing) tier on the roster. Every rank score must be bit-identical — not
+    approximately equal, because a formula that reads a fee produces a different float.
+    """
+    plain = {store: _served_bid(store, 90.0) for store in SERVED_STORES}
+    laden = {
+        store: _served_bid(
+            store,
+            90.0,
+            offer_extra={
+                "commitments": [_served_claim("returns_days", 30)],
+                "envelope_max_discount_pct": 40.0,
+            },
+            extra={"network_fee": 12.5, "fee_rate": 0.30, "tier": 3, "envelope_budget_cap": 900.0},
+        )
+        for store in SERVED_STORES
+    }
+    roster = {"store-a": 100.0, "store-b": 200.0, "store-c": 300.0}
+
+    first = _served_post(_served_app(plain), _served_roster(roster, tier=1))
+    second = _served_post(_served_app(laden), _served_roster(roster, tier=2))
+
+    assert _served_scores(first) == _served_scores(second), (
+        "a network fee, a tier or an envelope moved a served rank score (R11)"
+    )
+    assert _served_order(first) == _served_order(second)
+
+
+def test_the_served_ranking_is_deterministic_over_identical_inputs():
+    """R11/S3: the same inputs produce the same scores, to the bit."""
+    bids = {store: _served_bid(store, 90.0) for store in SERVED_STORES}
+    roster = _served_roster({"store-a": 100.0, "store-b": 200.0, "store-c": 300.0})
+    first = _served_post(_served_app(bids), roster)
+    second = _served_post(_served_app(bids), roster)
+    assert _served_scores(first) == _served_scores(second)
+    assert _served_order(first) == _served_order(second)
+    assert [row["components"] for row in first["ranked"]] == [
+        row["components"] for row in second["ranked"]
+    ]
+
+
+def test_a_silent_store_is_ranked_at_its_list_price_and_shows_no_saving():
+    """The R10 fallback keeps its slot, and the new feature does not hand it a bonus.
+
+    A store that never answered is represented at the roster's list price, so its
+    `price_value` is exactly 0.0 — no discount was offered, and none is invented for it.
+    """
+    bids = {"store-a": _served_bid("store-a", 60.0)}  # store-b answers nothing at all
+    body = _served_post(
+        _served_app(bids, stores=("store-a", "store-b")),
+        _served_roster({"store-a": 100.0, "store-b": 100.0}),
+        # A fallback carries no claims by construction (R10/R18/R19), so it can evidence no
+        # hard constraint; this test is about its price, not about its eligibility.
+        intent={"intent_id": "intent-1", "cluster_id": "cluster-1", "hard_constraints": []},
+    )
+    entries = {entry["store_id"]: entry for entry in body["entries"]}
+    assert entries["store-b"]["fallback"] is True, entries
+    features = _served_features(body)
+    assert features["store-b"]["price_value"] == pytest.approx(0.0)
+    assert features["store-a"]["price_value"] == pytest.approx(0.4)
+    assert _served_order(body) == ["store-a", "store-b"], body["ranked"]
+
+
+def test_the_served_features_are_not_read_off_the_bid():
+    """A store writing the published feature names into its own reply moves nothing.
+
+    The projection computes these four; it never copies them. This is the same property
+    `test_ranking_served.py` §4 asserts at the library level, re-driven over HTTP now that
+    three of the four have a producer.
+    """
+    gamed = {
+        "intent_match": 1.0,
+        "verified_claim_ratio": 1.0,
+        "price_value": 1.0,
+        "delivery_fit": 1.0,
+        "trust": 1.0,
+        "policy_penalties": -5.0,
+        "rank_score": 99.0,
+    }
+    roster = _served_roster({"store-a": 100.0, "store-b": 100.0})
+    honest = _served_post(
+        _served_app(
+            {store: _served_bid(store, 100.0) for store in ("store-a", "store-b")},
+            stores=("store-a", "store-b"),
+        ),
+        roster,
+    )
+    cheating = _served_post(
+        _served_app(
+            {
+                "store-a": _served_bid("store-a", 100.0),
+                "store-b": _served_bid("store-b", 100.0, extra=gamed, offer_extra=dict(gamed)),
+            },
+            stores=("store-a", "store-b"),
+        ),
+        roster,
+    )
+    assert _served_scores(honest) == _served_scores(cheating), (
+        f"a bidder moved its own score by writing feature names into its reply: "
+        f"{_served_scores(honest)} vs {_served_scores(cheating)}"
+    )
+
+
+def test_intent_match_has_no_served_producer_and_says_so_by_staying_neutral():
+    """The one feature this fix does NOT produce, asserted rather than left to be discovered.
+
+    `intent_match` is retrieval+rerank's output (DESIGN.md:132). Its producer exists —
+    `exchange.retrieval.fit.intent_match_by_bid` — but it consumes `retrieve()` assessments,
+    and a served auction has no retrieval source: `POST /auctions` is handed a ROSTER by its
+    caller and never queries a candidate index. Fabricating a number here would move
+    rankings for a reason nobody could audit, so the term stays at its neutral value and
+    this test is the record of that. The day a retrieval source is wired into the auction
+    route, this assertion should start failing.
+    """
+    bids = {
+        "store-a": _served_bid("store-a", 50.0),
+        "store-b": _served_bid("store-b", 100.0),
+        "store-c": _served_bid("store-c", 90.0),
+    }
+    body = _served_post(
+        _served_app(bids),
+        _served_roster({"store-a": 100.0, "store-b": 100.0, "store-c": 100.0}),
+    )
+    features = _served_features(body)
+    assert {row["intent_match"] for row in features.values()} == {0.5}, features

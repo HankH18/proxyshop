@@ -53,3 +53,6 @@ coverage/
 # measurement, and a tracked copy would churn main each cycle and put a
 # .swarm-loop/ path in any branch diff that produced it (check-branch vetoes those).
 .swarm-loop/reports/verify-last.log
+
+# T-210 probe scratch trees (see the ruff extend-exclude note); ephemeral, never committed
+.t210-*

@@ -822,19 +822,34 @@ def test_t317_the_merchant_route_comparison_is_armed() -> None:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-317: the merchant serves GET /install, GET /install/callback and GET "
-        "/install/shops (apps/merchant/svc/src/install/routes.py:145, :173, :248) and none of "
-        "the three appears in packages/contracts/openapi/merchant.openapi.json. Undeclared "
-        "served routes are a security and review surface: nothing in the contract review "
-        "process ever looks at them. test_merchant_hardening.py:413-417 hard-exempts exactly "
-        "these three while its own docstring justifies only 'the install's own OAuth pair' — "
-        "/install/shops is an administrative JSON endpoint, not a browser redirect; remove "
-        "this marker with the fix"
-    ),
-)
+# T-317 CLOSED — the `xfail(strict=True)` marker that stood here is REMOVED in the change that
+# closed it. The assertion is untouched.
+#
+# The repair chosen was PUBLISH rather than "stop serving them", and the reason is that all
+# three are load-bearing: `GET /install` and `GET /install/callback` are the Shopify OAuth pair
+# a merchant's browser walks to onboard at all, and `GET /install/shops` is the administrative
+# read of who is installed. Deleting any of them removes onboarding; there was never a version
+# of this ticket where the routes were the thing that was wrong.
+#
+# What WAS wrong is that they were reachable and undeclared, and the standing justification for
+# that — `test_merchant_hardening.py`'s docstring, "a Shopify-facing browser redirect, not a
+# cross-domain service API" — is an argument about who calls a route, not about whether anyone
+# reviews it. It also never covered `GET /install/shops`, which returns JSON, enumerates every
+# installed merchant, and is guarded by a bearer token; the exemption listed it anyway. All
+# three now appear in packages/contracts/openapi/merchant.openapi.json with the refusals they
+# actually answer (400/401/422/502/503), each captured by DRIVING the built app.
+#
+#   BEFORE (this branch, worker 2, --runxfail):
+#     "the merchant service answers 3 operation(s) that appear in no published contract:
+#      [('get', '/install'), ('get', '/install/callback'), ('get', '/install/shops')]"
+#   AFTER: served 9, published 9; `served - published` empty and `published - served` empty.
+#   CAUSATION: deleting the three new entries from the merchant contract returns this node to
+#     the BEFORE failure verbatim.
+#
+# BLAST RADIUS, checked before moving: `test_merchant_hardening.py:411-423` computes
+# `served - pinned - exempt` and asserts it empty. Adding the three to PINNED_ROUTES empties
+# `served - pinned` first, so the assertion still holds and its `exempt` set is now redundant
+# rather than wrong. That file belongs to another lane and is left alone.
 def test_t317_every_route_the_merchant_serves_is_in_its_published_contract() -> None:
     """A served route nobody declared is a surface nobody reviews.
 

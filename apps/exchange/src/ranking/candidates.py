@@ -10,26 +10,32 @@ are security boundaries rather than plumbing.
 **The projection NAMES its fields; it never passes the bid through.** A bid is a document the
 *store* wrote. Handing it to the scorer whole would let a bidder write ``intent_match: 1.0``
 into its own reply and win every auction it entered — R11's blindness lost not to a leak but to
-a field the store filled in. So the candidate is assembled from a fixed list of keys. The
-published features are deliberately absent: ``intent_match`` is retrieval's output (T-031, and
-unwired — see T-260), and an absent feature takes its published neutral value, which is the "we
-do not know" the formula already has a rule for. This also agrees with the published shape:
-``Bid`` in ``packages/contracts/schemas/protocol.schema.json`` is ``additionalProperties:
-false`` and declares no feature fields at all, so a store cannot even state one without failing
-validation. Nothing here needs to *strip* them; it simply never copies them.
+a field the store filled in. So the candidate is assembled from a fixed list of keys, and no
+published feature is among them. This also agrees with the published shape: ``Bid`` in
+``packages/contracts/schemas/protocol.schema.json`` is ``additionalProperties: false`` and
+declares no feature fields at all, so a store cannot even state one without failing validation.
+Nothing here needs to *strip* them; it simply never copies them.
 
-**What that costs today, measured, because it is a real property of the served ranking and not
-a footnote.** With ``intent_match``, ``verified_claim_ratio``, ``price_value`` and
-``delivery_fit`` all absent on every served candidate, four of the formula's five terms take
-their neutral value on every request — so ``rank_score`` is a function of the trust snapshot
-alone, and candidates from stores with equal trust TIE exactly. The published tie-breaks then
-decide the order, and ``shortlist.assign_slot_names`` falls through to rank position, so D29's
-four slot names read out as 1st/2nd/3rd/4th rather than as four different reasons to pick. The
-formula is being applied correctly to inputs that do not exist yet; the producer for the one
-feature DESIGN names (``intent_match``, from retrieval+rerank) is T-260's, and until it lands
-the served ranking is an eligibility gate plus a trust ordering rather than a five-term score.
-That is worth stating plainly, because a shortlist that comes back looking sensible is exactly
-the shape in which nobody notices.
+**Where the features come from instead, because "this module does not copy them" used to mean
+"nobody produced them".** :mod:`.features` computes them, out of the roster's list price, the
+offer's stated total price and delivery estimate, and the verdicts this exchange attested on
+the store's claims — and :func:`.serving.rank_auction` applies it after the attestation, so the
+records this module builds reach the scorer carrying the inputs the formula consumes. That
+sequencing is the whole repair: with the features produced by nobody, four of the five terms
+took their neutral value on every served request, ``rank_score`` was ``0.4 + 0.2*trust``, and
+candidates from stores with equal trust TIED exactly — measured over a real socket, three
+stores bidding 90/100/90 against a roster listing 100/200/300 all answered ``0.52``, and
+inverting every list price returned bit-identical scores and the identical shortlist. The
+formula was being applied correctly to inputs that did not exist.
+
+**Copying is still forbidden, and that is not in tension with the paragraph above.** What
+:mod:`.features` reads off the store is the store's PRICE and its DELIVERY ESTIMATE — the
+commitments it is bidding with, which the buyer is shown and which the checkout and the trust
+dimensions hold it to. What no module reads off the store is a number the store wrote under a
+feature's name. ``intent_match`` remains produced by nobody on this path: its producer is
+retrieval+rerank (T-031, unwired — see T-260) and a served auction has no retrieval source, so
+that one term still takes its published neutral, which is the "we do not know" the formula
+already has a rule for.
 
 **``store_domain`` comes from the platform, never from the bid.** ``checkout/sellers.py`` spells
 out why in full: on a bid the registered domain came from ``bid["store_domain"]`` — a field the
@@ -76,12 +82,17 @@ is answering WITH. Two consequences, both measured through the HTTP door:
   ``exchange_verification`` is dropped before verification and read by nothing after it. The
   cost is a real operational requirement — an exchange with no catalog wired verifies nothing
   and shortlists nobody on a hard-constrained intent.
-* **The ``price`` tie-break is the store's own ``total_price``.** The T-177 price wall in
-  ``auction/collect.py`` is what stands between that and a 0.01 bid; the ranker does not know
-  the wall exists.
+* **The ``price`` tie-break is the store's own ``total_price``** — and since :mod:`.features`
+  exists, so is one side of ``price_value`` (the other side is the roster's, which the store
+  cannot write). The T-177 price wall in ``auction/collect.py`` is what stands between both of
+  those and a 0.01 bid; the ranker does not know the wall exists.
 
-The five published FEATURES are the part this module does close: none of them is copied, so no
-key a store invents can move its own ``rank_score``.
+The five published FEATURES are the part this module does close, and the claim is exactly this:
+**none of them is copied**, so no key a store writes under a feature's NAME can move its own
+``rank_score``. It is not the broader claim that nothing a store writes can move its score — a
+store moves ``price_value`` by charging less and ``delivery_fit`` by promising sooner, which is
+what bidding IS. What it cannot do is assert the score itself, and the difference between
+stating an offer and grading one is the whole of R11's blindness.
 """
 
 from __future__ import annotations

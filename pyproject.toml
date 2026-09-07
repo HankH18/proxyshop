@@ -85,7 +85,15 @@ markers = [
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-extend-exclude = ["node_modules",".venv","dist","build",".swarm-loop",".pkgroot"]
+extend-exclude = ["node_modules",".venv","dist","build",".swarm-loop",".pkgroot",".t210-*"]
+# `.t210-*`: T-210's lock-exit-status probe builds a throwaway pytest tree with
+# `tempfile.mkdtemp(prefix=".t210-", dir=REPO_ROOT)` and sweeps it when it finishes. It lives
+# inside the repo root because the probe has to run pytest against a real tree, and its
+# generated files are DELIBERATELY malformed -- `assert False, "simulated product defect"` is
+# the point of them. Ruff walking one is always wrong, and while a single-threaded run never
+# sees one, a lint that overlaps a concurrent pytest does: measured twice today, `make verify`
+# died at the lint step on B011 and I001 inside a directory that no longer existed by the time
+# anyone looked. Excluding the pattern makes the gate independent of what else is running.
 # Without this, `extend-exclude` is honoured only when ruff DISCOVERS a file by walking a
 # directory. Any explicitly-named path — `ruff check .swarm-loop/acceptance`, a pre-commit
 # hook passing filenames, an editor linting the open file — is linted anyway, which would

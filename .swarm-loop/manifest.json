@@ -1,6 +1,6 @@
 {
-  "frozen_at": "2026-09-06T14:28:45",
-  "amendments": 41,
+  "frozen_at": "2026-09-06T19:57:04",
+  "amendments": 42,
   "files": {
     ".swarm-loop/acceptance/README.md": "650910301dc909eb6fb13bd1fcebabc4766e372e0c08210d08e18d84e42e596e",
     ".swarm-loop/acceptance/conftest.py": "298928bc45944aaaa58dcf39d2d1e7b5515b879c89d7658adae3aff03f7796bf",
@@ -14,11 +14,11 @@
     ".swarm-loop/acceptance/test_e7_buyer.py": "9eb36ab742687abaa06f125c6bc73274c4780b4937d1334ce87e98468882da1c",
     ".swarm-loop/acceptance/test_e8_proofs.py": "a7f7fc8e400bb83331fd1aa8020bbf7d9212273de4ede45c8b0f927b2ba8b939",
     ".swarm-loop/acceptance/test_spec_criteria.py": "674d9b0020cf4ac9c4044a4e80f25e0a0fdcd9f865e409d942950814cafc451d",
-    ".swarm-loop/goals.json": "1b09e01e88a1c4d2b35a1f461b59f540a8917f41cc6478098b4beba5834ab647",
+    ".swarm-loop/goals.json": "bcaed4058ebf5940949a974a90d22933d8a0394baa78b0a2ceb17033f8fa3213",
     "Makefile": "5667e65a172b98035e56e39d12b5cf44063e29de592cb0f93a91322eacc89c62",
     "scripts/verify.sh": "a509eef02c766987fee2c6ab253c17b5192487750e4a84bbdaea50796bc98862",
     "scripts/check_verify_contracts.py": "4ff99fd83dd328b3be7b5cef72c63ed7e3bfcef2f102b7f0928ba959789d193e",
-    "tickets.json": "6cc00a370474521134bce78ca27219ef071f133bb09466e295e5f35abb9eec56",
+    "tickets.json": "9bb6609135bf7b9a3fbbe9784fd5dec9b2b2c60782851cb20820b3c5f05d60b3",
     ".swarm-loop/amend-classes.json": "7ba5e073eaa60de45e9ef5284d5ecc90a1a6aaec57ac5b02247b35bad0844bed"
   },
   "targets": {
@@ -36,7 +36,7 @@
     "e8_proofs_passing": 8.0
   },
   "goals_canon": "968c4996d90b13565555da6796be7101e63de4db96a152c9af20b9e78cfe728e",
-  "log_seq": 83,
+  "log_seq": 84,
   "metric_defs": {
     "acceptance_pass_rate": {
       "target": 100.0,

@@ -341,6 +341,12 @@ class ClarifyResponse(BaseModel):
     questions: list[str]
     intent: dict[str, Any]
     unresolved: list[str]
+    #: Must-haves the buyer stated that this network cannot turn into an eligibility filter,
+    #: each with the reason. Empty on almost every dialogue, and load-bearing when it is not:
+    #: a filter naming an attribute no catalogue carries excludes every candidate, so the
+    #: shopper's screen says "no stores matched" when the truth is "the question was
+    #: unanswerable". Reporting it is what stops that failure from being silent.
+    unsatisfiable: list[dict[str, Any]] = Field(default_factory=list)
     confirmed: bool = False
 
 
@@ -392,6 +398,7 @@ async def clarify_route(body: ClarifyBody) -> ClarifyResponse:
         questions=list(outcome.questions),
         intent=outcome.intent.to_dict(),
         unresolved=list(outcome.unresolved),
+        unsatisfiable=[item.to_dict() for item in outcome.unsatisfiable],
         confirmed=outcome.confirmed,
     )
 

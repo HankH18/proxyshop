@@ -7,6 +7,486 @@
   },
   "x-domain": "merchant",
   "paths": {
+    "/install": {
+      "get": {
+        "operationId": "startInstall",
+        "summary": "Begin an install: redirect the merchant to Shopify's authorize screen.",
+        "description": "Served and declared nowhere until T-317. It is a browser redirect rather than a cross-domain service call, which is exactly why it was left out — and exactly why it was never reviewed. It is unauthenticated, it takes a caller-supplied `shop`, and it issues a signed install state; a surface with those three properties belongs in the contract.",
+        "parameters": [
+          {
+            "name": "shop",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "Redirect to Shopify's OAuth authorize screen, carrying the signed install state.",
+            "headers": {
+              "location": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "The authorize URL."
+              }
+            }
+          },
+          "400": {
+            "description": "`shop` is not a shop domain this app will talk to.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "description": "A stable machine-readable refusal code."
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "missing": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "expected": {
+                      "type": "string"
+                    },
+                    "got": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "error": "invalid-shop",
+                  "detail": "not a myshopify.com domain"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "`shop` was not supplied.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "detail": {
+                      "type": "array",
+                      "items": {
+                        "type": "object"
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "detail": [
+                    {
+                      "type": "missing",
+                      "loc": [
+                        "query",
+                        "shop"
+                      ],
+                      "msg": "Field required"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No Shopify API key/secret is configured, so no state can be issued or verified.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "description": "A stable machine-readable refusal code."
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "missing": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "expected": {
+                      "type": "string"
+                    },
+                    "got": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "error": "app-not-configured",
+                  "missing": [
+                    "SHOPIFY_API_KEY/SECRET"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/install/callback": {
+      "get": {
+        "operationId": "finishInstall",
+        "summary": "Verify Shopify's redirect, exchange the code, store the offline token, install.",
+        "description": "The other half of the OAuth pair, and the more sensitive one: it consumes the install state, spends an authorization code and stores an offline token. A forged, tampered and expired state all answer the same 400 on purpose — telling them apart is a signal handed to whoever is guessing.",
+        "responses": {
+          "200": {
+            "description": "The install that was completed: scopes granted, pixel installed, webhooks registered.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "shop",
+                    "scopes"
+                  ],
+                  "properties": {
+                    "shop": {
+                      "type": "string"
+                    },
+                    "scopes": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "web_pixel_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "webhooks": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "topic": {
+                            "type": "string"
+                          },
+                          "uri": {
+                            "type": "string"
+                          },
+                          "already_registered": {
+                            "type": "boolean"
+                          }
+                        }
+                      }
+                    },
+                    "offline_token_stored": {
+                      "type": "boolean"
+                    }
+                  }
+                },
+                "example": {
+                  "shop": "demo-store.myshopify.com",
+                  "scopes": [
+                    "read_products",
+                    "write_discounts"
+                  ],
+                  "web_pixel_id": "gid://shopify/WebPixel/1",
+                  "webhooks": [
+                    {
+                      "topic": "orders/paid",
+                      "uri": "https://app.example.com/webhooks/shopify/orders/paid",
+                      "already_registered": false
+                    }
+                  ],
+                  "offline_token_stored": true
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The state is unknown, or the shop it was issued for is not the shop that came back.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "description": "A stable machine-readable refusal code."
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "missing": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "expected": {
+                      "type": "string"
+                    },
+                    "got": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "error": "unknown-state"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "The callback's own HMAC did not verify.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "description": "A stable machine-readable refusal code."
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "missing": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "expected": {
+                      "type": "string"
+                    },
+                    "got": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "error": "callback-rejected",
+                  "detail": "hmac mismatch"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Shopify was unreachable or refused the exchange. Not this app being broken.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "description": "A stable machine-readable refusal code."
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "missing": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "expected": {
+                      "type": "string"
+                    },
+                    "got": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "error": "token-exchange-failed",
+                  "detail": "connect timeout"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No Shopify API key/secret is configured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "description": "A stable machine-readable refusal code."
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "missing": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "expected": {
+                      "type": "string"
+                    },
+                    "got": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "error": "app-not-configured",
+                  "missing": [
+                    "SHOPIFY_API_KEY/SECRET"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/install/shops": {
+      "get": {
+        "operationId": "listInstalledShops",
+        "summary": "Every shop this process holds an offline token for. Administrative; bearer-guarded.",
+        "description": "An administrative JSON endpoint, not a browser redirect — the reason T-317 refused the 'it is only the OAuth pair' exemption. It enumerates every installed merchant, and it refuses every caller until MERCHANT_ADMIN_TOKEN is configured.",
+        "responses": {
+          "200": {
+            "description": "The shops with a stored offline token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "shops"
+                  ],
+                  "properties": {
+                    "shops": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "shops": [
+                    "demo-store.myshopify.com"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No bearer token, or one that does not match.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "description": "A stable machine-readable refusal code."
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "missing": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "expected": {
+                      "type": "string"
+                    },
+                    "got": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "error": "unauthorized"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No administrative token is configured, so the route refuses everyone.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "error"
+                  ],
+                  "properties": {
+                    "error": {
+                      "type": "string",
+                      "description": "A stable machine-readable refusal code."
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "missing": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "expected": {
+                      "type": "string"
+                    },
+                    "got": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "error": "admin-api-not-configured",
+                  "missing": [
+                    "MERCHANT_ADMIN_TOKEN"
+                  ],
+                  "detail": "administrative routes refuse every caller until a token is configured"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/codes": {
       "post": {
         "operationId": "createDiscountCode",

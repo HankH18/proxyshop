@@ -1025,3 +1025,67 @@ def test_an_identifier_no_response_encoder_can_emit_is_refused_at_the_door() -> 
         f"the auction it opened answers 500 to every reader of GET /auctions/{{auction_id}}"
     )
     assert _retained_records(app) == {}
+
+
+# ---------------------------------------------------------------------------------
+# The roster's list price reaches the ranker (R11)
+#
+# `price_value = clamp((list_price - total_price)/list_price, 0, 1)` (DESIGN.md:127) is one
+# of the five published rank features, and `list_price` exists ONLY on the roster row: the
+# bid states what the store charges, never what the product lists at. Until `BidEntry`
+# carried it, the ranker held one half of that subtraction and the feature was absent on
+# every served candidate — so the published formula's offer-value term did nothing at all.
+# ---------------------------------------------------------------------------------
+def test_every_entry_carries_the_rosters_list_price() -> None:
+    """Both branches: a store that answered, and one that did not."""
+    entries = collect_bids(
+        [rostered("store-a", 120.0), rostered("store-b", 80.0)],
+        [response("store-a", 90.0, T_NOW - 1.0)],
+        T_NOW,
+    )
+    by_store = {entry.store_id: entry for entry in entries}
+
+    assert by_store["store-a"].fallback is False
+    assert by_store["store-a"].list_price == pytest.approx(120.0)
+    assert by_store["store-b"].fallback is True
+    assert by_store["store-b"].list_price == pytest.approx(80.0), (
+        "a fallback entry lost the roster price it was minted from, so the ranker cannot "
+        "compare its list-price offer against anything"
+    )
+
+
+def test_the_entrys_list_price_is_the_rosters_and_never_the_bids() -> None:
+    """A store writing a list price into its own reply states nothing.
+
+    It is the same rule as `store_id` and `store_domain`: the list price is the other half of
+    the saving the buyer is shown, so a bidder supplying both halves would be publishing its
+    own discount.
+    """
+    answered = response("store-a", 90.0, T_NOW - 1.0)
+    answered["bid"]["list_price"] = 9_999.0
+    answered["bid"]["offer"]["list_price"] = 9_999.0
+
+    entry = collect_bids([rostered("store-a", 120.0)], [answered], T_NOW)[0]
+
+    assert entry.list_price == pytest.approx(120.0)
+
+
+@pytest.mark.parametrize("listed", [None, 0.0, -10.0, "cheap", float("nan"), float("inf"), True])
+def test_a_roster_row_that_prices_nothing_states_no_list_price(listed) -> None:
+    """Absent, zero, negative and unreadable all mean the same thing: no comparison.
+
+    `None` rather than `0.0`, because `0.0` on this field is a list price of nothing, against
+    which every bid is a 100% markup — or, taken the other way, a free product. The ranker
+    reads the absence as "this exchange cannot price the product" and the feature takes its
+    published neutral instead of a number nobody could defend. This is the same set of
+    spellings `_list_price_bid` already mints no offer for (T-277/T-224).
+    """
+    row = rostered("store-a", 100.0)
+    if listed is None:
+        row.pop("list_price")
+    else:
+        row["list_price"] = listed
+
+    entry = collect_bids([row], [response("store-a", 90.0, T_NOW - 1.0)], T_NOW)[0]
+
+    assert entry.list_price is None, f"list_price={listed!r} was read as a price"

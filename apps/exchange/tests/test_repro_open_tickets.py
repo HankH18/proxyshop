@@ -886,7 +886,9 @@ def test_the_served_versus_published_sweep_is_armed() -> None:
         f"{served_counts}) — for any service in that state the gates below cannot tell "
         "'serves nothing' from 'cannot be measured'"
     )
-    served_floors = {"exchange": 3, "trust": 6}
+    # RAISED with the T-266/T-312 fix, from {"exchange": 3, "trust": 6}, to the counts measured
+    # after it: a floor left at the pre-fix number cannot see the fix being undone.
+    served_floors = {"exchange": 6, "trust": 8}
     lost = {n: c for n, c in served_counts.items() if c < served_floors.get(n, 0)}
     assert not lost, (
         f"a swept service lost served routes since these gates were measured — {lost} against "
@@ -904,7 +906,10 @@ def test_the_served_versus_published_sweep_is_armed() -> None:
     # control, not as a graded surface, and floor-ing its contract here would turn THIS file
     # red for a merchant-lane change that has nothing to do with T-310 or T-312 — a gate whose
     # failures land on a lane that cannot act on them is a gate that gets deleted.
-    floors = {"exchange": 5, "trust": 4}
+    # RAISED with the T-266/T-312 fix, from {"exchange": 5, "trust": 4}. Sixteen operations
+    # four services were already answering became declared in that change; a floor still set to
+    # the pre-fix count would let every one of them be deleted again silently.
+    floors = {"exchange": 6, "trust": 10}
     shrunk = {name: n for name, n in published_counts.items() if n < floors.get(name, 0)}
     assert not shrunk, (
         "a published contract lost operations since these gates were measured — "
@@ -919,41 +924,46 @@ def test_the_served_versus_published_sweep_is_armed() -> None:
 # =====================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-312 (exchange half): exchange.main.create_app() serves POST /auctions, "
-        "GET /auctions/{auction_id} and POST /auctions/{auction_id}/accept, while the "
-        "published contract declares GET /auctions/{auction_id}/shortlist, "
-        "POST /internal/outcomes and POST /v1/auctions/{auction_id}/bids — all three measured "
-        "404 — and declares nothing at all for the GET /auctions/{auction_id} the app does "
-        "serve; remove this marker with the fix"
-    ),
-)
+# T-312 (exchange half) CLOSED — the `xfail(strict=True)` marker that stood here is REMOVED in
+# the change that closed it, and the assertion below is untouched.
+#
+# The marker's reason was already half stale when this lane picked it up, which is worth saying
+# because it is why the ticket text and the tree disagreed. It claimed three published paths
+# "all three measured 404": GET /auctions/{auction_id}/shortlist, POST /internal/outcomes and
+# POST /v1/auctions/{auction_id}/bids. RE-MEASURED on this branch by building the app, all
+# three are SERVED — `exchange.main.create_app()` mounts five feature routers (accept, auction,
+# external_bids, policy, ranking) and answers six operations. Only ONE half of the divergence
+# was still live: `GET /auctions/{auction_id}`, served and declared in no contract.
+#
+# The repair chosen was PUBLISH, not delete, and the reason is a caller rather than a
+# preference: `proxyshop_demo/s1.py` drives `GET {exchange_url}/auctions/{id}` over HTTP at
+# :709 and :1015, and README.md documents it as part of the exchange's surface. Deleting a
+# route the demo drives to make two sets agree would have been the fake this file's arming test
+# warns about, in the served direction.
+#
+#   BEFORE (this branch, worker 2, --runxfail):
+#     served 6, published 5; published but NOT served: none;
+#     served but NOT published: ['GET /auctions/{}']
+#   AFTER: served 6, published 6, both directions empty.
+#   CAUSATION: removing the `/auctions/{auction_id}` entry from
+#     packages/contracts/openapi/exchange.openapi.json (and its two PINNED_ROUTES rows)
+#     returns this node to the BEFORE failure verbatim.
 def test_t312_the_exchange_serves_exactly_the_operations_its_contract_publishes() -> None:
-    """Three published doors nobody answers, and one served door nobody published.
+    """The exchange's served surface and its published contract, in both directions.
 
-    Measured at HEAD by building the app and reading ``app.openapi()['paths']``::
+    Measured after the fix by building the app and reading ``app.openapi()['paths']``::
 
-        served     POST /auctions
+        served == published ==
+                   POST /auctions
                    GET  /auctions/{auction_id}
                    POST /auctions/{auction_id}/accept
-        published  POST /auctions
-                   POST /auctions/{auction_id}/accept
-                   GET  /auctions/{auction_id}/shortlist      -> 404
-                   POST /internal/outcomes                    -> 404
-                   POST /v1/auctions/{auction_id}/bids        -> 404
+                   GET  /auctions/{auction_id}/shortlist
+                   POST /internal/outcomes
+                   POST /v1/auctions/{auction_id}/bids
 
-    The three 404s are the shortlist a buyer is supposed to read, the outcome callback the
-    bandit is supposed to learn from, and the external bid submission a store is supposed to
-    use — each fully built and tested as a library and reachable by no request. The fourth
-    difference runs the other way: ``GET /auctions/{auction_id}`` is a live, unauthenticated
-    read of auction state that appears in no contract, so no client can be told it exists and
-    no reviewer of the contract can see that it does.
-
-    Both directions are asserted together on purpose. Serving the three missing paths while
-    leaving the fourth undeclared leaves the surface still diverging from its specification,
-    which is the property this gate is for — not a checklist of three names.
+    Both directions are asserted together on purpose. Serving every published path while
+    leaving a served one undeclared still leaves the surface diverging from its specification,
+    which is the property this gate is for — not a checklist of names.
     """
     served = _served_operations(_build("exchange.main"))
     published = _published_operations(EXCHANGE_OPENAPI)
@@ -965,32 +975,53 @@ def test_t312_the_exchange_serves_exactly_the_operations_its_contract_publishes(
     )
 
 
+# MARKER REASON REWRITTEN, and the marker deliberately KEPT. The text that stood here was
+# false in three of its four claims, measured on this branch: trust does NOT serve "only the
+# six raw-ledger /events operations" (it serves eight, including `GET /snapshot` and
+# `POST /claims/verifications`), `GET /snapshot` does NOT measure 404 (T-261 served it), and
+# the five read-side /events operations ARE now declared. A strict-xfail whose stated reason is
+# false is how a gate stops being readable evidence — this file says so above
+# `test_the_published_denial_reason_has_an_enumerated_vocabulary` — so the reason is corrected
+# to what is actually still red, and only that.
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "T-312 (trust half): trust.main.create_app() serves only the six raw-ledger "
-        "/events operations, while the published contract declares GET /snapshot, "
-        "GET /stores/{store_id}/trust and POST /feedback/{order_ref} — all three measured "
-        "404 — and declares none of the five read-side /events operations the app does "
-        "serve; remove this marker with the fix"
+        "T-312 (trust half), RE-MEASURED on this branch: the served-but-unpublished direction "
+        "is CLOSED — trust.openapi.json now declares all eight operations trust.main serves "
+        "(GET /events, /events/head, /events/verify, /events/replay, /events/{event_id} and "
+        "POST /claims/verifications joined POST /events and GET /snapshot). What is still red "
+        "is the other direction and only it: GET /stores/{store_id}/trust and "
+        "POST /feedback/{order_ref} are published and served by nothing, 10 published against "
+        "8 served. Closing it needs a decision this lane cannot take and a file it does not "
+        "own. Both repairs are out of scope AND unsound as-is: SERVING them means a new "
+        "apps/trust/src/<feature>/routes.py, and nothing in the repo would call either door — "
+        "the exchange reads trust through GET /snapshot (composition.py trust_endpoint) and "
+        "the buyer's R14 feedback already reaches trust through POST /events "
+        "(proxyshop_support/trust_ledger.py TRUST_EVENTS_PATH), so each new route would be "
+        "born with zero callers, which is the island this batch exists to remove. UNPUBLISHING "
+        "them means deleting two routes DESIGN.md §Service APIs pins, plus repointing the two "
+        "example-checker fixtures in packages/contracts/tests that use "
+        "trust /stores/{store_id}/trust responses.200 as their known-good body. Keep this "
+        "marker until that decision is made; remove it with the fix"
     ),
 )
 def test_t312_the_trust_service_serves_exactly_the_operations_its_contract_publishes() -> None:
-    """The trust service exposes its ledger and none of the reads the platform is promised.
+    """Two promises the trust service publishes and does not keep.
 
-    Measured at HEAD::
+    Measured on this branch by building the app and reading ``app.openapi()['paths']``::
 
         served     POST /events            GET /events        GET /events/head
                    GET  /events/replay     GET /events/verify GET /events/{event_id}
-        published  POST /events
-                   GET  /snapshot                  -> 404
+                   GET  /snapshot          POST /claims/verifications
+        published  the eight above, plus
                    GET  /stores/{store_id}/trust   -> 404
                    POST /feedback/{order_ref}      -> 404
 
-    So the only operation the two sides agree on is the append. The trust *scores* — the whole
-    point of the service, and R12's input to the exchange's eligibility gate — are readable by
-    nobody, and the buyer feedback that is supposed to move them has no door. Inversely, five
-    read paths over the raw event log are served with no contract declaring them.
+    The trust *scores* are readable — through ``GET /snapshot``, which is what the exchange's
+    client actually reads — so the per-store door is a second read of the same computation
+    with no consumer, and the buyer's feedback already reaches the ledger through
+    ``POST /events``. That is the whole of what is left, and it is a product decision about two
+    DESIGN-pinned interfaces rather than a missing implementation.
 
     This half lives in the exchange's repro file rather than under ``apps/trust/tests`` because
     it needs no file there: it imports ``trust.main`` and reads
@@ -1038,21 +1069,29 @@ def test_t312_the_trust_service_serves_exactly_the_operations_its_contract_publi
 # armed test above covers this one for free.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-266: the exchange's served surface is not the one its contract publishes. Filed "
-        "at 4 served against 5 published; RE-MEASURED on this branch after POST "
-        "/internal/outcomes was served, it is 5 against 5 and still divergent — published "
-        "but NOT served: POST /v1/auctions/{auction_id}/bids; served but NOT published: GET "
-        "/auctions/{auction_id}. Each remaining half needs a file apps/exchange does not "
-        "own: serving the bid door turns packages/contracts/tests/test_repro_open_tickets"
-        "::test_the_pinned_external_bid_door_is_actually_served into an XPASS(strict) "
-        "failure, and publishing the auction read needs PINNED_ROUTES in both languages "
-        "plus DESIGN.md. A published path a service does not answer is a promise the "
-        "platform is already making to clients; remove this marker with the fix"
-    ),
-)
+# T-266 CLOSED — the `xfail(strict=True)` marker that stood here is REMOVED in the change that
+# closed it. The assertion is untouched.
+#
+# The marker's own reason named two obstacles and BOTH had already dissolved by the time this
+# lane measured them, which is recorded rather than quietly dropped:
+#
+#   * "published but NOT served: POST /v1/auctions/{auction_id}/bids" — stale. T-244 landed
+#     `apps/exchange/src/external_bids/routes.py`; the door is served, and the coupling this
+#     reason predicted ("serving the bid door turns
+#     packages/contracts/tests/test_repro_open_tickets::
+#     test_the_pinned_external_bid_door_is_actually_served into an XPASS(strict) failure") was
+#     already handled there — that node's marker is gone and it PASSES. Re-checked before
+#     moving; nothing about it needed touching here.
+#   * "publishing the auction read needs PINNED_ROUTES in both languages plus DESIGN.md" —
+#     two thirds right. It needed `contracts.openapi.PINNED_ROUTES` and its TypeScript twin,
+#     both of which this change edits. It did NOT need DESIGN.md: no test parses DESIGN's
+#     route prose, and `test_no_route_is_declared_that_design_does_not_pin` compares the
+#     documents to PINNED_ROUTES alone. DESIGN still owns which routes are cross-domain; it
+#     was never the register of which are reachable, and the `PINNED_ROUTES` docstring now
+#     says so instead of implying otherwise.
+#
+# BEFORE / AFTER / CAUSATION are recorded once, above the T-312 exchange node, because the two
+# nodes read the same corpus through the same helpers and cannot disagree.
 def test_t266_the_exchange_serves_exactly_the_operations_its_contract_publishes() -> None:
     """T-266's own node for T-266's own property: served surface == published contract."""
     served = _served_operations(_build("exchange.main"))

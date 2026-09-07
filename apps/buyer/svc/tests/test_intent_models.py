@@ -617,3 +617,241 @@ def test_the_refusal_names_the_field_and_the_ceiling_but_never_quotes_the_value(
     assert "query" in message
     assert "q" * 100 not in message, "the refusal quotes the oversized value back"
     assert len(message) <= 512, f"a {len(message)}-character refusal is an echo by another name"
+
+
+# =====================================================================================
+# The two clarifier defects that made every real shopper's shortlist empty
+# =====================================================================================
+# Both were invisible to the green suite because nothing drove the SERVED route with a real
+# dialogue and then asked what the intent it produced does downstream. Measured on this
+# branch before the fix, ``POST /buyer/intent/clarify`` with the three turns
+# ``e2e/support/s1/run.json`` ships as its shopper's own words answered:
+#
+#     "hard_constraints": [{"field": "brew_method", "op": "eq", "value": "espresso"}]
+#     "budget_band": "unspecified",  "unresolved": ["budget"]
+#     "questions": ["What is the most you would want to spend?",
+#                   "Roughly what budget should I stay under?",
+#                   "A ballpark number is fine - what is the ceiling?"]
+#
+# 1. ``brew_method`` names an attribute NO catalogue in this tree carries — not
+#    ``fixtures/catalog/coffee.json``, not a store agent's catalogue, not a bid, not a
+#    catalog snapshot. A hard constraint is an eligibility FILTER decided against verified
+#    supporting facts (R19), so a filter on an attribute nothing can supply evidence for is
+#    not a strict filter: it is a guaranteed-empty shortlist wearing one. Driven against the
+#    exchange's own ``POST /auctions`` + ``GET /auctions/{id}/shortlist`` with the S1
+#    roster, catalogues and trust snapshot, that intent produced **0 slots**; the same
+#    auction with the constraint expressed in the catalogue's own vocabulary produced 2.
+# 2. The budget was in the dialogue, verbatim, and was not read — so all THREE of R1's
+#    questions were spent asking for it again in different words.
+
+S1_RUN = pathlib.Path(__file__).resolve().parents[4] / "e2e" / "support" / "s1" / "run.json"
+
+#: The shopper's own three turns, read from the run fixture rather than retyped, so this
+#: gate cannot drift away from the dialogue the S1 flow is graded on.
+S1_TURNS: list[str] = json.loads(S1_RUN.read_text(encoding="utf-8"))["buyer_turns"]
+
+
+def _served_clarify(client, turns: list[str]) -> dict[str, Any]:
+    response = client.post(CLARIFY_PATH, json={"turns": turns})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+# --- defect 1: the filter nobody can satisfy ----------------------------------------
+
+
+def test_the_served_clarifier_emits_no_filter_the_catalogue_cannot_speak(confirm_door) -> None:
+    """R19: a hard constraint needs verified supporting facts, so it must name an attribute
+    a catalogue can carry. ``brew_method`` is carried by nothing."""
+    from apps.buyer.svc.src.intent import catalogue_speaks
+
+    client, _exchange = confirm_door
+    body = _served_clarify(client, S1_TURNS)
+    intent = body["intent"]
+    fields = [item["field"] for item in intent["hard_constraints"]]
+    assert "brew_method" not in fields, (
+        f"the clarifier still emits a filter no catalogue can satisfy: {fields}"
+    )
+    for field in fields:
+        assert catalogue_speaks(intent.get("category"), field), (
+            f"{field!r} is not an attribute the {intent.get('category')!r} catalogue carries; "
+            f"every candidate is excluded hard_constraint_unsatisfied and the shortlist is "
+            f"empty every time"
+        )
+
+
+def test_what_could_not_become_a_filter_is_reported_rather_than_silently_dropped(
+    confirm_door,
+) -> None:
+    """A silent total exclusion reads as "no stores matched" and is really "the question was
+    unanswerable". The clarify response has to say so."""
+    client, _exchange = confirm_door
+    body = _served_clarify(client, S1_TURNS)
+    assert "unsatisfiable" in body, "the clarify response names no unsatisfiable constraints"
+    reported = {item["field"] for item in body["unsatisfiable"]}
+    assert "brew_method" in reported, body["unsatisfiable"]
+    assert all(str(item.get("reason") or "").strip() for item in body["unsatisfiable"]), (
+        "an unsatisfiable constraint is reported without saying why"
+    )
+
+
+def test_a_catalogue_speakable_constraint_still_becomes_a_filter(confirm_door) -> None:
+    """The positive control for defect 1.
+
+    A guard that empties ``hard_constraints`` would also make every shortlist non-empty, and
+    that is a worse bug than the one it replaced. ``roast_level`` IS in
+    ``fixtures/catalog/coffee.json``, so it must survive.
+    """
+    client, _exchange = confirm_door
+    body = _served_clarify(client, ["I want a light roast under $20"])
+    constraints = {(c["field"], c["op"], c["value"]) for c in body["intent"]["hard_constraints"]}
+    assert ("roast_level", "eq", "light") in constraints, constraints
+    assert body["intent"]["category"] == "coffee"
+
+
+def test_a_category_this_service_declares_no_catalogue_for_is_left_alone() -> None:
+    """The second positive control: the guard refuses what it can PROVE unsatisfiable.
+
+    ``footwear`` has no catalogue in this tree, so this service knows nothing about what a
+    footwear catalogue carries and must not purge a footwear shopper's must-haves on a guess.
+    """
+    outcome = clarify(["trail running shoes, size 10, waterproof"])
+    fields = {item.field for item in outcome.intent.hard_constraints}
+    assert {"size", "waterproof"} <= fields, fields
+    assert outcome.unsatisfiable == (), outcome.unsatisfiable
+
+
+def test_a_model_proposed_constraint_is_guarded_on_the_same_terms() -> None:
+    """The model is the likelier source of invented vocabulary, not the safer one.
+
+    ``packages/llm/fixtures/recorded/buyer_intent.json`` proposes ``brew_method eq espresso``
+    for a real recorded dialogue, so a guard that only covered the local lexicon would leave
+    the hole open for every deployment with a live model.
+    """
+    scripted = (
+        '{"constraints": [{"field": "brew_method", "op": "eq", "value": "espresso"},'
+        ' {"field": "roast_level", "op": "eq", "value": "dark"}],'
+        ' "preferences": [], "clarifying_question": null}'
+    )
+    outcome = clarify(["a dark roast for espresso", "under $30"], lambda prompt, system: scripted)
+    fields = {item.field for item in outcome.intent.hard_constraints}
+    assert "brew_method" not in fields, fields
+    assert "roast_level" in fields, "the guard threw away a constraint the catalogue carries"
+    assert "brew_method" in {item.field for item in outcome.unsatisfiable}
+
+
+# --- defect 2: the budget that was stated and not read -------------------------------
+
+
+def test_the_served_clarifier_reads_the_budget_the_shopper_stated(confirm_door) -> None:
+    client, _exchange = confirm_door
+    body = _served_clarify(client, S1_TURNS)
+    assert body["intent"]["budget_band"] == "500-1000", body["intent"]
+    assert "budget" not in body["unresolved"], body["unresolved"]
+
+
+def test_the_three_question_ceiling_is_not_spent_re_asking_an_answered_question(
+    confirm_door,
+) -> None:
+    """R1 allows three questions. Before the fix all three were the budget question."""
+    client, _exchange = confirm_door
+    questions = _served_clarify(client, S1_TURNS)["questions"]
+    budget_questions = [q for q in questions if "spend" in q or "budget" in q or "ceiling" in q]
+    assert len(budget_questions) <= 1, questions
+
+
+@pytest.mark.parametrize(
+    "answer,band",
+    [
+        ("about five hundred dollars", "500-1000"),
+        ("five hundred dollars", "500-1000"),
+        ("$500", "500-1000"),
+        ("under 500", "500-1000"),
+        ("no more than 500", "500-1000"),
+        ("500ish", "500-1000"),
+        ("300 to 500", "500-1000"),
+        ("a hundred bucks", "100-250"),
+        ("twelve hundred", "1000+"),
+        ("two hundred fifty", "250-500"),
+    ],
+    ids=[
+        "about-words",
+        "bare-words",
+        "dollar-sign",
+        "under",
+        "no-more-than",
+        "ish",
+        "bare-range",
+        "a-hundred-bucks",
+        "twelve-hundred",
+        "compound-words",
+    ],
+)
+def test_the_ordinary_spellings_of_a_budget_are_read(answer: str, band: str) -> None:
+    outcome = clarify(["an espresso machine for the office", answer])
+    assert outcome.intent.budget_band == band, (
+        f"{answer!r} -> {outcome.intent.budget_band!r}; questions={list(outcome.questions)}"
+    )
+
+
+def test_no_budget_is_invented_from_a_dialogue_that_states_none() -> None:
+    """The positive control for defect 2: reading MORE money is only a fix if it still reads
+    none where none was said."""
+    outcome = clarify(["a wool scarf", "no idea honestly", "whatever you think"])
+    assert outcome.intent.budget_band == BUDGET_BAND_UNSPECIFIED
+    assert "budget" in outcome.unresolved
+
+
+def test_a_size_is_still_a_size_and_not_a_price() -> None:
+    """The second positive control: word-number money must not eat sizes and model numbers."""
+    outcome = clarify(["trail running shoes, size 10, waterproof"])
+    assert outcome.intent.budget_band == BUDGET_BAND_UNSPECIFIED
+    sizes = {c.value for c in outcome.intent.hard_constraints if c.field == "size"}
+    assert sizes == {10.0}
+
+
+def test_an_approximated_ceiling_is_a_target_and_not_a_filter() -> None:
+    """ "up to about five hundred" is what the S1 shopper said, and "about" is the operative
+    word: it fixes the band and rules nothing out. The module already read "around $40" that
+    way; a ceiling cue in front of the approximator does not make the number exact.
+
+    The human-approved S1 run fixture agrees about the shape: its ground-truth intent for
+    this dialogue carries ``hard_constraints: []`` and a budget as a BAND. (Its band label,
+    ``"300-500"``, is not one of this service's — ``BUDGET_BAND_VOCABULARY`` snaps 500 into
+    ``"500-1000"`` — and that disagreement is the run fixture's, not this module's.)
+    """
+    approximate = clarify(["an espresso machine", "up to about five hundred dollars"])
+    assert approximate.intent.budget_band == "500-1000"
+    assert [c for c in approximate.intent.hard_constraints if c.field == "price_usd"] == []
+
+    exact = clarify(["an espresso machine", "no more than five hundred dollars"])
+    assert exact.intent.budget_band == "500-1000"
+    assert [(c.op, c.value) for c in exact.intent.hard_constraints if c.field == "price_usd"] == [
+        ("lte", 500.0)
+    ]
+
+
+@pytest.mark.parametrize(
+    "answer,shape",
+    [
+        ("one of those cheap ones", "a pronoun that happens to be a number word"),
+        ("size 8 to 10", "a size run answered to the budget question"),
+        ("no idea honestly", "no number at all"),
+    ],
+    ids=["pronoun-one", "size-run", "no-number"],
+)
+def test_reading_more_money_still_reads_none_where_none_was_said(answer: str, shape: str) -> None:
+    """Third positive control, and each case was MEASURED before it was written.
+
+    Widening what counts as money is only a fix if it does not start inventing budgets.
+    ``one of those cheap ones`` produced ``price_usd lte 1.0`` while this was being built;
+    ``size 8 to 10`` produced ``price_usd lte 8.0`` and no size at HEAD, before any of this.
+    """
+    outcome = clarify(["trail running shoes", answer])
+    assert outcome.intent.budget_band == BUDGET_BAND_UNSPECIFIED, shape
+    assert [c for c in outcome.intent.hard_constraints if c.field == "price_usd"] == [], shape
+
+
+def test_a_size_answered_to_the_budget_question_stays_a_size() -> None:
+    outcome = clarify(["trail running shoes", "size 8 to 10"])
+    assert {c.value for c in outcome.intent.hard_constraints if c.field == "size"} == {8.0}

@@ -7,7 +7,9 @@
     "types": [
       "vitest/globals",
       "node"
-    ]
+    ],
+    "allowImportingTsExtensions": true,
+    "emitDeclarationOnly": true
   },
   "include": [
     "src/**/*.ts",

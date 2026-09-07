@@ -7,6 +7,128 @@
   },
   "x-domain": "exchange",
   "paths": {
+    "/auctions/{auction_id}": {
+      "get": {
+        "operationId": "readAuction",
+        "summary": "Read one auction's state, its transitions and the bid it accepted.",
+        "description": "The auction-state read a client polls after `POST /auctions` and `POST /auctions/{auction_id}/accept`; `proxyshop_demo/s1.py` drives it over HTTP twice. It was SERVED and declared nowhere (T-266, T-312) — a live, unauthenticated read of auction state that no generated client could reach and no contract review had ever seen. Declared here so both are false.",
+        "parameters": [
+          {
+            "name": "auction_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The auction as the store holds it, with every state transition it made.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "auction_id",
+                    "state",
+                    "history"
+                  ],
+                  "properties": {
+                    "auction_id": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "open",
+                        "closed"
+                      ],
+                      "description": "auction.state.OPEN or auction.state.CLOSED."
+                    },
+                    "intent_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "cluster_id": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "accepted_bid_ref": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "null until POST /auctions/{id}/accept succeeds."
+                    },
+                    "history": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "at",
+                          "state"
+                        ],
+                        "properties": {
+                          "at": {
+                            "type": "number"
+                          },
+                          "state": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "auction_id": "auction-a2590cb3-e45a-4f41-ab2c-7415fc8ba2da",
+                  "state": "closed",
+                  "intent_id": "int-0001",
+                  "cluster_id": "cluster-serum",
+                  "accepted_bid_ref": null,
+                  "history": [
+                    {
+                      "at": 1788738703.180892,
+                      "state": "open"
+                    },
+                    {
+                      "at": 1788738703.234634,
+                      "state": "closed"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "The auction was never created, or its 900s TTL has expired.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "example": {
+                  "detail": "\"auction 'auction-does-not-exist' is not in the store — it was never created, or its 900s TTL has expired\""
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/auctions": {
       "post": {
         "operationId": "openAuction",

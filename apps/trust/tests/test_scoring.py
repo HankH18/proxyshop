@@ -38,6 +38,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -74,6 +75,16 @@ from apps.trust.src.scoring import (
     manifest_source,
     prior_snapshot,
     score,
+)
+from apps.trust.src.scoring.blacklist import (
+    BLACKLIST_EXPIRED_KIND,
+    BLACKLISTED_KIND,
+    DELISTING_KINDS,
+    UNRECORDED_REASON_CODE,
+    FoldedBlacklist,
+    UnreadableBlacklist,
+    delisting_identity,
+    fold_delisting_events,
 )
 from apps.trust.src.scoring.manifest import (
     MANIFEST_ENV_VAR,
@@ -1115,3 +1126,291 @@ def test_the_weight_channel_accepts_any_real_number_not_only_int_and_float(e6_as
                 ],
                 as_of=e6_as_of,
             )
+
+
+# ======================================================================================
+# T-303 (b) — the fold: a sealed delisting event becomes a listing
+#
+# `trust.snapshot.delisting` decides a delisting and `trust.events.append` seals it into the
+# hash chain. Until `fold_delisting_events` existed, nothing turned that sealed event into a
+# row in the registry `trust.scoring.is_blacklisted` actually reads, so the platform delisted
+# a store and went on serving it. These grade the state machine itself; the served end of the
+# chain is graded in `test_snapshot_route.py` and `test_repro_open_tickets.py`.
+# ======================================================================================
+
+
+def _blacklisted_event(
+    identity: str,
+    *,
+    store_id: str = "s-1",
+    reason_code: str = "trust_score_below_threshold",
+    source: str = "trust-score",
+    expires_at: str | None = None,
+) -> dict[str, Any]:
+    """One sealed ``blacklisted`` event, shaped as ``delisting_events`` emits it."""
+    return {
+        "event_id": f"{BLACKLISTED_KIND}:{store_id}:{identity}",
+        "kind": BLACKLISTED_KIND,
+        "store_id": store_id,
+        "payload": {
+            "store_id": store_id,
+            "reason_code": reason_code,
+            "source": source,
+            "expires_at": expires_at,
+            "business_identity": identity,
+        },
+    }
+
+
+def _expired_event(identity: str, *, store_id: str = "s-1") -> dict[str, Any]:
+    return {
+        "event_id": f"{BLACKLIST_EXPIRED_KIND}:{store_id}:{identity}",
+        "kind": BLACKLIST_EXPIRED_KIND,
+        "store_id": store_id,
+        "payload": {
+            "store_id": store_id,
+            "reason_code": "trust_score_below_threshold",
+            "business_identity": identity,
+        },
+    }
+
+
+def test_a_sealed_delisting_becomes_a_listing_the_read_path_blocks_on() -> None:
+    """The missing link, at its smallest: sealed event in, blocked store out.
+
+    The control below is the whole point — the SAME registry and the SAME store read
+    ``False`` before the event is folded, so the block is attributable to the fold and not to
+    something the registry already said.
+    """
+    store = {"store_id": "s-1", "business_identity": "biz-1"}
+    registry = Blacklist()
+    assert is_blacklisted(registry, store) is False, "the control registry already blocked"
+
+    folded = fold_delisting_events([_blacklisted_event("biz-1")], base=registry)
+    assert isinstance(folded, FoldedBlacklist)
+    assert is_blacklisted(folded, store) is True
+
+    entry = folded.lookup("biz-1")
+    assert entry.status == "active"
+    assert entry.reason_code == "trust_score_below_threshold", (
+        "the listing did not keep the reason the sealed decision was recorded with, which is "
+        "the field an appeal is answered from"
+    )
+    assert entry.expires_at is None, "an automatic delisting must not acquire a window"
+    assert len(registry) == 0, (
+        "the fold mutated the registry it was handed; a caller's registry is the caller's, "
+        "and `blacklist_for` hands over one it does not own"
+    )
+
+
+def test_folding_the_same_sealed_delisting_twice_changes_nothing() -> None:
+    """The ledger is append-only and replayable, so the same event WILL be folded again.
+
+    Both shapes are exercised: the same event twice in one fold (a replayed chain) and a
+    second fold over a registry the first one already listed (every subsequent snapshot read).
+    """
+    event = _blacklisted_event("biz-1")
+    once = fold_delisting_events([event], base=Blacklist())
+    twice = fold_delisting_events([event, dict(event)], base=Blacklist())
+    assert once.lookup("biz-1") == twice.lookup("biz-1")
+
+    already = Blacklist()
+    already.add(business_identity="biz-1", reason_code="manual_review", status="active")
+    again = fold_delisting_events([event, event], base=already)
+    assert again is already, (
+        "folding a decision the registry already records produced an overlay; that is a "
+        "second row for one listing every time the snapshot is read"
+    )
+
+
+def test_a_second_delisting_never_reopens_a_closed_review_or_an_open_appeal() -> None:
+    """``blacklisted`` onto a blocking listing is a no-op — including a human's.
+
+    ``under_review`` and ``appealed`` are states only a person can put a listing in; the two
+    ledger kinds cannot express either. A fold that re-stamped ``active`` over them would
+    close an appeal nobody finished, silently, on a GET.
+    """
+    for status in sorted(BLOCKING_BLACKLIST_STATUSES):
+        registry = Blacklist()
+        registry.add(
+            business_identity="biz-1",
+            reason_code="manual_review",
+            status=status,
+            note="opened by a human",
+        )
+        folded = fold_delisting_events([_blacklisted_event("biz-1")], base=registry)
+        assert folded is registry, f"the fold overwrote a {status} listing"
+        entry = folded.lookup("biz-1")
+        assert entry.status == status
+        assert entry.reason_code == "manual_review"
+        assert is_blacklisted(folded, {"store_id": "s-1", "business_identity": "biz-1"}) is True
+
+
+def test_a_sealed_expiry_returns_the_store_to_service_and_keeps_its_reason() -> None:
+    """The un-delisting half. Without it a lapse recorded in the ledger reaches nothing."""
+    store = {"store_id": "s-1", "business_identity": "biz-1"}
+    listed = fold_delisting_events([_blacklisted_event("biz-1")], base=Blacklist())
+    assert is_blacklisted(listed, store) is True
+
+    released = fold_delisting_events(
+        [_blacklisted_event("biz-1"), _expired_event("biz-1")], base=Blacklist()
+    )
+    assert is_blacklisted(released, store) is False
+    entry = released.lookup("biz-1")
+    assert entry.status == "expired"
+    assert entry.reason_code == "trust_score_below_threshold", (
+        "the expiry was stamped with a reason the listing never had; `blacklist_expired` "
+        "records why a listing ENDED and it must be the one it was opened with"
+    )
+
+
+def test_order_is_the_history_and_not_a_spelling() -> None:
+    """A relisting after an expiry blocks; the two orders are two different histories."""
+    store = {"store_id": "s-1", "business_identity": "biz-1"}
+    listing, expiry = _blacklisted_event("biz-1"), _expired_event("biz-1")
+    assert (
+        is_blacklisted(fold_delisting_events([listing, expiry], base=Blacklist()), store) is False
+    )
+    assert is_blacklisted(fold_delisting_events([expiry, listing], base=Blacklist()), store) is True
+    relisted = fold_delisting_events([listing, expiry, listing], base=Blacklist())
+    assert is_blacklisted(relisted, store) is True
+    assert relisted.lookup("biz-1").status == "active"
+
+
+def test_an_expiry_for_a_listing_nobody_holds_creates_nothing() -> None:
+    """An expiry is not a licence to invent the listing it would have ended."""
+    folded = fold_delisting_events([_expired_event("biz-1")], base=Blacklist())
+    assert folded.lookup("biz-1") is None
+    assert is_blacklisted(folded, {"store_id": "s-1", "business_identity": "biz-1"}) is False
+
+    already = Blacklist()
+    already.add(business_identity="biz-1", reason_code="r", status="expired")
+    assert fold_delisting_events([_expired_event("biz-1")], base=already) is already
+
+
+def test_a_registry_that_cannot_be_read_still_lists_and_is_never_released() -> None:
+    """Fail-closed, in both directions, when the base lookup raises.
+
+    A ``blacklisted`` is applied anyway — the ledger says list it, and refusing to on the
+    strength of a failed read would drop the decision. A ``blacklist_expired`` is NOT applied:
+    releasing a store because a read failed is the one direction R12 forbids, and the base's
+    own raise keeps ``is_blacklisted`` at ``True``.
+    """
+
+    class Exploding:
+        def lookup(self, business_identity: str) -> None:
+            raise RuntimeError("blacklist store unreachable")
+
+    store = {"store_id": "s-1", "business_identity": "biz-1"}
+    listed = fold_delisting_events([_blacklisted_event("biz-1")], base=Exploding())
+    assert listed.lookup("biz-1").status == "active"
+    assert is_blacklisted(listed, store) is True
+
+    released = fold_delisting_events([_expired_event("biz-1")], base=Exploding())
+    assert is_blacklisted(released, store) is True, (
+        "an unreadable registry released a store on the strength of an expiry event; the "
+        "fold must not turn 'we could not tell' into 'back in service'"
+    )
+
+
+def test_the_fold_binds_to_the_business_and_not_to_the_store_row() -> None:
+    """R12: a delisted operator must not return under a fresh ``store_id``.
+
+    The event names ``store-old``; the block lands on the business, so ``store-new`` — a
+    different row, same operator — is refused too. The roster fallback is graded beside it: an
+    event that named only a store still binds to the business behind it.
+    """
+    folded = fold_delisting_events(
+        [_blacklisted_event("biz-1", store_id="store-old")], base=Blacklist()
+    )
+    assert is_blacklisted(folded, {"store_id": "store-new", "business_identity": "biz-1"}) is True
+    assert is_blacklisted(folded, {"store_id": "store-old", "business_identity": "biz-2"}) is False
+
+    anonymous = _blacklisted_event("biz-1", store_id="store-old")
+    del anonymous["payload"]["business_identity"]
+    assert delisting_identity(anonymous) is None
+    assert delisting_identity(anonymous, {"store-old": "biz-1"}) == "biz-1"
+    from_roster = fold_delisting_events(
+        [anonymous], base=Blacklist(), identities={"store-old": "biz-1"}
+    )
+    assert (
+        is_blacklisted(from_roster, {"store_id": "store-new", "business_identity": "biz-1"}) is True
+    )
+
+
+def test_an_event_that_names_no_business_at_all_lists_nobody() -> None:
+    """Not a hole: such an event describes no store any snapshot can key, and a store record
+    with no identity is already refused by ``is_blacklisted``'s first unknown."""
+    anonymous = _blacklisted_event("biz-1", store_id="store-old")
+    del anonymous["payload"]["business_identity"]
+    base = Blacklist()
+    folded = fold_delisting_events([anonymous], base=base)
+    assert folded is base, "an unkeyable event still produced an overlay"
+    assert is_blacklisted(folded, {"store_id": "store-old", "business_identity": "biz-1"}) is False
+    assert is_blacklisted(folded, {"store_id": "store-old"}) is True
+
+
+def test_the_fold_reads_only_the_two_delisting_kinds() -> None:
+    """The whole chain may be handed over; everything else is skipped, not misread."""
+    assert DELISTING_KINDS == (BLACKLISTED_KIND, BLACKLIST_EXPIRED_KIND)
+    noise = [
+        {"kind": "accepted", "store_id": "s-1", "payload": {"business_identity": "biz-1"}},
+        {"kind": "feedback", "store_id": "s-1", "payload": {"business_identity": "biz-1"}},
+        {"kind": "", "store_id": "s-1", "payload": {"business_identity": "biz-1"}},
+    ]
+    quiet = Blacklist()
+    assert fold_delisting_events(noise, base=quiet) is quiet
+    folded = fold_delisting_events([*noise, _blacklisted_event("biz-1")], base=Blacklist())
+    assert is_blacklisted(folded, {"store_id": "s-1", "business_identity": "biz-1"}) is True
+
+
+def test_a_delisting_with_no_reason_records_that_it_has_none() -> None:
+    """``reason_code`` is NOT NULL in ``app.seller_blacklist`` and is what an appeal answers.
+
+    Dropping such a listing would be the fail-open direction; inventing a reason would file a
+    false record of why the store is out. It is recorded as unrecorded.
+    """
+    event = _blacklisted_event("biz-1")
+    event["payload"]["reason_code"] = ""
+    folded = fold_delisting_events([event], base=Blacklist())
+    assert folded.lookup("biz-1").reason_code == UNRECORDED_REASON_CODE
+
+
+def test_the_folded_registry_is_iterable_so_the_expiry_path_can_still_see_it() -> None:
+    """``trust.snapshot.delisting`` iterates the registry to find lapsed listings.
+
+    A fold that broke iteration would silently switch that module onto its lookup-only
+    fallback, where a lapsed listing whose store is absent from the snapshot is invisible.
+    """
+    base = Blacklist()
+    base.add(business_identity="biz-other", reason_code="manual_review", status="active")
+    folded = fold_delisting_events([_blacklisted_event("biz-1")], base=base)
+    listed = {entry.business_identity: entry.status for entry in folded}
+    assert listed == {"biz-other": "active", "biz-1": "active"}
+    assert len(folded) == 2
+
+    class NotIterable:
+        def lookup(self, business_identity: str) -> None:
+            return None
+
+    opaque = fold_delisting_events([_blacklisted_event("biz-1")], base=NotIterable())
+    with pytest.raises(TypeError):
+        list(opaque)
+
+
+def test_a_fold_over_a_registry_with_no_lookup_still_refuses_everyone_else() -> None:
+    """The fail-open hole a wrapper opens if it answers for the object it wraps.
+
+    "A drop-in object that does not implement the lookup at all" is one of the unknowns
+    ``is_blacklisted`` returns ``True`` for — and it recognises it by asking the object it was
+    HANDED. Hand it a fold over such an object and the wrapper has a ``lookup``, so a fold
+    that answered ``None`` for identities it did not touch would turn that unknown into "not
+    blacklisted" for every store in the snapshot.
+    """
+    folded = fold_delisting_events([_blacklisted_event("biz-1")], base=object())
+    assert is_blacklisted(folded, {"store_id": "s-1", "business_identity": "biz-1"}) is True
+    assert is_blacklisted(folded, {"store_id": "s-2", "business_identity": "biz-other"}) is True, (
+        "the fold answered for a registry that cannot be asked; an unknown is a refusal (R12)"
+    )
+    with pytest.raises(UnreadableBlacklist):
+        folded.lookup("biz-other")

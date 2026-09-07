@@ -10,6 +10,8 @@ joined them. ``uvicorn exchange.main:app`` boots an exchange with
   to leave it for the same reason the ledger sink did;
 * ``bid_solicitor``       -> :class:`~exchange.auction.routes.NullSolicitor`, which asks nobody;
 * ``trust_snapshot``      -> ``{}``, in which no store can be shown to be off the blacklist;
+  **No longer either** — it is the third entry to leave this list, and it left for the reason
+  the two before it did: see the note on R12's MIDDLE gate below;
 * ``ranking_registered_domains`` -> nothing, so the platform vouches for no checkout host;
 * ``auction_bids``        -> :class:`~exchange.accept.routes.NoRecordedBids`, which knows none;
 * ``intent_clusters``     -> :class:`~exchange.retrieval.clusters.NoIntentClusters`, which
@@ -45,6 +47,28 @@ declares as "Every store's snapshot, for exchange consumption" and which nothing
 repository had a client for. It does **not** weaken the invariant below: a trust service that
 cannot be read yields no snapshot, a store with no snapshot row is ``UNAVAILABLE``, and
 ``UNAVAILABLE`` denies at all three gates. See :func:`bind_eligibility` for the full ladder.
+
+**And R12's MIDDLE gate, which the paragraph above was quietly overclaiming about.** "Denies at
+all three gates" was true of the eligibility PORT, and the ranking gate does not read the port
+— it reads ``app.state.trust_snapshot`` (:func:`exchange.ranking.filters.blacklist_reason`),
+deliberately, so one auction does not read the eligibility backend once per candidate inside
+R10's synchronous window. Until :class:`LiveTrustSnapshot` existed the only thing that could
+bind that key was a literal ``trust_snapshot`` object typed into the deployment document, so
+every deployment that did not type one out consulted trust at two gates out of three and ranked
+against ``{}`` — which excludes EVERY store ``blacklist_unreadable`` and empties the shortlist
+for honest and dishonest stores alike. That is the fail-closed path firing on honest traffic,
+which is a dead service rather than a strict one. :func:`_bind_live_ranking_snapshot` now points
+it at the same trust service, and at the SAME reader when this module built one, so the three
+gates cannot hold two opinions about one store inside one auction.
+
+**And the deployment shape that made the R12 seam reachable at all.** A document states its
+sellers to state their bid endpoints and registered domains, not only their eligibility — and
+``bind_eligibility``'s first rung took the presence of ``sellers`` as the answer to all three.
+So the only deployment that ever reached the trust-backed rung was one that named no sellers,
+which is also one that solicits nobody and shortlists nobody: the trust engine was reachable
+only by an exchange with no traffic to apply it to. A row may now say
+``"eligibility": "trust"`` (:data:`TRUST_DEFERRED_ELIGIBILITY`) and hand that one question to
+the trust service while still stating where the store bids.
 
 Seven fail-closed defaults are a correct *deployment* posture and a dead *service*. Measured on
 this tree, on the app exactly as ``create_app()`` builds it (the eligibility reason is the
@@ -142,8 +166,13 @@ The document
     The catalogue snapshots this exchange grades a store's CLAIMS against, ``{store_id:
     snapshot}``, in the shape :func:`claim_verification.verify` reads. It is the last of the
     seven and the one whose absence is least visible: with no catalog wired, every claim comes
-    back ``unsupported``, R19 refuses to let an unsupported claim satisfy a hard constraint,
-    and **an intent carrying any must-have shortlists nobody**. Measured on this tree over a
+    back ``ambiguous`` — R18's verdict for a claim this exchange could not check at all, not
+    one it checked and found nothing behind — R19 refuses to let anything but ``verified``
+    satisfy a hard constraint, and **an intent carrying any must-have shortlists nobody**.
+    (It does NOT also sink those stores in the ranking: see
+    :func:`exchange.ranking.features.verified_claim_ratio`, which counts the claims this
+    exchange decided and leaves an undecided one out of the ratio rather than scoring it as a
+    failure.) Measured on this tree over a
     real socket, two rostered stores that both bid, one auction, the same request differing
     only in whether this key is present::
 
@@ -222,7 +251,7 @@ import logging
 import os
 import time
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -253,6 +282,7 @@ from .auction.ledger import InMemoryLedgerSink
 from .checkout.registry import registered_modes
 from .checkout.sellers import StaticRegisteredDomains
 from .eligibility import ELIGIBILITY_STATUSES, StaticSellerEligibility
+from .eligibility.layered import LayeredSellerEligibility
 from .eligibility.trust_backed import (
     TrustBackedSellerEligibility,
     TrustSnapshotUnavailable,
@@ -280,12 +310,15 @@ __all__ = [
     "DEFAULT_TRUST_URL",
     "ENV_DEPLOYMENT",
     "ENV_DEPLOYMENT_JSON",
+    "ELIGIBILITY_WORDS",
     "ENV_TRUST_URL",
     "Deployment",
     "DeploymentConfigurationError",
     "HttpBidSolicitor",
     "HttpTrustLedgerSink",
     "HttpTrustSnapshot",
+    "LayeredSellerEligibility",
+    "LiveTrustSnapshot",
     "MAX_BID_RESPONSE_BYTES",
     "MAX_DEPLOYMENT_BYTES",
     "MAX_DEPLOYMENT_SELLERS",
@@ -296,10 +329,12 @@ __all__ = [
     "TRUST_SNAPSHOT_PATH",
     "TRUST_SNAPSHOT_REFRESH_SECONDS",
     "TRUST_SNAPSHOT_RETRY_SECONDS",
+    "TRUST_DEFERRED_ELIGIBILITY",
     "TrustBackedSellerEligibility",
     "TrustLedgerPublisher",
     "bind_ledger_sink",
     "bind_seller_eligibility",
+    "bind_trust_snapshot_reader",
     "configure_exchange",
     "default_ledger_sink",
     "default_seller_eligibility",
@@ -420,6 +455,29 @@ class DeploymentConfigurationError(RuntimeError):
 # =====================================================================================
 # The document
 # =====================================================================================
+#: The fourth word a seller row's ``eligibility`` may carry, and the only one that is not a
+#: status: the platform declining to answer R12 for this store and handing the question to the
+#: trust service.
+#:
+#: It exists because a document states its sellers for THREE independent reasons — where the
+#: agent answers, which host the store checks out on, and whether the platform will have it —
+#: and :func:`bind_eligibility` used to read the presence of ``sellers`` as the answer to all
+#: three. So the only deployment that consulted trust was one that named no sellers, which is
+#: also one that solicits nobody and shortlists nobody: the trust engine was reachable only by
+#: an exchange with no traffic to apply it to. Measured, before this word existed, against a
+#: real trust service scoring the manifest's own scripted adversary at 0.10 under a published
+#: 0.35 threshold — the served exchange solicited it anyway, on the strength of a
+#: ``static-eligibility`` row.
+#:
+#: Deliberately NOT a member of :data:`~exchange.eligibility.ELIGIBILITY_STATUSES`: it is
+#: never an answer, only a statement about who answers. See
+#: :attr:`Deployment.eligibility_rows`.
+TRUST_DEFERRED_ELIGIBILITY = "trust"
+
+#: Every word a seller row's ``eligibility`` may carry: the three statuses, plus the deferral.
+ELIGIBILITY_WORDS: tuple[str, ...] = (*ELIGIBILITY_STATUSES, TRUST_DEFERRED_ELIGIBILITY)
+
+
 @dataclass(frozen=True)
 class SellerRow:
     """One seller as the PLATFORM states it — never as the seller states it."""
@@ -460,7 +518,26 @@ class Deployment:
 
     @property
     def eligibility_rows(self) -> dict[str, str]:
-        return {row.store_id: row.eligibility for row in self.sellers}
+        """The rows the PLATFORM answered R12 for. Rows deferred to trust are not among them.
+
+        :data:`TRUST_DEFERRED_ELIGIBILITY` is not an eligibility STATUS — it is the platform
+        declining to state one — so putting it in this mapping would hand
+        :class:`~exchange.eligibility.StaticSellerEligibility` a status it does not recognise,
+        and ``read_eligibility`` would answer ``unavailable: … unrecognised status 'trust'``
+        for exactly the stores the document meant to ask trust about.
+        """
+        return {
+            row.store_id: row.eligibility
+            for row in self.sellers
+            if row.eligibility != TRUST_DEFERRED_ELIGIBILITY
+        }
+
+    @property
+    def trust_deferred_stores(self) -> frozenset[str]:
+        """The stores this document leaves to the trust service (``"eligibility": "trust"``)."""
+        return frozenset(
+            row.store_id for row in self.sellers if row.eligibility == TRUST_DEFERRED_ELIGIBILITY
+        )
 
     @property
     def registered_domains(self) -> dict[str, str]:
@@ -499,13 +576,13 @@ def _seller_row(raw: Any, index: int, source: str) -> SellerRow:
         raise DeploymentConfigurationError(
             f"{source}: seller {store_id!r} states no 'eligibility'. R12 is a fail-closed "
             f"gate and this file is what opens it, so the word is required rather than "
-            f"assumed; write one of {list(ELIGIBILITY_STATUSES)}"
+            f"assumed; write one of {list(ELIGIBILITY_WORDS)}"
         )
     eligibility = str(row.get("eligibility"))
-    if eligibility not in ELIGIBILITY_STATUSES:
+    if eligibility not in ELIGIBILITY_WORDS:
         raise DeploymentConfigurationError(
             f"{source}: seller {store_id!r} states eligibility {eligibility!r}, which is not "
-            f"one of {list(ELIGIBILITY_STATUSES)}; an unrecognised status has an unknown "
+            f"one of {list(ELIGIBILITY_WORDS)}; an unrecognised status has an unknown "
             f"meaning and this exchange will not guess at one"
         )
 
@@ -1359,6 +1436,59 @@ class HttpTrustSnapshot:
         return self._client
 
 
+class LiveTrustSnapshot(Mapping[str, Any]):
+    """The RANKING gate's live view of the same snapshot the eligibility source reads.
+
+    R12 is consulted at three gates, and the middle one does not read the eligibility port:
+    ``rank()`` derives the blacklist from the ``trust_snapshot`` mapping it is handed
+    (:func:`exchange.ranking.filters.blacklist_reason`), deliberately, so one auction does not
+    read the eligibility backend once per candidate inside the synchronous window R10 bounds.
+    That mapping is resolved by :func:`exchange.ranking.serving.trust_snapshot_of` off
+    ``app.state.trust_snapshot``, and until this class existed the ONLY thing that could bind
+    it was a literal ``trust_snapshot`` key typed into the deployment document. A deployment
+    that did not type one out ranked against ``{}`` — and an empty snapshot excludes EVERY
+    store ``blacklist_unreadable``, so the fail-closed path fired on honest traffic and the
+    shortlist was empty no matter who bid.
+
+    So this is a ``Mapping`` and not a callable, because that is the shape the ranking reads,
+    and it is backed by the SAME :class:`HttpTrustSnapshot` the eligibility source holds: one
+    reader, one cache, one version, one round trip per refresh window. Two readers would be two
+    opinions about the same store inside one auction, which is the thing
+    :func:`exchange.ranking.serving.registered_domains_of` is careful about one seam over.
+
+    **Unreadable is empty, and empty denies.** A read that fails yields no rows, so
+    :func:`~exchange.ranking.filters.blacklist_reason` finds no row for any store and answers
+    ``blacklist_unreadable`` — the same direction, and the same denial, that
+    :class:`~exchange.eligibility.trust_backed.TrustBackedSellerEligibility` answers at the
+    other two gates for the same failure. The exception is swallowed HERE rather than at the
+    gate because ``rank()`` is not written to catch one, and an exception escaping the ranker
+    would turn a trust outage into a 500 on ``POST /auctions`` instead of an empty shortlist.
+    """
+
+    def __init__(self, reader: Callable[[], Any]) -> None:
+        self._reader = reader
+
+    def _rows(self) -> Mapping[str, Any]:
+        try:
+            rows = snapshot_rows(self._reader())
+        except Exception:  # noqa: BLE001 - a blanket catch IS the fail-closed rule
+            return {}
+        return {} if rows is None else rows
+
+    def __getitem__(self, store_id: str) -> Any:
+        return self._rows()[store_id]
+
+    def __iter__(self) -> Any:
+        return iter(self._rows())
+
+    def __len__(self) -> int:
+        return len(self._rows())
+
+    def __repr__(self) -> str:
+        url = getattr(self._reader, "url", None)
+        return f"{type(self).__name__}({url!r})" if url else f"{type(self).__name__}(...)"
+
+
 def bind_seller_eligibility(
     base_url: str | None = None, env: Mapping[str, str] | None = None
 ) -> TrustBackedSellerEligibility:
@@ -1370,6 +1500,23 @@ def bind_seller_eligibility(
     and ``INFO`` rather than ``WARNING`` because a deployment that states no ``trust_url`` has
     not made a mistake — the default is the compose service name.
     """
+    reader, url = bind_trust_snapshot_reader(base_url, env)
+    return TrustBackedSellerEligibility(reader, source=f"the trust snapshot at {url}")
+
+
+def bind_trust_snapshot_reader(
+    base_url: str | None = None, env: Mapping[str, str] | None = None
+) -> tuple[HttpTrustSnapshot, str]:
+    """The ONE snapshot reader this process reads R12 from, and the url it reads.
+
+    Split out of :func:`bind_seller_eligibility` because the reader now feeds two things and
+    must not become two readers: the eligibility port at the solicitation and checkout gates
+    (through :class:`~exchange.eligibility.trust_backed.TrustBackedSellerEligibility`) and the
+    ranking gate's mapping (through :class:`LiveTrustSnapshot`). Sharing the object is what
+    keeps one auction to one round trip per refresh window, and — the part that is correctness
+    rather than cost — what stops the middle gate from reading a different snapshot version
+    than the two either side of it.
+    """
     url, source = trust_snapshot_endpoint(base_url, env)
     _log.info(
         "exchange eligibility: R12 will be read from the trust service's snapshot at %s "
@@ -1378,9 +1525,7 @@ def bind_seller_eligibility(
         url,
         _ENDPOINT_SOURCES.get(source, source),
     )
-    return TrustBackedSellerEligibility(
-        HttpTrustSnapshot(url), source=f"the trust snapshot at {url}"
-    )
+    return HttpTrustSnapshot(url), url
 
 
 def default_seller_eligibility(
@@ -1415,14 +1560,15 @@ def bind_eligibility(
     **The ladder, and why it is in this order.** All three rungs are fail-closed; they differ
     only in who is answering.
 
-    1. ``sellers`` — the platform's own registry, stated by a person. It stays FIRST even when
-       the document also states a ``trust_snapshot``, because the module header says why: R12's
-       eligibility and the trust snapshot are two independent reads by design, the ranking
-       calls them ``blacklisted_store`` and ``blacklist_unreadable`` separately, and a
-       composition root that manufactured one from the other would be inventing an answer the
-       trust service never gave. ``test_a_store_the_ranking_excluded_cannot_be_bought`` is
-       exactly that distinction: it marks ``s1`` blacklisted in the SNAPSHOT and requires the
-       store to still be solicited and still be excluded by the ranking.
+    1. ``sellers``, every row stating a STATUS — the platform's own registry, answered by a
+       person. It stays FIRST even when the document also states a ``trust_snapshot``, because
+       the module header says why: R12's eligibility and the trust snapshot are two independent
+       reads by design, the ranking calls them ``blacklisted_store`` and
+       ``blacklist_unreadable`` separately, and a composition root that manufactured one from
+       the other would be inventing an answer the trust service never gave.
+       ``test_a_store_the_ranking_excluded_cannot_be_bought`` is exactly that distinction: it
+       marks ``s1`` blacklisted in the SNAPSHOT and requires the store to still be solicited
+       and still be excluded by the ranking.
     2. ``trust_snapshot`` with no ``sellers`` — a document that states trust's verdict and no
        registry of its own. Then trust's verdict IS the eligibility answer, read through
        :class:`~exchange.eligibility.trust_backed.TrustBackedSellerEligibility` rather than
@@ -1435,6 +1581,28 @@ def bind_eligibility(
        is unavailable`` for every store alive — which is not "consulted trust and refused", it
        is "asked nobody".
 
+    **The rung that was missing, and it is why rung 1 now says "every row stating a status".**
+    Rung 1 used to take ANY document with ``sellers``, and a document has to state its sellers
+    to state their bid endpoints and registered domains at all. So the only deployment that
+    ever reached rung 3 was one that named no sellers — an exchange that asks nobody to bid,
+    ranks nothing and shortlists nobody. The trust engine was reachable only by a deployment
+    with no traffic to apply it to, which is the same island one layer up. A row may now say
+    ``"eligibility": "trust"`` (:data:`TRUST_DEFERRED_ELIGIBILITY`), and a document with any
+    such row binds :class:`~exchange.eligibility.layered.LayeredSellerEligibility`: the stated
+    rows answered by the platform, every deferred row — and every store the document never
+    mentions — answered by the trust service.
+
+    **And the ranking gate.** R12 is three gates, and the middle one does not read the
+    eligibility port at all — it reads ``app.state.trust_snapshot`` (see
+    :class:`LiveTrustSnapshot`). Until a live view of that existed, the ONLY thing that could
+    bind it was a literal ``trust_snapshot`` key typed into the document, so every deployment
+    that did not type one out consulted trust at two gates out of three and ranked against
+    ``{}`` — which excludes every store ``blacklist_unreadable`` and empties the shortlist for
+    honest and dishonest stores alike. So :func:`_bind_live_ranking_snapshot` now points that
+    gate at the trust service on EVERY rung, sharing this function's reader when it built one.
+    A document that DOES state a ``trust_snapshot`` keeps it untouched: that key is a person's
+    statement and this function does not overrule one.
+
     Idempotent, and it never overwrites: an app a test or a deployment has already handed a
     source through ``configure_auctions`` keeps it. That matters more here than elsewhere
     because ``ensure_configured`` does NOT cache the "no deployment configured" answer, so this
@@ -1444,10 +1612,15 @@ def bind_eligibility(
 
     if getattr(app.state, "seller_eligibility", None) is not None:
         return False
-    if deployment is not None and deployment.sellers:
-        configure_auctions(app, eligibility=StaticSellerEligibility(deployment.eligibility_rows))
+
+    stated = {} if deployment is None else deployment.eligibility_rows
+    deferred = frozenset() if deployment is None else deployment.trust_deferred_stores
+
+    if deployment is not None and stated and not deferred:
+        configure_auctions(app, eligibility=StaticSellerEligibility(stated))
+        _bind_live_ranking_snapshot(app, deployment, env=env)
         return True
-    if deployment is not None and deployment.trust_snapshot is not None:
+    if deployment is not None and not deferred and deployment.trust_snapshot is not None:
         configure_auctions(
             app,
             eligibility=TrustBackedSellerEligibility(
@@ -1456,13 +1629,63 @@ def bind_eligibility(
             ),
         )
         return True
+
+    reader, url = bind_trust_snapshot_reader(
+        None if deployment is None else deployment.trust_url, env
+    )
+    live = TrustBackedSellerEligibility(reader, source=f"the trust snapshot at {url}")
     configure_auctions(
         app,
-        eligibility=bind_seller_eligibility(
-            None if deployment is None else deployment.trust_url, env
+        eligibility=(
+            LayeredSellerEligibility(
+                stated,
+                live,
+                source=f"the seller registry in {deployment.source}",
+            )
+            if stated and deployment is not None
+            else live
         ),
     )
+    _bind_live_ranking_snapshot(app, deployment, reader, env)
     return True
+
+
+def _bind_live_ranking_snapshot(
+    app: Any,
+    deployment: Deployment | None,
+    reader: Callable[[], Any] | None = None,
+    env: Mapping[str, str] | None = None,
+) -> None:
+    """Point the RANKING gate at the trust service unless a person already stated a snapshot.
+
+    ``reader`` is :func:`bind_eligibility`'s, when that function built one — the two gates must
+    read one snapshot, not two. On the rung where eligibility comes from a stated seller
+    registry there is no such reader, and one is built here rather than the gate being left on
+    ``{}``: the registry answers "may this store participate", the ranking's blacklist read
+    answers "has trust delisted it", and the module header is explicit that those are two
+    independent questions. A document that answers the first says nothing about the second.
+
+    Deliberately silent when the document states ``trust_snapshot``: that key is the operator's
+    own statement about who is blacklisted, ``configure_exchange`` binds it a few lines later,
+    and a live view installed here would take the ``unset('trust_snapshot')`` guard first and
+    make the document's key unreadable.
+
+    Silent too when something already bound one, because
+    :func:`exchange.ranking.serving.trust_snapshot_of` installs ``{}`` on first read: an app
+    that has already served a ranking keeps what it answered with rather than changing its
+    mind mid-process.
+    """
+    from .ranking.serving import configure_ranking  # noqa: PLC0415 — see the import note
+
+    if deployment is not None and deployment.trust_snapshot is not None:
+        return
+    if getattr(app.state, "trust_snapshot", None) is not None:
+        return
+    if reader is None:
+        reader, _url = bind_trust_snapshot_reader(
+            None if deployment is None else deployment.trust_url, env
+        )
+    configure_ranking(app, trust_snapshot=LiveTrustSnapshot(reader))
 
 
 def configure_exchange(

@@ -650,50 +650,73 @@ def test_the_ingest_served_versus_published_sweep_is_armed() -> None:
     # LEXICOGRAPHIC, so that spelling accepts (7, 0) — a contract emptied to zero, waved
     # through because one more route got served. The bug the floor exists to catch would have
     # walked straight past its own guard.
-    assert len(served) >= 6, (
+    # Both floors RAISED with the T-312 (ingest half) fix, from 6 served / 1 published, to the
+    # counts measured after it. EIGHT operations became declared in that change; floors left at
+    # the pre-fix numbers could not see any of them deleted again.
+    assert len(served) >= 9, (
         f"ingest lost served surface since this gate was measured: {len(served)} operation(s), "
-        "floor 6. Deleting routes so the sets agree is not a fix."
+        "floor 9. Deleting routes so the sets agree is not a fix."
     )
-    assert len(published) >= 1, (
+    assert len(published) >= 9, (
         f"the ingest contract lost operations since this gate was measured: {len(published)}, "
-        "floor 1. Serving a promise is a fix; deleting the promise so the sets agree is not."
+        "floor 9. Serving a promise is a fix; deleting the promise so the sets agree is not."
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-312 (ingest half): the published POST /refresh/{store_id} is served by nothing "
-        "(measured 404) while the six operations ingest.main.create_app() does mount — the "
-        "er and extraction routers — appear in no contract at all, so the divergence between "
-        "the served surface and the published one runs in BOTH directions; remove this marker "
-        "with the fix"
-    ),
-)
+# T-312 (ingest half) CLOSED — the `xfail(strict=True)` marker that stood here is REMOVED in the
+# change that closed it. The assertion is untouched.
+#
+# Half of the marker's reason was stale and is recorded rather than dropped. It said "the
+# published POST /refresh/{store_id} is served by nothing (measured 404)". RE-MEASURED on this
+# branch: `ingest.main.create_app()` mounts three routers (er, extraction, scheduler) and the
+# scheduler's `POST /refresh/{store_id}` IS served — driven here, it answers 404 with the JSON
+# body `{"detail": "no ingest target registered for store 'store-1'; ..."}`, which is the
+# handler refusing an unregistered store, not a routing miss. Both are "404" to a curl; they are
+# not the same fact, and the marker had recorded the wrong one.
+#
+# So only the served-but-unpublished direction was still live, and the repair was PUBLISH: the
+# `er` and `extraction` routers are a real operator surface (`docs/deploy.md:284` documents
+# `curl :8085/er/config`), and `POST /extraction/stores/{store_id}` crawls an arbitrary
+# storefront — precisely the reachable-but-unreviewed surface the ticket was filed about.
+# Every one was DRIVEN with a real payload before it was declared, and every published response
+# example is a body the running service actually returned, not a body someone imagined: the
+# first draft of the `/extraction/stores/{store_id}` example was hand-written, the served report
+# turned out to carry `base_url`, `observed_at`, `model_calls`, `reused`, `hash_index` and
+# `upserts` as well, and it was replaced by the measured one.
+#
+# `GET /schedule` and `POST /schedule/tick` arrived from another lane's scheduler work WHILE
+# this change was in flight — the re-measure that caught them is why they are here rather than
+# left as a fresh instance of the same defect the moment this one closed. They were driven the
+# same way and declared with the rest.
+#
+#   BEFORE (this branch, worker 2, --runxfail):
+#     served 7, published 1; published but NOT served: none;
+#     served but NOT published: the six er/extraction operations
+#   AFTER: served 9, published 9, both directions empty.
+#   CAUSATION: deleting the eight new entries from
+#     packages/contracts/openapi/ingest.openapi.json returns this node to that failure —
+#     re-measured against `git show HEAD:...` and it reports exactly the BEFORE line.
 def test_t312_ingest_serves_exactly_the_operations_its_contract_publishes() -> None:
-    """One published door with no server, and six servers with no published door.
+    """The ingest service's served surface and its published contract, in both directions.
 
-    Measured at HEAD by building the app and reading ``app.openapi()['paths']``::
+    Measured after the fix by building the app and reading ``app.openapi()['paths']``::
 
-        served     GET  /er/config                    POST /er/match
+        served == published ==
+                   GET  /er/config                    POST /er/match
                    POST /er/resolve                   GET  /extraction/config
                    POST /extraction/policy-pages      POST /extraction/stores/{store_id}
-        published  POST /refresh/{store_id}           -> 404
+                   POST /refresh/{store_id}           GET  /schedule
+                   POST /schedule/tick
 
-    The two sets are disjoint. ``POST /refresh/{store_id}`` is the whole published surface of
-    this service — the door that re-crawls a store's catalog — and it is answered by nothing,
-    which is the same class of defect as the store agent serving no path at all: the pipeline
-    behind it is built and tested as a library and no request can start it.
+    Both directions are asserted here on purpose, and the served-but-unpublished one is the
+    half this ticket turned on: eight live endpoints — entity resolution, extraction and the
+    scheduler's driving surface, including ``POST /extraction/stores/{id}``, which crawls an
+    arbitrary store — were served by a deployed service and declared by no contract. Nothing
+    told a client they existed, and nothing told a reviewer of the contract that this service's
+    real reachable surface was nine times what the document showed.
 
-    The other direction is the larger half and is deliberately asserted here too. Six live
-    endpoints — entity resolution and extraction, including ``POST /extraction/stores/{id}``,
-    which crawls an arbitrary store — are served by a deployed service and declared by no
-    contract. Nothing tells a client they exist, and nothing tells a reviewer of the contract
-    that this service's real attack surface is six times what the document shows. Gating only
-    the missing half would let a fix mount ``/refresh`` and leave that untouched.
-
-    Either direction is repairable independently and the test names both, so whichever is
-    fixed first the message says exactly what is left.
+    Either direction is repairable independently and the test names both, so whichever
+    regresses first the message says exactly what is wrong.
     """
     from ingest.main import create_app  # noqa: PLC0415
 

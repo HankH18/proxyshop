@@ -99,18 +99,28 @@ from .models import (
     intent_from_payload,
     payload_weight,
 )
+from .vocabulary import (
+    CATALOGUE_ATTRIBUTES,
+    INTENT_AXES,
+    PLATFORM_ATTRIBUTES,
+    UnsatisfiableConstraint,
+    catalogue_speaks,
+    unspeakable_reason,
+)
 
 __all__ = [
     "AUCTION_CLIENT_METHODS",
     "BUDGET_BAND_UNSPECIFIED",
     "BUDGET_BAND_VOCABULARY",
     "CANNED_QUESTIONS",
+    "CATALOGUE_ATTRIBUTES",
     "CONSTRAINT_OPS",
     "DEFAULT_CURRENCY",
     "GAP_BUDGET",
     "GAP_CONSTRAINTS",
     "GAP_ORDER",
     "GAP_USE_CASE",
+    "INTENT_AXES",
     "INTENT_CONTRACT",
     "INTENT_SCHEMA_VERSION",
     "MAX_CLARIFYING_QUESTIONS",
@@ -118,6 +128,7 @@ __all__ = [
     "MAX_IDENTIFIER_LENGTH",
     "MAX_INTENT_BYTES",
     "MAX_INTENT_TERMS",
+    "PLATFORM_ATTRIBUTES",
     "PREFERENCE_DIRECTIONS",
     "AuctionClientUnusable",
     "AuctionCreated",
@@ -138,8 +149,10 @@ __all__ = [
     "LLMProposal",
     "Preference",
     "QuestionCapBroken",
+    "UnsatisfiableConstraint",
     "UnstructuredIntent",
     "band_for_amount",
+    "catalogue_speaks",
     "check_intent_bounds",
     "clarify",
     "coerce_intent",
@@ -150,6 +163,7 @@ __all__ = [
     "parse_llm_reply",
     "payload_weight",
     "reset_confirmations",
+    "unspeakable_reason",
 ]
 
 # LAST, and it is not decoration: this tree is importable as `buyer_svc.intent` and as

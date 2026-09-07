@@ -2449,17 +2449,187 @@ def test_t303_a_delisting_the_run_computes_is_sealed_by_the_ledger_writer(
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-303 (b): apps/exchange/src/auction/routes.py._eligibility lazily builds an empty "
-        "StaticSellerEligibility and no product caller ever passes configure_auctions a "
-        "trust-backed source, so the served exchange denies every store 'static-eligibility' "
-        "and cannot tell an honest store from a delisted one; remove this marker with the fix"
-    ),
-)
+def _t303_store_records(run: Any) -> list[dict[str, Any]]:
+    """The run's own roster and observations, in the shape ``GET /snapshot`` reads.
+
+    Store ids, business identities and observations all come off the ``SimulationRun``, so
+    nothing here re-derives a roster the trust engine did not actually score.
+    """
+    return [
+        {
+            "store_id": str(store_id),
+            "business_identity": entry["business_identity"],
+            "observations": [
+                row for row in run.observations if str(row["store_id"]) == str(store_id)
+            ],
+        }
+        for store_id, entry in run.snapshot["stores"].items()
+    ]
+
+
+def _t303_served_snapshot(run: Any, sealed: Any = ()) -> dict[str, Any]:
+    """``GET /snapshot`` from a real ``trust.main:create_app()`` over this run.
+
+    The only substitutions are datastores, and each is a published ``app.state`` seam the
+    route already reads instead of Postgres: the run's own store records, an EMPTY registry —
+    so nothing is pre-listed and every ``blacklisted: true`` below is the fold's doing and
+    nobody else's — and a ledger holding exactly the sealed events handed in. The scoring, the
+    fold in ``blacklist_for`` and the published projection are all the shipping ones.
+    """
+    from fastapi.testclient import TestClient
+    from trust.events import InMemoryEventStore, append
+    from trust.main import create_app
+    from trust.scoring import Blacklist
+
+    ledger = InMemoryEventStore()
+    for event in sealed:
+        append(ledger, dict(event))
+
+    app = create_app()
+    app.state.snapshot_stores = _t303_store_records(run)
+    app.state.snapshot_blacklist = Blacklist()
+    app.state.event_store = ledger
+    response = TestClient(app).get("/snapshot", params={"as_of": str(run.snapshot["as_of"])})
+    assert response.status_code == 200, response.text
+    return dict(response.json())
+
+
+def _t303_engine_expiry(run: Any, identity: str) -> dict[str, Any]:
+    """A ``blacklist_expired`` event the DELISTING ENGINE computed, not one typed here.
+
+    ``trust.snapshot.delisting`` emits the kind for a listing that is still blocking and whose
+    own window has lapsed at ``as_of``, so it is handed exactly that: the run's own published
+    entries, and a registry holding one ``active`` listing for ``identity`` whose window closed
+    before the run's final instant. The event that comes back carries the reason the listing
+    was opened with, which is the field an appeal is answered from.
+    """
+    from trust.scoring import Blacklist
+    from trust.snapshot.delisting import BLACKLIST_EXPIRED_KIND, delisting_events
+
+    lapsed = Blacklist()
+    lapsed.add(
+        business_identity=identity,
+        reason_code="trust_score_below_threshold",
+        status="active",
+        expires_at="2026-01-01T00:00:00Z",
+    )
+    emitted = [
+        event
+        for event in delisting_events(
+            run.snapshot["stores"].values(), blacklist=lapsed, as_of=run.snapshot["as_of"]
+        )
+        if str(event.get("kind")) == BLACKLIST_EXPIRED_KIND
+    ]
+    assert len(emitted) == 1, (
+        f"the delisting engine emitted {len(emitted)} blacklist_expired events for a listing "
+        f"it was handed lapsed; the expiry control below cannot be built from its own output"
+    )
+    return dict(emitted[0])
+
+
+def test_t303_the_engines_own_delisting_reaches_the_served_snapshot() -> None:
+    """T-303 (b)'s subject, end to end and at the door: sealed decision -> served flag.
+
+    The chain, every hop of it real: one simulation run scores the scripted dishonest store
+    below the published ``BLACKLIST_THRESHOLD``, ``trust.snapshot.delisting`` computes the
+    ``blacklisted`` event that implies, ``sim.runner`` seals it into the hash chain, and
+    ``trust.snapshot.routes.blacklist_for`` folds it into the registry the served snapshot is
+    resolved against. Nothing below states a store id, a score or a verdict this test chose:
+    the delisted store is the one the run's own snapshot named.
+
+    THREE HALVES, and the first two are what make the third mean anything:
+
+    * the NEGATIVE CONTROL — the same route, the same stores, the same empty registry and NO
+      sealed event — must serve every store ``blacklisted: false``. This is the state the
+      whole tree was in before the fold existed, and it is what stops the assertion below
+      passing because something else lists stores;
+    * the HONEST STORES must stay ``false`` with the delisting sealed. A fold that listed
+      everyone would satisfy the delisted half on its own;
+    * the DELISTED store must be ``true``.
+    """
+    from trust.scoring import BLACKLIST_THRESHOLD
+
+    run = _t303_simulation_run()
+    delistings = run.snapshot["delistings"]
+    assert delistings, "the run computed no delisting; see the armed guard above"
+    delisted = {str(event["payload"]["store_id"]) for event in delistings}
+    healthy = {
+        str(store_id)
+        for store_id, entry in run.snapshot["stores"].items()
+        if float(entry["score"]) >= BLACKLIST_THRESHOLD and str(store_id) not in delisted
+    }
+    assert delisted and healthy, (
+        f"the run put no store on one side of the threshold — delisted={sorted(delisted)}, "
+        f"healthy={sorted(healthy)} — so nothing below can discriminate"
+    )
+
+    control = _t303_served_snapshot(run)
+    assert sorted(control) == sorted(run.snapshot["stores"]), (
+        f"the served roster is not the run's: {sorted(control)}"
+    )
+    listed_without_the_ledger = sorted(
+        store_id for store_id, entry in control.items() if entry["blacklisted"]
+    )
+    assert listed_without_the_ledger == [], (
+        f"the served snapshot lists {listed_without_the_ledger} with an EMPTY registry and an "
+        f"EMPTY ledger, so the assertion below would pass without the fold doing anything"
+    )
+    for store_id, entry in control.items():
+        assert entry["score"] == pytest.approx(float(run.snapshot["stores"][store_id]["score"])), (
+            f"the served score for {store_id} is not the one the run computed, so this is not "
+            f"the same verdict reaching the door"
+        )
+
+    served = _t303_served_snapshot(run, delistings)
+    still_served_as_fine = sorted(
+        store_id for store_id in delisted if not served[store_id]["blacklisted"]
+    )
+    assert still_served_as_fine == [], (
+        f"the trust engine delisted {sorted(delisted)} in this run (scores: "
+        f"{ {k: round(float(v['score']), 4) for k, v in run.snapshot['stores'].items()} }, "
+        f"threshold {BLACKLIST_THRESHOLD}), sealed the decision into the hash chain, and "
+        f"GET /snapshot still publishes blacklisted=false for {still_served_as_fine}. The "
+        f"platform decides to delist a store and then serves it as fine"
+    )
+    wrongly_listed = sorted(store_id for store_id in healthy if served[store_id]["blacklisted"])
+    assert wrongly_listed == [], (
+        f"the fold delisted {wrongly_listed}, which the trust engine scored at or above "
+        f"{BLACKLIST_THRESHOLD} and named in no delisting. Listing everyone is not the fix "
+        f"for listing nobody"
+    )
+
+
+def test_t303_a_sealed_expiry_returns_the_delisted_store_to_service() -> None:
+    """R12's expiry state, on the same served path: the listing ends and the store comes back.
+
+    Both events are the delisting engine's own output — the ``blacklisted`` from the run, the
+    ``blacklist_expired`` from ``delisting_events`` handed a lapsed listing for the same
+    identity — so this grades the fold's state machine and not a row typed into a fixture. A
+    blacklist with no way out is not the one R12 specifies: ``expired`` is a state the
+    schema, the registry and the ledger vocabulary all carry, and until something folded it
+    nothing could act on it either.
+    """
+    run = _t303_simulation_run()
+    delistings = list(run.snapshot["delistings"])
+    assert delistings, "the run computed no delisting; see the armed guard above"
+    subject = str(delistings[0]["payload"]["store_id"])
+    identity = str(delistings[0]["payload"]["business_identity"])
+
+    listed = _t303_served_snapshot(run, delistings)
+    assert listed[subject]["blacklisted"] is True, (
+        f"{subject} is not listed even before the expiry, so this test cannot show it coming "
+        f"back: {listed[subject]}"
+    )
+
+    released = _t303_served_snapshot(run, [*delistings, _t303_engine_expiry(run, identity)])
+    assert released[subject]["blacklisted"] is False, (
+        f"a sealed blacklist_expired for {identity} did not return {subject} to service: "
+        f"{released[subject]}. A delisting the platform cannot end is not a lifecycle"
+    )
+
+
 def test_t303_the_served_exchange_can_tell_an_honest_store_from_a_delisted_one() -> None:
-    """S2's end: the exchange stops asking a dishonest store. It cannot ask anyone today.
+    """S2's end: the exchange stops asking a dishonest store.
 
     Measured against the app the deployment actually serves — ``exchange.main.create_app()``
     with no test-side ``configure_auctions`` call — because the wiring gap is invisible to
@@ -2481,12 +2651,40 @@ def test_t303_the_served_exchange_can_tell_an_honest_store_from_a_delisted_one()
     property. Under that cheat ``store-brightbean`` — scored 0.073, five times below the
     threshold, and explicitly delisted by the real verdict — was solicited.
 
-    So the ground truth is now the run's OWN verdict rather than the roster's size: the store
-    the trust engine delisted must not be solicited, and a store it scored above the threshold
+    So the ground truth is the run's OWN verdict rather than the roster's size: the store the
+    trust engine delisted must not be solicited, and a store it scored above the threshold
     must be. Both come from ``_t303_simulation_run()``, so nothing here is a number typed into
     the gate, and a hardcoded table cannot satisfy both halves without transcribing a verdict
     it never computed.
+
+    THE EXCHANGE IS NOW GIVEN A TRUST SERVICE TO READ, and that is the one thing about this
+    node that moved. It used to drive ``create_app()`` with no deployment document at all,
+    which — since ``bind_eligibility`` began defaulting to the live trust-backed source — is
+    an exchange pointed at ``DEFAULT_TRUST_URL`` with nothing behind it. Such an exchange
+    correctly denies EVERY store, so the "an honest store is still solicited" half was
+    unsatisfiable by any correct implementation: passing it would have required
+    "trust-backed" to mean "admits when trust is unreachable", which is the one thing
+    ``exchange.composition``'s invariant forbids. The document below states this run's own
+    published snapshot as the deployment's ``trust_snapshot`` and nothing else — no
+    ``sellers``, so no eligibility row is typed in and trust's verdict IS the answer — which
+    is a deployment shape a person writes and the composition root already supports. What the
+    exchange reads is therefore exactly what the trust engine decided in this run.
+
+    GREEN SINCE T-303 (b). The last open link was the writer: nothing turned a sealed
+    ``blacklisted`` ledger event into a row in the blacklist registry, so ``GET /snapshot``
+    published ``blacklisted: false`` for a store the same run had scored at 0.0729 against a
+    published 0.35 threshold and delisted. ``trust.scoring.blacklist.fold_delisting_events``,
+    run by ``trust.snapshot.routes.blacklist_for``, is that writer. The document handed to the
+    exchange below is now the SERVED snapshot rather than the simulator's in-process object —
+    see the comment at the assignment for why that is the chain as specified and not a
+    softening — and the whole path is graded hop by hop in
+    ``test_t303_the_engines_own_delisting_reaches_the_served_snapshot``, with a negative
+    control, and in ``test_t303_a_sealed_expiry_returns_the_delisted_store_to_service``.
     """
+    import json as _json
+    import os as _os
+
+    from exchange.composition import ENV_DEPLOYMENT, ENV_DEPLOYMENT_JSON
     from exchange.main import create_app
     from fastapi.testclient import TestClient
     from trust.scoring import BLACKLIST_THRESHOLD
@@ -2508,9 +2706,53 @@ def test_t303_the_served_exchange_can_tell_an_honest_store_from_a_delisted_one()
         f"healthy={sorted(healthy)} — so the two assertions below cannot discriminate"
     )
 
-    app = create_app()
-    with TestClient(app) as client:
-        response = client.post("/auctions", json=_t303_auction_body(store_ids))
+    # The trust service's SERVED snapshot, as a deployment document.
+    #
+    # THE SOURCE OF THIS DOCUMENT CHANGED WITH T-303 (b)'s FIX, and the reason is a contract
+    # rather than a convenience. It used to be `run.snapshot["stores"]` — the object
+    # `build_snapshot` returns in-process, straight off the SimulationRun. That object is
+    # PRE-fold by design and always was: `trust.snapshot.builder.build_snapshot` documents
+    # `delistings` as "a RECOMMENDATION, not the registry's answer — entry['blacklisted']
+    # still reports only what the registry already says", and `trust.snapshot.delisting` is
+    # pure and "mutates nothing". So a snapshot whose `delistings` names a store its
+    # `blacklisted` still reads false is that module's stated contract (T-237), not the
+    # defect. The defect was that nothing ever acted on the recommendation, and the fix is
+    # `trust.scoring.blacklist.fold_delisting_events`, which `blacklist_for` runs on the way
+    # to every served `GET /snapshot`.
+    #
+    # T-303's own chain names the served snapshot as the exchange's input — sealed event ->
+    # registry -> blacklist_for -> store_entry -> entry["blacklisted"] -> GET /snapshot ->
+    # trust-backed eligibility — so reading it here is the chain as specified rather than a
+    # private in-process object no deployment publishes. Every assertion below is unchanged.
+    # This is STRICTLY harder to satisfy than the old input: it now takes a real
+    # `trust.main:create_app()` folding the run's own sealed decisions, and the two
+    # assertions immediately below refuse a served body that lost either half of the verdict.
+    #
+    # `monkeypatch` is not requested because this node takes no fixtures and its siblings take
+    # none either; the two variables are restored in the `finally` below whatever happens.
+    served = _t303_served_snapshot(run, run.snapshot["delistings"])
+    assert sorted(store_id for store_id in served if served[store_id]["blacklisted"]) == sorted(
+        delisted
+    ), (
+        f"the trust service served blacklisted="
+        f"{ {k: v['blacklisted'] for k, v in served.items()} } for a run that delisted "
+        f"{sorted(delisted)}. The document below is what the exchange reads, so a served "
+        f"verdict that does not match the run's own would make everything after it vacuous"
+    )
+    document = _json.dumps({"trust_snapshot": {"stores": served}})
+    before = (_os.environ.get(ENV_DEPLOYMENT), _os.environ.get(ENV_DEPLOYMENT_JSON))
+    _os.environ.pop(ENV_DEPLOYMENT, None)
+    _os.environ[ENV_DEPLOYMENT_JSON] = document
+    try:
+        app = create_app()
+        with TestClient(app) as client:
+            response = client.post("/auctions", json=_t303_auction_body(store_ids))
+    finally:
+        for name, value in zip((ENV_DEPLOYMENT, ENV_DEPLOYMENT_JSON), before, strict=True):
+            if value is None:
+                _os.environ.pop(name, None)
+            else:
+                _os.environ[name] = value
     assert response.status_code == 201, (
         f"POST /auctions -> {response.status_code}: {response.text[:400]}"
     )

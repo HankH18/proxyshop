@@ -728,3 +728,332 @@ def test_every_instant_the_scorer_accepts_is_still_served_with_a_header(as_of: s
             f"the caller's instant was rewritten to {served!r}; a replayed decision is "
             f"stamped with the instant it was replayed at"
         )
+
+
+# ======================================================================================
+# T-303 (b) — the fold on the read path: a sealed delisting becomes a served `blacklisted`
+#
+# `blacklist_for` is where the ledger's delisting decisions meet the registry the snapshot is
+# resolved against. Before this, `app.seller_blacklist` had no writer anywhere in the tree —
+# `db/migrations/0004` grants `trust_rw` INSERT on it and nothing used the grant — so a
+# delisting the trust engine sealed into the hash chain never became a row and the exchange
+# went on being told the store was fine.
+#
+# The injected layer below grades the FOLD; the docker layer grades the WRITER, which an
+# injected fixture cannot prove and which is the half that breaks in a deployment.
+# ======================================================================================
+
+_FOLD_STORES = [
+    _store(
+        "store-caught",
+        "co-caught",
+        [{"dim": "price_honored", "type": "verified", "observed_at": "2026-01-01T00:00:00Z"}],
+    ),
+    _store("store-honest", "co-honest", []),
+]
+
+
+def _sealed(kind: str, store_id: str, identity: str, **payload: Any) -> dict[str, Any]:
+    """One sealed delisting event, in the shape ``trust.snapshot.delisting`` emits."""
+    body = {"store_id": store_id, "reason_code": "trust_score_below_threshold", **payload}
+    body.setdefault("business_identity", identity)
+    if kind == "blacklisted":
+        body.setdefault("source", "trust-score")
+        body.setdefault("expires_at", None)
+    return {
+        "event_id": f"{kind}:{store_id}:{AS_OF}",
+        "ts": AS_OF,
+        "kind": kind,
+        "store_id": store_id,
+        "payload": body,
+    }
+
+
+def _served_with_ledger(events: list[dict[str, Any]], registry: Any = None) -> dict[str, Any]:
+    """``GET /snapshot`` over :data:`_FOLD_STORES`, with ``events`` sealed in the ledger."""
+    from trust.events import InMemoryEventStore, append
+    from trust.main import create_app
+    from trust.scoring import Blacklist
+
+    store = InMemoryEventStore()
+    for event in events:
+        append(store, event)
+
+    app = create_app()
+    app.state.snapshot_stores = _FOLD_STORES
+    app.state.snapshot_blacklist = Blacklist() if registry is None else registry
+    app.state.event_store = store
+    response = TestClient(app).get("/snapshot", params={"as_of": AS_OF})
+    assert response.status_code == 200, response.text
+    return dict(response.json())
+
+
+def test_a_sealed_delisting_reaches_the_served_snapshot() -> None:
+    """The missing link, at the door the exchange actually reads.
+
+    The control is the same route, the same stores and the same empty registry with NO event
+    sealed — so ``blacklisted: true`` is attributable to the fold and to nothing else. Before
+    this fold existed, both halves answered ``false``.
+    """
+    control = _served_with_ledger([])
+    assert control["store-caught"]["blacklisted"] is False, control
+    assert control["store-honest"]["blacklisted"] is False, control
+
+    served = _served_with_ledger([_sealed("blacklisted", "store-caught", "co-caught")])
+    assert served["store-caught"]["blacklisted"] is True, (
+        f"a delisting sealed into the ledger did not reach the served snapshot: {served}"
+    )
+    assert served["store-honest"]["blacklisted"] is False, (
+        f"the fold blacklisted a store no delisting names: {served}"
+    )
+    _validate_trust_snapshot(served["store-caught"])
+
+
+def test_a_sealed_expiry_returns_the_store_to_the_served_snapshot() -> None:
+    """R12's expiry state, end to end: the listing ends and the store is served again."""
+    listed = _served_with_ledger([_sealed("blacklisted", "store-caught", "co-caught")])
+    assert listed["store-caught"]["blacklisted"] is True
+
+    released = _served_with_ledger(
+        [
+            _sealed("blacklisted", "store-caught", "co-caught"),
+            _sealed("blacklist_expired", "store-caught", "co-caught"),
+        ]
+    )
+    assert released["store-caught"]["blacklisted"] is False, (
+        f"a sealed blacklist_expired did not return the store to service: {released}"
+    )
+
+
+def test_the_served_fold_never_reopens_a_listing_a_human_is_still_deciding() -> None:
+    """A sealed ``blacklisted`` must not close an open appeal by re-stamping it ``active``.
+
+    The two ledger kinds cannot express ``under_review`` or ``appealed``; only
+    ``app.seller_blacklist`` can, so the fold may add listings and close them and may not
+    overwrite the lifecycle state a person put one in.
+    """
+    from trust.scoring import Blacklist
+
+    registry = Blacklist()
+    registry.add(business_identity="co-caught", reason_code="manual_review", status="appealed")
+    served = _served_with_ledger(
+        [_sealed("blacklisted", "store-caught", "co-caught")], registry=registry
+    )
+    assert served["store-caught"]["blacklisted"] is True, served
+    assert registry.lookup("co-caught").status == "appealed", (
+        "the served fold rewrote a listing under appeal; a GET closed a review nobody finished"
+    )
+    assert registry.lookup("co-caught").reason_code == "manual_review"
+
+
+def test_an_injected_registry_with_no_ledger_bound_is_served_exactly_as_before() -> None:
+    """No ``event_store``, no fold, no attempt to reach a datastore nobody configured.
+
+    This is the shape every injected-source test in this file and in ``e2e/`` uses. A fold
+    that reached for a ``PostgresEventStore`` here would turn each of them into a 503.
+    """
+    from trust.scoring import Blacklist
+
+    registry = Blacklist()
+    registry.add(business_identity="co-caught", reason_code="manual_review", status="active")
+    response = _client(_FOLD_STORES, registry).get("/snapshot", params={"as_of": AS_OF})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["store-caught"]["blacklisted"] is True, body
+    assert body["store-honest"]["blacklisted"] is False, body
+
+
+@pytest.mark.docker
+def test_the_fold_writes_the_listing_into_app_seller_blacklist(
+    ledger_clean: Any,
+    pg_admin: Any,
+    worker_database: str,
+    worker_index: int,
+) -> None:
+    """The half an injected fixture cannot prove: the grant nothing used is now used.
+
+    ``db/migrations/0004`` gives ``trust_rw`` ``INSERT, UPDATE, DELETE`` on
+    ``app.seller_blacklist`` and, until this fold, no product code anywhere in the tree wrote
+    to that table — ``blacklist_for`` was its only reader. So this seeds a seller and a
+    delisting sealed through the REAL ledger writer, leaves the blacklist table EMPTY, and
+    asks the route for a snapshot: the store must come back listed, and the row must exist
+    afterwards, written by the service under its own role.
+
+    The second read is not decoration. It is the idempotency claim at the database: the fold
+    runs again over the same chain, and ``seller_blacklist_one_live_entry_idx`` plus
+    ``on conflict do nothing`` must leave exactly one row rather than a second listing per
+    snapshot read.
+    """
+    import os
+
+    from trust.events import PostgresEventStore, append
+    from trust.main import create_app
+
+    from proxyshop_support.postgres import role_dsn
+
+    with pg_admin.cursor() as cursor:
+        cursor.execute("delete from ledger.trust_observations")
+        cursor.execute("delete from app.seller_blacklist")
+        cursor.execute("delete from app.sellers")
+        cursor.execute(
+            "insert into app.sellers (store_id, domain, business_identity, tier) values "
+            "('store-caught', 'caught.example', 'co-caught', 'hosted'), "
+            "('store-windowed', 'windowed.example', 'co-windowed', 'hosted'), "
+            "('store-honest', 'honest.example', 'co-honest', 'hosted')"
+        )
+        cursor.execute(
+            "insert into ledger.trust_observations "
+            "(store_id, dim, observation_type, weight, observed_at) values "
+            "('store-caught', 'price_honored', 'verified', 1.0, '2026-01-01T00:00:00Z')"
+        )
+
+    dsn = role_dsn("trust_rw", worker_index, database=worker_database)
+    writer = PostgresEventStore(dsn)
+    try:
+        append(writer, _sealed("blacklisted", "store-caught", "co-caught"))
+        # A listing with a WINDOW, and one whose window closes before the instant this fold
+        # runs at. `seller_blacklist_window_ordered` requires `expires_at >= starts_at`, so a
+        # row stamped `starts_at = now()` would be refused and the listing lost on a schema
+        # technicality — which is why the insert floors `starts_at` by `expires_at`.
+        append(
+            writer,
+            _sealed(
+                "blacklisted",
+                "store-windowed",
+                "co-windowed",
+                expires_at="2026-03-01T00:00:00Z",
+            ),
+        )
+    finally:
+        writer.close()
+
+    with pg_admin.cursor() as cursor:
+        cursor.execute("select count(*) from app.seller_blacklist")
+        assert cursor.fetchone()[0] == 0, "the blacklist table was seeded; nothing left to write"
+
+    app = create_app()
+    app.state.ledger_connection = None
+    previous = os.environ.get("PROXYSHOP_LEDGER_DSN")
+    os.environ["PROXYSHOP_LEDGER_DSN"] = role_dsn("trust_rw", database=worker_database)
+    try:
+        client = TestClient(app)
+        first = client.get("/snapshot", params={"as_of": AS_OF})
+        second = client.get("/snapshot", params={"as_of": AS_OF})
+    finally:
+        if previous is None:
+            os.environ.pop("PROXYSHOP_LEDGER_DSN", None)
+        else:
+            os.environ["PROXYSHOP_LEDGER_DSN"] = previous
+
+    for response in (first, second):
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["store-caught"]["blacklisted"] is True, (
+            f"a delisting sealed into ledger.commerce_events did not reach the served "
+            f"snapshot, so the fold did not read the real chain: {body}"
+        )
+        assert body["store-windowed"]["blacklisted"] is True, (
+            f"a delisting whose window has not closed at as_of={AS_OF} is not enforced: {body}"
+        )
+        assert body["store-honest"]["blacklisted"] is False, body
+
+    with pg_admin.cursor() as cursor:
+        cursor.execute(
+            "select business_identity, store_id, reason_code, source, status, expires_at "
+            "from app.seller_blacklist order by business_identity"
+        )
+        rows = cursor.fetchall()
+    assert len(rows) == 2, (
+        f"the fold wrote {len(rows)} rows for two sealed delistings across two reads; the "
+        f"registry has to CONVERGE on the chain, not be re-listed on every snapshot: {rows}"
+    )
+    windowed = rows[1]
+    assert windowed[0] == "co-windowed" and windowed[4] == "active", windowed
+    assert windowed[5] is not None, (
+        f"the listing lost the window the sealed decision carried, so it can never lapse: "
+        f"{windowed}"
+    )
+    identity, store_id, reason_code, source, status, expires_at = rows[0]
+    assert (identity, store_id, status) == ("co-caught", "store-caught", "active"), rows[0]
+    assert reason_code == "trust_score_below_threshold", rows[0]
+    assert source == "trust-score", (
+        f"the row does not record WHO decided, so a reviewer cannot tell an automatic "
+        f"delisting from a human one: {rows[0]}"
+    )
+    assert expires_at is None, rows[0]
+
+
+@pytest.mark.docker
+def test_a_sealed_expiry_closes_the_row_the_fold_wrote(
+    ledger_clean: Any,
+    pg_admin: Any,
+    worker_database: str,
+    worker_index: int,
+) -> None:
+    """The other half of the lifecycle, against the real table: the listing is CLOSED.
+
+    Two phases, because that is the sequence a deployment actually runs: the delisting is
+    sealed and read (the fold writes an ``active`` row), then the expiry is sealed and read
+    (the fold closes that same row). ``status`` moves to ``expired`` rather than the row being
+    deleted — an appeal, an auditor and ``reviewed_by`` all read a history, and a blacklist
+    you cannot explain is one nobody will maintain.
+    """
+    import os
+
+    from trust.events import PostgresEventStore, append
+    from trust.main import create_app
+
+    from proxyshop_support.postgres import role_dsn
+
+    with pg_admin.cursor() as cursor:
+        cursor.execute("delete from ledger.trust_observations")
+        cursor.execute("delete from app.seller_blacklist")
+        cursor.execute("delete from app.sellers")
+        cursor.execute(
+            "insert into app.sellers (store_id, domain, business_identity, tier) values "
+            "('store-caught', 'caught.example', 'co-caught', 'hosted')"
+        )
+
+    dsn = role_dsn("trust_rw", worker_index, database=worker_database)
+    app = create_app()
+    app.state.ledger_connection = None
+    previous = os.environ.get("PROXYSHOP_LEDGER_DSN")
+    os.environ["PROXYSHOP_LEDGER_DSN"] = role_dsn("trust_rw", database=worker_database)
+
+    def seal(event: dict[str, Any]) -> None:
+        writer = PostgresEventStore(dsn)
+        try:
+            append(writer, event)
+        finally:
+            writer.close()
+
+    def statuses() -> list[str]:
+        with pg_admin.cursor() as cursor:
+            cursor.execute("select status from app.seller_blacklist order by created_at")
+            return [row[0] for row in cursor.fetchall()]
+
+    try:
+        client = TestClient(app)
+        seal(_sealed("blacklisted", "store-caught", "co-caught"))
+        listed = client.get("/snapshot", params={"as_of": AS_OF})
+        assert listed.status_code == 200, listed.text
+        assert listed.json()["store-caught"]["blacklisted"] is True, listed.text
+        assert statuses() == ["active"], statuses()
+
+        seal(_sealed("blacklist_expired", "store-caught", "co-caught"))
+        released = client.get("/snapshot", params={"as_of": AS_OF})
+    finally:
+        if previous is None:
+            os.environ.pop("PROXYSHOP_LEDGER_DSN", None)
+        else:
+            os.environ["PROXYSHOP_LEDGER_DSN"] = previous
+
+    assert released.status_code == 200, released.text
+    body = released.json()
+    assert body["store-caught"]["blacklisted"] is False, (
+        f"a sealed blacklist_expired did not return the store to service: {body}"
+    )
+    assert statuses() == ["expired"], (
+        f"the closed listing is not readable as a closed listing: {statuses()}. An expiry "
+        f"ends a listing; it does not erase that it happened"
+    )

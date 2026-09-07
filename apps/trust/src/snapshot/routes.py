@@ -43,18 +43,38 @@ No such client exists yet — ``git grep SNAPSHOT_VERSION -- . ':(exclude)apps/t
 nothing. What lands here is the cache KEY, served; the caching and the refresh are acceptance
 3 itself and are still to be built in ``apps/exchange``.
 
+Where the enforced answer comes from (T-303 b)
+-----------------------------------------------
+:func:`blacklist_for` does not merely READ the blacklist any more: it folds the ledger's
+sealed delisting decisions into it, and writes the result back. That fold is the link the
+whole S2 chain was missing. ``trust.snapshot.delisting`` decided a delisting, ``sim.runner``
+and ``POST /events`` sealed it into the hash chain — and nothing turned it into a row in
+``app.seller_blacklist``, which is the only thing ``entry["blacklisted"]`` reports and the
+only thing the exchange's eligibility read can see. ``db/migrations/0004`` grants ``trust_rw``
+INSERT on that table and no product code used the grant. Measured on this tree before the
+fix: one simulation run scored ``store-brightbean`` at 0.0729 against a published 0.35
+threshold, sealed the ``blacklisted`` event that implies, and this route published
+``blacklisted: false`` for it.
+
+Why the fold lives on this READ path rather than on the ledger's append path is argued in
+:func:`blacklist_for` itself, in terms of what each one does when it fails.
+
 Where the data comes from
 -------------------------
-Three tables, read through ONE per-request connection borrowed from
+Four tables now — ``ledger.commerce_events`` joins the three below for the fold — read
+through ONE per-request connection borrowed from
 :func:`trust.claims.routes.connection_for` — deliberately, so this route and
 ``/claims/verifications`` resolve one DSN between them rather than two. ``trust_rw``'s grant
-set is what makes this possible: full DML on ``ledger`` and READ-ONLY on ``app``, which is
-exactly SELECT on ``app.sellers`` and ``app.seller_blacklist`` plus SELECT on
-``ledger.trust_observations``.
+set is what makes this possible: full DML on ``ledger`` and read on ``app`` — SELECT on
+``app.sellers``, ``app.seller_blacklist``, ``ledger.trust_observations`` and
+``ledger.commerce_events``, plus the ``INSERT, UPDATE, DELETE`` on ``app.seller_blacklist``
+that 0004 granted for the fold and that nothing used until it existed.
 
 Both halves are injectable on ``app.state`` (``snapshot_stores`` / ``snapshot_blacklist``),
 the same shape ``/events`` uses for ``event_store``, so the route can be driven without a
 database and so a deployment can point it at a different source without editing this file.
+An injected registry folds against ``app.state.snapshot_delistings`` or ``event_store`` if
+either is bound and against nothing if neither is; see :func:`sealed_delistings_for`.
 
 ``as_of`` is a query parameter and defaults to the serve instant. ``build_snapshot`` refuses
 to read a clock itself and says why — a snapshot computed against ``now()`` cannot be told
@@ -88,6 +108,7 @@ value this process has already proved it can render.
 
 from __future__ import annotations
 
+import contextlib
 import re
 from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime
@@ -103,6 +124,16 @@ from ..scoring import (
     UnknownTrustDimension,
 )
 
+# Straight from the submodule, like ``..scoring.engine`` below: ``trust.scoring``'s
+# ``__init__`` is orchestrator-frozen and does not re-export the fold.
+from ..scoring.blacklist import (
+    BLACKLIST_EXPIRED_KIND,
+    BLACKLISTED_KIND,
+    BLOCKING_BLACKLIST_STATUSES,
+    FoldedBlacklist,
+    fold_delisting_events,
+)
+
 # The scorer's OWN parser, imported private-and-deliberately: the door and the scorer must
 # agree on what an instant is, and two parsers written to the same spec is exactly how a
 # value gets admitted here and then raises there — which is the 500 this door exists to
@@ -116,8 +147,11 @@ __all__ = [
     "PUBLISHED_SNAPSHOT_FIELDS",
     "UNRENDERABLE_HEADER_CHARACTERS",
     "blacklist_for",
+    "persist_folded_listings",
     "published_entry",
     "router",
+    "sealed_delistings_for",
+    "snapshot_identities",
     "stores_for",
     "validated_as_of",
 ]
@@ -151,6 +185,14 @@ MAX_AS_OF_LENGTH = 64
 #: The same lesson ``trust.events.routes.UNRENDERABLE_IDENTIFIER_CHARACTERS`` records for
 #: caller-chosen identifiers, reached independently here on a different parameter.
 UNRENDERABLE_HEADER_CHARACTERS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+#: ``app.seller_blacklist.source`` for a folded listing whose sealed event named no source.
+#: The column is NOT NULL and it is what tells a reviewer an automatic delisting from a human
+#: one, so a missing value is recorded as missing rather than attributed to this fold.
+UNRECORDED_DELISTING_SOURCE = "unrecorded"
+
+#: The kinds :func:`sealed_delistings_for` keeps, as a set for the per-event membership test.
+_DELISTING_KIND_SET = frozenset({BLACKLISTED_KIND, BLACKLIST_EXPIRED_KIND})
 
 
 def _refuse_as_of(reason: str, why: str) -> NoReturn:
@@ -288,6 +330,65 @@ from app.seller_blacklist
 order by business_identity, created_at
 """
 
+#: The sealed delisting decisions, oldest first, for the fold in :func:`blacklist_for`.
+#:
+#: ``order by seq`` because order IS the semantics — a ``blacklisted`` followed by a
+#: ``blacklist_expired`` leaves the store in service and the reverse leaves it delisted — and
+#: ``commerce_events_kind_seq_idx`` is exactly ``(kind, seq)``, so the filter and the ordering
+#: are both served by one index rather than by a scan of a table that only ever grows.
+#:
+#: The LEFT JOIN is the identity fallback and nothing more: every event this repo produces
+#: carries ``payload.business_identity`` (``trust.snapshot.delisting`` writes it), but the
+#: registry is keyed on the business and an event from some other producer that named only a
+#: store would otherwise bind to nothing. ``app.sellers`` is the roster that answers it.
+_DELISTINGS_SQL = f"""
+select e.kind, e.store_id, e.payload, s.business_identity
+from ledger.commerce_events as e
+left join app.sellers as s on s.store_id = e.store_id
+where e.kind in ('{BLACKLISTED_KIND}', '{BLACKLIST_EXPIRED_KIND}')
+order by e.seq
+"""
+
+#: Insert one folded listing. ``ON CONFLICT DO NOTHING`` covers
+#: ``seller_blacklist_one_live_entry_idx`` — the partial UNIQUE index that already declares
+#: "at most one live entry per identity" — so two concurrent snapshot reads racing to persist
+#: the same sealed decision produce one row and no error, and a fold that runs again over a
+#: chain it has already written is a no-op at the database as well as in memory.
+#: ``store_id`` is resolved from ``app.sellers`` BY IDENTITY rather than taken from the event,
+#: so it lands NULL instead of violating ``seller_blacklist``'s foreign key when the ledger
+#: names a store the roster has never held. The listing is keyed on the business either way;
+#: the store link is provenance, and provenance is not worth losing the listing over.
+#:
+#: ``starts_at`` is the serve instant, floored by ``expires_at`` so
+#: ``seller_blacklist_window_ordered`` holds for a decision whose window had already closed
+#: before this fold ever read it. The alternative — refusing such a row — would drop a listing
+#: on a schema technicality, which is the direction R12 forbids.
+_INSERT_LISTING_SQL = """
+insert into app.seller_blacklist
+  (business_identity, store_id, reason_code, source, status, starts_at, expires_at)
+values (
+  %(business_identity)s,
+  (select s.store_id from app.sellers as s
+    where s.business_identity = %(business_identity)s
+    order by s.store_id limit 1),
+  %(reason_code)s,
+  %(source)s,
+  'active',
+  least(now(), coalesce(%(expires_at)s::timestamptz, now())),
+  %(expires_at)s::timestamptz
+)
+on conflict do nothing
+"""
+
+#: Close every blocking listing for one identity. The fold only ever emits an expiry for a
+#: listing the registry already holds, so this updates rows rather than creating them.
+_EXPIRE_LISTING_SQL = """
+update app.seller_blacklist
+set status = 'expired'
+where business_identity = %(business_identity)s
+  and status = any(%(blocking)s)
+"""
+
 
 def _instant(value: Any) -> str:
     """An RFC-3339 UTC instant with millisecond precision, as the ledger spells them."""
@@ -421,22 +522,199 @@ def stores_for(request: Request) -> list[dict[str, Any]]:
         return _stores_from_rows(cursor.fetchall())
 
 
+def _delistings_from_rows(rows: Iterable[Any]) -> list[dict[str, Any]]:
+    """``(kind, store_id, payload, business_identity)`` rows as delisting events.
+
+    The roster identity from the LEFT JOIN is written into the payload only where the event
+    did not carry one, so a producer that named the business keeps naming it and this is a
+    fallback rather than an override.
+    """
+    events: list[dict[str, Any]] = []
+    for row in rows:
+        payload = _row_value(row, 2, "payload")
+        body = dict(payload) if isinstance(payload, Mapping) else {}
+        if not str(body.get("business_identity") or "").strip():
+            identity = _row_value(row, 3, "business_identity")
+            if identity is not None:
+                body["business_identity"] = str(identity)
+        events.append(
+            {
+                "kind": str(_row_value(row, 0, "kind")),
+                "store_id": _row_value(row, 1, "store_id"),
+                "payload": body,
+            }
+        )
+    return events
+
+
+def snapshot_identities(request: Request) -> dict[str, str]:
+    """``store_id -> business_identity`` for the INJECTED roster, or ``{}``.
+
+    Deliberately only the injected one. The database path resolves identities in
+    :data:`_DELISTINGS_SQL`'s own join, and calling :func:`stores_for` here to get them would
+    read ``app.sellers`` and ``ledger.trust_observations`` a second time on every request —
+    the same double-read :class:`trust.snapshot.builder._ReadOnceRegistry` exists to avoid.
+    """
+    injected = getattr(request.app.state, "snapshot_stores", None)
+    if injected is None:
+        return {}
+    identities: dict[str, str] = {}
+    for record in injected() if callable(injected) else injected:
+        store_id = str(record.get("store_id") or "").strip() if isinstance(record, Mapping) else ""
+        identity = str(record.get("business_identity") or "").strip() if store_id else ""
+        if store_id and identity:
+            identities[store_id] = identity
+    return identities
+
+
+def sealed_delistings_for(request: Request) -> list[Any]:
+    """The sealed delisting events the fold consumes, for an INJECTED registry.
+
+    Resolution order: ``app.state.snapshot_delistings`` (a list, or a callable returning one),
+    otherwise the ledger on ``app.state.event_store`` if one is already bound, otherwise
+    nothing.
+
+    "Otherwise nothing" is the honest answer and not a fail-open shortcut. This function is
+    reached only when a deployment has injected ``snapshot_blacklist`` — which is a statement
+    that THAT registry is the whole truth — and a ledger nobody bound holds no sealed decision
+    for it to be behind. A ``PostgresEventStore`` is never CONSTRUCTED here: the database path
+    folds on its own connection (see :func:`blacklist_for`), and reaching for a datastore an
+    injected-source deployment never configured would turn every such ``GET /snapshot`` into
+    a 503.
+    """
+    injected = getattr(request.app.state, "snapshot_delistings", None)
+    if injected is not None:
+        return list(injected() if callable(injected) else injected)
+    store = getattr(request.app.state, "event_store", None)
+    if store is None:
+        return []
+    # ``iter_events`` ahead of ``read``: both stores publish it, and the Postgres one walks the
+    # chain in bounded chunks (``LEDGER_SCAN_CHUNK``) where ``read()`` materialises the whole
+    # thing. Only the two delisting kinds are kept, so what this holds is proportional to the
+    # delisting decisions ever taken and not to the ledger — which only ever grows.
+    stream = getattr(store, "iter_events", None) or getattr(store, "read", None)
+    if not callable(stream):
+        return []
+    return [
+        event
+        for event in stream()
+        if str(event.get("kind") if isinstance(event, Mapping) else "") in _DELISTING_KIND_SET
+    ]
+
+
+def persist_folded_listings(connection: Any, folded: Any) -> int:
+    """Write the fold's decisions into ``app.seller_blacklist``. Returns rows attempted.
+
+    THIS IS THE WRITER THE TABLE NEVER HAD. ``db/migrations/0004`` grants ``trust_rw``
+    ``INSERT, UPDATE, DELETE`` on ``app.seller_blacklist`` and, until this function, no
+    product code anywhere in the tree used the grant — which is why a delisting the trust
+    engine sealed into the hash chain never became a row anything enforced.
+
+    Writing here, on a GET, is deliberate. The fold has already decided; persisting makes the
+    registry CONVERGE on the chain rather than be recomputed from it forever, and it is what
+    keeps the table the source of truth for the half the ledger cannot express — ``status``
+    ``under_review`` / ``appealed``, ``reviewed_by``, and a listing a human opened by hand.
+    There are only two kinds in the vocabulary and neither of them can say "an appeal is
+    open", so the fold may only ever ADD the automatic listings and close them again.
+
+    **A failed write never fails the read.** The folded registry the caller already holds is
+    what the snapshot is resolved against, so persistence is a convergence step and not the
+    enforcement: on any error the transaction is rolled back, the listing stays enforced in
+    this response, and the next read folds it again. The opposite arrangement — refusing to
+    serve because a row could not be written — would let one bad row take down the endpoint
+    the exchange reads its whole eligibility from.
+    """
+    overlay = getattr(folded, "overlay", None)
+    if not overlay:
+        return 0
+    blocking = sorted(BLOCKING_BLACKLIST_STATUSES)
+    written = 0
+    try:
+        with connection.cursor() as cursor:
+            for identity, entry in sorted(overlay.items()):
+                if entry.status == "expired":
+                    cursor.execute(
+                        _EXPIRE_LISTING_SQL,
+                        {"business_identity": identity, "blocking": blocking},
+                    )
+                else:
+                    cursor.execute(
+                        _INSERT_LISTING_SQL,
+                        {
+                            "business_identity": identity,
+                            "reason_code": entry.reason_code,
+                            # `note` is where the fold parks the sealed event's own `source`
+                            # ("trust-score" for an automatic delisting), which is the column
+                            # a reviewer reads to tell a machine decision from a human one.
+                            "source": entry.note or UNRECORDED_DELISTING_SOURCE,
+                            "expires_at": entry.expires_at,
+                        },
+                    )
+                written += 1
+        connection.commit()
+    except Exception:  # noqa: BLE001 - convergence is best effort; enforcement already holds
+        with contextlib.suppress(Exception):
+            connection.rollback()
+        return 0
+    return written
+
+
 def blacklist_for(request: Request) -> Any:
     """The blacklist registry this snapshot resolves ``blacklisted`` against.
 
     Injectable on ``app.state.snapshot_blacklist``; otherwise read from
     ``app.seller_blacklist``. Never a module-level singleton — :func:`trust.scoring.
     is_blacklisted` takes the registry for exactly this reason.
+
+    THE FOLD LIVES HERE (T-303 b), and this is the choice the previous lane left open. The
+    other candidate was the ledger's APPEND path, and it was rejected on failure behaviour
+    rather than on taste:
+
+    * a fold on the append path must not be allowed to fail an append — the ledger is the
+      record of what was decided, and a registry that is down must not stop a decision being
+      recorded — so its write is best effort, and its failure mode is a sealed ``blacklisted``
+      that never became a row. That is a store the platform delisted, served as fine, forever,
+      with nothing anywhere to notice: fail-OPEN, and silent, which is the one direction R12
+      forbids. Nothing retries it, because from the caller's side the append succeeded.
+    * a fold here cannot be skipped. The registry the snapshot is resolved against IS its
+      output, so there is no window in which a sealed delisting is not enforced, and the whole
+      read is one connection: if the ledger cannot be read, ``blacklist_for`` raises and this
+      route answers 503 — which the exchange reads as "deny every store" (R12). The failure
+      direction is that the store stays delisted, which is what the ticket requires.
+
+    The price is that the enforced answer is recomputed per read, and it is paid down rather
+    than argued away: :func:`persist_folded_listings` writes the fold's decisions back into
+    ``app.seller_blacklist``, so the table converges on the chain and remains the source of
+    truth for the lifecycle states the two ledger kinds cannot express (``under_review``,
+    ``appealed``, ``reviewed_by``, a listing a human opened). The read is served by
+    ``commerce_events_kind_seq_idx``, which is ``(kind, seq)`` — the two columns the query
+    filters and orders on.
     """
     injected = getattr(request.app.state, "snapshot_blacklist", None)
     if injected is not None:
-        return injected() if callable(injected) else injected
+        base = injected() if callable(injected) else injected
+        return fold_delisting_events(
+            sealed_delistings_for(request),
+            base=base,
+            identities=snapshot_identities(request),
+        )
 
     from ..claims.routes import connection_for
 
     with connection_for(request) as connection, connection.cursor() as cursor:
         cursor.execute(_BLACKLIST_SQL)
-        return _blacklist_from_rows(cursor.fetchall())
+        base = _blacklist_from_rows(cursor.fetchall())
+        cursor.execute(_DELISTINGS_SQL)
+        folded = fold_delisting_events(_delistings_from_rows(cursor.fetchall()), base=base)
+        # Only a connection this request owns is committed to. An injected
+        # ``app.state.ledger_connection`` belongs to whoever injected it — its transaction is
+        # theirs to end, and a GET that committed into it would commit their half-written
+        # rows. Enforcement does not depend on this either way; see the docstring above.
+        if isinstance(folded, FoldedBlacklist) and (
+            getattr(request.app.state, "ledger_connection", None) is None
+        ):
+            persist_folded_listings(connection, folded)
+        return folded
 
 
 @router.get(

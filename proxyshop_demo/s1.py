@@ -33,15 +33,19 @@ It does not wire anything. The exchange reads its own deployment document out of
 ``EXCHANGE_DEPLOYMENT`` — including ``trust_url``, the one line that decides where its audit
 trail goes — and each store agent reads its own context out of ``STORE_AGENT_CONTEXT``, which
 is what a person deploying these containers does. The buyer service reads its exchange address
-out of ``EXCHANGE_URL``, which is what ``apps/buyer/compose.yaml`` sets, and this driver sets it
-after the exchange is actually listening — the way a container's environment would have, before
-either process started.
+out of ``EXCHANGE_URL``, which is what ``apps/buyer/compose.yaml`` sets, and its candidate set
+out of a ``BUYER_ROSTER`` document — the two are separate resolutions in
+``buyer_svc.composition`` because an address says nothing about who competes, and a deployment
+that resolves one and not the other refuses the confirmation instead of opening an auction that
+solicits nobody. This driver states both after the exchange is actually listening — the way a
+container's environment would have, before either process started.
 
 **The one key this driver deliberately leaves unstated is the exchange's ``catalog``**, and the
 consequence is named in beat 2 rather than hidden. That key is the snapshot the exchange grades
 a store's CLAIMS against; unstated, ``ranking.serving.catalog_of`` keeps its
-``NoCatalogSnapshots`` default, every claim comes back ``unsupported``, and R19 will not let an
-unsupported claim satisfy a hard constraint. This run still shortlists three stores only because
+``NoCatalogSnapshots`` default, every claim comes back ``ambiguous`` — R18's verdict for one
+this exchange could not check at all — and R19 will not let anything but a ``verified`` claim
+satisfy a hard constraint. This run still shortlists three stores only because
 the auction is opened on ``e2e/support/s1/run.json``'s intent, whose ``hard_constraints`` is
 empty. Wiring a catalogue here would mean this driver supplying the exchange's own evidence on
 the store's behalf, so it does not; it says so instead.
@@ -436,6 +440,34 @@ def _demo_trust_score(store: Mapping[str, Any], honesty: Mapping[str, bool]) -> 
     return 0.86 if honesty.get(store_id, True) else 0.58
 
 
+@contextlib.contextmanager
+def _environment(values: Mapping[str, str | None]) -> Iterator[None]:
+    """Set (or clear, on ``None``) environment variables, and put the previous ones back.
+
+    The driver's other variables are read at app-construction time and are deliberately left
+    standing — a reader can look at the process it just ran and see what the deployment said.
+    This one cannot be: it names a file under a temporary directory this function's caller is
+    about to delete, and a ``BUYER_ROSTER`` pointing at a deleted file is a
+    ``DeploymentConfigurationError`` rather than an unset variable. Left behind, it would turn
+    every later buyer confirmation in the same interpreter — the rest of a pytest session, for
+    instance — into a 503 about a document nobody wrote.
+    """
+    previous = {name: os.environ.get(name) for name in values}
+    for name, value in values.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
 def _roster(stores: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
@@ -455,6 +487,7 @@ def _roster(stores: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
 def run_journey(stream: TextIO | None = None) -> JourneyResult:
     """Drive the S1 starting slice over HTTP and narrate it. Returns what it produced."""
     import httpx
+    from buyer_svc.composition import ENV_ROSTER, ENV_ROSTER_JSON
     from buyer_svc.main import create_app as create_buyer
     from exchange.composition import ENV_DEPLOYMENT, ENV_DEPLOYMENT_JSON
     from exchange.main import create_app as create_exchange
@@ -518,6 +551,19 @@ def run_journey(stream: TextIO | None = None) -> JourneyResult:
         # before either process started. Without it the shopper's confirmation is a 503:
         # "confirm() was given no auction client, so the confirmed intent has nowhere to go."
         os.environ["EXCHANGE_URL"] = exchange_url
+
+        # ...and WHO COMPETES, which `EXCHANGE_URL` says nothing about. `buyer_svc
+        # .composition.read_deployment` resolves an address and a roster separately, and a
+        # deployment that resolves an address and no roster refuses the confirmation
+        # (`NoRosterBound`) rather than opening an auction that solicits nobody — the shopper
+        # cannot tell an empty shortlist from "no store had anything for you". So this driver
+        # states the candidate set the way a deployment states it: a mounted document, the
+        # same rows beat 2 puts on `POST /auctions`, read through the same validator.
+        roster_document = workdir / "buyer-roster.json"
+        roster_document.write_text(
+            json.dumps({"roster": _roster(stores)}, indent=2), encoding="utf-8"
+        )
+        stack.enter_context(_environment({ENV_ROSTER: str(roster_document), ENV_ROSTER_JSON: None}))
 
         buyer = stack.enter_context(
             httpx.Client(base_url=buyer_url, timeout=REQUEST_TIMEOUT_SECONDS)
@@ -812,10 +858,19 @@ def _beat_two_to_four(
         two comparable. The empty hard-constraint list is load-bearing. This driver states no
         `catalog` in its deployment document, because that snapshot is the exchange's own
         evidence about a store and a demo that supplied it would be marking the store's
-        homework. Unstated, every claim grades `unsupported` and R19 will not let an
-        unsupported claim satisfy a hard constraint — so on an intent that carried the
-        clarifier's `brew_method eq espresso`, this same exchange shortlists nobody.
+        homework. Unstated, every claim grades `ambiguous` — the verdict for a claim this
+        exchange could not check at all — and R19 will not let anything but a `verified` claim
+        satisfy a hard constraint, so on an intent that carried the clarifier's
+        `brew_method eq espresso`, this same exchange shortlists nobody.
         `exchange.composition`'s `catalog` entry records that measurement over a real socket.
+
+        It costs the two stores that DID bid nothing in the ranking below, and that is a
+        property worth naming because it did not hold a day ago: `verified_claim_ratio` counts
+        the claims this exchange decided, so a claim it could not check leaves the ratio
+        undefined and the term reads its published neutral. Counted as failures instead, the
+        two hosted stores read 0.0 on that term while the silent store's claimless R10
+        fallback read the neutral 0.5 — and the store that never replied took the top slot
+        off both of the ones that did.
         """
     )
     say.say(

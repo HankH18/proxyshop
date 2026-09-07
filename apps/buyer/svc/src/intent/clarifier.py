@@ -185,6 +185,7 @@ def clarify(
         answers=tuple(draft.answers),
         transcript=tuple(draft.transcript),
         unresolved=draft.gaps(),
+        unsatisfiable=tuple(draft.unsatisfiable),
         llm_calls=llm_calls,
     )
 

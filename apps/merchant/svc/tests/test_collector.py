@@ -32,19 +32,47 @@ tests against the real ``create_app()`` router, so they witness the refusal the 
 route gives. They say nothing about how much memory a real container uses under real load;
 the arithmetic above is the claim, and ``test_the_full_ring_of_hostile_beacons_fits_inside``
 is what pins it.
+
+T-051 — and the OTHER half, the one that sends
+----------------------------------------------
+Everything above grades the receiver against bodies this file typed out. That is the right
+way to test a bound and the wrong way to know the endpoint works, because a collector and a
+hand-written fixture can agree with each other forever while the thing that actually POSTs
+here sends something else. Until this section existed there was no emitter at all: ``pixel/``
+held one 0-byte ``.gitkeep``, and ``e2e/support/s1/flow.py`` says so in its own docstring.
+
+The last section of this file therefore runs the **real web pixel**. ``node`` executes
+``pixel/src/{pixel,settings,beacon,transport}.ts`` unchanged — no build step, no bundler, no
+Python re-implementation of the transform — against the recorded Shopify ``checkout_completed``
+event, and the extension's own ``fetch(..., {keepalive: true})`` POSTs over a real loopback
+socket to ``create_app()`` served by ``proxyshop_support.asgi_server.serve`` (D40). What is
+asserted is what came out the far end: a 204, and a
+:class:`~merchant_svc.collector.PixelObservation` whose four join keys equal the ones the
+authoritative ``orders/paid`` webhook recording carries for the same purchase (R4/D24).
+
+What that green is evidence of, exactly: everything from the Web Pixels subscriber callback
+onwards is real. What it is NOT evidence of: Shopify's sandbox itself — that it loads the
+bundle, that it builds an event of that shape, that a browser honours ``keepalive`` after the
+tab closes. C9 forbids a live call and no offline test can witness those; the shape the event
+is asserted against is the recorded one under ``services/shopify-stub/fixtures/recorded/``,
+which is provenance-stamped from Shopify's published type tables rather than captured.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import shutil
+import subprocess
 import sys
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 from merchant_svc.collector import (
+    ACCEPTED_FIELDS,
     PIXEL_INBOX,
     PixelEventRejected,
     PixelInbox,
@@ -52,6 +80,8 @@ from merchant_svc.collector import (
 )
 from merchant_svc.http_limits import MAX_REQUEST_BODY_BYTES
 from merchant_svc.install.config import COLLECTOR_PATH
+
+from proxyshop_support.asgi_server import serve
 
 #: The container the collector runs in — ``apps/merchant/compose.yaml:66  mem_limit: 256m``.
 #: The number the retention ceiling has to be *smaller* than for the ring to mean anything.
@@ -69,6 +99,20 @@ MAX_REFUSAL_BODY_BYTES = 512
 
 #: The logger the accept path emits its gap line on.
 COLLECTOR_LOG = "merchant_svc.collector.routes"
+
+#: Repo root: ``apps/merchant/svc/tests/`` is four levels down.
+REPO_ROOT = Path(__file__).resolve().parents[4]
+
+#: The harness that runs the real pixel. Its own docstring states the protocol.
+PIXEL_BEACON_DRIVER = REPO_ROOT / "pixel" / "tests" / "beacon-driver.ts"
+
+#: The recorded Shopify surfaces. Authored by the stub lane from Shopify's published type
+#: tables (D21/D3), which is what makes them evidence rather than a restatement of this code.
+RECORDINGS = REPO_ROOT / "services" / "shopify-stub" / "fixtures" / "recorded"
+
+#: How long the pixel gets to start, transform and POST. Generous: it is a cold ``node`` start
+#: over loopback, and a flaky timeout in an unattended run is worse than a slow test.
+PIXEL_DRIVER_TIMEOUT_SECONDS = 120.0
 
 
 @pytest.fixture(autouse=True)
@@ -442,3 +486,212 @@ def test_the_published_ceiling_leaves_room_for_the_longest_real_join_key() -> No
         f"{PixelInbox().capacity} slots = {text_ceiling / (1 << 20):.2f} MiB, over the "
         f"{INBOX_RETENTION_BUDGET_BYTES / (1 << 20):.0f} MiB budget for this buffer"
     )
+
+
+# ======================================================================================
+# T-051 — the emitter: the real web pixel, over a real socket, into this route
+# ======================================================================================
+@pytest.fixture(scope="module")
+def node_binary() -> str:
+    """The ``node`` that runs the pixel.
+
+    Missing ``node`` **fails** rather than skips. This ticket's verify is
+    ``npx vitest run pixel && … pytest apps/merchant/svc/tests/test_collector.py``, so node is
+    already a hard requirement of the gate — and a skip here would turn "the emitter was never
+    exercised" into a green run, which is the exact shape of the vacuous gate this section
+    replaced.
+    """
+    found = shutil.which("node")
+    if found is None:
+        pytest.fail(
+            "`node` is not on PATH, so the web pixel cannot be run and the emitter half of "
+            "T-051 would go unexercised. It is a hard requirement of this ticket's verify."
+        )
+    return found
+
+
+@pytest.fixture(scope="module")
+def collector_origin() -> Iterator[str]:
+    """The real merchant app on a real loopback port (D40), for the pixel to POST at.
+
+    Not the in-process ASGI transport the rest of this file uses: the claim being made here is
+    that the request the extension's ``fetch`` really builds — its method, its headers, its
+    body — is one this route accepts, and an ASGI transport that never encodes a request
+    cannot witness that.
+    """
+    from merchant_svc.main import create_app  # noqa: PLC0415
+
+    with serve(create_app()) as base_url:
+        yield base_url
+
+
+def recorded(name: str) -> dict[str, Any]:
+    """One recorded Shopify surface, or a loud failure naming the file that is missing."""
+    path = RECORDINGS / name
+    if not path.is_file():
+        pytest.fail(f"the recorded Shopify fixture {path} is missing; nothing to grade against")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def drive_the_pixel(node: str, collector_url: str, event: Any) -> dict[str, Any]:
+    """Run the real web pixel over ``event`` and return what it did.
+
+    ``{"subscribed": [names], "body": …, "outcome": …}``: every standard event the extension
+    subscribed to, the body it chose to send, and what its own transport reported. A non-zero
+    exit is reported with node's stderr, because a pixel that crashed and a pixel that decided
+    not to send are the same silence at the collector and must never be the same test result.
+    """
+    request = json.dumps({"collectorUrl": collector_url, "event": event})
+    completed = subprocess.run(  # noqa: S603 - fixed argv, no shell, repo-local script
+        [node, str(PIXEL_BEACON_DRIVER)],
+        input=request,
+        capture_output=True,
+        text=True,
+        timeout=PIXEL_DRIVER_TIMEOUT_SECONDS,
+        cwd=REPO_ROOT,
+    )
+    if completed.returncode != 0:
+        pytest.fail(f"the web pixel failed to run:\n{completed.stderr[-4000:]}")
+    return json.loads(completed.stdout)
+
+
+def degraded(event: dict[str, Any]) -> dict[str, Any]:
+    """The same event as a beacon that left before the order existed.
+
+    Built the way ``shopify_stub.telemetry.checkout_completed_payload(degraded=True)`` builds
+    it — ``order`` and ``discountApplications`` nulled, the browser-side members untouched — so
+    both halves of the offline substrate describe one failure rather than two.
+    """
+    raced = json.loads(json.dumps(event))
+    raced["data"]["checkout"]["order"] = None
+    raced["data"]["checkout"]["discountApplications"] = None
+    return raced
+
+
+def test_the_real_pixel_lands_a_joinable_observation_on_this_route(
+    node_binary: str, collector_origin: str
+) -> None:
+    """Acceptance 1 — a stub-emitted ``checkout_completed`` arrives here with its join keys.
+
+    Every hop is real except Shopify's sandbox: the extension's transform, its keepalive POST,
+    the socket, the route, the collector. The four join keys are then held to the recorded
+    ``orders/paid`` webhook for the SAME purchase, which is the property R4 actually needs —
+    a pixel that spells ``order_ref`` differently from the webhook reconciles to nothing and
+    looks exactly like a shopper who blocked the beacon.
+    """
+    event = recorded("web_pixel_checkout_completed.json")["payload"]
+    webhook = recorded("webhook_orders_paid.json")["payload"]
+
+    result = drive_the_pixel(node_binary, f"{collector_origin}{COLLECTOR_PATH}", event)
+
+    # C5 makes the pixel the only checkout observation path, so this is both halves of one
+    # claim: it watches the completed checkout, and it watches nothing else. The name is
+    # Shopify's and is spelled here rather than imported from the extension, which would let a
+    # pixel that renamed its own constant keep passing.
+    assert result["subscribed"] == ["checkout_completed"], result["subscribed"]
+    assert result["outcome"] == {"delivered": True, "reason": None, "status": 204}, result
+
+    (observation,) = PIXEL_INBOX.observations()
+    assert observation.checkout_token == webhook["checkout_token"]
+    assert observation.order_ref == webhook["admin_graphql_api_id"]
+    assert observation.discount_code == webhook["discount_codes"][0]["code"]
+    client_ids = [
+        attribute["value"]
+        for attribute in webhook["note_attributes"]
+        if attribute["name"] == "proxyshop_client_id"
+    ]
+    assert observation.client_id == client_ids[0]
+    assert observation.gaps == (), "a complete beacon was recorded with a gap"
+
+
+def test_a_pixel_that_raced_order_creation_lands_as_a_visible_gap(
+    node_binary: str, collector_origin: str
+) -> None:
+    """Acceptance 2 — the documented degraded beacon is recorded, not crashed on, not completed.
+
+    The event fires and the join keys are not there yet. R4 makes that a *gap*: the row exists,
+    it says which keys are missing, and nothing infers the order it did not carry.
+    """
+    event = degraded(recorded("web_pixel_checkout_completed.json")["payload"])
+
+    result = drive_the_pixel(node_binary, f"{collector_origin}{COLLECTOR_PATH}", event)
+
+    assert result["outcome"]["status"] == 204, result
+    assert result["body"]["orderId"] is None
+    assert result["body"]["discountApplications"] is None
+
+    (observation,) = PIXEL_INBOX.observations()
+    assert observation.gaps == ("order_ref", "discount_code")
+    assert observation.order_ref is None
+    assert observation.discount_code is None
+    # Still joinable on what the browser always has, which is why this is a gap and not a loss.
+    assert observation.checkout_token
+    assert observation.client_id
+
+
+def test_the_pixel_sends_no_field_outside_the_collectors_allowlist(
+    node_binary: str, collector_origin: str
+) -> None:
+    """Acceptance 3, the emitter's half — the two allowlists are one allowlist.
+
+    :data:`~merchant_svc.collector.ACCEPTED_FIELDS` is enforced at the door; this asserts the
+    pixel never puts anything outside it on the wire in the first place. Both halves matter:
+    the door's refusal is what makes the guarantee, and this is what makes the guarantee not
+    cost a working feature.
+    """
+    event = recorded("web_pixel_checkout_completed.json")["payload"]
+
+    result = drive_the_pixel(node_binary, f"{collector_origin}{COLLECTOR_PATH}", event)
+
+    sent = set(result["body"])
+    assert sent, "the pixel sent an empty body"
+    assert sent <= set(ACCEPTED_FIELDS), sorted(sent - set(ACCEPTED_FIELDS))
+
+
+def test_the_pixel_carries_no_buyer_identity_through_this_route(
+    node_binary: str, collector_origin: str
+) -> None:
+    """R5/C5 — customer data the sandbox hands the extension never reaches this service.
+
+    The Web Pixels ``Checkout`` type really does carry ``email``, ``phone``, ``billingAddress``,
+    ``shippingAddress`` and ``order.customer``; the sandbox delivers them whether the app wants
+    them or not, and C5 grants this app no scope to hold any of it. The assertion is made at
+    the far end — over the stored observation and the bytes that produced it — so it covers the
+    emitter, the wire and the collector in one statement rather than trusting any of them.
+    """
+    identities = {
+        "email": "shopper@example.com",
+        "phone": "+15555550123",
+        "first_name": "Ada",
+        "last_name": "Lovelace",
+        "street": "12 Marylebone Road",
+        "postcode": "NW1 5LA",
+    }
+    event = recorded("web_pixel_checkout_completed.json")["payload"]
+    checkout = event["data"]["checkout"]
+    address = {
+        "firstName": identities["first_name"],
+        "lastName": identities["last_name"],
+        "address1": identities["street"],
+        "zip": identities["postcode"],
+        "phone": identities["phone"],
+    }
+    checkout["email"] = identities["email"]
+    checkout["phone"] = identities["phone"]
+    checkout["billingAddress"] = address
+    checkout["shippingAddress"] = dict(address)
+    checkout["order"]["customer"] = {
+        "id": "gid://shopify/Customer/99",
+        "email": identities["email"],
+        "firstName": identities["first_name"],
+    }
+
+    result = drive_the_pixel(node_binary, f"{collector_origin}{COLLECTOR_PATH}", event)
+
+    assert result["outcome"]["status"] == 204, result
+    on_the_wire = json.dumps(result["body"])
+    (observation,) = PIXEL_INBOX.observations()
+    stored = json.dumps(observation.__dict__, default=str)
+    for field_name, value in identities.items():
+        assert value not in on_the_wire, f"the pixel put {field_name} on the wire"
+        assert value not in stored, f"{field_name} reached the collector's store"

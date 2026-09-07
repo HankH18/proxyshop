@@ -23,6 +23,13 @@ does not:
 
 Nothing here re-implements any ranking rule. Every filter, the formula, the tie-breaks and the
 slot assignment stay in :mod:`exchange.ranking`; this module hands them their inputs.
+
+**And "hands them their inputs" is now literal.** :func:`rank_auction` is the only place that
+holds a served auction's bids, its roster and this exchange's catalogue at once, so it is the
+only place that can run :mod:`.verification` and then :mod:`.features` over them in that order
+— which is what makes ``verified_claim_ratio``, ``price_value`` and ``delivery_fit`` exist on a
+served candidate at all. Without that pair of lines the formula still runs and still returns a
+number, but four of its five terms are neutral and the number is ``0.4 + 0.2*trust``.
 """
 
 from __future__ import annotations
@@ -38,6 +45,7 @@ from contracts.ranking import RankingWeights
 from ..auction.state import AUCTION_TTL_SECONDS
 from . import rank
 from .candidates import candidates_from_entries
+from .features import attach_features
 from .verification import NoCatalogSnapshots, attest_candidates
 
 __all__ = [
@@ -290,6 +298,18 @@ def rank_auction(
         registered_domains=registered_domains,
     )
     candidates = attest_candidates(candidates, catalog=catalog, product_refs=product_refs)
+    # The published formula's INPUTS, and the reason this line is not optional: without it
+    # four of the five features are absent on every served candidate, each takes its published
+    # neutral, and `rank_score` is `0.4 + 0.2*trust` — a one-term formula wearing a five-term
+    # one's name. Measured over a real socket, inverting every list price on the roster then
+    # returned bit-identical scores and the identical shortlist.
+    #
+    # AFTER `attest_candidates`, never before: `verified_claim_ratio` counts the verdicts this
+    # exchange attested, and over unattested claims it would count none of them — a silent 0.0
+    # for every honest store. `entries` are handed over positionally for the roster's
+    # `list_price`, which exists on no candidate; see :mod:`.features` for what each feature
+    # reads and for the one (`intent_match`) this exchange still cannot produce.
+    candidates = attach_features(candidates, entries)
     ranked = rank(
         candidates,
         intent,

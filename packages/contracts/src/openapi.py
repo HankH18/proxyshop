@@ -38,9 +38,27 @@ class Route(NamedTuple):
     path: str
 
 
-#: Every route DESIGN §Interfaces pins under "Service APIs". Read it as the checklist it is: a
-#: cross-domain endpoint that is not here is one no consumer has an example for.
+#: Every route this platform publishes a contract for. The first block is DESIGN §Interfaces
+#: "Service APIs" verbatim — the cross-domain checklist; an endpoint missing from it is one no
+#: consumer has an example for.
+#:
+#: The second block is the correction T-266/T-312/T-317 forced, and it is NOT decoration. This
+#: tuple is compared against the documents in BOTH directions
+#: (`test_no_route_is_declared_that_design_does_not_pin`), so for years it doubled as the answer
+#: to "what may be declared" — and the answer it gave was "only what crosses a domain". Measured
+#: on this branch, four services were answering SIXTEEN operations that no document declared:
+#: the exchange's auction read (which `proxyshop_demo/s1.py` drives over HTTP), the trust
+#: ledger's five reads plus its claim-verification producer, ingest's `er` and `extraction`
+#: routers, and the merchant's OAuth install pair plus its administrative shop list. Every one
+#: of them is reachable by anyone who can reach the service. "It does not cross a domain" was
+#: never a reason for a served route to escape review — it was only a reason nobody had written
+#: it down.
+#:
+#: So the rule this list now encodes is the one the served-vs-published gates grade: a route the
+#: service ANSWERS is declared here. DESIGN still owns which routes are cross-domain; it does
+#: not own which are reachable.
 PINNED_ROUTES: tuple[Route, ...] = (
+    # DESIGN §Interfaces, "Service APIs" — the cross-domain contract.
     Route("exchange", "post", "/auctions"),
     Route("exchange", "get", "/auctions/{auction_id}/shortlist"),
     Route("exchange", "post", "/auctions/{auction_id}/accept"),
@@ -58,6 +76,25 @@ PINNED_ROUTES: tuple[Route, ...] = (
     Route("trust", "get", "/snapshot"),
     Route("trust", "post", "/feedback/{order_ref}"),
     Route("ingest", "post", "/refresh/{store_id}"),
+    # Served surfaces that were reachable and undeclared until T-266 / T-312 / T-317.
+    Route("exchange", "get", "/auctions/{auction_id}"),
+    Route("trust", "get", "/events"),
+    Route("trust", "get", "/events/head"),
+    Route("trust", "get", "/events/verify"),
+    Route("trust", "get", "/events/replay"),
+    Route("trust", "get", "/events/{event_id}"),
+    Route("trust", "post", "/claims/verifications"),
+    Route("ingest", "get", "/er/config"),
+    Route("ingest", "post", "/er/match"),
+    Route("ingest", "post", "/er/resolve"),
+    Route("ingest", "get", "/extraction/config"),
+    Route("ingest", "post", "/extraction/policy-pages"),
+    Route("ingest", "post", "/extraction/stores/{store_id}"),
+    Route("ingest", "get", "/schedule"),
+    Route("ingest", "post", "/schedule/tick"),
+    Route("merchant", "get", "/install"),
+    Route("merchant", "get", "/install/callback"),
+    Route("merchant", "get", "/install/shops"),
 )
 
 _HTTP_METHODS = ("get", "put", "post", "delete", "patch", "head", "options", "trace")

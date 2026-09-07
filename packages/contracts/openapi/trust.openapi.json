@@ -7,7 +7,1265 @@
   },
   "x-domain": "trust",
   "paths": {
+    "/events/head": {
+      "get": {
+        "operationId": "readLedgerHead",
+        "summary": "The stored chain head and anchor.",
+        "description": "The cheapest integrity probe: what the chain's last hash is and how long it claims to be.",
+        "responses": {
+          "200": {
+            "description": "The head hash and the chain length behind it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "head_hash",
+                    "length"
+                  ],
+                  "properties": {
+                    "head_hash": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "length": {
+                      "type": "integer"
+                    }
+                  }
+                },
+                "example": {
+                  "head_hash": "52241c4ce39f3c75344eeab0feb6ee4673fdd2a9fc745a0619d9edd07b22fa2d",
+                  "length": 1
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The ledger database could not be reached. An outage, never a bad request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "required": [
+                        "error",
+                        "message"
+                      ],
+                      "properties": {
+                        "error": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "detail": {
+                    "error": "store_unavailable",
+                    "message": "the ledger writer has no database to write to: no DSN was passed"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/events/verify": {
+      "get": {
+        "operationId": "verifyLedgerChain",
+        "summary": "Verify the chain and name any break.",
+        "description": "Recomputes every link. `broken_at` is the sequence number of the first event whose hash does not follow.",
+        "responses": {
+          "200": {
+            "description": "The verification report. `ok: false` still answers 200 — the chain is the subject, not the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "verified",
+                    "length"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "broken_at": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "head_hash": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "verified": {
+                      "type": "integer"
+                    },
+                    "length": {
+                      "type": "integer"
+                    },
+                    "expected_length": {
+                      "type": "integer"
+                    },
+                    "expected_head": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "stream_hash": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "broken_event": {
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "anchor": {
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    },
+                    "anchor_ok": {
+                      "type": "boolean"
+                    }
+                  }
+                },
+                "example": {
+                  "ok": true,
+                  "broken_at": null,
+                  "reason": null,
+                  "head_hash": "52241c4ce39f3c75344eeab0feb6ee4673fdd2a9fc745a0619d9edd07b22fa2d",
+                  "verified": 1,
+                  "length": 1,
+                  "expected_length": 1,
+                  "expected_head": "52241c4ce39f3c75344eeab0feb6ee4673fdd2a9fc745a0619d9edd07b22fa2d",
+                  "stream_hash": "52241c4ce39f3c75344eeab0feb6ee4673fdd2a9fc745a0619d9edd07b22fa2d",
+                  "broken_event": null,
+                  "detail": "ledger chain intact: 1 event(s) verified, head 52241c4ce39f3c75344eeab0feb6ee4673fdd2a9fc745a0619d9edd07b22fa2d",
+                  "anchor": {
+                    "head_hash": "52241c4ce39f3c75344eeab0feb6ee4673fdd2a9fc745a0619d9edd07b22fa2d",
+                    "length": 1
+                  },
+                  "anchor_ok": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The ledger database could not be reached. An outage, never a bad request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "required": [
+                        "error",
+                        "message"
+                      ],
+                      "properties": {
+                        "error": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "detail": {
+                    "error": "store_unavailable",
+                    "message": "the ledger writer has no database to write to: no DSN was passed"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/events/replay": {
+      "get": {
+        "operationId": "replayLedgerChain",
+        "summary": "Replay the chain out of the ledger.",
+        "description": "Verification plus the replayed events themselves, and optionally the trust snapshots rebuilt from them (T-062). Verification is never capped by `limit`; only the serialised page is.",
+        "parameters": [
+          {
+            "name": "include_events",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Include the replayed events themselves.",
+              "default": true
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 10000,
+              "minimum": 1,
+              "description": "How many replayed events to serialise. Verification is never capped.",
+              "default": 1000
+            }
+          },
+          {
+            "name": "after_seq",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Start the serialised page after this seq.",
+              "default": 0
+            }
+          },
+          {
+            "name": "snapshots",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Also rebuild trust snapshots (T-062).",
+              "default": false
+            }
+          },
+          {
+            "name": "as_of",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required with snapshots=true. Never a clock."
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The verification report, the replayed page, and the snapshots when asked for.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "ok",
+                    "verified",
+                    "length"
+                  ],
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "broken_at": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "reason": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "head_hash": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "verified": {
+                      "type": "integer"
+                    },
+                    "length": {
+                      "type": "integer"
+                    },
+                    "expected_length": {
+                      "type": "integer"
+                    },
+                    "expected_head": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "stream_hash": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "broken_event": {
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    },
+                    "detail": {
+                      "type": "string"
+                    },
+                    "anchor": {
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    },
+                    "anchor_ok": {
+                      "type": "boolean"
+                    },
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "One appended ledger event with the hash-chain fields the store stamps on it.",
+                        "required": [
+                          "event_id",
+                          "ts",
+                          "kind",
+                          "prev_hash",
+                          "event_hash",
+                          "seq"
+                        ],
+                        "properties": {
+                          "event_id": {
+                            "type": "string"
+                          },
+                          "ts": {
+                            "type": "string"
+                          },
+                          "kind": {
+                            "type": "string"
+                          },
+                          "store_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "order_ref": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "payload": {
+                            "type": "object"
+                          },
+                          "prev_hash": {
+                            "type": "string"
+                          },
+                          "event_hash": {
+                            "type": "string"
+                          },
+                          "seq": {
+                            "type": "integer"
+                          }
+                        }
+                      }
+                    },
+                    "snapshots": {
+                      "type": [
+                        "object",
+                        "null"
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "ok": true,
+                  "broken_at": null,
+                  "reason": null,
+                  "head_hash": "52241c4ce39f3c75344eeab0feb6ee4673fdd2a9fc745a0619d9edd07b22fa2d",
+                  "verified": 1,
+                  "length": 1,
+                  "expected_length": 1,
+                  "expected_head": "52241c4ce39f3c75344eeab0feb6ee4673fdd2a9fc745a0619d9edd07b22fa2d",
+                  "stream_hash": "52241c4ce39f3c75344eeab0feb6ee4673fdd2a9fc745a0619d9edd07b22fa2d",
+                  "broken_event": null,
+                  "detail": "ledger chain intact: 1 event(s) verified, head 52241c4ce39f3c75344eeab0feb6ee4673fdd2a9fc745a0619d9edd07b22fa2d",
+                  "anchor": {
+                    "head_hash": "52241c4ce39f3c75344eeab0feb6ee4673fdd2a9fc745a0619d9edd07b22fa2d",
+                    "length": 1
+                  },
+                  "anchor_ok": true,
+                  "events": [
+                    {
+                      "event_id": "ev-0003",
+                      "ts": "2026-01-01T00:20:00.000Z",
+                      "kind": "claim_verified",
+                      "store_id": "store-1",
+                      "payload": {
+                        "claim_ref": "claim-0001",
+                        "status": "contradicted",
+                        "dim": "catalog_claim_accuracy"
+                      },
+                      "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+                      "event_hash": "52241c4ce39f3c75344eeab0feb6ee4673fdd2a9fc745a0619d9edd07b22fa2d",
+                      "seq": 1
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The ledger database could not be reached. An outage, never a bad request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "required": [
+                        "error",
+                        "message"
+                      ],
+                      "properties": {
+                        "error": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "detail": {
+                    "error": "store_unavailable",
+                    "message": "the ledger writer has no database to write to: no DSN was passed"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/events/{event_id}": {
+      "get": {
+        "operationId": "readLedgerEvent",
+        "summary": "One event by its idempotency key.",
+        "parameters": [
+          {
+            "name": "event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The stored event, with its chain fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "event"
+                  ],
+                  "properties": {
+                    "event": {
+                      "type": "object",
+                      "description": "One appended ledger event with the hash-chain fields the store stamps on it.",
+                      "required": [
+                        "event_id",
+                        "ts",
+                        "kind",
+                        "prev_hash",
+                        "event_hash",
+                        "seq"
+                      ],
+                      "properties": {
+                        "event_id": {
+                          "type": "string"
+                        },
+                        "ts": {
+                          "type": "string"
+                        },
+                        "kind": {
+                          "type": "string"
+                        },
+                        "store_id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "order_ref": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "payload": {
+                          "type": "object"
+                        },
+                        "prev_hash": {
+                          "type": "string"
+                        },
+                        "event_hash": {
+                          "type": "string"
+                        },
+                        "seq": {
+                          "type": "integer"
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "event": {
+                    "event_id": "ev-0003",
+                    "ts": "2026-01-01T00:20:00.000Z",
+                    "kind": "claim_verified",
+                    "store_id": "store-1",
+                    "payload": {
+                      "claim_ref": "claim-0001",
+                      "status": "contradicted",
+                      "dim": "catalog_claim_accuracy"
+                    },
+                    "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+                    "event_hash": "52241c4ce39f3c75344eeab0feb6ee4673fdd2a9fc745a0619d9edd07b22fa2d",
+                    "seq": 1
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No event carries that `event_id`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "required": [
+                        "error",
+                        "message"
+                      ],
+                      "properties": {
+                        "error": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "detail": {
+                    "error": "unknown_event",
+                    "message": "no event with event_id 'nope'"
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The ledger database could not be reached. An outage, never a bad request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "required": [
+                        "error",
+                        "message"
+                      ],
+                      "properties": {
+                        "error": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "detail": {
+                    "error": "store_unavailable",
+                    "message": "the ledger writer has no database to write to: no DSN was passed"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/claims/verifications": {
+      "post": {
+        "operationId": "recordClaimVerification",
+        "summary": "Record one claim-verification outcome and announce it on the ledger.",
+        "description": "The producer of the `claim_verified` event this document already used as its `POST /events` example while declaring no way to emit one. Rows are persisted first and the event appended second, so the ledger never announces a verification the tables do not hold. A replay writes neither and answers 200.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "store_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "title": "Store Id",
+                    "description": "The store the claim was made by."
+                  },
+                  "claim_ref": {
+                    "type": "string",
+                    "minLength": 1,
+                    "title": "Claim Ref",
+                    "description": "The claim's identity within the store."
+                  },
+                  "claim_type": {
+                    "type": "string",
+                    "title": "Claim Type",
+                    "description": "A member of the approved claim_type vocabulary."
+                  },
+                  "key": {
+                    "type": "string",
+                    "minLength": 1,
+                    "title": "Key",
+                    "description": "The claim's key, e.g. `price.value`."
+                  },
+                  "status": {
+                    "type": "string",
+                    "title": "Status",
+                    "description": "verified | contradicted | unsupported | ambiguous."
+                  },
+                  "confidence": {
+                    "type": "number",
+                    "maximum": 1.0,
+                    "minimum": 0.0,
+                    "title": "Confidence"
+                  },
+                  "catalog_snapshot_id": {
+                    "type": "string",
+                    "title": "Catalog Snapshot Id",
+                    "description": "The catalog snapshot verified against (uuid)."
+                  },
+                  "verifier_version": {
+                    "type": "string",
+                    "minLength": 1,
+                    "title": "Verifier Version"
+                  },
+                  "observed_at": {
+                    "type": "string",
+                    "title": "Observed At",
+                    "description": "RFC-3339. Explicit, never a clock."
+                  },
+                  "evidence_refs": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array",
+                    "title": "Evidence Refs"
+                  },
+                  "value": {
+                    "title": "Value"
+                  },
+                  "observed_value": {
+                    "title": "Observed Value"
+                  },
+                  "provenance_source": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Provenance Source"
+                  },
+                  "provenance_ref": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Provenance Ref"
+                  },
+                  "authority_rank": {
+                    "type": "integer",
+                    "title": "Authority Rank",
+                    "default": 0
+                  },
+                  "weight": {
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "maximum": 1.0,
+                        "minimum": 0.0
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Weight"
+                  },
+                  "source_class": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Source Class"
+                  }
+                },
+                "additionalProperties": false,
+                "type": "object",
+                "required": [
+                  "store_id",
+                  "claim_ref",
+                  "claim_type",
+                  "key",
+                  "status",
+                  "confidence",
+                  "catalog_snapshot_id",
+                  "verifier_version",
+                  "observed_at"
+                ],
+                "title": "ClaimVerificationIn",
+                "description": "One verification outcome, as the verifier decided it.\n\nEvery field the migration marks NOT NULL without a DEFAULT is required here too, and the\ntwo fields the migration additionally constrains by CHECK — ``status`` and\n``provenance_source`` — are validated against the vocabularies that own them. Without\nthat, a value only Postgres refuses arrives as a 500 from deep inside the writer instead\nof a 422 naming the field, which is what a caller can act on."
+              },
+              "example": {
+                "store_id": "store-1",
+                "claim_ref": "claim-0001",
+                "claim_type": "return_policy",
+                "key": "returns.window_days",
+                "status": "verified",
+                "confidence": 0.93,
+                "catalog_snapshot_id": "3f2b1c58-9c1a-4a51-9a0f-6f5f8f1d2e30",
+                "verifier_version": "claim_verification@1.0.0",
+                "observed_at": "2026-01-01T00:20:00Z",
+                "evidence_refs": [
+                  "snapshot://shop.example.com/policies/returns"
+                ],
+                "value": 30,
+                "observed_value": 30,
+                "provenance_source": "scraped",
+                "authority_rank": 2,
+                "weight": 0.8
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The outcome was new: rows written and `claim_verified` appended.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "replayed",
+                    "verification"
+                  ],
+                  "properties": {
+                    "replayed": {
+                      "type": "boolean"
+                    },
+                    "verification": {
+                      "type": "object",
+                      "properties": {
+                        "claim_id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "verification_id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "dim": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "observation_type": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "written": {
+                          "type": "boolean"
+                        },
+                        "score": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "confidence": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        }
+                      }
+                    },
+                    "event": {
+                      "type": "object",
+                      "properties": {
+                        "event_id": {
+                          "type": "string"
+                        },
+                        "kind": {
+                          "type": "string"
+                        },
+                        "inserted": {
+                          "type": "boolean"
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "replayed": false,
+                  "verification": {
+                    "claim_id": "9a1f0c2e-1d3b-4c5a-8e7f-0b1a2c3d4e5f",
+                    "verification_id": "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+                    "dim": "catalog_claim_accuracy",
+                    "observation_type": "claim_verified",
+                    "written": true,
+                    "score": 1.0,
+                    "confidence": 0.93
+                  },
+                  "event": {
+                    "event_id": "claim_verified:store-1:claim-0001:3f2b1c58-9c1a-4a51-9a0f-6f5f8f1d2e30:claim_verification@1.0.0",
+                    "kind": "claim_verified",
+                    "inserted": true
+                  }
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Already recorded. No second row and no second event.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "replayed",
+                    "verification"
+                  ],
+                  "properties": {
+                    "replayed": {
+                      "type": "boolean"
+                    },
+                    "verification": {
+                      "type": "object",
+                      "properties": {
+                        "claim_id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "verification_id": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "dim": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "observation_type": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "written": {
+                          "type": "boolean"
+                        },
+                        "score": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        },
+                        "confidence": {
+                          "type": [
+                            "number",
+                            "null"
+                          ]
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "replayed": true,
+                  "verification": {
+                    "claim_id": "9a1f0c2e-1d3b-4c5a-8e7f-0b1a2c3d4e5f",
+                    "verification_id": "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+                    "dim": "catalog_claim_accuracy",
+                    "observation_type": "claim_verified",
+                    "written": false,
+                    "score": 1.0,
+                    "confidence": 0.93
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The caller's payload is wrong — an unmapped claim_type, a bad uuid, a refused vocabulary value.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "required": [
+                        "error",
+                        "message"
+                      ],
+                      "properties": {
+                        "error": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "detail": {
+                    "error": "unverifiable_claim",
+                    "message": "claim_type 'nonsense' is not an approved claim type"
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The ledger database could not be reached. An outage, never a bad request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "required": [
+                        "error",
+                        "message"
+                      ],
+                      "properties": {
+                        "error": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "detail": {
+                    "error": "store_unavailable",
+                    "message": "the ledger writer has no database to write to: no DSN was passed"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/events": {
+      "get": {
+        "operationId": "readLedgerEvents",
+        "summary": "Read the chain in insertion order.",
+        "description": "The ledger's read side. Served since T-150 and published nowhere until T-312: five read operations over the append-only chain that no contract declared. `store_id` is a PROJECTION filter and the result is then not a chain — `is_chain` says which you got.",
+        "parameters": [
+          {
+            "name": "after_seq",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Return events after this sequence number.",
+              "default": 0
+            }
+          },
+          {
+            "name": "store_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Projection filter. NOT a chain."
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 10000,
+              "minimum": 1,
+              "description": "Rows per response. Capped by default; see DEFAULT_EVENT_PAGE.",
+              "default": 1000
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of the chain, and whether more of it remains.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "events",
+                    "count",
+                    "limit",
+                    "truncated",
+                    "is_chain"
+                  ],
+                  "properties": {
+                    "events": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "One appended ledger event with the hash-chain fields the store stamps on it.",
+                        "required": [
+                          "event_id",
+                          "ts",
+                          "kind",
+                          "prev_hash",
+                          "event_hash",
+                          "seq"
+                        ],
+                        "properties": {
+                          "event_id": {
+                            "type": "string"
+                          },
+                          "ts": {
+                            "type": "string"
+                          },
+                          "kind": {
+                            "type": "string"
+                          },
+                          "store_id": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "order_ref": {
+                            "type": [
+                              "string",
+                              "null"
+                            ]
+                          },
+                          "payload": {
+                            "type": "object"
+                          },
+                          "prev_hash": {
+                            "type": "string"
+                          },
+                          "event_hash": {
+                            "type": "string"
+                          },
+                          "seq": {
+                            "type": "integer"
+                          }
+                        }
+                      }
+                    },
+                    "count": {
+                      "type": "integer"
+                    },
+                    "limit": {
+                      "type": "integer"
+                    },
+                    "truncated": {
+                      "type": "boolean"
+                    },
+                    "next_after_seq": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "is_chain": {
+                      "type": "boolean",
+                      "description": "false when store_id projected the stream."
+                    }
+                  }
+                },
+                "example": {
+                  "events": [
+                    {
+                      "event_id": "ev-0003",
+                      "ts": "2026-01-01T00:20:00.000Z",
+                      "kind": "claim_verified",
+                      "store_id": "store-1",
+                      "payload": {
+                        "claim_ref": "claim-0001",
+                        "status": "contradicted",
+                        "dim": "catalog_claim_accuracy"
+                      },
+                      "prev_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+                      "event_hash": "52241c4ce39f3c75344eeab0feb6ee4673fdd2a9fc745a0619d9edd07b22fa2d",
+                      "seq": 1
+                    }
+                  ],
+                  "count": 1,
+                  "limit": 1000,
+                  "truncated": false,
+                  "next_after_seq": 1,
+                  "is_chain": true
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "The ledger database could not be reached. An outage, never a bad request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "type": "object",
+                      "required": [
+                        "error",
+                        "message"
+                      ],
+                      "properties": {
+                        "error": {
+                          "type": "string"
+                        },
+                        "message": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "example": {
+                  "detail": {
+                    "error": "store_unavailable",
+                    "message": "the ledger writer has no database to write to: no DSN was passed"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "operationId": "appendLedgerEvent",
         "summary": "Append one LedgerEvent to the hash-chained ledger.",

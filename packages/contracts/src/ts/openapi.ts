@@ -23,8 +23,19 @@ export interface Route {
   path: string;
 }
 
-/** Every route DESIGN §Interfaces pins under "Service APIs". */
+/**
+ * Every route this platform publishes a contract for, and it must stay identical to the Python
+ * tuple in `../openapi.py` — both are compared against the same documents in both directions.
+ *
+ * The first block is DESIGN §Interfaces "Service APIs", the cross-domain checklist. The second
+ * is the sixteen operations four services were ANSWERING while no document declared them
+ * (T-266, T-312, T-317): the exchange's auction read, the trust ledger's five reads and its
+ * claim-verification producer, ingest's `er` and `extraction` routers, and the merchant's OAuth
+ * install pair plus its administrative shop list. "It does not cross a domain" was never a
+ * reason for a reachable route to escape contract review.
+ */
 export const PINNED_ROUTES: readonly Route[] = [
+  // DESIGN §Interfaces, "Service APIs" — the cross-domain contract.
   {domain: "exchange", method: "post", path: "/auctions"},
   {domain: "exchange", method: "get", path: "/auctions/{auction_id}/shortlist"},
   {domain: "exchange", method: "post", path: "/auctions/{auction_id}/accept"},
@@ -42,6 +53,25 @@ export const PINNED_ROUTES: readonly Route[] = [
   {domain: "trust", method: "get", path: "/snapshot"},
   {domain: "trust", method: "post", path: "/feedback/{order_ref}"},
   {domain: "ingest", method: "post", path: "/refresh/{store_id}"},
+  // Served surfaces that were reachable and undeclared until T-266 / T-312 / T-317.
+  {domain: "exchange", method: "get", path: "/auctions/{auction_id}"},
+  {domain: "trust", method: "get", path: "/events"},
+  {domain: "trust", method: "get", path: "/events/head"},
+  {domain: "trust", method: "get", path: "/events/verify"},
+  {domain: "trust", method: "get", path: "/events/replay"},
+  {domain: "trust", method: "get", path: "/events/{event_id}"},
+  {domain: "trust", method: "post", path: "/claims/verifications"},
+  {domain: "ingest", method: "get", path: "/er/config"},
+  {domain: "ingest", method: "post", path: "/er/match"},
+  {domain: "ingest", method: "post", path: "/er/resolve"},
+  {domain: "ingest", method: "get", path: "/extraction/config"},
+  {domain: "ingest", method: "post", path: "/extraction/policy-pages"},
+  {domain: "ingest", method: "post", path: "/extraction/stores/{store_id}"},
+  {domain: "ingest", method: "get", path: "/schedule"},
+  {domain: "ingest", method: "post", path: "/schedule/tick"},
+  {domain: "merchant", method: "get", path: "/install"},
+  {domain: "merchant", method: "get", path: "/install/callback"},
+  {domain: "merchant", method: "get", path: "/install/shops"},
 ];
 
 const HTTP_METHODS = ["get", "put", "post", "delete", "patch", "head", "options", "trace"] as const;

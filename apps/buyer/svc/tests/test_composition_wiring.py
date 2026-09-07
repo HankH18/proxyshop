@@ -36,6 +36,17 @@ from apps.buyer.svc.src.intent import reset_confirmations
 CONFIRM = "/buyer/intent/confirm"
 CLARIFY = "/buyer/intent/clarify"
 ACCEPT = "/buyer/shortlist/accept"
+AUCTION_VIEW = "/buyer/auctions"
+
+#: The candidate set a deployment states, in the shape the exchange's own ``RosterEntry``
+#: requires — ``store_id`` **and** a ``list_price`` above zero, because a row without one is
+#: a 422 from ``POST /auctions`` rather than a store that competes.
+ROSTER: list[dict[str, Any]] = [
+    {"store_id": "demo-woolworks", "tier": 1, "product_ref": "beanie-1", "list_price": 80.0},
+    {"store_id": "demo-northface", "tier": 1, "product_ref": "beanie-2", "list_price": 95.0},
+    {"store_id": "demo-fastfashion", "tier": 2, "product_ref": "beanie-3", "list_price": 40.0},
+]
+ROSTERED_STORES = [row["store_id"] for row in ROSTER]
 
 #: The 503 the unconfigured service answers, verbatim. Pinned as a whole sentence because it
 #: is the thing an operator reads, and a reworded version of it is a different answer.
@@ -70,7 +81,53 @@ class FakeExchange:
         #: ``{path_suffix: (status, body)}``; the default is a created auction.
         self.answers: dict[str, tuple[int, Any]] = {}
         self.default_answer: tuple[int, Any] = (201, {"auction_id": "auction-from-the-wire"})
+        #: Opt-in, and OFF for every test that predates the roster gate. With it on,
+        #: ``POST /auctions`` answers the way the real exchange was measured to answer —
+        #: ``solicited`` / ``entries`` / ``ranked`` computed from the roster it was handed,
+        #: and a live shortlist with one slot per rostered store. A roster of nothing
+        #: therefore reproduces the audit's finding exactly, on the wire::
+        #:
+        #:     solicited: []  entries: []  ranked: []  slots: 0
+        self.echo_roster = False
+        #: ``{auction_id: shortlist}`` — what ``GET /auctions/{id}/shortlist`` serves.
+        self.shortlists: dict[str, Any] = {}
         self._server: ThreadingHTTPServer | None = None
+
+    def open_auction(self, body: Any) -> dict[str, Any]:
+        """The answer a real exchange gives to the roster it was actually sent.
+
+        Modelled on the measured shape, not an invented one: a store with no bid endpoint
+        answers nothing and the exchange mints a list-price fallback entry for it, ranks it,
+        and gives it a shortlist slot. Every one of those five arrays is derived from the
+        roster, so an auction that named nobody produces the empty ones and no others.
+        """
+        roster = list((body or {}).get("roster") or [])
+        auction_id = f"auction-{len(self.requests)}"
+        solicited = [str(row.get("store_id") or "") for row in roster]
+        self.shortlists[auction_id] = {
+            "auction_id": auction_id,
+            "slots": [
+                {"slot": "fit", "bid_ref": f"{auction_id}:{store_id}", "store_id": store_id}
+                for store_id in solicited
+            ],
+        }
+        return {
+            "auction_id": auction_id,
+            "solicited": solicited,
+            "entries": [
+                {"store_id": store_id, "fallback": True, "fallback_reason": "no_response"}
+                for store_id in solicited
+            ],
+            "ranked": [
+                {"bid_ref": f"{auction_id}:{store_id}", "store_id": store_id, "rank_score": 0.56}
+                for store_id in solicited
+            ],
+            "denied": [],
+            "excluded": [],
+            # Deliberately EMPTY, and different from the live door above: the buyer's auction
+            # view may never serve the recorded shortlist as if it were the live one.
+            "shortlist": {"auction_id": auction_id, "slots": []},
+        }
 
     # -- lifecycle ------------------------------------------------------------------
     def start(self) -> str:
@@ -87,7 +144,30 @@ class FakeExchange:
                 except ValueError:
                     body = None
                 exchange.requests.append({"path": self.path, "body": body})
-                status, answer = exchange.answers.get(self.path, exchange.default_answer)
+                if self.path in exchange.answers:
+                    status, answer = exchange.answers[self.path]
+                elif exchange.echo_roster and self.path == "/auctions":
+                    status, answer = 201, exchange.open_auction(body)
+                else:
+                    status, answer = exchange.default_answer
+                self.reply(status, answer)
+
+            def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler's spelling
+                """``GET /auctions/{id}/shortlist`` — the LIVE half of the buyer's view."""
+                exchange.requests.append({"path": self.path, "body": None})
+                if self.path in exchange.answers:
+                    status, answer = exchange.answers[self.path]
+                else:
+                    auction_id = self.path.removeprefix("/auctions/").removesuffix("/shortlist")
+                    shortlist = exchange.shortlists.get(auction_id)
+                    status, answer = (
+                        (200, shortlist)
+                        if shortlist is not None
+                        else (404, {"detail": f"no shortlist for {auction_id!r}"})
+                    )
+                self.reply(status, answer)
+
+            def reply(self, status: int, answer: Any) -> None:
                 payload = (
                     answer
                     if isinstance(answer, (bytes, bytearray))
@@ -138,6 +218,8 @@ def app_factory(monkeypatch):
     monkeypatch.delenv("BUYER_DEPLOYMENT", raising=False)
     monkeypatch.delenv("BUYER_DEPLOYMENT_JSON", raising=False)
     monkeypatch.delenv("EXCHANGE_URL", raising=False)
+    monkeypatch.delenv("BUYER_ROSTER", raising=False)
+    monkeypatch.delenv("BUYER_ROSTER_JSON", raising=False)
 
     def build():
         return importlib.import_module("buyer_svc.main").create_app()
@@ -150,6 +232,20 @@ def confirm_body(**overrides: Any) -> dict[str, Any]:
     body = {"intent": dict(INTENT), "confirmed": True}
     body.update(overrides)
     return body
+
+
+def deployment(exchange_url: str, **overrides: Any) -> dict[str, Any]:
+    """A deployment document that would actually run an auction.
+
+    It states a ``roster``, and every test below that means "a deployment which works" goes
+    through here. That is not decoration: a deployment naming no candidate set opens an
+    auction that solicits nobody, and this service now refuses to open one rather than hand
+    the shopper an empty shortlist. The tests in the roster section assert that refusal; the
+    tests that are about something else state a roster so they keep testing what they test.
+    """
+    document = {"exchange_url": exchange_url, "roster": [dict(row) for row in ROSTER]}
+    document.update(overrides)
+    return document
 
 
 # =====================================================================================
@@ -172,7 +268,7 @@ def test_a_configured_buyer_service_carries_the_confirmed_intent_to_the_exchange
     call from ``confirm_route``, or the ``auction_client`` binding from ``configure_buyer``,
     and it goes back to the 503 the case above asserts.
     """
-    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps({"exchange_url": exchange.url}))
+    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps(deployment(exchange.url)))
 
     with TestClient(app_factory()) as client:
         response = client.post(CONFIRM, json=confirm_body())
@@ -192,7 +288,7 @@ def test_the_document_may_be_a_file_as_well_as_an_inline_variable(
 ) -> None:
     """``BUYER_DEPLOYMENT`` is the mounted-file half, and it is what compose would use."""
     document = tmp_path / "buyer-deployment.json"
-    document.write_text(json.dumps({"exchange_url": exchange.url}), encoding="utf-8")
+    document.write_text(json.dumps(deployment(exchange.url)), encoding="utf-8")
     monkeypatch.setenv("BUYER_DEPLOYMENT", str(document))
 
     with TestClient(app_factory()) as client:
@@ -210,8 +306,12 @@ def test_the_bare_exchange_url_the_compose_fragment_already_sets_is_enough(
     That is the variable the shipped ``docker compose up`` stack hands this service, with a
     comment saying what it is for. If only ``BUYER_DEPLOYMENT*`` were read, the composition
     root would be correct and the repository's own deployment still could not reach it.
+
+    ``BUYER_ROSTER_JSON`` beside it because a bare origin says where the exchange is and
+    nothing about who competes; the roster section below is where that half is asserted.
     """
     monkeypatch.setenv("EXCHANGE_URL", exchange.url)
+    monkeypatch.setenv("BUYER_ROSTER_JSON", json.dumps(ROSTER))
 
     with TestClient(app_factory()) as client:
         response = client.post(CONFIRM, json=confirm_body())
@@ -282,7 +382,7 @@ def test_the_configured_service_also_accepts_through_the_same_exchange(
     Two urls would let a buyer accept an offer in an auction the accepting process has never
     heard of, so the two seams are bound from one value and this asserts they are.
     """
-    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps({"exchange_url": exchange.url}))
+    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps(deployment(exchange.url)))
     exchange.answers["/auctions/auction-from-the-wire/accept"] = (
         200,
         {"permalink_url": "https://s1.example.com/checkout/abc"},
@@ -319,7 +419,7 @@ def test_clarifying_reaches_no_exchange_even_when_one_is_configured(
     app_factory, exchange, monkeypatch
 ) -> None:
     """R1 survives the composition root: ``/clarify`` takes no hook and calls nobody."""
-    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps({"exchange_url": exchange.url}))
+    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps(deployment(exchange.url)))
 
     with TestClient(app_factory()) as client:
         response = client.post(CLARIFY, json={"turns": ["something for espresso, cheap"]})
@@ -333,7 +433,7 @@ def test_an_unconfirmed_intent_reaches_no_exchange_when_one_is_configured(
     app_factory, exchange, monkeypatch
 ) -> None:
     """R1's ordering invariant, now that there is a real client behind the seam."""
-    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps({"exchange_url": exchange.url}))
+    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps(deployment(exchange.url)))
 
     with TestClient(app_factory()) as client:
         response = client.post(CONFIRM, json=confirm_body(confirmed=False))
@@ -346,7 +446,7 @@ def test_a_client_already_on_app_state_is_never_replaced(
     app_factory, exchange, monkeypatch
 ) -> None:
     """A deployment or a test that wires it itself wins, so this module can be adopted."""
-    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps({"exchange_url": exchange.url}))
+    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps(deployment(exchange.url)))
 
     class Recorder:
         def __init__(self) -> None:
@@ -433,7 +533,7 @@ def test_a_failure_is_not_cached_so_a_fixed_document_serves_the_next_request(
     with TestClient(app, raise_server_exceptions=False) as client:
         assert client.post(CONFIRM, json=confirm_body()).status_code == 503
 
-        monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps({"exchange_url": exchange.url}))
+        monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps(deployment(exchange.url)))
         second = client.post(CONFIRM, json=confirm_body())
 
     assert second.status_code == 201, second.text
@@ -443,7 +543,7 @@ def test_a_failure_is_not_cached_so_a_fixed_document_serves_the_next_request(
 def test_an_exchange_that_is_not_there_is_a_502_and_not_a_500(app_factory, monkeypatch) -> None:
     """With a real outbound client, an exchange outage is now reachable from a deployment."""
     # Port 1 on loopback: nothing binds it, so the connection is refused rather than hung.
-    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps({"exchange_url": "http://127.0.0.1:1"}))
+    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps(deployment("http://127.0.0.1:1")))
 
     with TestClient(app_factory(), raise_server_exceptions=False) as client:
         response = client.post(CONFIRM, json=confirm_body())
@@ -463,7 +563,7 @@ def test_a_non_2xx_from_post_auctions_is_a_502_rather_than_a_201_naming_no_aucti
     turn a refusal into a created auction that names nothing, and the buyer would be handed a
     receipt for an auction that does not exist.
     """
-    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps({"exchange_url": exchange.url}))
+    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps(deployment(exchange.url)))
     exchange.answers["/auctions"] = (422, {"detail": "intent.hard_constraints carries 999 entries"})
 
     with TestClient(app_factory(), raise_server_exceptions=False) as client:
@@ -483,7 +583,7 @@ def test_the_exchanges_409_on_accept_is_returned_as_a_refusal_not_raised_as_a_fa
     ``{"accepted": false, "denial_reason": ...}`` at 409 is a decision about this buyer's
     offer. Raising on it would answer 502 and blame the exchange for working correctly.
     """
-    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps({"exchange_url": exchange.url}))
+    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps(deployment(exchange.url)))
     exchange.answers["/auctions/auc-9/accept"] = (
         409,
         {"accepted": False, "denial_reason": "blacklist: store s1 is blacklisted"},
@@ -503,7 +603,7 @@ def test_a_404_on_accept_is_a_502_because_it_is_not_a_decision_about_this_buyer(
     app_factory, exchange, monkeypatch
 ) -> None:
     """The other side of the same rule: a gone auction is the upstream's state, not a denial."""
-    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps({"exchange_url": exchange.url}))
+    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps(deployment(exchange.url)))
     exchange.answers["/auctions/auc-gone/accept"] = (404, {"detail": "no such auction"})
 
     with TestClient(app_factory(), raise_server_exceptions=False) as client:
@@ -527,7 +627,7 @@ def test_an_oversized_answer_is_refused_rather_than_read_into_memory(
     """
     from apps.buyer.svc.src import composition
 
-    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps({"exchange_url": exchange.url}))
+    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps(deployment(exchange.url)))
     monkeypatch.setattr(composition, "MAX_EXCHANGE_RESPONSE_BYTES", 16)
     exchange.answers["/auctions"] = (201, {"auction_id": "a" * 200})
 
@@ -636,3 +736,369 @@ def test_an_oversized_document_is_refused_rather_than_parsed_on_the_request_path
     padded = json.dumps({"exchange_url": "http://x:1" + " " * (MAX_DEPLOYMENT_BYTES + 10)})
     with pytest.raises(DeploymentConfigurationError, match="reads at most"):
         read_deployment({"BUYER_DEPLOYMENT_JSON": padded})
+
+
+# =====================================================================================
+# The roster: a deployment that names nobody opens an auction that solicits nobody
+# =====================================================================================
+# MEASURED on the real stack — `uvicorn buyer_svc.main:app` and `uvicorn exchange.main:app`,
+# both on loopback, the buyer configured with EXCHANGE_URL and nothing else:
+#
+#     POST /buyer/intent/confirm                       -> 201  {"auction_id": "auction-945c..."}
+#     GET  /buyer/auctions/auction-945c...             -> 200
+#     {"solicited": [], "entries": [], "ranked": [], "denied": [], "slots": 0}
+#
+# The same process, with a roster in the confirm body, on the same two servers:
+#
+#     {"solicited": ["demo-woolworks", "demo-northface", "demo-fastfashion"],
+#      "entries": [... 3 ...], "ranked": [... 3 ...], "slots": 3}
+#
+# So the mechanism is served and correct and the buyer deployable was missing the one
+# configuration source that feeds it. These tests are that source, and the refusal that
+# replaces the cheerful empty auction when it resolves nothing.
+def test_a_deployment_that_names_no_roster_refuses_rather_than_soliciting_nobody(
+    app_factory, exchange, monkeypatch
+) -> None:
+    """FAIL-CLOSED, not fail-empty. The audit's exact deployment: EXCHANGE_URL, alone.
+
+    Before this gate the service answered 201 and the shopper got ``slots: 0`` — which is
+    indistinguishable from "no store had anything for you". It is a 503 naming both variables
+    that would fix it, and **nothing is sent to the exchange**: an auction nobody can win is
+    not worth opening, and opening it would burn an auction id and a ledger claim.
+    """
+    exchange.echo_roster = True
+    monkeypatch.setenv("EXCHANGE_URL", exchange.url)
+
+    with TestClient(app_factory(), raise_server_exceptions=False) as client:
+        response = client.post(CONFIRM, json=confirm_body())
+
+    assert response.status_code == 503, response.text
+    detail = response.json()["detail"]
+    assert "roster" in detail
+    assert "BUYER_ROSTER" in detail and "BUYER_ROSTER_JSON" in detail
+    # It names the deployment that came up short, so an operator knows which one to edit.
+    assert f"EXCHANGE_URL={exchange.url}" in detail
+    assert exchange.requests == [], "an auction that solicits nobody was opened anyway"
+    # NOT the unconfigured message: a service with an exchange and no roster is a different
+    # state from a service with no exchange, and the operator has to be able to tell them apart.
+    assert detail != UNCONFIGURED_DETAIL
+
+
+def test_the_roster_variable_makes_a_bare_exchange_url_deployment_open_a_real_auction(
+    app_factory, exchange, monkeypatch
+) -> None:
+    """The whole point: EXCHANGE_URL + BUYER_ROSTER_JSON is a complete buyer deployment.
+
+    Driven the way an operator drives it — two environment variables — and read back through
+    the served auction view, so what is asserted is the JSON a shopper's page receives.
+    """
+    exchange.echo_roster = True
+    monkeypatch.setenv("EXCHANGE_URL", exchange.url)
+    monkeypatch.setenv("BUYER_ROSTER_JSON", json.dumps(ROSTER))
+
+    with TestClient(app_factory()) as client:
+        created = client.post(CONFIRM, json=confirm_body())
+        assert created.status_code == 201, created.text
+        auction_id = created.json()["auction_id"]
+        view = client.get(f"{AUCTION_VIEW}/{auction_id}")
+
+    assert view.status_code == 200, view.text
+    seen = view.json()
+    assert seen["solicited"] == ROSTERED_STORES
+    assert [entry["store_id"] for entry in seen["entries"]] == ROSTERED_STORES
+    assert [row["store_id"] for row in seen["ranked"]] == ROSTERED_STORES
+    assert len(seen["shortlist"]["slots"]) == len(ROSTER)
+    # The roster reached the exchange's own door, on the wire, unabridged.
+    opened = next(call for call in exchange.requests if call["path"] == "/auctions")
+    assert opened["body"]["roster"] == ROSTER
+
+
+def test_the_roster_may_be_a_mounted_file_as_well_as_an_inline_variable(
+    app_factory, exchange, monkeypatch, tmp_path
+) -> None:
+    """``BUYER_ROSTER`` is the mounted-file half — the shape a container actually uses.
+
+    A roster is data with a row per store; ``EXCHANGE_DEPLOYMENT`` is mounted for the same
+    reason, and a 500-row candidate set does not belong in an environment variable.
+    """
+    document = tmp_path / "buyer-roster.json"
+    document.write_text(json.dumps(ROSTER), encoding="utf-8")
+    exchange.echo_roster = True
+    monkeypatch.setenv("EXCHANGE_URL", exchange.url)
+    monkeypatch.setenv("BUYER_ROSTER", str(document))
+
+    with TestClient(app_factory()) as client:
+        created = client.post(CONFIRM, json=confirm_body())
+
+    assert created.status_code == 201, created.text
+    opened = next(call for call in exchange.requests if call["path"] == "/auctions")
+    assert opened["body"]["roster"] == ROSTER
+
+
+def test_the_roster_document_may_wrap_its_rows_the_way_the_deployment_document_does(
+    app_factory, exchange, monkeypatch
+) -> None:
+    """``{"roster": [...]}`` and a bare ``[...]`` are the same statement.
+
+    One file has to serve both variables and both spellings, or an operator who copied the
+    ``roster`` key out of the deployment document gets a 503 for being consistent.
+    """
+    exchange.echo_roster = True
+    monkeypatch.setenv("EXCHANGE_URL", exchange.url)
+    monkeypatch.setenv("BUYER_ROSTER_JSON", json.dumps({"roster": ROSTER}))
+
+    with TestClient(app_factory()) as client:
+        created = client.post(CONFIRM, json=confirm_body())
+
+    assert created.status_code == 201, created.text
+    opened = next(call for call in exchange.requests if call["path"] == "/auctions")
+    assert opened["body"]["roster"] == ROSTER
+
+
+def test_a_roster_in_the_confirm_body_still_opens_the_auction_it_always_did(
+    app_factory, exchange, monkeypatch
+) -> None:
+    """POSITIVE CONTROL. The refusal is about a deployment resolving nothing, not about bodies.
+
+    ``create_auction`` honours a payload that names its own roster — that is how the devstack
+    and ``e2e`` drive a different candidate set — and this asserts the new gate did not close
+    over that path while closing the empty one.
+    """
+    exchange.echo_roster = True
+    monkeypatch.setenv("EXCHANGE_URL", exchange.url)
+
+    with TestClient(app_factory()) as client:
+        created = client.post(CONFIRM, json=confirm_body(roster=ROSTER))
+        assert created.status_code == 201, created.text
+        view = client.get(f"{AUCTION_VIEW}/{created.json()['auction_id']}")
+
+    assert view.status_code == 200, view.text
+    assert view.json()["solicited"] == ROSTERED_STORES
+    assert len(view.json()["shortlist"]["slots"]) == len(ROSTER)
+
+
+def test_the_documents_roster_outranks_the_environments_so_two_sources_are_not_a_coin_toss(
+    app_factory, exchange, monkeypatch
+) -> None:
+    """Document, then environment — the order ``exchange.composition`` resolves ``trust_url``."""
+    stated = [{"store_id": "from-the-document", "tier": 1, "list_price": 5.0}]
+    exchange.echo_roster = True
+    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps(deployment(exchange.url, roster=stated)))
+    monkeypatch.setenv("BUYER_ROSTER_JSON", json.dumps(ROSTER))
+
+    with TestClient(app_factory()) as client:
+        created = client.post(CONFIRM, json=confirm_body())
+
+    assert created.status_code == 201, created.text
+    opened = next(call for call in exchange.requests if call["path"] == "/auctions")
+    assert opened["body"]["roster"] == stated
+
+
+def test_a_document_that_states_no_roster_falls_through_to_the_environment(
+    app_factory, exchange, monkeypatch
+) -> None:
+    """The middle rung. A document is not an all-or-nothing statement about the roster."""
+    exchange.echo_roster = True
+    monkeypatch.setenv("BUYER_DEPLOYMENT_JSON", json.dumps({"exchange_url": exchange.url}))
+    monkeypatch.setenv("BUYER_ROSTER_JSON", json.dumps(ROSTER))
+
+    with TestClient(app_factory()) as client:
+        created = client.post(CONFIRM, json=confirm_body())
+
+    assert created.status_code == 201, created.text
+    opened = next(call for call in exchange.requests if call["path"] == "/auctions")
+    assert opened["body"]["roster"] == ROSTER
+
+
+def test_a_refused_confirmation_does_not_burn_the_intent(
+    app_factory, exchange, monkeypatch
+) -> None:
+    """The claim is released, so configuring the roster serves the SAME shopper's need.
+
+    ``confirm`` claims ``intent_id`` before it calls the client and one intent opens one
+    auction, so a refusal that spent the claim would answer 409 for the life of the process —
+    the operator would fix the deployment and the buyer would still be refused.
+    """
+    exchange.echo_roster = True
+    monkeypatch.setenv("EXCHANGE_URL", exchange.url)
+
+    app = app_factory()
+    with TestClient(app, raise_server_exceptions=False) as client:
+        assert client.post(CONFIRM, json=confirm_body()).status_code == 503
+
+        monkeypatch.setenv("BUYER_ROSTER_JSON", json.dumps(ROSTER))
+        # The SAME app and the SAME intent id. Two properties in one request: a bind that
+        # resolved no roster is not remembered, so this one re-reads the environment and
+        # replaces the client it built; and the claim the refused confirmation made was
+        # given back, so the id is still spendable.
+        second = client.post(CONFIRM, json=confirm_body())
+
+    assert second.status_code == 201, second.text
+    assert second.json()["intent_id"] == INTENT["intent_id"]
+    opened = next(call for call in exchange.requests if call["path"] == "/auctions")
+    assert opened["body"]["roster"] == ROSTER
+
+
+@pytest.mark.parametrize(
+    ("roster", "must_name"),
+    [
+        pytest.param([{"store_id": "s1", "tier": 1}], "list_price", id="no-list-price"),
+        pytest.param([{"store_id": "s1", "list_price": 0}], "list_price", id="priced-at-nothing"),
+        pytest.param([{"store_id": "s1", "list_price": -1.0}], "list_price", id="negative-price"),
+        pytest.param([{"store_id": "s1", "list_price": True}], "list_price", id="price-is-a-bool"),
+        pytest.param([{"store_id": "s1", "list_price": "80"}], "list_price", id="price-is-a-str"),
+        pytest.param([{"tier": 1, "list_price": 9.0}], "store_id", id="no-store-id"),
+        pytest.param(
+            [{"store_id": "s1", "list_price": 9.0, "max_discount_pct": 150}],
+            "max_discount_pct",
+            id="discount-out-of-range",
+        ),
+        pytest.param({"store_id": "s1"}, "must be a JSON array", id="not-an-array"),
+    ],
+)
+def test_a_roster_row_the_exchange_would_refuse_is_a_503_here_naming_the_row(
+    app_factory, exchange, monkeypatch, roster, must_name
+) -> None:
+    """Refused ONCE, at configuration, instead of as a 422 on every confirmation.
+
+    Each of these is a real ``RosterEntry`` refusal on the exchange's own door — ``list_price``
+    is ``Field(gt=0.0, allow_inf_nan=False)`` and required there. A buyer service that passes
+    them through looks configured and answers 502 to every shopper, with a detail quoting a
+    pydantic error about a service the operator did not write.
+    """
+    monkeypatch.setenv("EXCHANGE_URL", exchange.url)
+    monkeypatch.setenv("BUYER_ROSTER_JSON", json.dumps(roster))
+
+    with TestClient(app_factory(), raise_server_exceptions=False) as client:
+        response = client.post(CONFIRM, json=confirm_body())
+
+    assert response.status_code == 503, response.text
+    detail = response.json()["detail"]
+    assert must_name in detail, detail
+    assert "BUYER_ROSTER_JSON" in detail, "the refusal must name the source it came from"
+    assert exchange.requests == []
+
+
+def test_a_roster_file_that_is_not_there_is_a_503_and_not_read_as_no_roster(
+    app_factory, exchange, monkeypatch, tmp_path
+) -> None:
+    """A named-but-missing path is a mistake, not a deployment that stated nothing."""
+    monkeypatch.setenv("EXCHANGE_URL", exchange.url)
+    monkeypatch.setenv("BUYER_ROSTER", str(tmp_path / "nope.json"))
+
+    with TestClient(app_factory(), raise_server_exceptions=False) as client:
+        response = client.post(CONFIRM, json=confirm_body())
+
+    assert response.status_code == 503, response.text
+    assert "could not be read" in response.json()["detail"]
+
+
+def test_the_roster_path_variable_outranks_the_inline_one(tmp_path) -> None:
+    """Documented precedence, asserted, so a container setting both is not a coin toss."""
+    from apps.buyer.svc.src.composition import ENV_EXCHANGE_URL, ENV_ROSTER, read_deployment
+
+    document = tmp_path / "roster.json"
+    document.write_text(json.dumps([{"store_id": "from-the-file", "list_price": 1.0}]), "utf-8")
+    resolved = read_deployment(
+        {
+            ENV_EXCHANGE_URL: "http://exchange:8083",
+            ENV_ROSTER: str(document),
+            "BUYER_ROSTER_JSON": json.dumps([{"store_id": "from-the-variable", "list_price": 1.0}]),
+        }
+    )
+    assert resolved is not None
+    assert [row["store_id"] for row in resolved.roster] == ["from-the-file"]
+    assert str(document) in resolved.roster_source
+
+
+def test_a_bare_client_nobody_deployed_still_sends_what_it_was_given() -> None:
+    """The refusal belongs to a DEPLOYMENT, not to the transport.
+
+    ``HttpExchangeClient`` is the object that knows the exchange's routing; it is not the
+    object that judges whether a deployment is complete. One built by hand — by a test, or by
+    a caller composing its own — carries no deployment source and keeps the pass-through
+    behaviour ``test_composition.py`` pins. Every client the composition root builds carries
+    one, which is what makes the gate reachable from a deployment and only from a deployment.
+    """
+    from apps.buyer.svc.src.composition import HttpExchangeClient, NoRosterBound
+
+    assert HttpExchangeClient("http://exchange:8083").deployment_source == ""
+    bound = HttpExchangeClient("http://exchange:8083", deployment_source="EXCHANGE_URL=...")
+    with pytest.raises(NoRosterBound, match="roster"):
+        bound.create_auction({"intent": {"intent_id": "i-1"}})
+
+
+def test_the_roster_refusal_is_the_503_the_frozen_confirm_route_answers() -> None:
+    """``NoRosterBound`` is an ``AuctionClientUnusable`` and that is load-bearing.
+
+    ``intent/routes.py`` — which this lane does not own — maps ``AuctionClientUnusable`` to
+    503 and ``ExchangeCallFailed`` to 502. This condition is the service's configuration and
+    not the exchange's health, so 503 is the honest answer and this is the inheritance that
+    produces it. Break the base class and the served answer silently becomes "bad gateway",
+    which sends an operator to read the exchange's logs about a buyer-side misconfiguration.
+    """
+    from apps.buyer.svc.src.composition import ExchangeCallFailed, NoRosterBound
+    from apps.buyer.svc.src.intent.errors import AuctionClientUnusable
+
+    assert issubclass(NoRosterBound, AuctionClientUnusable)
+    assert not issubclass(NoRosterBound, ExchangeCallFailed)
+
+
+def test_a_roster_alone_configures_nothing_and_the_service_still_refuses(
+    app_factory, exchange, monkeypatch
+) -> None:
+    """NEGATIVE CONTROL. A candidate set is not an exchange address.
+
+    The failure mode a fix like this invites is admitting more than it should: a roster
+    variable that also counted as "configured" would bind a client to nowhere, and the
+    fail-closed default this module may not break — a buyer service nobody configured must
+    not invent an exchange — would be broken by the repair meant to strengthen it.
+    """
+    monkeypatch.setenv("BUYER_ROSTER_JSON", json.dumps(ROSTER))
+
+    with TestClient(app_factory()) as client:
+        response = client.post(CONFIRM, json=confirm_body())
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == UNCONFIGURED_DETAIL
+    assert exchange.requests == []
+
+
+def test_an_oversized_roster_document_is_refused_rather_than_parsed_on_the_request_path() -> None:
+    """Its own ceiling, and a larger one than the deployment document's, on purpose.
+
+    A 500-row roster — the most the exchange accepts — does not fit in ``MAX_DEPLOYMENT_BYTES``,
+    so sharing that cap would make the documented maximum unreachable.
+    """
+    from apps.buyer.svc.src.composition import (
+        MAX_DEPLOYMENT_BYTES,
+        MAX_ROSTER_BYTES,
+        DeploymentConfigurationError,
+        read_roster,
+    )
+
+    assert MAX_ROSTER_BYTES > MAX_DEPLOYMENT_BYTES
+    padded = json.dumps([{"store_id": "s" + " " * MAX_ROSTER_BYTES, "list_price": 1.0}])
+    with pytest.raises(DeploymentConfigurationError, match="reads at most"):
+        read_roster({"BUYER_ROSTER_JSON": padded})
+
+
+def test_a_full_length_roster_is_accepted_and_one_row_longer_is_not() -> None:
+    """The cap an operator can actually reach, exercised at both ends.
+
+    ``MAX_ROSTER_ENTRIES`` is the exchange's own ``CreateAuctionRequest`` ceiling; a roster
+    that fits it must parse, or this service refuses a deployment the exchange would accept.
+    """
+    from apps.buyer.svc.src.composition import (
+        MAX_ROSTER_ENTRIES,
+        DeploymentConfigurationError,
+        read_roster,
+    )
+
+    rows = [{"store_id": f"s{index}", "list_price": 9.99} for index in range(MAX_ROSTER_ENTRIES)]
+    roster, source = read_roster({"BUYER_ROSTER_JSON": json.dumps(rows)})
+    assert len(roster) == MAX_ROSTER_ENTRIES
+    assert source == "BUYER_ROSTER_JSON"
+
+    with pytest.raises(DeploymentConfigurationError, match=f"at most {MAX_ROSTER_ENTRIES}"):
+        read_roster({"BUYER_ROSTER_JSON": json.dumps([*rows, {"store_id": "one-too-many"}])})

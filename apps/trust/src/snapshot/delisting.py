@@ -36,6 +36,16 @@ exactly where an appeal would look.
 Fail-closed, in the same direction as :func:`trust.scoring.is_blacklisted`: a registry this
 module cannot read yields no ``blacklist_expired`` event, so a store stays listed rather than
 being quietly released because its source was down.
+
+Where the decision GOES (T-303 b)
+---------------------------------
+This module still only recommends, and that is still right — but the recommendation now has
+a consumer. The event it returns is sealed into the hash chain by the caller and folded back
+into the registry by :func:`trust.scoring.blacklist.fold_delisting_events`, which
+``trust.snapshot.routes.blacklist_for`` runs on the way to every served ``GET /snapshot``.
+Until that fold existed the loop was open by construction: ``entry["blacklisted"]`` reported
+only what the registry already said, nothing ever wrote to the registry, and a store the
+engine had just delisted was served as fine.
 """
 
 from __future__ import annotations
@@ -48,6 +58,11 @@ from typing import Any
 # `trust.` spelling does not resolve at all.
 from ..scoring import BLACKLIST_THRESHOLD, BLOCKING_BLACKLIST_STATUSES, business_identity_of
 
+# Straight from the submodule rather than through the package, because `trust.scoring`'s
+# `__init__` is orchestrator-frozen and does not re-export these two. `..scoring.engine` is
+# already reached this way from `trust.snapshot.routes`, for the same reason.
+from ..scoring.blacklist import BLACKLIST_EXPIRED_KIND, BLACKLISTED_KIND
+
 __all__ = [
     "BLACKLISTED_KIND",
     "BLACKLIST_EXPIRED_KIND",
@@ -57,12 +72,6 @@ __all__ = [
     "below_blacklist_threshold",
     "delisting_events",
 ]
-
-#: The frozen ledger kind recording that a store has been delisted.
-BLACKLISTED_KIND = "blacklisted"
-
-#: The frozen ledger kind recording that a listing has lapsed.
-BLACKLIST_EXPIRED_KIND = "blacklist_expired"
 
 #: Why this module delists. The manifest publishes ``blacklist_threshold`` and nothing else
 #: about blacklisting -- no vocabulary of reason codes -- so this names its own, once.

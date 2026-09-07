@@ -382,6 +382,25 @@ class BidEntry:
     #: Kept because ``fallback_reason`` is a fixed vocabulary a loss report aggregates on, while
     #: *which* relation the bid broke is what the store's operator actually needs told.
     price_reasons: list[str] = field(default_factory=list)
+    #: What the ROSTER lists this store's product at, as a finite positive number, or ``None``
+    #: where the roster states no price the exchange can read.
+    #:
+    #: Carried on the entry because it is the one input the published ``price_value`` feature
+    #: needs and the only place it exists: ``price_value = clamp((list_price - total_price) /
+    #: list_price, 0, 1)`` (DESIGN.md:127), and ``list_price`` is on the roster row, not on the
+    #: bid. Without it every served candidate reached the ranker with no ``price_value`` at
+    #: all, the feature took its neutral value on every request, and the published formula's
+    #: offer-value term did nothing — measured over a real socket, three stores bidding
+    #: 90/100/90 against a roster listing 100/200/300 came back with bit-identical scores, and
+    #: inverting every list price changed neither a score nor the shortlist.
+    #:
+    #: **The roster's, never the bid's.** A store cannot state what its own product lists at
+    #: any more than it can state its own ``store_domain``: the list price is the other half of
+    #: the comparison the buyer is being shown, so a bidder that supplied both halves would be
+    #: publishing its own discount. It is read here with :func:`_number` — the same read the
+    #: price wall does — so an absent, zero, negative or unreadable row states no price rather
+    #: than a free one, exactly as :func:`_list_price_bid` treats the same three spellings.
+    list_price: float | None = None
 
     @property
     def offer(self) -> dict[str, Any]:
@@ -990,6 +1009,14 @@ def collect_bids(
             if refused:
                 reason = UNRECONCILABLE_PRICE_REASON
 
+        # Read once, from the ROSTER row, and carried on both branches: the published
+        # `price_value` feature is a comparison between what this row lists and what the entry
+        # charges, and a fallback is a real rankable offer that has to be comparable too (R10).
+        # It reads 0.0 there rather than being absent — an entry priced AT its list price
+        # demonstrates no saving, which is the honest answer for a store that never bid.
+        listed = _number(rostered.get("list_price"))
+        listed = listed if listed is not None and listed > 0.0 else None
+
         if reason is None and answer is not None:
             bid = dict(answer["bid"])
             entries.append(
@@ -1000,6 +1027,7 @@ def collect_bids(
                     bid=bid,
                     received_at=float(answer["received_at"]),
                     claims=list(bid.get("claims") or []),
+                    list_price=listed,
                 )
             )
         else:
@@ -1012,6 +1040,7 @@ def collect_bids(
                     received_at=None,
                     fallback_reason=reason,
                     price_reasons=refused,
+                    list_price=listed,
                 )
             )
     return entries

@@ -50,6 +50,17 @@ by :mod:`buyer_svc.composition` from ``BUYER_DEPLOYMENT`` / ``BUYER_DEPLOYMENT_J
 same object ``POST /buyer/intent/confirm`` opened the auction with, which is what makes the
 record reachable from here at all. A service with no document configured binds nothing and
 answers **503**; a malformed document is a **503 naming the problem**, never a 500.
+
+What ``solicited: []`` means here, and what it can no longer mean
+----------------------------------------------------------------
+It used to be able to mean "this buyer service was configured with an exchange and with no
+candidate set, so it opened an auction and asked nobody" — measured on a real ``uvicorn``
+pair with ``EXCHANGE_URL`` alone, this route answered ``200`` with all five arrays empty and
+a shortlist of ``slots: 0``, which is indistinguishable from "no store had anything for you".
+:class:`~buyer_svc.composition.NoRosterBound` closed that: an auction with no roster is now
+refused at ``POST /buyer/intent/confirm`` and never opened. So an empty ``solicited`` on this
+route is the EXCHANGE's answer about a real roster — every candidate gated out before
+solicitation — and the ``denied`` array beside it is where the reason is.
 """
 
 from __future__ import annotations

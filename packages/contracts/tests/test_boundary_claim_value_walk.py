@@ -24,7 +24,7 @@ import json
 import pathlib
 import time
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
@@ -535,6 +535,50 @@ def test_a_container_that_understates_its_own_length_is_still_walked() -> None:
     assert result.ok is False, f"a lying __len__ hid a seller_asserted block: {result.reasons}"
 
 
+class _CountedKey(str):
+    """A mapping key that counts every time the walk READS it.
+
+    `_container_entries` is the only thing in the walk that turns a container's entries into
+    `(key_text, child)` pairs, and it calls `_key_text` — that is, `str()` — on every key it
+    produces. So "how many times were this payload's keys stringified" IS "how many entries did
+    the walk read and sort", which is the quantity the test below is really about and the
+    quantity it used to infer from a stopwatch. A node the walk declines to ENTER never reaches
+    `_container_entries`, so its keys are read zero times; that difference is the whole subject.
+
+    Subclassing `str` rather than wrapping one is deliberate, for the same reason the magic-link
+    limiter's `_CountedInstant` subclasses `datetime`: the key stays a string to every part of
+    the walk that handles it — hashing, the sort, `_trimmed`, the breadcrumb — and nothing in
+    `boundary.py` is aware of it, so what is counted is the shipped code path rather than a
+    test-only one. `self[:]` returns a plain `str`, so the text the walk carries onward cannot
+    re-enter the counter and inflate the reading.
+    """
+
+    reads: ClassVar[int] = 0
+
+    @classmethod
+    def reset(cls) -> None:
+        """Begin a fresh measurement."""
+        cls.reads = 0
+
+    def __str__(self) -> str:
+        type(self).reads += 1
+        return self[:]
+
+
+def _entries_read(width: int, fanout: int) -> tuple[int, Any]:
+    """One walk over a `width` x `fanout` value, and the entries it actually read getting there.
+
+    Every child is its own mapping, as a parser handing this door a wire payload would produce.
+    The key OBJECTS are shared between children because they are immutable strings and the count
+    is kept on the class, which keeps a two-million-entry payload cheap to build.
+    """
+    inner = [_CountedKey(f"c{index:06d}") for index in range(fanout)]
+    value = {_CountedKey(f"k{index:06d}"): dict.fromkeys(inner, 1) for index in range(width)}
+    _CountedKey.reset()
+    return_value = _with_value(value)
+    return _CountedKey.reads, return_value
+
+
 def test_enforcing_the_bound_costs_less_than_ignoring_it() -> None:
     """The payload here is REJECTED, and that is the point.
 
@@ -543,19 +587,65 @@ def test_enforcing_the_bound_costs_less_than_ignoring_it() -> None:
     5,000-wide value took 5.6 seconds. A bound that costs more to enforce than the payload it is
     bounding is a denial of service of its own.
 
-    The threshold is deliberately close to the measurement (~10 ms here) rather than a decorative
-    two seconds: this test's job is to notice a slowdown, and a 100x margin notices nothing.
-    """
-    value = {f"k{index}": {"v": index, "w": index} for index in range(60000)}
-    started = time.perf_counter()
-    result = _with_value(value)
-    elapsed = time.perf_counter() - started
+    COUNTED, not timed — a repair to this test, not a change of subject. It used to wrap one walk
+    in `time.perf_counter()` and assert under half a second, with the margin held deliberately
+    close to the measurement rather than at a decorative two seconds, because "a 100x margin
+    notices nothing". That reasoning is kept and the margin is now TIGHTER: the ceiling below is
+    the walk's own entry budget and the measurement sits 0.05% under it. What is dropped is the
+    stopwatch, which was grading the machine rather than the walk — in BOTH directions:
 
-    assert _unwalkable(result), (
-        "the payload no longer exceeds the budget, so this test has stopped exercising the "
-        f"reject-then-read path it exists for: {result.reasons}"
+    * RED on correct code. MEASURED on this box, 4 runs in 4 under contention: 1.75 s, 1.99 s,
+      2.03 s and 2.11 s against the 0.5 s threshold, with the walk unchanged and right. Idle,
+      the same call is 0.10 s. A gate in the always-run suite that goes red because something
+      else wanted the CPU teaches people to ignore the suite.
+    * GREEN on the defect it exists for. MEASURED: the reject-then-read walk restored and run on
+      this test's own former payload took 0.148 s — it PASSED, on an idle machine, with the
+      denial of service present. The wall clock only ever caught that walk by being SLOW at it,
+      so the machine decided both verdicts and neither of them was about the walk.
+
+    The property was never about seconds. The bound is an ENTRY BUDGET and the walk spends it,
+    so the work is countable: enforcing the bound costs at most the budget, however much payload
+    is dangled behind the refusal, whereas ignoring it costs the whole payload. On the two
+    payloads below — 501,000 entries and 2,004,000 — this walk reads 65,500 either way, and the
+    reject-then-read walk reads 501,000 and 2,004,000, which is 7.6x and 30.6x over the ceiling.
+    Those are integers: they read the same on any machine at any load.
+    """
+    from contracts.boundary import CLAIM_VALUE_MAX_ENTRIES  # noqa: PLC0415
+
+    # ARMED: the instrument is not blind. A value small enough to be walked in FULL is read
+    # exactly once per entry — without this, a run whose keys went uncounted would report every
+    # implementation, bounded or not, as having done no work at all, which is the failure mode a
+    # counter has and a stopwatch does not.
+    walked_in_full, admitted = _entries_read(width=20, fanout=10)
+    assert admitted.ok is True, admitted.reasons
+    assert walked_in_full == 20 + 20 * 10, (
+        f"a 220-entry value the walk read in full registered {walked_in_full} key reads; the "
+        "counter is not seeing what `_container_entries` produces"
     )
-    assert elapsed < 0.5, f"refusing an over-budget claim value took {elapsed:.2f}s"
+
+    small_reads, refused = _entries_read(width=1_000, fanout=500)
+    large_reads, refused_larger = _entries_read(width=4_000, fanout=500)
+
+    # ARMED: both payloads are REJECTED. If the budget ever stops refusing them this test has
+    # stopped exercising the reject-then-read path it exists for, and would be measuring a walk
+    # that finished rather than one that refused.
+    for label, result in (("500,000", refused), ("2,000,000", refused_larger)):
+        assert _unwalkable(result), (
+            f"the {label}-entry payload no longer exceeds the budget, so this test has stopped "
+            f"exercising the reject-then-read path it exists for: {result.reasons}"
+        )
+
+    assert large_reads == small_reads, (
+        f"refusing a 2,004,000-entry value read {large_reads:,} entries against {small_reads:,} "
+        f"for the 501,000-entry one — a factor of {large_reads / small_reads:.1f}. The cost of "
+        "enforcing the bound is scaling with the payload the bound already refused, so the more "
+        "hostile the value the more work it buys"
+    )
+    assert large_reads <= CLAIM_VALUE_MAX_ENTRIES, (
+        f"refusing an over-budget claim value read {large_reads:,} entries against a budget of "
+        f"{CLAIM_VALUE_MAX_ENTRIES:,}; the walk is reading and sorting entries under nodes it "
+        "had already decided it could not afford to enter"
+    )
 
 
 def test_a_container_that_will_not_stop_producing_entries_does_not_hang_the_door() -> None:

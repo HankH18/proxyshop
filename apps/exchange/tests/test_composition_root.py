@@ -62,7 +62,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -1760,3 +1760,328 @@ def test_the_exchange_caches_the_trust_snapshot_and_revalidates_on_the_version_i
         reader()
     assert "ConnectError" in str(failure.value) or "Connect" in str(failure.value), failure.value
     assert reader.status()["readable"] is False, reader.status()
+
+
+# =====================================================================================
+# The WHOLE chain, end to end, on the served path (T-303 b)
+#
+# `test_a_booted_exchange_reads_r12_from_a_real_trust_service` above proves the exchange
+# reads R12 from trust. It cannot prove S2, and the reason is the two things that document
+# leaves out: it states no `sellers`, so no store agent is ever asked and there is no
+# shortlist for a delisted store to be missing from; and it hand-types the registry row
+# rather than letting the trust ENGINE decide who is out.
+#
+# The three properties asserted below are the ones S2 actually names, and each of them was
+# measured false before the change that closes them:
+#
+#   1. a deployment can state its seller registry (bid endpoints, registered domains) AND
+#      still read R12 from the trust service. Before: `bind_eligibility`'s first rung took
+#      any document with `sellers` and bound `StaticSellerEligibility`, so the only
+#      deployment shape that consulted trust was one that solicited nobody;
+#   2. the RANKING gate reads the same live snapshot. Before: `app.state.trust_snapshot`
+#      was bound only from a literal `trust_snapshot` key in the document, so a deployment
+#      that did not type one out ranked against `{}` and excluded EVERY store
+#      `blacklist_unreadable` — the fail-closed path firing on honest traffic;
+#   3. the store the trust engine delisted disappears from the shortlist while the honest
+#      ones remain on it.
+# =====================================================================================
+#: How far back the scripted evidence is placed. Decay is a function of recorded time
+#: (D17/S3) and the served route scores against its own serve instant, so observations
+#: written at the manifest's 2026-02 episode dates would be half-lives old by the time this
+#: runs and every score would have decayed back toward the neutral prior. The SCRIPT is the
+#: manifest's; only its position on the clock is chosen here.
+EVIDENCE_WINDOW_DAYS = 30
+
+
+def _observations(store_id: str, dishonest_id: str, manifest: Mapping[str, Any]) -> list[Any]:
+    """One store's trust observations: the manifest's script for the adversary, clean for the rest.
+
+    The dishonest store's rows are ``manifest.dishonest_store.behaviours`` — the approved
+    ``(dim, type)`` pairs, replayed once per episode across the published ``episode_budget``,
+    which is the schedule ``expected_trust_trajectory`` is graded against. The honest stores
+    get ``fulfilled`` on every dimension, which is what "no complaint has ever been filed"
+    looks like in this vocabulary.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    now = datetime.now(tz=UTC)
+
+    def at(episode: int) -> str:
+        moment = now - timedelta(days=EVIDENCE_WINDOW_DAYS - episode)
+        return moment.isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    budget = int(manifest["episode_budget"])
+    if store_id != dishonest_id:
+        dims = sorted({str(row["dim"]) for row in manifest["dishonest_store"]["behaviours"]})
+        return [
+            {"dim": dim, "type": "fulfilled", "observed_at": at(episode)}
+            for episode in range(1, budget + 1)
+            for dim in dims
+        ]
+    return [
+        {"dim": str(row["dim"]), "type": str(row["type"]), "observed_at": at(episode)}
+        for episode in range(1, budget + 1)
+        for row in manifest["dishonest_store"]["behaviours"]
+    ]
+
+
+def _scored_roster() -> tuple[list[dict[str, Any]], str]:
+    """The approved roster as trust's own store records, carrying the manifest's evidence."""
+    from fixtures.manifest import load_manifest
+
+    manifest = load_manifest()
+    dishonest_id = str(manifest["dishonest_store"]["store_id"])
+    records = [
+        {
+            "store_id": str(row["store_id"]),
+            "business_identity": str(row["business_identity"]),
+            "domain": str(row["domain"]),
+            "observations": _observations(str(row["store_id"]), dishonest_id, manifest),
+        }
+        for row in manifest["stores"]
+    ]
+    return records, dishonest_id
+
+
+def _registry_the_engine_decided(records: list[dict[str, Any]]) -> tuple[Any, set[str]]:
+    """The blacklist registry the trust ENGINE's own delisting decision implies, and who is on it.
+
+    ``trust.snapshot.delisting.delisting_events`` IS the platform delisting a store: it reads
+    the scores and the registry and returns the ``blacklisted`` ledger events they imply at
+    ``as_of``. Nothing here decides who is out — the manifest's published
+    ``blacklist_threshold`` does, through the trust engine, over the manifest's own scripted
+    behaviours.
+
+    **The registry row is written HERE because no product code writes it**, and that is the
+    one link in this chain still open (see the report on T-303 b). The decision is computed by
+    ``build_snapshot`` and published on ``snapshot["delistings"]``, the simulator seals it into
+    the hash chain (T-303 a) — and no writer turns it into a row in ``app.seller_blacklist``,
+    which is the only thing ``trust.snapshot.routes.blacklist_for`` reads. So the served
+    ``GET /snapshot`` reports ``blacklisted: false`` for a store scoring 0.10 against a 0.35
+    threshold, measured. This helper is that missing writer, standing in a test, and it is
+    deliberately built out of the event's OWN payload rather than from a hand-typed identity:
+    when the real writer lands it has to do exactly this.
+    """
+    from datetime import UTC, datetime
+
+    from trust.scoring import Blacklist
+    from trust.snapshot import build_snapshot
+
+    as_of = datetime.now(tz=UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+    empty = Blacklist()
+    decided = build_snapshot(records, blacklist=empty, as_of=as_of)["delistings"]
+
+    registry = Blacklist()
+    delisted: set[str] = set()
+    for event in decided:
+        if event["kind"] != "blacklisted":
+            continue
+        payload = event["payload"]
+        registry.add(
+            business_identity=str(payload["business_identity"]),
+            reason_code=str(payload["reason_code"]),
+            status="active",
+            expires_at=payload.get("expires_at"),
+        )
+        delisted.add(str(payload["store_id"]))
+    return registry, delisted
+
+
+def _trust_service_over(records: list[dict[str, Any]], registry: Any) -> FastAPI:
+    """A real ``trust.main:create_app()`` serving ``GET /snapshot`` over these records."""
+    from trust.events import InMemoryEventStore
+    from trust.main import create_app as create_trust
+
+    app = create_trust()
+    app.state.snapshot_stores = [
+        {
+            "store_id": row["store_id"],
+            "business_identity": row["business_identity"],
+            "observations": row["observations"],
+        }
+        for row in records
+    ]
+    app.state.snapshot_blacklist = registry
+    app.state.event_store = InMemoryEventStore()
+    return app
+
+
+def _roster_agent_app(records: list[dict[str, Any]]) -> FastAPI:
+    """A real store agent per rostered store, answering the published bid door."""
+    app = FastAPI(title="roster-agent-double")
+
+    def door_for(row: dict[str, Any]) -> Any:
+        def door(body: dict[str, Any]) -> JSONResponse:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "auction_id": str(body.get("auction_id") or ""),
+                    "store_id": row["store_id"],
+                    "offer": {
+                        "product_ref": "prod-1",
+                        "unit_price": 15.0,
+                        "currency": "USD",
+                        "commitments": [],
+                        "total_price": 15.0,
+                        "expires_at": "2999-01-01T00:00:00Z",
+                        "checkout_url": f"https://{row['domain']}/cart/44352913:1",
+                    },
+                    "claims": [],
+                    "message": None,
+                    "agent_version": "roster-agent-double/1.0.0",
+                    "signature": None,
+                    "schema_version": "1.0.0",
+                },
+            )
+
+        return door
+
+    for row in records:
+        app.post(f"/{row['store_id']}/v1/bid-requests")(door_for(dict(row)))
+    return app
+
+
+def test_a_store_the_trust_engine_delisted_leaves_the_shortlist_the_others_stay_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, unwired: None
+) -> None:
+    """S2, on the served path: the dishonest store is gone and the honest ones are still there.
+
+    Everything real. A ``trust.main:create_app()`` scoring the manifest's own scripted
+    behaviours; the registry carrying the delisting THAT ENGINE decided; store agents on
+    loopback answering the published bid door; and ``exchange.main:create_app()`` reading one
+    deployment document. No ``configure_*`` call anywhere in this test.
+
+    ``"eligibility": "trust"`` is the word that makes it possible for the document to state a
+    seller registry — which it must, or there are no bid endpoints and no shortlist — without
+    that registry also becoming the R12 answer.
+    """
+    records, dishonest_id = _scored_roster()
+    registry, delisted = _registry_the_engine_decided(records)
+    assert delisted == {dishonest_id}, (
+        f"the trust engine delisted {sorted(delisted)}; this test needs it to delist exactly "
+        f"the manifest's dishonest store, or it is not discriminating"
+    )
+    honest = {row["store_id"] for row in records} - delisted
+
+    with serve(_trust_service_over(records, registry)) as trust_url:
+        with serve(_roster_agent_app(records)) as agent_url:
+            document = {
+                "trust_url": trust_url,
+                "sellers": [
+                    {
+                        "store_id": row["store_id"],
+                        # The platform states WHERE this store bids and WHICH host it owns,
+                        # and leaves who may participate to the trust service.
+                        "eligibility": "trust",
+                        "registered_domain": row["domain"],
+                        "bid_endpoint": f"{agent_url}/{row['store_id']}/v1/bid-requests",
+                    }
+                    for row in records
+                ],
+                "checkout_mode": "redirect",
+            }
+            path = tmp_path / "deployment.json"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            monkeypatch.setenv(ENV_DEPLOYMENT, str(path))
+            monkeypatch.delenv(ENV_DEPLOYMENT_JSON, raising=False)
+
+            with served_exchange() as client:
+                body = _open_a_roster_auction(
+                    client, [{"store_id": r["store_id"]} for r in records]
+                )
+                # The CHECKOUT gate, in the same served run and through the same live source:
+                # `accept/routes.py` re-reads `app.state.seller_eligibility` and refuses on
+                # anything but ELIGIBLE, so a 200 carrying a real code is that gate consulting
+                # trust and admitting. It is the positive control the gate's own denial test
+                # (`test_accept_routes.py::test_a_store_blacklisted_after_bidding_gets_no_code_
+                # through_the_route`, which wires a static double and has no admitting arm)
+                # does not carry. A trust-sourced DENIAL here cannot be produced in one request
+                # cycle by construction — gate 1 reads the same source a moment earlier and
+                # stops the store before it can bid — so this gate only ever fires on a verdict
+                # that changed between solicitation and checkout.
+                top = body["shortlist"]["slots"][0]
+                accepted = client.post(
+                    f"/auctions/{body['auction_id']}/accept", json={"bid_ref": top["bid_ref"]}
+                )
+
+    denials = {row["store_id"]: row for row in body["denied"]}
+    solicited = set(body["solicited"])
+    ranked = {row["store_id"] for row in body["ranked"]}
+    # A published `ShortlistSlot` names a `bid_ref`, never a store — the buyer-facing object
+    # deliberately does not publish who is behind a slot — so the store is resolved back
+    # through `ranked`, which is where the two are joined.
+    seller_of = {row["bid_ref"]: row["store_id"] for row in body["ranked"]}
+    slots = {seller_of[slot["bid_ref"]] for slot in body["shortlist"]["slots"]}
+
+    # 1. the delisted store, refused at the solicitation gate with a TRUST-sourced reason
+    assert dishonest_id in denials, f"denied={sorted(denials)} solicited={sorted(solicited)}"
+    assert denials[dishonest_id]["status"] == "blacklisted", denials[dishonest_id]
+    assert "trust-eligibility" in denials[dishonest_id]["reason"], denials[dishonest_id]
+    assert dishonest_id not in solicited, "a delisted store was still asked to bid"
+    assert dishonest_id not in slots, "a delisted store reached the buyer's shortlist"
+
+    # 2. the positive control, in the SAME run: a gate that refuses everyone is not a fix
+    assert honest <= solicited, (
+        f"the served exchange did not solicit {sorted(honest - solicited)}: "
+        f"{[(k, v['reason']) for k, v in denials.items()]}"
+    )
+    assert honest <= ranked, (
+        f"honest stores {sorted(honest - ranked)} were solicited and then dropped by the "
+        f"ranking gate: excluded={body['excluded']}"
+    )
+    assert slots, f"nobody reached the shortlist: ranked={sorted(ranked)}"
+    assert slots <= honest, f"the shortlist carries a store trust did not clear: {sorted(slots)}"
+
+    # 3. the checkout gate admits that store too, so all three R12 gates are consulting the
+    #    same live trust source and honest traffic reaches a real discount code.
+    assert accepted.status_code == 200, (
+        f"the checkout gate refused a store the trust service cleared "
+        f"{accepted.status_code}: {accepted.text}"
+    )
+    assert accepted.json()["code"].startswith("PSX-"), accepted.json()
+    assert seller_of[top["bid_ref"]] in honest, seller_of[top["bid_ref"]]
+
+
+def test_the_ranking_gates_live_snapshot_tells_the_same_three_states_apart() -> None:
+    """R12's middle gate, in the three states the whole fix turns on.
+
+    A direct-call unit test of :class:`~exchange.composition.LiveTrustSnapshot` — one of the
+    handful in this file that issues no request; see the module docstring. It is graded
+    through :func:`exchange.ranking.filters.blacklist_reason`, which is the function ``rank()``
+    actually applies, so what is asserted here is what the gate will do rather than what the
+    mapping returns.
+
+    The three states must not collapse, and the failing one is the reason this class exists:
+    a reader that raised would take an exception straight through ``rank()`` and turn a trust
+    outage into a 500 on ``POST /auctions``, while a reader that answered "no rows" silently
+    would be indistinguishable from a trust service with nothing to say. Both must deny, and
+    the delisted store must deny for a DIFFERENT stated reason than the unreadable one.
+    """
+    from exchange.composition import LiveTrustSnapshot
+    from exchange.eligibility.trust_backed import TrustSnapshotUnavailable
+    from exchange.ranking.filters import blacklist_reason
+
+    rows = {
+        "honest": {"store_id": "honest", "blacklisted": False},
+        "delisted": {"store_id": "delisted", "blacklisted": True},
+    }
+
+    def unreachable() -> dict[str, Any]:
+        raise TrustSnapshotUnavailable("ConnectError: nodename nor servname provided")
+
+    answering = LiveTrustSnapshot(lambda: rows)
+    down = LiveTrustSnapshot(unreachable)
+
+    # trust answered and holds nothing against this store -> the ONLY admitting state
+    assert blacklist_reason("honest", answering) is None
+    # trust answered and has delisted it
+    delisted = blacklist_reason("delisted", answering)
+    assert delisted is not None and "blacklisted_store" in delisted, delisted
+    # trust answered and has no opinion on this store — denied, and NOT as a delisting
+    unknown = blacklist_reason("never-heard-of", answering)
+    assert unknown is not None and "blacklist_unreadable" in unknown, unknown
+    # trust could not be read at all. The positive control is the first line: the SAME store
+    # id, admitted when trust answers and refused when it does not.
+    unreadable = blacklist_reason("honest", down)
+    assert unreadable is not None and "blacklist_unreadable" in unreadable, unreadable
+    assert len(down) == 0 and dict(answering) == rows

@@ -269,6 +269,28 @@ def test_the_silent_store_was_represented_at_its_catalogue_list_price(
     )
 
 
+def test_the_shoppers_confirmation_really_reached_the_exchange(journey: tuple[Any, str]) -> None:
+    """Beat 1's confirmation opened an auction, rather than 503-ing on the buyer's own door.
+
+    This is graded rather than left to the gap block because it is the one beat whose failure
+    is INVISIBLE in the numbers below it: beats 2 to 7 open their own auction directly on the
+    exchange, so the driver prints a complete journey either way and the only difference is a
+    paragraph most of a room will not read.
+
+    It regressed exactly once and silently, which is why it is here. ``buyer_svc.composition``
+    resolves WHERE the exchange is and WHO COMPETES separately, and a deployment that resolves
+    an address and no roster refuses the confirmation (``NoRosterBound``) instead of opening an
+    auction that solicits nobody. The driver was stating ``EXCHANGE_URL`` alone, so every
+    confirmation answered 503 the day that rule landed.
+    """
+    result, _ = journey
+    assert result.confirm_status in (200, 201), (
+        f"POST /buyer/intent/confirm answered {result.confirm_status}: "
+        f"{result.confirm_detail!r}. The shopper's own act of saying yes did not reach the "
+        f"exchange, so nothing after beat 1 is the buyer service's doing"
+    )
+
+
 def test_the_hosted_stores_really_answered_over_http(journey: tuple[Any, str]) -> None:
     """The two hosted agents produced real bids, not the exchange's own fallback.
 
