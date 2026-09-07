@@ -8,22 +8,6 @@
       "claimed_at": "2026-09-06T01:22:07",
       "worktree": "/Users/hankholcomb/Documents/code_parent_folders/gauntlet_repos/proxyshop-worktrees/c21-contracts",
       "branch": "task/c21-contracts"
-    },
-    "11": {
-      "claimed_at": "2026-09-06T21:33:19",
-      "agent_ref": "proxyshop-4e-gate-verify"
-    },
-    "12": {
-      "claimed_at": "2026-09-06T22:51:17",
-      "agent_ref": "slop-tests"
-    },
-    "13": {
-      "claimed_at": "2026-09-06T22:51:17",
-      "agent_ref": "slop-config"
-    },
-    "2": {
-      "claimed_at": "2026-09-06T23:45:44",
-      "agent_ref": "fix-e7-vocabulary"
     }
   }
 }
