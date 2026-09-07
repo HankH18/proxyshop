@@ -85,8 +85,6 @@ LIVE_FOR_AN_HOUR = 3600.0
 
 STORE_A = "store-a"
 STORE_B = "store-b"
-STORE_OFF_DOMAIN = "store-offdomain"
-STORE_BLACKLISTED = "store-black"
 
 #: R2's five, as the served slot spells them. A SUBSET check everywhere it is used (``>=``), so a
 #: sixth thing a slot learns to show never turns these assertions red.

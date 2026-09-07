@@ -41,11 +41,44 @@ services:
       # -- apps/buyer/svc/src` returns nothing at all, so this service never opened a Redis
       # connection and the dependency only made the container wait on a store it never used.
       LLM_PROVIDER: "${LLM_PROVIDER:-double}"                    # D19: offline by default
+      # ...and it has to STAY `double` in THIS container: the image installs no `anthropic`
+      # SDK (see the Dockerfile's pip layer, where anthropic is deliberately absent), so
+      # `LLM_PROVIDER=anthropic` here reaches `import anthropic` at
+      # `packages/llm/src/client.py:168` and raises on the first clarify request. That is why
+      # ANTHROPIC_API_KEY is NOT forwarded: a key here would advertise a live path this image
+      # cannot take. `.env.example` documents that variable for a local `.venv` run instead.
       BUYER_MODEL: "${BUYER_MODEL:-claude-sonnet-4-5}"
       INTERVIEW_MODEL: "${INTERVIEW_MODEL:-claude-opus-4-1}"
       # The exchange is reached by service name inside the network, never by localhost.
       EXCHANGE_URL: "${EXCHANGE_URL:-http://exchange:8083}"
       TRUST_URL: "${TRUST_URL:-http://trust:8084}"
+      # WHERE THE EXCHANGE IS, and WHO COMPETES. `EXCHANGE_URL` above is the LOWEST of the
+      # three rungs `buyer_svc.composition._stated_deployment` resolves — a bare origin with
+      # no roster around it — so a stack configured by that line alone opens every auction
+      # over an EMPTY candidate set. These four are the other rungs, and until now they were
+      # in no compose fragment and no `.env.example`: `composition.py` was built and tested
+      # and the repository's own deployment could not reach any of it.
+      #
+      # BUYER_DEPLOYMENT is a path INSIDE the container, so a file one has to be mounted; no
+      # volume is declared here for the reason `EXCHANGE_DEPLOYMENT` declares none in
+      # `apps/exchange/compose.yaml` — a default mount would name a deployment nobody
+      # approved. BUYER_DEPLOYMENT_JSON is the same document inline and needs no mount; the
+      # path outranks it. BUYER_ROSTER / BUYER_ROSTER_JSON carry the roster ALONE (data, not
+      # settings), read only when the document states none.
+      #
+      # All four default to EMPTY, and empty is exactly unset here: every reader is
+      # `str(environ.get(...) or "").strip()`, so a blank takes the same branch as an absent
+      # value — the unconfigured buyer whose confirmations are the 503 they always were,
+      # never a half-configured one. A NAMED-but-unreadable path is refused, loudly.
+      BUYER_DEPLOYMENT: "${BUYER_DEPLOYMENT:-}"
+      BUYER_DEPLOYMENT_JSON: "${BUYER_DEPLOYMENT_JSON:-}"
+      BUYER_ROSTER: "${BUYER_ROSTER:-}"
+      BUYER_ROSTER_JSON: "${BUYER_ROSTER_JSON:-}"
+      # NO BUYER_UI_DIST, deliberately. `composition.mount_ui` is its only reader and this
+      # container never calls it: the CMD is `uvicorn buyer_svc.main:app`, and `main.py`
+      # mounts `<feature>/routes.py` routers and nothing else. Only `apps/buyer/devstack/
+      # run.py` calls `mount_ui`, and that launcher sets the variable itself from the vite
+      # build (run.py:488). Setting it here would serve nothing and say otherwise.
       # R5 magic-link sign-in. With these unset the auth routes answer a deliberate 503
       # and the journey page shows the service's own words, rather than failing blankly.
       #

@@ -1123,6 +1123,17 @@ def _exchange_app_import_closure() -> dict[str, str]:
     checkout root and its ``.pkgroot`` on ``sys.path`` for every process that uses it — a
     probe that trusts the resolution it happens to get can measure a different tree than the
     one under test.
+
+    **What an import closure does NOT answer: whether anything is SERVED.** A sibling probe that
+    asked the store agent's ``create_app()`` the same module-table question was defanged by an
+    adversarial pass with a file containing nothing but ``router = None`` beside a dead function
+    naming ``receive_bid``. ``create_app()``'s glob IMPORTS every ``<feature>/routes.py`` it
+    finds and only then checks for a ``router`` attribute, so a module that mounts nothing still
+    lands in the closure and the closure conjunct goes green. Being imported is not being served,
+    and being served is not being executed — a reachability gate that ends here is defeatable.
+    :func:`_bid_door_dispatch_probe` is what settles that question: it DISPATCHES a real request
+    and counts entries into the door. Use this function only for the narrower claim it can
+    actually support — that building the app pulls a module in at all.
     """
     import os  # noqa: PLC0415 - kept out of this file's frozen import head
     import subprocess  # noqa: PLC0415
@@ -3155,56 +3166,6 @@ print(json.dumps(report))
     assert completed.returncode == 0, (
         f"the bid-door dispatch probe would not run:\n{completed.stderr[-3000:]}"
     )
-    return json.loads(completed.stdout.strip().splitlines()[-1])
-
-
-def _store_agent_app_probe() -> dict[str, Any]:
-    """What BUILDING the store agent's real app imports, AND what it ends up serving.
-
-    A sibling of :func:`_exchange_app_import_closure` and a subprocess for the same reason —
-    in-process, ``sys.modules`` already holds whatever the rest of the session imported, and a
-    reachability question answered against a polluted module table answers itself in the
-    affirmative every time. It differs in two deliberate ways.
-
-    First, it returns the WHOLE module table, not just the ``store_agent.*`` slice, because a
-    production call site may live in any package and the question is whether the serving
-    process reaches it.
-
-    Second, it reports ``paths`` and ``mounted`` as well, and that is not decoration. An
-    adversarial pass defanged the earlier module-only version with a file containing nothing
-    but ``router = None`` beside a dead function naming ``receive_bid``: ``create_app()``'s
-    glob IMPORTS every ``<feature>/routes.py`` it finds and only then checks for a ``router``
-    attribute, so a module that mounts nothing still lands in the import closure. Being
-    imported is not being served; the gate now asks for both.
-    """
-    import os  # noqa: PLC0415 - kept out of this file's frozen import head
-    import subprocess  # noqa: PLC0415
-    import sys  # noqa: PLC0415
-
-    repo_root = Path(__file__).resolve().parents[3]
-    code = (
-        "import json, sys\n"
-        "import store_agent.main\n"
-        "app = store_agent.main.create_app()\n"
-        "print(json.dumps({\n"
-        "    'modules': {name: getattr(module, '__file__', '') or ''\n"
-        "                for name, module in sys.modules.items()},\n"
-        "    'paths': sorted(app.openapi().get('paths', {})),\n"
-        "    'mounted': list(getattr(app.state, 'mounted_routers', []) or []),\n"
-        "}))\n"
-    )
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join([str(repo_root), str(repo_root / ".pkgroot")])
-    env["PROXYSHOP_WORKER"] = env.get("PROXYSHOP_WORKER", "0")
-    completed = subprocess.run(  # noqa: S603 - fixed argv, no shell
-        [sys.executable, "-c", code],
-        cwd=str(repo_root),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert completed.returncode == 0, f"the store agent app would not build:\n{completed.stderr}"
     return json.loads(completed.stdout.strip().splitlines()[-1])
 
 

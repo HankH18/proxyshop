@@ -20,30 +20,13 @@ import pytest
 from merchant_svc.install.tokens import InMemoryOfflineTokenStore
 from merchant_svc.install.webhooks import INBOX, WebhookInbox
 from shopify_stub.app import create_app as create_stub_app
-from shopify_stub.state import (
-    DEFAULT_ACCESS_TOKEN,
-    DEFAULT_SHOP_DOMAIN,
-    DEFAULT_WEBHOOK_SECRET,
-)
+from shopify_stub.state import DEFAULT_WEBHOOK_SECRET
 from shopify_stub.testing import SEED_VARIANT, RecordingReceiver, StubClient
 
 from proxyshop_support.asgi_server import serve
 
-#: The shop every install test installs on — the domain the stub claims to be, so the
-#: permalink and webhook payloads it emits are self-consistent.
-INSTALL_SHOP = DEFAULT_SHOP_DOMAIN
-
-#: The offline token the stub's Admin API accepts. Any other value is a 401 there.
-INSTALL_TOKEN = DEFAULT_ACCESS_TOKEN
-
 #: The HMAC key the stub signs webhook deliveries with; the merchant app's client secret.
 INSTALL_SECRET = DEFAULT_WEBHOOK_SECRET
-
-
-@pytest.fixture
-def install_shop() -> str:
-    """The ``.myshopify.com`` host under test."""
-    return INSTALL_SHOP
 
 
 @pytest.fixture

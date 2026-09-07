@@ -1,5 +1,15 @@
 """Fixtures for T-052's discount-code tests. Loaded by the frozen sibling ``conftest.py``.
 
+**Nothing requests these yet, and that is the ticket's state, not dead scaffolding.** T-052 is
+``status: open``; its scope is ``apps/merchant/svc/src/codes/**`` and ``apps/merchant/svc/tests/**``;
+the source side exists (ten modules under ``src/codes/``, two of which — ``ledger.py`` and
+``redemption.py`` — the fixtures below already import); the test side — the
+``test_codes.py`` the ticket's own status evidence records as missing — was never written. So
+every fixture and helper here is currently unreferenced by any test in this directory, measured
+over every function signature, ``usefixtures`` marker and ``getfixturevalue`` call in it. Do not
+delete the file to tidy that up: it is the harness the missing tests are meant to use, and the
+doubles below are the non-obvious part.
+
 Every name here is prefixed ``codes_`` so it cannot collide with ``_fixtures_install.py``
 or ``_fixtures_onboarding.py`` in the same directory — ``scripts/check_verify_contracts.py``
 fails the gate on a duplicate fixture name, and the prefix is how the three files stay out

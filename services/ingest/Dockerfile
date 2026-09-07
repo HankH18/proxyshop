@@ -8,21 +8,36 @@
 
 FROM python:3.12-slim
 
-# The prologue of all four service Dockerfiles is BYTE-IDENTICAL (base image, ENV, WORKDIR,
-# pip layer, contracts/support copy). That is deliberate: the layer cache is keyed on the
-# parent image plus the instruction, so building all four services costs ONE dependency
-# download rather than four. Change the pin list here and you change it in all four.
+# The prologue of all EIGHT service Dockerfiles that carry it is BYTE-IDENTICAL (base image,
+# ENV, WORKDIR, pip layer, contracts/support copy): buyer, merchant, exchange, trust,
+# seller-reference, store-agent, ingest and sim. `services/shopify-stub/Dockerfile` is the
+# ninth and installs a smaller set of its own. That is deliberate: the layer cache is keyed on
+# the parent image plus the instruction, so building all eight costs ONE dependency download
+# rather than eight. Change the pin list here and you change it in all eight -- this said
+# "four" while there were four services, and the count went stale as the layer was adopted.
 #
 # The versions below MIRROR the root pyproject.toml's pins — they are not a second source of
 # truth and they are not a manifest a worker may edit. If the root manifest moves, this file
-# follows it; it must never lead. The set is the measured closure of what the four service
+# follows it; it must never lead. The set is the measured closure of what these service
 # packages import: fastapi/uvicorn/pydantic for the app itself, httpx for the merchant's
 # Shopify Admin client, psycopg for the ledger and the vault, redis for D39's worker client,
 # jsonschema (which pulls referencing) for contracts.registry, email-validator because
 # buyer_svc.auth.routes types a field `EmailStr` and pydantic imports the validator lazily
 # at schema-build time — an extras dependency an import scan cannot see, and the reason
-# buyer-svc crash-looped on its first deploy. numpy, scipy, lxml, anthropic
-# and mcp are in no deployable's closure and are deliberately absent.
+# buyer-svc crash-looped on its first deploy. numpy, lxml and anthropic are in no
+# deployable's closure and are deliberately absent. So is python-multipart, which this layer
+# used to install -- and it is the one removal here that has to be RE-MEASURED rather than
+# re-reasoned, because it looks load-bearing and is not. `starlette/formparsers.py:18` imports
+# it AT MODULE SCOPE, spelled `python_multipart` and not `multipart` (grep either name alone
+# and you miss it), on the path every `import fastapi` takes. An image without it still boots
+# because that import sits under `try/except ModuleNotFoundError`, which leaves
+# `multipart = None` and fails only when a form is PARSED -- and neither fastapi nor starlette
+# REQUIRES the wheel, both declaring it in an extra. No route in this repo declares a
+# `Form`/`File`/`UploadFile` parameter or calls `request.form()`, measured by importing all
+# six services with the wheel made absent: every app builds and every published OpenAPI
+# carries no form body. Put it back in the same commit as the first form route, never before
+# it. (scipy and mcp were named here too, until the same commit removed both from the root
+# manifest outright: nothing imported either.)
 #
 # This image keeps that block VERBATIM even though ingest itself needs only fastapi, uvicorn
 # and pydantic of it. Deviating would buy nothing: the layer is keyed on the instruction
@@ -41,7 +56,6 @@ RUN pip install --no-cache-dir \
       "uvicorn[standard]==0.52.4" \
       "pydantic==2.13.5" \
       "email-validator==2.3.0" \
-      "python-multipart==0.0.32" \
       "httpx==0.28.1" \
       "psycopg[binary,pool]==3.3.5" \
       "redis[hiredis]==8.1.0" \

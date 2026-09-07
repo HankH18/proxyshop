@@ -34,11 +34,6 @@ from typing import Any
 
 import pytest
 
-#: Depth is a FRACTION on the wire the learning loop reads and writes (`discount_depth: 0.2`),
-#: and a PERCENT in the envelope and in `learned_policy` (`discount_pct: 20.0`). Getting this
-#: backwards silently turns a 20% ask into a 0.2% ask, or a 0.2 ask into a 20 000% one.
-PERCENT_PER_UNIT = 100.0
-
 #: Anything reachable from a learning state must be one of these, recursively. A `list`, `dict`
 #: or `set` anywhere in a state is a channel through which one store's update can reach another.
 IMMUTABLE_LEAVES = (str, int, float, bool, bytes, type(None))
@@ -392,6 +387,12 @@ def test_learned_policy_renders_in_the_shape_choose_policy_action_reads(
     It compares that number against the envelope's `max_discount_pct`, which is a PERCENT. A
     loop that hands it the 0.2 fraction it learned in asks for a 0.2% discount and nobody
     notices, because 0.2 is inside every wall.
+
+    The two units and where each lives: depth is a FRACTION on the wire the learning loop reads
+    and writes (`discount_depth: 0.2`) and a PERCENT in the envelope and in `learned_policy`
+    (`discount_pct: 20.0`). Getting the direction backwards silently turns a 20% ask into a 0.2%
+    ask, or a 0.2 ask into a 20 000% one. The conversion itself lives in
+    `store_agent.learning.grid` (`PERCENT_PER_UNIT`), which is the only place it is spelled.
     """
     from store_agent.learning import (
         build_network_prior,

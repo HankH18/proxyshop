@@ -32,7 +32,30 @@ services:
       NEO4J_PASSWORD: "${NEO4J_PASSWORD:-proxyshop_dev_pw}"
       # D20: the offline double unless something says otherwise. extraction/llm_extractor.py
       # builds its client through packages/llm, which defaults to the deterministic double.
+      # It has to stay `double` here for the reason apps/buyer/compose.yaml states at length:
+      # this image installs no `anthropic` SDK either, so the live client raises on first use.
       LLM_PROVIDER: "${LLM_PROVIDER:-double}"
+      # THE SCHEDULER'S THREE VARIABLES. `main.py` globs `*/routes.py`, so `scheduler/routes.py`
+      # is mounted in this image and reads all three AT IMPORT — and none of them appeared in
+      # any compose fragment or in `.env.example`, so the crawler shipped with nothing to crawl.
+      # All three treat a blank value as unset, so the empty defaults below are exactly the
+      # unset behaviour and are safe to leave alone:
+      #
+      #   PROXYSHOP_INGEST_STORES  a JSON array of StoreTarget objects (store_id, base_url,
+      #     source: signed_fetch|catalog_mcp, ...). UNSET = an EMPTY registry: `POST
+      #     /refresh/{store_id}` answers 404 for every store and the scheduler ticks over
+      #     nothing. A malformed entry is skipped, logged and does not take the service down.
+      #     Environment rather than source (D41) because a hard-coded storefront URL in a
+      #     crawler turns a config mistake into someone else's traffic.
+      #   PROXYSHOP_INGEST_CADENCE  inline JSON (it starts with `[`) or a path to a file
+      #     holding it. UNSET = the published DEFAULT_CADENCE — price/availability hourly,
+      #     product fields daily, policy claims weekly — which is a working table, not a stall.
+      #   PROXYSHOP_INGEST_SCHEDULER_STATE  a path for the durable schedule. UNSET = an
+      #     in-memory store that RESETS ON RESTART, so the first tick after a redeploy
+      #     re-crawls every configured store. The service says so in a startup warning.
+      PROXYSHOP_INGEST_STORES: "${PROXYSHOP_INGEST_STORES:-}"
+      PROXYSHOP_INGEST_CADENCE: "${PROXYSHOP_INGEST_CADENCE:-}"
+      PROXYSHOP_INGEST_SCHEDULER_STATE: "${PROXYSHOP_INGEST_SCHEDULER_STATE:-}"
     depends_on:
       neo4j:
         condition: service_healthy

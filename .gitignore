@@ -48,11 +48,18 @@ coverage/
 # Docker volumes
 .docker-data/
 .claude/.claude-build.json
-*.py[co]
+
 # build_succeeds' evidence log (goals.json amendment 3): rewritten every
 # measurement, and a tracked copy would churn main each cycle and put a
 # .swarm-loop/ path in any branch diff that produced it (check-branch vetoes those).
-.swarm-loop/reports/verify-last.log
+#
+# A GLOB, because the rule used to be the exact path `.swarm-loop/reports/verify-last.log`
+# and an exact path only ignores the file that never moves. Two run logs were committed past
+# it anyway — `.swarm-loop/reports/stale/verify-last.log` and `.../stale/verify-last.1.log`,
+# a moved copy and a rotated one — and both were outside a rule with no wildcard in it.
+# `**/` matches zero or more directories, so this covers the live path and any sub-directory
+# a future rotation invents.
+.swarm-loop/reports/**/*.log
 
 # T-210 probe scratch trees (see the ruff extend-exclude note); ephemeral, never committed
 .t210-*

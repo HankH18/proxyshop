@@ -7,6 +7,13 @@ would look identical to a green one.
 
 The filename is deliberately not of the form a feature ticket would choose — every ticket
 reserves the ``test_<topic>*.py`` prefix for its own topic, and ``scaffold`` is nobody's.
+
+Other members carry a ``test_scope_directories_exist`` beside this one, asserting that every
+directory their ticket scopes name is present. This member had one whose list was ``[]``, so
+its body never ran and it passed against any tree at all. It was removed rather than kept as a
+green tick with nothing behind it. No ticket scoped to ``apps/seller-reference`` names a
+directory outside ``src/`` and ``tests/``; if one starts to, add the test back with that
+directory in the list — see ``packages/llm/tests/test_scaffold_smoke.py`` for the live shape.
 """
 
 from __future__ import annotations
@@ -23,9 +30,3 @@ def test_import_namespace_resolves() -> None:
     assert module.__file__ is not None
     resolved = Path(module.__file__).resolve().parent
     assert resolved == (REPO_ROOT / "apps/seller-reference/src").resolve()
-
-
-def test_scope_directories_exist() -> None:
-    """Every directory a ticket scope names is present, so `pytest <path>` cannot exit 4."""
-    for relative in []:
-        assert (REPO_ROOT / relative).is_dir(), relative

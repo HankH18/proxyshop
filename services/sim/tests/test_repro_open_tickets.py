@@ -1,12 +1,23 @@
-"""Reproductions for the simulation tickets that carry a PLACEHOLDER gate.
+"""Regression guards for the simulation tickets that carried a PLACEHOLDER gate.
 
-Same mechanism as the other ``test_repro_open_tickets.py`` files: one
-``xfail(strict=True)`` test per defect measured live at HEAD, so a normal run reports
-``xfailed`` and exits 0 while the ticket's gate runs ``--runxfail -k <id>`` and gets a real
-``1 failed``. ``strict=True`` turns the eventual repair into an XPASS *failure*, so whoever
-fixes the defect must delete the marker.
+Same mechanism as the other ``test_repro_open_tickets.py`` files: each defect got one
+``xfail(strict=True)`` test measured live at HEAD, so a normal run reported ``xfailed`` and
+exited 0 while the ticket's gate ran ``--runxfail -k <id>`` and got a real ``1 failed``.
+``strict=True`` turns the eventual repair into an XPASS *failure*, so the marker had to come
+off with the fix.
 
-Covered here: T-242, T-265, T-303 (a).
+**Every marker in this file is now off — T-242, T-265 and T-303 (a) are all FIXED**, and each
+section's header comment records what was measured before its repair, what changed, and the
+sabotage that returns its test to ``xfailed``. So nothing here is a reproduction: each graded
+test must pass in its own name on an ordinary run and must fail in its own name if its defect
+returns, and a ``--runxfail -k <id>`` command quoted from ``tickets.json`` reports a pass rather
+than the ``1 failed`` it once did.
+
+The ``..._is_armed`` controls beside the graded tests were never xfail and stay. Under
+``xfail(strict=True)`` ANY exception in a graded body reads as ``xfailed``, i.e. green, so every
+precondition that could make a gate measure NOTHING lives in an armer where it fails in its own
+name; with the markers off, that is what still separates "passes because the defect is fixed"
+from "passes because it stopped measuring".
 
 Nothing in this file touches product source.
 """

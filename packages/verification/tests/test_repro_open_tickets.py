@@ -1,11 +1,13 @@
-"""Reproduction gates for the open `packages/verification` findings.
+"""T-193's gate for `packages/verification` — now a live regression test, not a reproduction.
 
-The test here asserts the behaviour that SHOULD hold and therefore fails against the tree as it
-stands. It carries ``xfail(strict=True)`` so an ordinary run reports ``xfailed`` and the
-repo-wide build gate stays green, while the ticket's own gate
-(``pytest <file> -q --runxfail -k <name>``) reports a real failure with the test SELECTED. When
-the defect is repaired the test XPASSes, which ``strict=True`` turns into a failure — so the
-marker cannot outlive the bug.
+The single test here asserts the behaviour that SHOULD hold. It arrived carrying
+``xfail(strict=True)``: an ordinary run reported ``xfailed`` and the repo-wide build gate stayed
+green, while the ticket's own gate (``pytest <file> -q --runxfail -k <name>``) reported a real
+failure with the test SELECTED. **That marker is gone, because the defect is.** ``strict=True``
+turns a repaired defect's XPASS into a failure, so the marker could not outlive the bug and its
+absence is the record that T-193 was actually closed. The test now passes in its own name on
+every ordinary run and must go red in its own name if the Dockerfile stops shipping the seam —
+so a ``--runxfail -k`` gate quoted from ``tickets.json`` correctly reports ``1 passed`` here.
 
 The assertion is made against the **Dockerfile text**, deliberately, rather than against a
 reconstructed container: a probe that builds a scratch tree and imports out of it can resolve

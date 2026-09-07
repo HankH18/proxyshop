@@ -1,10 +1,18 @@
-"""Reproductions for the cycle-16 rung-2 verifier's exchange findings — T-270 to T-277.
+"""Regression guards for the cycle-16 rung-2 verifier's exchange findings — T-270 to T-277.
 
-Every gate here arrived ``xfail(strict=True)`` and asserts the behaviour that SHOULD hold, so a
-normal run reports ``xfailed`` and the repo-wide build gate stays green, while each ticket's own
-gate runs the same node under ``--runxfail`` and gets a real failure. ``strict=True`` is what
-forces the marker to be deleted with the fix: a repaired defect makes the test XPASS, and a strict
-XPASS is a failure.
+Every gate here arrived ``xfail(strict=True)`` and asserts the behaviour that SHOULD hold, so
+while its defect stood a normal run reported ``xfailed`` and the repo-wide build gate stayed
+green, while each ticket's own gate ran the same node under ``--runxfail`` and got a real
+failure. ``strict=True`` is what forces the marker to be deleted with the fix: a repaired defect
+makes the test XPASS, and a strict XPASS is a failure.
+
+**No marker in this file survives: every defect above is closed and every node here now runs as
+an ordinary passing regression test.** Each one's own docstring records what was measured before
+its repair and what closed it — read T-270's, which is also the record of what a stale marker
+costs: it merged carrying an ``xfail`` for a defect the tree no longer had, and reddened the
+build as ``1 failed … [XPASS(strict)]``. A ``--runxfail -k`` command quoted from ``tickets.json``
+therefore reports a pass here, not a failure, and that is the closure showing through rather
+than a gate that stopped working. No assertion in this file was weakened to reach that state.
 
 Two of the findings in this batch are not shaped like that, and they are written down here rather
 than faked into markers:

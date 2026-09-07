@@ -7,14 +7,43 @@ dependencies = [
   "proxyshop-buyer-svc","proxyshop-merchant-svc","proxyshop-exchange","proxyshop-trust",
   "proxyshop-seller-reference","proxyshop-ingest","proxyshop-shopify-stub","proxyshop-sim",
   "proxyshop-fixtures",
-  "fastapi==0.141.1","uvicorn[standard]==0.52.4","python-multipart==0.0.32",
-  "pydantic==2.13.5","pydantic-settings==2.15.0","email-validator==2.3.0",
-  "httpx==0.28.1","anthropic==1.2.0","mcp==2.1.1",
+  # TWO OF THESE ARE INVISIBLE TO AN IMPORT SCAN and must not be cut by one:
+  #   email-validator  pydantic reaches it LAZILY while building the schema for
+  #                    `apps/buyer/svc/src/auth/routes.py:36`'s `EmailStr` field. Its absence
+  #                    is what crash-looped buyer-svc on its first deploy.
+  #   lxml             asked for BY NAME as a BeautifulSoup parser at
+  #                    `services/ingest/src/adapters/signed_fetch.py:472`, never imported.
+  #                    Without it extraction silently falls back to html.parser.
+  #
+  # Eight more were declared here and reached by NOTHING — no import anywhere in the repo and
+  # no lazy consumer either — so they were removed: python-multipart, pydantic-settings, mcp,
+  # cryptography, pyjwt, scipy, structlog, tenacity.
+  #
+  # python-multipart is the one that nearly survived the sweep by LOOKING load-bearing, and it
+  # is the reason the removals were measured by running rather than by grepping.
+  # `starlette/formparsers.py:18` imports it AT MODULE SCOPE — spelled `python_multipart`, not
+  # `multipart`, so grepping either name alone misses it — on the path every `import fastapi`
+  # takes. It is still optional: that import sits under `try/except ModuleNotFoundError` which
+  # leaves `multipart = None` and fails only when a form is PARSED, and neither fastapi nor
+  # starlette requires the wheel (both put it in an extra). Nothing here parses a form — no
+  # `Form`/`File`/`UploadFile` parameter and no `request.form()` — measured by importing all
+  # six services with the wheel made absent: every app builds, and every published OpenAPI
+  # carries no form body. NOTE for anyone repeating that probe: block it by raising
+  # `ModuleNotFoundError`, which is what an absent distribution raises; a bare `ImportError`
+  # escapes starlette's guard and reports a false dependency on every service.
+  #
+  # The other seven are plainer: pyjwt is unimported (no `import jwt` anywhere) and is what
+  # would otherwise have pulled cryptography; structlog was declared and DELIBERATELY unused —
+  # see `proxyshop_support/logging_config.py`, which configures the stdlib root logger instead.
+  # Add any of them back in the same commit as the importer, never before it.
+  "fastapi==0.141.1","uvicorn[standard]==0.52.4",
+  "pydantic==2.13.5","email-validator==2.3.0",
+  "httpx==0.28.1","anthropic==1.2.0",
   "psycopg[binary,pool]==3.3.5","neo4j==5.28.5","redis[hiredis]==8.1.0",
-  "jsonschema[format]==4.26.0","cryptography==50.0.1","pyjwt==2.13.0",
+  "jsonschema[format]==4.26.0",
   "beautifulsoup4==4.15.0","lxml==6.1.2","protego==0.6.2",
-  "numpy==2.5.2","scipy==1.18.1",
-  "pyyaml==6.0.3","structlog==26.1.0","tenacity==9.1.2",
+  "numpy==2.5.2",
+  "pyyaml==6.0.3",
 ]
 
 [project.optional-dependencies]

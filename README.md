@@ -64,7 +64,7 @@ project's scored measurement run and must not be used.** The examples below use 
 
 This one needs only `make bootstrap` — no `PROXYSHOP_WORKER`, no datastore, no external
 connection. (Measured: run with `PROXYSHOP_WORKER` unset and with Postgres, Redis and Neo4j
-irrelevant, it still exits 0.) It prints 301 lines: a header, the roster, six narrated beats,
+irrelevant, it still exits 0.) It prints 439 lines: a header, the roster, seven narrated beats,
 and a closing summary that states both what ran and what did not.
 
 It opens with this banner:
@@ -72,17 +72,20 @@ It opens with this banner:
 ```
 ================================================================================
   ProxyShop — the S1 starting slice, live
-  four deployables, four loopback ports, one purchase, no Shopify account
+  five ProxyShop deployables, one purchase, no Shopify account
 ================================================================================
 ```
 
-**That second line undercounts, and it is the one thing on screen that is wrong.** Measured:
-the driver starts **seven uvicorn servers**, each on its own ephemeral loopback port, all as
-daemon threads inside **one OS process** — two store agents (one per hosted store), the buyer
-service, the exchange, the Shopify stub, a pixel collector and a webhook receiver. There is no
+**That second line counts ProxyShop deployables, and it counts them correctly.** It used to say
+"four deployables, four loopback ports", which undercounted; the trust service was the one it
+left out. Five ProxyShop services come up: two store agents (one per hosted store), the buyer
+service, the exchange and the trust service. Measured, the driver starts **eight uvicorn
+servers** in all, each on its own ephemeral loopback port, all as daemon threads inside **one
+OS process** — those five, plus the three the merchant side of beat 6 adds and names where it
+adds them: the Shopify stub, a pixel collector and a webhook receiver. There is no
 `subprocess`, `Popen`, `multiprocessing` or `fork` anywhere in `proxyshop_demo/s1.py`; the
 servers come from `proxyshop_support/asgi_server.py`'s `serve()`, which is
-`uvicorn.Config(app, port=0)` on a `threading.Thread`. An eighth port is bound and then closed
+`uvicorn.Config(app, port=0)` on a `threading.Thread`. A ninth port is bound and then closed
 deliberately, so that the silent store hands the exchange a genuine connection-refused rather
 than a simulated one.
 
@@ -178,9 +181,14 @@ It closes by counting what it did, and then naming what it could not do:
       - 0 candidate(s) refused, each naming every reason
       - 3 shortlist slot(s) shown to the shopper
       - one single-use code minted: PSX-JQE7CB30
-      ...
+      - one permalink on the registered domain: https://store-northroast.example.com/cart/1:1?discount=PSX-JQE7CB30
+      - one order closed at the merchant: #1001 for $389.00
+      - one web pixel beacon read by the merchant app (order gid://shopify/Order/5500000000001)
+      - one HMAC-signed webhook verified and read as order_paid (order gid://shopify/Order/5500000000001)
+      - 8 ledger event(s) delivered to the trust service and served back as a VERIFIED hash chain (head ...)
+
   Did NOT run, and why (1):
-      - reconciliation and the trust update cannot run from anything this demo served
+      - reconciliation and the trust update cannot run over the ledger chain this run writes
 ```
 
 That last block is not boilerplate. It is the demo's own gap list, and there is exactly one
@@ -294,7 +302,7 @@ ports listed are what its Dockerfile's CMD binds.
 | `apps/buyer` | Three things in one directory: the Vite/React SPA (`@proxyshop/buyer`), the FastAPI buyer service (`buyer_svc`, port 8081), and `devstack/run.py`, the launcher demo 2 uses. Routes: `POST /buyer/intent/clarify`, `POST /buyer/intent/confirm`, `GET /buyer/auctions/{auction_id}`, `POST /buyer/shortlist/render`, `POST /buyer/shortlist/accept`, `POST /buyer/feedback` and `/prompt`, plus the auth and profile routes. |
 | `apps/exchange` | The auction itself (`exchange`, port 8083): `POST /auctions`, `GET /auctions/{id}`, `GET /auctions/{id}/shortlist`, `POST /auctions/{id}/accept`. |
 | `apps/merchant` | A React-Router/Shopify-Polaris embedded admin app (`@proxyshop/merchant`) plus the FastAPI merchant service (`merchant_svc`, port 8082): `GET /install`, `/install/callback`, `/install/shops`, `POST /webhooks/shopify/{topic}`, `POST /pixel/collect`, `POST /codes`, `GET\|PUT /stores/{id}/envelope`, `POST /stores/{id}/kill`. |
-| `apps/trust` | The hash-chained, append-only event ledger plus scoring, reconciliation and snapshots (`trust`, port 8084). It serves one router, `/events`: `POST /events`, `GET /events`, `/events/head`, `/events/verify`, `/events/replay`, `/events/{id}`. Its published contract declares three more paths that it does not serve — see [What is not finished](#what-is-not-finished). |
+| `apps/trust` | The hash-chained, append-only event ledger plus scoring, reconciliation and snapshots (`trust`, port 8084). It mounts four routers and serves ten operations: `POST\|GET /events`, `/events/head`, `/events/verify`, `/events/replay`, `/events/{id}`, `POST /claims/verifications`, `GET /snapshot`, and `GET\|POST /reconcile`. Two published paths are still served by nothing — see [What is not finished](#what-is-not-finished). |
 | `apps/seller-reference` | **Not a service.** Its whole tracked source is `src/__init__.py` and `src/personas/__init__.py` — no `main.py`, no `routes.py` — and its Dockerfile CMD is a one-shot self-check that builds every persona and exits. |
 
 ### `services/`
@@ -319,7 +327,7 @@ ports listed are what its Dockerfile's CMD binds.
 | Path | What it is |
 |---|---|
 | `proxyshop_support/` | Shared runtime helpers every service imports — the port-0 `serve()` context manager, the Postgres/Redis/Neo4j clients, the clock, the fixture loader, and the LLM double. |
-| `pixel/` | The npm workspace `@proxyshop/pixel`. **Scaffold only** — see below. |
+| `pixel/` | The npm workspace `@proxyshop/pixel`: the Shopify web pixel extension. `src/` holds `beacon.ts` (the pure `checkout_completed` → collector-body transform, built from a four-key allowlist so no customer PII can leak into it), `transport.ts`, `settings.ts`, `pixel.ts` and `index.ts`, with tests beside them under `tests/`. What it emits reaches `merchant_svc.collector` and stops there — see below. |
 | `proxyshop_demo/` | The narrated CLI demo from demo 1 (`s1.py` is the driver, `narrate.py` the prose). |
 | `e2e/` | Cross-service pytest: `test_s1_flow.py` (the scripted S1 proof), `test_jcs_conformance.py`, `test_scaffold_smoke.py`, and the fixtures under `e2e/support/s1/`. |
 | `db/` | Raw SQL — one init script and four migrations. |
@@ -337,69 +345,90 @@ This section is the measured gap list, not a summary of it.
 The CLI demo prints exactly one `DOES NOT RUN YET` block, and this is it.
 `trust.reconcile.reconcile` joins the accepted offer, the browser beacon and the webhook into
 a single `reconciled` verdict, and that verdict is what moves a store's trust score — the same
-snapshot the ranker filters on. Both halves exist and are tested. Neither can be reached from
-what the demo stands up, for two reasons that were measured rather than assumed:
+snapshot the ranker filters on.
 
-1. **Nothing emits the beacon event.** `reconcile` reads a page of ledger events —
-   `accepted`, `checkout_pixel`, `order_paid`. The exchange's ledger is an in-process sink
-   that no HTTP route serves, and `pixel/src/` is empty, so no deployable emits
-   `checkout_pixel` at all.
-2. **Even given the page, the join key is missing.** The checkout provider invents its
-   `checkout_token` with `secrets.token_hex(16)` and never transmits it — the cart permalink
-   carries the discount code and nothing else — while the merchant mints its own, unrelated
-   token when the cart is visited. `reconcile` joins on exactly that key, finds none, and
-   emits nothing.
+Both halves exist, are tested, and are now wired to each other. `POST /reconcile` is a served
+route on `apps/trust`. A served accept files the whole C11 trio into the chain — `accepted`
+from the state machine's own transition, then `code_created` and `checkout_redirect` forwarded
+by `_record_checkout_bridge` (`apps/exchange/src/accept/routes.py:856`) — and the merchant
+posts its HMAC-verified `order_paid` to the trust service over HTTP. Measured on one run of
+demo 1: eight events in six kinds, written by two different applications, read back through
+`GET /events` and verified as an unbroken hash chain.
 
-In the demo's own words: *"this is where the starting slice genuinely stops today."*
+**The fold over that chain still returns 0 verdicts.** Two things stop it, and the demo
+measures both rather than asserting them:
 
-### `pixel/src/` is scaffold only
+1. **The two halves of the purchase name the seller differently.** `reconcile` namespaces every
+   join key by the store that owns it — it has to, a Shopify `order_id` is a per-shop number and
+   two shops both have order 1001. The signed `order_paid` names
+   `proxyshop-demo.myshopify.com`, because an unsigned `X-Shopify-Shop-Domain` header is the
+   only shop identity a signed delivery carries at all. The mapping back to a `store_id` is
+   built — `trust.reconcile.routes.resolve_store_aliases` reads the platform's own
+   `app.sellers` roster — but that table is Postgres, and neither demo starts one. The demo
+   prints a *probe* beside the real answer: state the names and the same events, the same
+   webhook and the same fold produce one real verdict, price honoured, `389.0 / 389.0`.
+2. **`checkout_pixel` has no producer.** `pixel/src/beacon.ts` builds a collector body and
+   `merchant_svc.collector` really accepts one — beat 6 reads one, in process — but the
+   collector stops at a `PixelObservation` held in memory
+   (`apps/merchant/svc/src/collector/routes.py:100`), and nothing writes a `checkout_pixel`
+   ledger event anywhere in the repo. That costs *evidence* rather than the verdict: a group
+   with no beacon grades `pixel_missing`, which by design is not a blocker. A driver that
+   manufactured a beacon would be supplying the evidence whose absence is the defect.
 
-`pixel/src/` contains a single 0-byte `.gitkeep` and nothing else; `pixel/tests/` holds one
-scaffold test. The directory and the npm workspace exist, the web pixel does not. This is the
-direct cause of reason 1 above.
+### The three things the buyer UI itself says are not wired
 
-### The five things the buyer UI itself says are not wired
+The running page renders a "What is not wired yet" panel. It is down to three items from five:
+sign-in and the browser-minted pseudonym both closed, and the page now signs in by magic link
+(`apps/buyer/app/journey/SignIn.tsx`, `journey/magic-link.ts`) rather than minting a pseudonym
+client-side and throwing it away on reload. What the panel still lists:
 
-The running page renders a "What is not wired yet" panel. These are its own five items:
-
-1. **Sign-in is not available.** `POST /buyer/auth/magic-link` answers 202 and, by design,
-   never returns the token, so a browser cannot redeem one without an email transport. There
-   is no sign-in form on the page, because nothing could complete it.
-2. **The pseudonym is minted in the browser.** It is generated client-side for the visit and
-   thrown away on reload, because sign-in cannot complete and so there is no session to mint
-   one from. Stores are told only the pseudonym (`psn-ed94fae142` on my run) and nothing else.
-3. **The store domain is not pinned.** The exchange's shortlist slot carries no
-   `store_domain`, so the checkout host can only be checked for scheme and host presence — it
-   cannot be pinned to a named store.
-4. **Price is not on the slot.** The shortlist slot carries no price field at all. The page
-   joins prices out of `entries[]` in the same `GET /buyer/auctions/{id}` answer, matching on
-   the store id inside each slot's `bid_ref`, and labels every price *recorded* rather than
-   *current*.
-5. **The clarifying questions came from no live model.** With `LLM_PROVIDER` unset,
+1. **The store domain is not pinned.** `ShortlistSlot`
+   (`packages/contracts/src/generated/protocol.py:628`) carries no `store_domain`, so the
+   checkout host can only be checked for scheme and host presence — it cannot be pinned to a
+   named store. Still true.
+2. **Price is not on the slot.** This item is itself out of date, and the panel is the thing
+   that is now wrong: `ShortlistSlot` declares `product`, `price` and `commitments`, and
+   `exchange.ranking.serving._with_offer_fields` fills them on both served doors. The page
+   still joins prices out of `entries[]` and labels them *recorded* rather than *current*,
+   which is a page that has not caught up rather than a field that is missing.
+3. **The clarifying questions came from no live model.** With `LLM_PROVIDER` unset,
    `build_llm("buyer")` returns the offline double `<DeterministicLLM role='buyer'>`,
    `model="double:buyer"`. That is the intended default rather than a failure, but it means
-   the questions and the extraction are the buyer service's own wording, not a model's.
+   the questions and the extraction are the buyer service's own wording, not a model's. Still
+   true.
 
-### The trust service publishes a read API it does not serve
+### The trust service publishes two paths that no route serves
 
-`packages/contracts/openapi/trust.openapi.json` declares four paths — `/events`,
-`/snapshot`, `/stores/{store_id}/trust` and `/feedback/{order_ref}`. The app mounts one
-router, `/events`, and serves six operations under it. The other three paths are published
-and not served.
+`packages/contracts/openapi/trust.openapi.json` declares ten operations. `apps/trust` mounts
+four routers and serves ten — but they are not the same ten. Eight are in both. The two that
+are published and reachable at no route are `GET /stores/{store_id}/trust` and
+`POST /feedback/{order_ref}`; the two the app serves and the contract does not declare are
+`GET /reconcile` and `POST /reconcile`.
 
-That is why the trust score the ranker filters on reaches the exchange by hand: the exchange
-reads a `trust_snapshot` out of its deployment document
-(`apps/exchange/src/composition.py:936-938`), because no client can fetch one over HTTP. The
-two halves named in the gap above both exist, and there is no wire between them.
+The direction that used to matter most is closed. The trust score the ranker filters on no
+longer has to be typed into a deployment document by hand: `GET /snapshot` is served, and
+`exchange.composition.bind_trust_snapshot_reader` points `app.state.trust_snapshot` at it on
+every rung, so a document that states no `trust_snapshot` gets a live view instead of `{}`. A
+document that *does* state one still wins — that key is a person's statement and composition
+does not overrule it.
 
 ### Where the rest of the known defects are written down
 
-The 56 xfails a full `make verify` reports are this repository's open-defect register, and
-each one carries its reason in its own decorator. They live in eleven files, one per package:
+The strict xfails a full `make verify` reports are this repository's open-defect register, and
+each one carries its reason in its own decorator. There are **eight**, naming eight tickets in
+seven files:
 
 ```sh
-git ls-files | grep test_repro_open_tickets.py
+grep -rn "^@pytest.mark.xfail" --include='*.py' apps packages services proxyshop_support
 ```
+
+That grep is the locator, not `git ls-files | grep test_repro_open_tickets.py`, which is what
+this section used to say: eleven files match that name and six of them now carry no xfail at
+all, while two of the eight live in files it does not match
+(`apps/exchange/tests/test_accept_denials.py` and
+`proxyshop_support/tests/test_repro_ticket_graph.py`). The eight are T-204 (contracts), T-321
+(store-agent), T-325, T-158 and T-312 (exchange), T-302 (trust), T-142 (buyer) and T-262
+(`proxyshop_support`).
 
 Some of what they name is larger than anything listed above. Read them before assuming a
 behaviour works.
@@ -407,13 +436,11 @@ behaviour works.
 Nothing else in this repo should be read as a promise. If a behaviour is not demonstrated by
 one of the two demos or by the test suite, treat it as unbuilt.
 
-Note on the docs: the `proxyshop_demo/s1.py` module docstring still says **four** beats do not
-run. That is stale. Three of those four now work — `POST /buyer/intent/confirm` answers 201
-with an `auction_id`, the store-agent probe answers 204 `no_matching_product`, and the silent
-store `store-slowreply` does reach the shortlist in the `value` slot at $519.00. Only
-reconciliation remains. `docs/demo/starting-slice.md` said the same thing and was corrected
-alongside this file. Where prose and a demo run disagree, believe the run: the gap list the
-driver prints is measured on the spot, and the prose is not.
+Where prose and a demo run disagree, believe the run: the gap list the driver prints is
+measured on the spot, and the prose is not. Two pieces of prose are known to be behind the
+tree right now, both of them stating that `pixel/src/` holds nothing but an empty `.gitkeep` —
+`proxyshop_demo/s1.py` in its `DOES NOT RUN YET` block, and `e2e/support/s1/flow.py`. The
+directory holds five TypeScript modules.
 
 ---
 
@@ -445,7 +472,9 @@ make deps-down
 5. `python scripts/check_verify_contracts.py`
 6. `echo "OK: $STEP"`
 
-A full run takes six to seven minutes and reports:
+A full run takes six to seven minutes. Below is what one **recorded** run printed. The shape is
+what to read it for; the counts move with every commit, and two of them have moved a long way
+since:
 
 ```
 5980 passed, 1 deselected, 56 xfailed, 11 warnings in 363.01s (0:06:03)
@@ -462,10 +491,19 @@ check_verify_contracts:
 OK: all
 ```
 
-`OK: all` on the last line and exit 0 is the whole result. The 56 xfails are not noise: each
-one names an open defect in its own reason string, so the suite carries its known gaps in the
-open rather than deleting the tests that expose them. The six "not created yet" verify paths
-are tickets whose test file nobody has written.
+`OK: all` on the last line and exit 0 is the whole result.
+
+**The two numbers that have moved, both checkable without a six-minute run.** There are now
+**8** strict xfails, not 56 — `grep -rn "^@pytest.mark.xfail" --include='*.py' apps packages
+services proxyshop_support` finds every one, and they are named under [Where the rest of the
+known defects are written down](#where-the-rest-of-the-known-defects-are-written-down). And
+`./.venv/bin/python scripts/check_verify_contracts.py` now reports **two** unwritten verify
+paths, not six: T-086 (`e2e/test_onboarding.py`) and T-087 (`docs/tests/test_runbook.py`).
+T-024's file exists.
+
+The xfails are not noise: each one names an open defect in its own reason string, so the suite
+carries its known gaps in the open rather than deleting the tests that expose them. The "not
+created yet" verify paths are tickets whose test file nobody has written.
 
 Two things the gate does deliberately and loudly, worth knowing before you read its output:
 collecting zero tests is a **failure**, not a pass (pytest's exit 5 is fatal here, including
@@ -489,5 +527,5 @@ One target that behaves unusually on purpose: `make e2e-live` is a preflight tha
 exits non-zero — 2 means a live precondition is unmet, 3 means all the preconditions hold but
 the live driver itself is missing. A non-zero exit from it is not news. Exit 3 is currently
 permanent: the driver lives in `docs/demo/shopify-onboarding-extension.md`, which
-`docs/demo/e2e_live.sh:37` names and which does not exist — `git ls-files docs/demo` returns
-only `.gitkeep`, `e2e_live.sh` and `starting-slice.md`.
+`docs/demo/e2e_live.sh:36` names and which does not exist — `git ls-files docs/demo` returns
+only `e2e_live.sh` and `starting-slice.md`.

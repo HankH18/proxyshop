@@ -1,13 +1,17 @@
 """Shared builders for the T-032 ranking tests (auto-loaded by the exchange conftest).
 
-Two audiences, one set of builders:
+One set of builders, imported directly. :func:`make_claim`, :func:`make_candidate`,
+:func:`make_intent`, :func:`make_trust_snapshot` and :func:`make_config` are plain functions
+and ``test_ranking.py`` imports them by name — a builder that exists twice is a builder that
+can disagree with itself about what a candidate looks like.
 
-* :func:`rank_candidate`, :func:`rank_intent`, :func:`rank_trust_snapshot` and
-  :func:`rank_config` are ordinary fixtures, so any test in ``apps/exchange/tests`` can ask
-  for a ranking input without importing anything.
-* the plain functions they wrap are importable directly, which is what
-  ``test_ranking.py`` does — a builder that exists twice is a builder that can disagree with
-  itself about what a candidate looks like.
+There used to be a second audience: five one-line ``@pytest.fixture`` wrappers
+(``rank_claim``, ``rank_candidate``, ``rank_intent``, ``rank_trust_snapshot``, ``rank_config``)
+that returned the builder above them, so a test could request one by parameter name without an
+import. They were removed because no test in ``apps/exchange/tests`` ever requested one —
+measured over every function signature, ``usefixtures`` marker and ``getfixturevalue`` call in
+the directory. Add a wrapper back only alongside the test that asks for it; the loader in
+``proxyshop_support.fixture_loader`` picks up anything decorated here with no other wiring.
 
 The shapes here are the ones the frozen acceptance suite drives ``rank()`` with: the seller's
 registered domain at ``store_domain``, a float epoch ``expires_at``, and
@@ -28,7 +32,6 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 from exchange.ranking.attestation import attest_claim
 
 T_NOW = 1_700_000_000.0
@@ -160,28 +163,3 @@ def make_trust_snapshot(
 def make_config(**overrides: Any) -> dict[str, Any]:
     """Ranker config. `now` is supplied so no test depends on the wall clock."""
     return {"now": T_NOW, **overrides}
-
-
-@pytest.fixture
-def rank_claim():
-    return make_claim
-
-
-@pytest.fixture
-def rank_candidate():
-    return make_candidate
-
-
-@pytest.fixture
-def rank_intent():
-    return make_intent
-
-
-@pytest.fixture
-def rank_trust_snapshot():
-    return make_trust_snapshot
-
-
-@pytest.fixture
-def rank_config():
-    return make_config

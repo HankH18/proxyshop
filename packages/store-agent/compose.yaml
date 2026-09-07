@@ -50,7 +50,12 @@ services:
       - "${STORE_AGENT_PORT:-8086}:8086"
     environment:
       PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
-      LLM_PROVIDER: "${LLM_PROVIDER:-double}"
+      # NO LLM_PROVIDER. The agent negotiates from its store context and a policy, not from a
+      # model: `packages/store-agent/Dockerfile` copies contracts, proxyshop_support and
+      # `packages/store-agent/src` only — no `llm` package is in the image — and nothing under
+      # that tree imports one (`grep -rnE "^\s*(from|import) llm\b" packages/store-agent/src`
+      # is empty). The line that used to stand here set a variable no process in this
+      # container could read, and implied a live model where there is none.
       # Unset by default, and deliberately: a default path would point at a store this
       # deployment never approved. See the header for what happens with them unset.
       STORE_AGENT_CONTEXT: "${STORE_AGENT_CONTEXT:-}"

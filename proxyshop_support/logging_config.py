@@ -49,8 +49,9 @@ and DISCARDED if it does not conform. An earlier draft adopted it verbatim, whic
 response-header splitting on the way out (uvicorn does not validate header values) and log
 forging on the way in; see that function for the measurements.
 
-**Why the standard library and not ``structlog``.** ``structlog`` is a declared dependency
-with zero importers, and it is tempting to reach for it here. It is not what is broken:
+**Why the standard library and not ``structlog``.** ``structlog`` WAS a declared dependency
+with zero importers and has since been removed from ``pyproject.toml`` as unused; it is
+tempting to reach for it here, and it is not what is broken:
 ``structlog``'s default configuration still renders *through* the stdlib root logger, so
 without the configuration below it would be just as silent. Configuring the stdlib root is
 the load-bearing half and the half every existing ``logging.getLogger(__name__)`` call site

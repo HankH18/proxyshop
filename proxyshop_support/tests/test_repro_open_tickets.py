@@ -1,20 +1,31 @@
-"""Reproductions for the orchestrator-facing tickets that carry a PLACEHOLDER gate.
+"""Gates for the orchestrator-facing tickets that carried a PLACEHOLDER gate — T-160 and T-210.
 
-Same mechanism as the per-service ``test_repro_open_tickets.py`` files: one
-``xfail(strict=True)`` test per defect measured live at HEAD, so a normal run reports
-``xfailed`` and exits 0 while the ticket's own gate runs ``--runxfail -k <id>`` and gets a
-real ``1 failed``. ``strict=True`` turns the eventual repair into an XPASS *failure*, so
-whoever fixes the defect must delete the marker.
+Same mechanism as the per-service ``test_repro_open_tickets.py`` files: each defect got one
+``xfail(strict=True)`` test measured live at HEAD, so a normal run reported ``xfailed`` and
+exited 0 while the ticket's own gate ran ``--runxfail -k <id>`` and got a real ``1 failed``.
+``strict=True`` turns the eventual repair into an XPASS *failure*, so the marker had to come
+off with the fix.
+
+**Both markers are off: neither T-160 nor T-210 is a reproduction any more.** Each graded test
+now passes in its own name on an ordinary run and must fail in its own name if its defect
+returns, so a ``--runxfail -k`` command quoted from ``tickets.json`` correctly reports passes
+here. The comment above each test records what was measured before its repair and what changed.
+The four tests here are those two graded ones plus an ARMING control for each, and the controls
+were deliberately never xfail. Under ``xfail(strict=True)`` **any** exception in the graded body
+reads as ``xfailed`` — green — so a probe that had quietly stopped working was indistinguishable
+from the defect it was meant to detect, and under ``--runxfail`` a dead probe read as "still
+broken" forever. Every precondition that could make a graded test measure NOTHING and report
+success therefore lives in the armer, in its own name, where it fails ``make verify`` loudly.
+The armers stay whether or not the markers are on: they now guard against the reverse false
+green, a passing regression test that passes because it stopped measuring.
 
 What is different here, and it changes what a good test looks like: the subjects are the
 INSTRUMENTS, not the product. T-160 is about ticket gates that cannot fail. A gate about
 gates is easy to get wrong in one specific way — it can end up grading the patch that
 landed rather than the property that was meant to hold — so every test below is written to
-stay red when someone repairs the named instance and leaves the class alone. Where that is
-claimed it is also demonstrated: T-160's sweep stays red after the three tickets its own
-ticket names are repointed, because it finds a fourth instance the ticket never named.
-
-Covered here: T-160 and T-210.
+stay red when someone repairs the named instance and leaves the class alone. Where that was
+claimed it was also demonstrated: T-160's sweep stayed red after the three tickets its own
+ticket names were repointed, because it found a fourth instance the ticket never named.
 
 Nothing in this file touches product source.
 """
@@ -43,9 +54,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: The ticket graph. Read only — a gate about the ticket graph may not WRITE the ticket graph.
 TICKETS_JSON = REPO_ROOT / "tickets.json"
-
-#: The marker text a ticket carries when it has no gate yet.
-GATE_PLACEHOLDER = "false  # NO GATE YET"
 
 #: The marker expression ``scripts/verify.sh check`` runs the suite under (verify.sh:187).
 #: Resolving a selection under any *other* expression would count a test that is deselected

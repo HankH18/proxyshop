@@ -39,11 +39,18 @@ services:
       # D39: no database component. The logical DB index is the worker index and
       # proxyshop_support.redis_client sets it authoritatively.
       REDIS_URL: "redis://redis:6379"
-      LLM_PROVIDER: "${LLM_PROVIDER:-double}"
+      # NO LLM_PROVIDER, and its absence is measured rather than an oversight. This image
+      # ships no `llm` package — `apps/exchange/Dockerfile` copies contracts, verification,
+      # store_agent/external, exchange and ingest's graph/embeddings, and nothing else — and
+      # no module under `apps/exchange/src` imports one (`grep -rnE "^\s*(from|import) llm\b"
+      # apps/exchange/src` is empty). The line that used to stand here set a variable no
+      # process in this container could read. `resolve_provider` in `exchange.checkout` is a
+      # CHECKOUT provider and reads CHECKOUT_MODE below; it has nothing to do with a model.
       EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-hash}"
       # T-310. This block used to be a single `RANKING_WEIGHTS=w_m=0.35,w_e=0.20,...` and
-      # NOTHING read it — measured: `git grep RANKING_WEIGHTS` outside .swarm-loop returns
-      # this line and `.env.example:43` and no reader at all. The published loader is
+      # NOTHING read it — measured: `git grep RANKING_WEIGHTS` outside .swarm-loop returned
+      # this line and one in `.env.example` and no reader at all. `.env.example` has since
+      # been corrected the same way, so the dead name is now gone from both. The loader is
       # `contracts.ranking.RankingWeights.from_env`, and `WEIGHT_ENV_VARS` (ranking.py:58-64)
       # names five SEPARATE variables — RANK_W_M/E/T/V/D — plus RANK_WEIGHTS_VERSION. So the
       # deployed exchange was silently un-tunable: a weight set written into the old variable

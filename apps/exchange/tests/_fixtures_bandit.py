@@ -1,8 +1,13 @@
-"""Fixtures for the T-034 exposure-bandit gate (``test_bandit.py``).
+"""Shared builders for the T-034 exposure-bandit gate (``test_bandit.py``).
 
-Owned by T-034. Auto-loaded into ``apps/exchange/tests/conftest.py`` by
-``proxyshop_support.fixture_loader``, so every fixture here is prefixed ``bandit_`` —
-seven tickets share this directory and the loader poisons a duplicated name.
+Owned by T-034. ``test_bandit.py`` imports :func:`build_trust_snapshot` and
+:func:`build_outcomes` by name; nothing here is a ``@pytest.fixture`` any more. Two one-line
+fixture wrappers (``bandit_trust_snapshot``, ``bandit_outcomes``) returning those two builders
+were removed once measurement showed no test in ``apps/exchange/tests`` had ever requested
+either by parameter name. If a fixture is added back, prefix its name ``bandit_``: seven
+tickets share this directory, ``proxyshop_support.fixture_loader`` auto-loads every
+``@pytest.fixture`` here into the frozen sibling ``conftest.py``, and it poisons a name two
+files define.
 
 The trust-snapshot shape built here is deliberately the same shape the frozen acceptance
 suite builds (``.swarm-loop/acceptance/test_e3_exchange.py::_trust_snapshot``): a mapping
@@ -14,8 +19,6 @@ gate that feeds a friendlier shape than the grader does is a gate that proves no
 from __future__ import annotations
 
 from typing import Any
-
-import pytest
 
 #: Fixed clock value. Never ``time.time()`` — see the root conftest (D38).
 T_PAST = 1_600_000_000.0
@@ -88,15 +91,3 @@ def build_outcomes(rounds: int, winners, losers=(), cluster_id: str = "cluster-1
         for sid in losers:
             outcomes.append({"store_id": sid, "cluster_id": cluster_id, "converted": False})
     return outcomes
-
-
-@pytest.fixture
-def bandit_trust_snapshot():
-    """Factory for a trust snapshot in the frozen suite's shape."""
-    return build_trust_snapshot
-
-
-@pytest.fixture
-def bandit_outcomes():
-    """Factory for a list of conversion outcomes."""
-    return build_outcomes

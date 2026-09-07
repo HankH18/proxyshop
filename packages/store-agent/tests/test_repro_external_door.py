@@ -1,13 +1,20 @@
-"""Reproduction gates for the Tier-2 external door (`store_agent.external.door`).
+"""Regression guards for the Tier-2 external door (`store_agent.external.door`).
 
-Every test here asserts the behaviour that SHOULD hold and therefore fails against the tree as
-it stands. Each carries `xfail(strict=True)` so an ordinary run reports `xfailed` and stays
-green, the ticket's gate (`pytest <file> -q --runxfail -k <name>`) reports a real failure, and
-the marker cannot survive the fix: once the defect is closed the test XPASSes, which a strict
-xfail turns into a failure, and whoever fixed it has to delete the marker.
+Every test here asserts the behaviour that SHOULD hold. Each ARRIVED as a reproduction carrying
+`xfail(strict=True)`, so an ordinary run reported `xfailed` and stayed green while the ticket's
+gate (`pytest <file> -q --runxfail -k <name>`) reported a real failure. **Every one of those
+markers is now gone, because every one of the defects is closed** — T-229, T-230, T-231, T-232,
+T-233, T-234 and T-241, each with a comment above its test naming the repair that closed it.
+That was not optional bookkeeping: a strict xfail turns a repaired defect's XPASS into a
+failure, so the marker had to come off with the fix.
 
-Seven tickets, one root shape behind three of them: `receive_bid` accepts any `Mapping` and
-re-reads it instead of snapshotting it once at entry.
+So nothing in this file is a reproduction any more. Each test must pass in its own name on an
+ordinary run, `--runxfail` or not, and must fail in its own name if the defect comes back — a
+`--runxfail -k <name>` command quoted from `tickets.json` correctly reports `1 passed` here.
+
+Seven tickets, one root shape behind three of them: `receive_bid` used to accept any `Mapping`
+and re-read it instead of snapshotting it once at entry. `_snapshot` in `door.py` is the repair
+those three share.
 """
 
 from __future__ import annotations

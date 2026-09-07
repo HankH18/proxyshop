@@ -298,10 +298,14 @@ The host comparison is exact: a bid whose checkout URL points at `checkout.<sell
 `evil-<seller-domain>` or `<seller-domain>@attacker.tld` is refused, and refused *before* a
 discount code is created. **The live driver states that; it does not attempt it.** The four
 spoofs are driven for real by section 4. The port **builds** `accepted`, `code_created`
-and `checkout_redirect` and hands them back on `CheckoutResult.events` — but no served path
-emits them: `exchange.accept.routes` reads the `accepted` one for its `offer` body and drops the
-rest. The `accepted` row in the chain 3.8 serves is the state machine's own transition event,
-not the port's. That is one half of why reconciliation still cannot run (3.6).
+and `checkout_redirect` and hands them back on `CheckoutResult.events`, and the served path files
+all three. `exchange.accept.routes` reads the `accepted` one for its `offer` body and for the
+store it names, stamps the acceptance through the state machine — which writes the `accepted` row
+itself, with the auction's `intent_id` and `cluster_id` on it — and then forwards the other two
+through `exchange.accept.routes._record_checkout_bridge`, in the C11 order, acceptance first. The `accepted` row in the chain 3.8 serves is therefore still the state
+machine's own transition event rather than the port's copy of it, and the two bridge records now
+sit behind it. That used to be one half of why reconciliation could not run; it no longer is
+(3.6).
 
 ### 3.6 The pixel, the webhook and reconciliation
 
@@ -326,32 +330,38 @@ prints the outcome carefully, because two different things look alike there: the
 checkout is *not* refused, it completes carrying no discount. Single use means "the second
 order redeemed nothing", not "the second attempt errored".
 
-Then it stops, for two reasons it prints:
+Then it stops, and the reasons it prints are these:
 
-- `reconcile` needs three kinds — `accepted`, `checkout_pixel`, `order_paid` — and **two of
-  the three have no producer on any served path**. `accepted` is present: it is the last row of
-  the chain 3.8 serves, and it carries the offer and the token. The other two cannot be, because
-  `AuctionStateMachine._transition` is the exchange's only caller of `ledger.record` **on a
-  served path** (`retrieval.fit` holds the other one, the `bid_placed` producer, and no route
-  reaches it), so a served run's chain is auction transitions and nothing else. `checkout_pixel`
-  has no producer anywhere in the repository — `pixel/src/` holds one empty `.gitkeep`, and
-  `merchant_svc.collector` stops at a `PixelObservation` in memory — and the verified
-  `order_paid` goes into a bounded in-process hand-off buffer the module itself calls the seam a
-  downstream lane replaces. A driver that manufactured those events would be supplying the
-  evidence whose absence is the defect.
-- The join is still unmade, and beat 7 *measures* it: it prints the token the exchange stamped
-  into the ledger beside the token the merchant minted at the cart, and whether they match. They
-  do not. In `redirect` mode no merchant is called at all — `SimulatedRedirectProvider` mints
-  locally — and the `checkout_token` is invented right after the code is. It reaches the ledger;
-  it never reaches the *merchant*, because the only thing handed to the shopper is a cart
-  permalink carrying a variant, a quantity and the discount code. The merchant therefore mints
-  its own when the cart is visited. `reconcile` no longer joins on that token alone: it also
-  bridges an offer to an order through the single-use code, reading `code_created` and
-  `checkout_redirect`. Those two are exactly the events the checkout port builds, hands back on
-  `CheckoutResult.events`, and that no served path emits — `exchange.accept.routes` reads the
-  `accepted` one for its `offer` body and drops the rest. `e2e/support/s1` writes them itself
-  from real upstream data, which is what lets section 4 reach a `reconciled` verdict; the
-  `checkout_token` binding it still carries is vestigial and its own docstring says so.
+- `reconcile` needs three kinds — `accepted`, `checkout_pixel`, `order_paid` — and **two of the
+  three are on the served path now**. `accepted` carries the offer and the token; the two bridge
+  records `code_created` and `checkout_redirect` that carry the single-use code sit behind it
+  (3.5); and the merchant's HMAC-verified `order_paid` is posted to the trust service over HTTP by
+  a different application, so it lands in the same chain rather than in an in-process hand-off
+  buffer. `checkout_pixel` is the one kind with no producer: `pixel/src/beacon.ts` builds a
+  collector body out of a four-key allowlist and `merchant_svc.collector` really accepts one, but
+  the collector stops at a `PixelObservation` in memory and nothing turns that into a ledger
+  event. That costs *evidence* rather than the verdict — a group with no beacon grades
+  `pixel_missing`, which by design is not a blocker — and a driver that manufactured a beacon
+  would be supplying the evidence whose absence is the defect.
+- **What returns nothing is the fold itself**, and the demo prints the number: 0 verdicts over the
+  chain as served. `reconcile` namespaces every join key by the store that owns it, because a
+  Shopify `order_id` is only unique within one shop, and the signed `order_paid` names the *shop
+  domain* — an unsigned `X-Shopify-Shop-Domain` header is the only shop identity a signed delivery
+  carries at all. The mapping back is built and needs nothing from the demo:
+  `trust.reconcile.routes.resolve_store_aliases` reads the platform's own `app.sellers` roster and
+  `POST /reconcile` applies it. That roster is Postgres, and the live beat starts none. So the
+  driver states the names itself and prints the result as a **probe** rather than a result: the
+  same events and the same webhook fold to one real verdict, price honoured, `389.0 / 389.0`. The
+  product's own number is the first one: 0.
+- The `checkout_token` join is gone, and beat 7 still *measures* why. It prints the token the
+  exchange stamped into the ledger beside the token the merchant minted at the cart, and whether
+  they match. They do not. In `redirect` mode no merchant is called at all —
+  `SimulatedRedirectProvider` mints locally — and the `checkout_token` is invented right after the
+  code is. It reaches the ledger; it never reaches the *merchant*, because the only thing handed
+  to the shopper is a cart permalink carrying a variant, a quantity and the discount code. The
+  merchant therefore mints its own when the cart is visited. `reconcile` no longer joins on that
+  token: it bridges an offer to an order through the single-use code, reading `code_created` and
+  `checkout_redirect` — which is exactly the pair the served accept now files.
 
 ### 3.7 The trust projection
 
@@ -370,18 +380,20 @@ today, and the driver says so at the point it stops.
 
 ### 3.8 The chained ledger, read back off the trust service
 
-The exchange's state machine records every auction transition into a ledger sink, and the only
-thing its deployment document says about that sink is *where* it posts: one line, `trust_url`.
-The driver states the trust service's own loopback address there and then asks a **different
-application** what it received — `GET /events` and `GET /events/verify` on `apps/trust`, neither
-of which is authenticated. (Different application, not different process: every server on this
+The exchange's state machine records every auction transition into a ledger sink, the served
+accept adds the two checkout bridge records behind the acceptance, and the merchant service posts
+its verified `order_paid` into the same chain. The only thing the exchange's deployment document
+says about that sink is *where* it posts: one line, `trust_url`. The driver states the trust
+service's own loopback address there — and states it to the merchant too, which reads a different
+seam for it — and then asks a **different application** what it received: `GET /events` and
+`GET /events/verify` on `apps/trust`, neither of which is authenticated. (Different application, not different process: every server on this
 page is a uvicorn instance in a thread of the one interpreter. What makes the read meaningful is
 the socket and the separate app state, and both of those are real.)
 
-What beat 7 prints is the chain itself: five events (`auction_opened`, `auction_closed`,
-`auction_opened`, `auction_closed`, `accepted`), each one's `prev_hash` equal to its
-predecessor's `event_hash`, followed by the service's verdict — `ok: true`, `verified: 5`,
-`anchor_ok: true`, and the head hash. `anchor_ok` is the half worth pointing at: the chain's
+What beat 7 prints is the chain itself: eight events (`auction_opened`, `auction_closed`,
+`auction_opened`, `auction_closed`, `accepted`, `code_created`, `checkout_redirect`,
+`order_paid`), each one's `prev_hash` equal to its predecessor's `event_hash`, followed by the
+service's verdict — `ok: true`, `verified: 8`, `anchor_ok: true`, and the head hash. `anchor_ok` is the half worth pointing at: the chain's
 length and head are recorded outside the row list, so a stream truncated to a shorter but
 perfectly-linked prefix still fails verification. A flawless chain of the wrong length is still
 a tampered one.
@@ -433,11 +445,15 @@ means:
 The ledger is append-only and hash-chained, so the sequence is tamper-evident: an edited
 event breaks the chain rather than passing quietly.
 
-That table is what the *scripted proof* in section 4 produces. A **served** run produces three
-kinds and no others: `auction_opened`, `auction_closed`, and an `accepted` — and that `accepted`
-has a different provenance from the fifth row above, being the state machine's own transition
-event rather than the checkout port's trio. Everything else in the table, `bid_placed` included,
-has no emitter any route reaches. 3.8 is where the served chain is shown and verified.
+That table is what the *scripted proof* in section 4 produces. A **served** run now produces six
+of those kinds: `auction_opened` and `auction_closed` from the auction's state machine,
+`accepted`, `code_created` and `checkout_redirect` from the served accept, and `order_paid` posted
+by the merchant service. The `accepted` row still has a different provenance from the fifth row
+above — it is the state machine's own transition event, carrying the auction's `intent_id` and
+`cluster_id`, rather than the checkout port's copy of it, which is why exactly one `accepted`
+lands per acceptance. What has no emitter any route reaches is the rest of the table:
+`bid_placed`, `shown`, `claim_verified`, `checkout_pixel` and `reconciled`. 3.8 is where the
+served chain is shown and verified.
 
 ## Off the starting path: dev-store provisioning, the onboarding interview, and `make e2e-live`
 

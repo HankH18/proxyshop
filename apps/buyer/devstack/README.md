@@ -70,7 +70,7 @@ clarifies to a *different* cluster with no hard constraint at all, which no enve
 pursues. That is the clarifier reading an unresolved answer honestly, not a bug, and it is why
 the turns are written out verbatim.
 
-## Two things this launcher does that a deployment document cannot
+## What this launcher does that a deployment document cannot
 
 1. **`configure_solicitation(app, context=…)` per store agent, not `STORE_AGENT_CONTEXT`.**
    That env var is process-wide and names exactly one file, so it cannot describe three stores
@@ -80,15 +80,21 @@ the turns are written out verbatim.
    process and says all of this in `STORE_AGENT_CONTEXT`. It is unreachable-by-document here
    only because this launcher deliberately puts three merchants in one process.
 
-2. **`configure_ranking(app, catalog=…)` on the exchange.**
-   `apps/exchange/src/composition.py` contains the string `catalog` **zero** times, so a
-   deployment document has no way to express a catalog snapshot and `configure_exchange` binds
-   none. Without this call, measured on this stack: an intent carrying any hard constraint
-   gets `ranked: []`, `shortlist.slots: []`, and every candidate lands in `excluded[]` with
-   `hard_constraint_unsatisfied` — which reads like a policy decision and is actually a wiring
-   hole. Both demo conversations carry hard constraints. This is a defect in the exchange's
-   composition root that the launcher reaches past, not a demo convenience; the fix is a
-   `catalog` section in the deployment document.
+That is the only one left. There used to be a second, and it is recorded here rather than
+deleted because the launcher **still makes the call** and a reader will find it:
+
+2. **`configure_ranking(app, catalog=…)` on the exchange — the hole this reached past is
+   closed.** It was a real one: `apps/exchange/src/composition.py` contained the string
+   `catalog` zero times, so a deployment document had no way to express a catalog snapshot and
+   `configure_exchange` bound none. It now names `catalog` on 32 lines — the document has a
+   `catalog` key, `_catalog()` validates it, and `configure_exchange` binds it through
+   `configure_ranking` (`composition.py:1952`). What has not changed is the *consequence* of
+   binding no catalog, measured on this stack: an intent carrying any hard constraint gets
+   `ranked: []`, `shortlist.slots: []`, and every candidate lands in `excluded[]` with
+   `hard_constraint_unsatisfied` — which reads like a policy decision and is actually an
+   unwired verifier. Both demo conversations carry hard constraints, so this launcher must
+   still bind one; it can now do it the way a deployment would, and the comment at the call
+   site in `run.py` still calls it a hole in the composition root.
 
 ## Files
 

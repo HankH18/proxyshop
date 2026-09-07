@@ -1,18 +1,23 @@
 """Wire-shaped payload builders for every pinned protocol object.
 
-Loaded into `packages/contracts/tests/conftest.py` by `proxyshop_support.fixture_loader`, which
-is the sanctioned way to add fixtures without editing the orchestrator-owned conftest.
-
 Every builder returns the object as DESIGN §Interfaces spells it, with the same field names and
 value shapes the rest of the system uses, so a test that builds a `Bid` here is exercising the
 same thing a store-agent would send.
+
+Sibling suites reach these by IMPORT — `from packages.contracts.tests._fixtures_protocol import
+make_bid, make_submission, make_snapshot_table, protocol_payloads` — which is what every current
+caller does. Four `@pytest.fixture` wrappers around those same four builders
+(`protocol_payload_map`, `bid_factory`, `submission_factory`, `snapshot_table`) were removed
+after measurement showed no test in this directory requested any of them by parameter name; the
+builders they wrapped are unchanged and heavily used. `proxyshop_support.fixture_loader` still
+auto-loads anything decorated here into `packages/contracts/tests/conftest.py`, which remains
+the sanctioned way to add a fixture without editing the orchestrator-owned conftest — add one
+together with the test that asks for it.
 """
 
 from __future__ import annotations
 
 from typing import Any
-
-import pytest
 
 HOOK_PROVENANCE: dict[str, Any] = {
     "source": "owner_statement",
@@ -26,13 +31,6 @@ ASSERTED_PROVENANCE: dict[str, Any] = {
     "ref": "pitch:p-1#span-4",
     "observed_at": "2026-01-01T00:00:00Z",
     "authority_rank": 5,
-}
-
-SCRAPED_PROVENANCE: dict[str, Any] = {
-    "source": "scraped",
-    "ref": "snapshot://store-one.example.com/policies/returns@sha256:0f1e2d3c",
-    "observed_at": "2026-01-01T00:00:00Z",
-    "authority_rank": 4,
 }
 
 NOT_EXPIRED = "2999-01-01T00:00:00Z"
@@ -261,27 +259,3 @@ def protocol_payloads() -> dict[str, dict]:
             "activation": "shadow",
         },
     }
-
-
-@pytest.fixture
-def protocol_payload_map() -> dict[str, dict]:
-    """`{pinned object name: wire payload}` for all fourteen."""
-    return protocol_payloads()
-
-
-@pytest.fixture
-def bid_factory():
-    """Build a `Bid`-shaped dict; `bid_factory(claims=[...], store_id=...)`."""
-    return make_bid
-
-
-@pytest.fixture
-def submission_factory():
-    """Build a complete external `SignedBidSubmission`-shaped dict."""
-    return make_submission
-
-
-@pytest.fixture
-def snapshot_table() -> dict:
-    """The `{store_id: row}` mapping the dual-path boundary reads."""
-    return make_snapshot_table()

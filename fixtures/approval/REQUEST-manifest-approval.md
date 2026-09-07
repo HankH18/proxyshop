@@ -1,12 +1,23 @@
 # Approval request — `fixtures/manifest.json` (T-080)
 
-**Status: awaiting a human. Nothing here is approved.**
+**Status: APPROVED.** `fixtures/manifest.json`'s `approval` block records approver *Hank
+Holcomb* at `2026-09-03T07:14:09Z`, over content digest
+`0ce80606248b6afe996a5309630359b4bc5fce65fb74d66d3fbc1aae73bffa27` — the same digest this
+document pins below — and names the committed record
+`fixtures/approval/manifest-approval.md`, which exists and quotes it.
+
+This page is kept as the **standing request**, because it is what the approval command reads
+and what a re-approval is made against: `fixtures/approval/__init__.py` names this exact path
+(`REQUEST_REL`), recomputes every digest below before it will write anything, and refuses if
+any of them has drifted. Editing a covered document therefore breaks the approval and sends a
+reader back here to approve again. What follows is written for that reader.
 
 SPEC A3: *"the trust engine catches the dishonest store" is circular if the dishonest
 behaviors are defined by the trust engine's own config → behaviors live in a human-approved
 fixture manifest.* EXECUTION.md rule 6 adds: *"T-080's manifest approval is a human gate — do
 not fabricate the approval artifact."* So the manifest, the golden set and the category
-config are written and self-consistent, and the `approval` block is deliberately empty.
+config are written and self-consistent, and the `approval` block is filled only by the command
+below, run by a person.
 
 ## The one command
 
@@ -69,11 +80,15 @@ blacklist threshold **0.35**; neutral prior Beta(2,2); half-life 30 days; observ
 `contradicted 2.0`, `severe_policy 3.0`, `mismatch_return 1.5`, `unsupported 0.5`,
 `ambiguous 0.0`.
 
-**3. The expected trust trajectory.** 0.50 at episode 0 → **0.13 ± 0.05 at episode 12**, i.e.
-below the 0.35 threshold even at the top of the tolerance band, inside the budget. That is
-the S2 claim, stated in the manifest rather than discovered by the engine. *This is the
-number most worth your scrutiny: the trust engine (T-062) does not exist yet, so this
-trajectory is an approved expectation, and T-062 will be graded against it.*
+**3. The expected trust trajectory.** 0.50 at episode 0 → **0.073 ± 0.03 at episode 12**, i.e.
+below the 0.35 threshold even at the top of the tolerance band, inside the budget. That is the
+S2 claim, and the manifest states it rather than letting the engine discover it. *This is the
+number most worth your scrutiny.* Read `expected_trust_trajectory_replay_rule` beside it:
+under ESC-006 the scores are what **this document's own `observation_weights`** produce,
+recomputed with the shipped scoring engine
+against the replay schedule the manifest states — the schedule is part of what you are
+approving, not an implementation detail. The engine (`apps/trust/src/scoring/`) is graded
+against these numbers; it does not author them.
 
 **4. The `claim_type → dimension` table.** Fourteen published claim types, each mapped to
 exactly one of the six dimensions; the four product-fact types (`ingredients`,
@@ -124,13 +139,15 @@ this request, read it, and approve the new document instead. It is also not a gu
 human did it — no offline test can tell a signature from an agent typing a name. The
 authenticity of the artifact rests on this gate, not on any green test.
 
-## What is blocked until then
+## What this gate blocks when it is open
 
-`test_e8_proofs.py::test_fixture_manifest_carries_a_recorded_human_approval_artifact` fails
-with `manifest.approval.approver must be <class 'str'>, got NoneType` — the honest failure of
-an unapproved document. Sixteen tickets sit behind this gate (T-032, T-034, T-035, T-045,
-T-054, T-062, T-063, T-064, T-065, T-073, T-081, T-082, T-083, T-084, T-085 and the S8
-release-blocker work that reads the golden set).
+It is not open. `test_e8_proofs.py::test_fixture_manifest_carries_a_recorded_human_approval_artifact`
+passes against the recorded approval — measured. While it was open it failed with
+`manifest.approval.approver must be <class 'str'>, got NoneType`, the honest failure of an
+unapproved document, and sixteen tickets sat behind it (T-032, T-034, T-035, T-045, T-054,
+T-062, T-063, T-064, T-065, T-073, T-081, T-082, T-083, T-084, T-085 and the S8
+release-blocker work that reads the golden set). That is what re-opens if any covered document
+is edited without being re-approved — which is the whole point of pinning the digests here.
 
 Everything else in T-080 is built, committed and green: the manifest, the golden set, the
 category config, the generator, `make demo-seed`, and the tests.

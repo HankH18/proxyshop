@@ -42,9 +42,14 @@ services:
     # the default recorded in .env.example's SHOPIFY_STUB_URL.
     ports:
       - "${SHOPIFY_STUB_PORT:-8787}:8787"
-    environment:
-      # The host the stub claims to be, and the host its permalinks are validated against.
-      SHOPIFY_STUB_SHOP_DOMAIN: "${SHOPIFY_STUB_SHOP_DOMAIN:-proxyshop-demo.myshopify.com}"
+    # NO `environment:`, and the one key that used to be here is why this note replaces it.
+    # `SHOPIFY_STUB_SHOP_DOMAIN` read like the host the stub claims to be, and it set nothing:
+    # the stub reads NO environment variable anywhere (`grep -rn "environ\|getenv"
+    # services/shopify-stub/src` matches one docstring and no code). The domain is a
+    # `StubConfig` field defaulted at `services/shopify-stub/src/state.py:32` to
+    # `proxyshop-demo.myshopify.com` — the value the healthcheck's /healthz reports above —
+    # and changed at runtime through the `_stub` config route, never at container start. An
+    # operator who set the old variable got the default and no warning.
     # D10: memory is the binding constraint. The stub holds a few dictionaries and one
     # uvicorn worker; 128 MiB is generous for that and keeps it a rounding error against
     # the 3.125 GiB the datastore stack already commits.

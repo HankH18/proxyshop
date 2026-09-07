@@ -44,7 +44,8 @@ appeared. Measured on this tree, not assumed:
 * ``shown`` — nothing under ``apps/``, ``packages/`` or ``services/`` writes it; only the
   frozen payload shape ``("bid_ref", "slot")`` exists. Emitted here once per real shortlist
   slot that ``rank()`` produced.
-* ``checkout_pixel`` — ``pixel/src/`` is an empty ``.gitkeep`` and
+* ``checkout_pixel`` — ``pixel/src/`` holds a real Web Pixel extension, but nothing on a
+  served path turns its beacon into a ledger event and
   ``merchant_svc.collector`` stops at a ``PixelObservation``. Emitted here from the observation
   the real collector parsed out of the stub's real beacon.
 * ``claim_verified`` — ``claim_verification.verify`` produces verdicts and nothing turns a

@@ -347,14 +347,17 @@ together. What that test does not know is *why* the number is `1`.
 **What a second worker costs.** The T-158 guard — one accept per auction, one discount code
 per purchase — is a claim held in a store, so it is exactly as wide as that store.
 `apps/exchange/src/accept/routes.py::_claims` derives the acceptance-claim table from the
-auction machine's own store, and an exchange configured only by the deployment document never
-binds a machine: `configure_exchange` in `apps/exchange/src/composition.py` reads `sellers`,
-`trust_snapshot` and `checkout_mode`, and the document exposes **no key for `auction_machine`
-and none for `acceptance_claims`**. The machine therefore falls back to
-`AuctionStateMachine()` over `InMemoryAuctionStore` and the claim table is process-local. Two
-workers are two processes, two stores, two claim tables — both accepts win their own copy of
-the guard, both mint, and one purchase leaves **two live discount codes** in the merchant's
-account.
+auction machine's own store, and **the document exposes no key for `auction_machine` and none
+for `acceptance_claims`**. `configure_exchange` in `apps/exchange/src/composition.py` reads
+`sellers`, `trust_url`, `trust_snapshot`, `intent_clusters`, `catalog`, `registered_domains`
+and `checkout_mode` — and none of those names a store. It does now bind a machine
+unconditionally, with no key required, but only to fix *where the audit trail goes*: the
+branch at `composition.py:1909` hands `AuctionStateMachine` a ledger sink built from
+`trust_url` and leaves the store exactly as it was, the same `InMemoryAuctionStore` the lazy
+default builds. So the claim table is still process-local, and this paragraph's conclusion is
+unchanged: two workers are two processes, two stores, two claim tables — both accepts win
+their own copy of the guard, both mint, and one purchase leaves **two live discount codes** in
+the merchant's account.
 
 That last part is a *reported* measurement and not this lane's: an independent verifier
 reproduced the double mint 6-of-6 across a real process boundary and reported it dead only
@@ -418,9 +421,15 @@ is a code change with a review, not a capacity decision.
   a `--neo4j` check there would fail on the import rather than on the datastore. Fixing it
   means adding the driver to the exchange image — an image change owed to the exchange lane,
   not a compose change.
-* **`apps/buyer/app/` and `apps/merchant/app/`** are TypeScript scaffolds with no build
-  script and no entrypoint, so neither web app is containerised. When one grows a build it
-  becomes a second service in the same fragment (`buyer-web` / `merchant-web`).
+* **`apps/merchant/app/`** is a TypeScript scaffold with no build script and no entrypoint, so
+  the merchant web app is not containerised. `apps/merchant/package.json` declares dependencies
+  and no `scripts` block at all. When it grows a build it becomes a second service in the same
+  fragment (`merchant-web`).
+* **`apps/buyer/app/` builds, and is still not containerised.** That half of this bullet is
+  closed: `apps/buyer/package.json` has `build:ui` (`vite build --config vite.config.ts`), the
+  `demo` script runs it before the devstack, and `apps/buyer/dist/` is a real bundle. What is
+  missing is a compose service for it — the built SPA is served by the buyer app in the devstack
+  launcher, and no fragment publishes it as `buyer-web`.
 * **Images have never been pushed anywhere**; `docker compose` builds them locally by name.
 * **No test reaches a running container.** The readiness logic is covered by
   `proxyshop_support/tests/test_deploy_readiness.py` — static checks over the compose

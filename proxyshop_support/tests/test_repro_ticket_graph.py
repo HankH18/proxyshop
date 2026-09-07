@@ -27,9 +27,6 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TICKETS_JSON = REPO_ROOT / "tickets.json"
 
-#: A ticket with no gate yet.
-GATE_PLACEHOLDER = "false  # NO GATE YET"
-
 #: Flags that consume the next word, so ``-k runbook`` does not read ``runbook`` as a path.
 _VALUE_FLAGS = frozenset(
     {

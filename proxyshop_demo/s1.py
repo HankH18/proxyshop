@@ -1538,11 +1538,10 @@ def _beat_seven(say: Narrator, result: JourneyResult, trust: Any) -> None:
 
         1. `reconcile` namespaces every join key by the store that owns it — it has to, a
            Shopify `order_id` is a per-shop number, and two shops both have order 1001. The
-           two halves of this purchase name the seller differently and one of them does not
-           name it at all. The `accepted` event carries NO `store_id`:
-           `AuctionStateMachine._transition` records every transition with the auction id and
-           a payload and nothing else, so the offer lands in the unattributed scope while the
-           two bridge records beside it are filed under
+           two halves of this purchase name the seller differently. The `accepted` event
+           now DOES carry a `store_id` -- `AuctionStateMachine.accept` takes the winning
+           store and `_transition` stamps it on the envelope -- so the offer and the two
+           bridge records beside it are all filed under
            `{result.accepted_store_id or "the winning store"}`. And the `order_paid` names
            `{_merchant_store_name(result) or "the shop domain"}`, because an unsigned
            `X-Shopify-Shop-Domain` header is the only shop identity a signed delivery carries
@@ -1550,8 +1549,10 @@ def _beat_seven(say: Narrator, result: JourneyResult, trust: Any) -> None:
            reconcile: that is the probe printed above, and it is a probe rather than a result
            precisely because this driver had to supply them.
 
-        2. `checkout_pixel` still has no producer anywhere in this repository — `pixel/src/`
-           holds one empty `.gitkeep`, and `merchant_svc.collector` stops at a
+        2. `checkout_pixel` still has no producer anywhere in this repository. Not for want
+           of a pixel: `pixel/src/` holds a real Web Pixel extension (beacon, transport,
+           settings, pixel, index). What is missing is the last hop — nothing on a served
+           path turns a beacon into a ledger event, and `merchant_svc.collector` stops at a
            `PixelObservation` in memory (beat 6 read one, in process). That one costs
            EVIDENCE rather than the verdict: a group with no beacon grades `pixel_missing`,
            which by design is not a blocker. A driver that manufactured a beacon would be

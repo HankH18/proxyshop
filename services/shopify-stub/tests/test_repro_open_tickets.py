@@ -1,28 +1,30 @@
-"""Reproduction gates for the open `services/shopify-stub` findings.
+"""Regression guards for the `services/shopify-stub` findings — T-205, T-253 and T-255.
 
-Each test here asserts the behaviour that SHOULD hold. **While its defect is open** it carries
-``xfail(strict=True)``, so an ordinary run reports ``xfailed`` and the repo-wide build gate
-stays green, while the ticket's own gate (``pytest <file> -q --runxfail -k <name>``) reports a
-real failure with the test SELECTED. When the defect is repaired the test XPASSes, which
-``strict=True`` turns into a failure — so the marker cannot outlive the bug, and the lane that
-repairs the defect is the lane that removes it.
+Each test here asserts the behaviour that SHOULD hold. **While its defect was open** it carried
+``xfail(strict=True)``, so an ordinary run reported ``xfailed`` and the repo-wide build gate
+stayed green, while the ticket's own gate (``pytest <file> -q --runxfail -k <name>``) reported a
+real failure with the test SELECTED. When the defect was repaired the test XPASSed, which
+``strict=True`` turns into a failure — so the marker could not outlive the bug, and the lane
+that repaired the defect is the lane that removed it.
 
 **A test here whose marker is gone is no longer a reproduction.** It is a live regression guard
 that must pass in its own name on every ordinary run, ``--runxfail`` or not, and must fail in
-its own name if the defect returns. T-205's two guards are in that state; T-253 and T-255 are
-still reproductions.
+its own name if the defect returns. **All three tickets are now in that state — no test in this
+file is xfail any more.** T-205 went first; T-253 and T-255 followed, each with a comment above
+its test naming the repair and recording the sabotage that returns the test to ``xfailed``. A
+``--runxfail -k`` command quoted from ``tickets.json`` therefore reports a pass here, not the
+``1 failed`` it once did.
 
-Every ``xfail`` gate here is paired with a ``..._is_armed`` control that is NOT xfail. That
-separation is load-bearing: under ``xfail(strict=True)`` **any** exception in the graded body
-is reported ``xfailed``, which is green, so a probe that had quietly stopped working would be
-indistinguishable from the defect it is meant to detect — and under the ticket's own
-``--runxfail`` gate every dead-probe state reads as "still broken". The preconditions that
-make the red meaningful therefore live in the control, where they fail in their own name
-during ``make verify``. T-205's guards need no separate control: not being xfail, every
+While a gate here was xfail it was paired with a ``..._is_armed`` control that is NOT xfail, and
+those controls remain. The separation was load-bearing then and still is: under
+``xfail(strict=True)`` **any** exception in the graded body is reported ``xfailed``, which is
+green, so a probe that had quietly stopped working would have been indistinguishable from the
+defect it was meant to detect — and under the ticket's own ``--runxfail`` gate every dead-probe
+state read as "still broken". The preconditions that make the measurement mean something
+therefore live in the control, where they fail in their own name during ``make verify``; now
+that the markers are off, they guard the reverse false green — a guard that passes because it
+stopped measuring. T-205's guards need no separate control: never having been xfail, every
 precondition they assert already fails in its own name, and both carry theirs inline.
-
-Covered here: T-205 (**FIXED** — its marker was removed with the repair, so it is now a live
-regression guard rather than a reproduction), T-253, T-255.
 
 **Read the T-205 docstring below before treating its recorded blast radius as fact.** The
 swallow it names is real and is reproduced here; the consequence it states — that 219 stub

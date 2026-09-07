@@ -136,12 +136,6 @@ def _walk(plain: Any):
 
 
 @pytest.fixture
-def modes_plain():
-    """``(obj) -> plain Python`` — the frozen suite's normalizer, so assertions match its view."""
-    return _plain
-
-
-@pytest.fixture
 def modes_canon():
     """``(obj) -> str`` — a stable canonical string, the byte-identity workhorse."""
 
