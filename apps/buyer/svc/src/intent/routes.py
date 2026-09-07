@@ -341,12 +341,12 @@ class ClarifyResponse(BaseModel):
     questions: list[str]
     intent: dict[str, Any]
     unresolved: list[str]
-    #: Must-haves the buyer stated that this network cannot turn into an eligibility filter,
-    #: each with the reason. Empty on almost every dialogue, and load-bearing when it is not:
-    #: a filter naming an attribute no catalogue carries excludes every candidate, so the
-    #: shopper's screen says "no stores matched" when the truth is "the question was
-    #: unanswerable". Reporting it is what stops that failure from being silent.
-    unsatisfiable: list[dict[str, Any]] = Field(default_factory=list)
+    #: There is deliberately NO field here for "must-haves this network cannot satisfy", and
+    #: its absence is the correction rather than an omission. This service holds no
+    #: candidates, so the only thing it could report is a guess from a catalogue CONFIG — and
+    #: measured through ``POST /auctions``, that guess named the wrong constraints in both
+    #: directions. Whether a stated must-have could be decided is an auction-wide fact, and
+    #: the exchange answers it on the auction response's ``relaxed_constraints``.
     confirmed: bool = False
 
 
@@ -398,7 +398,6 @@ async def clarify_route(body: ClarifyBody) -> ClarifyResponse:
         questions=list(outcome.questions),
         intent=outcome.intent.to_dict(),
         unresolved=list(outcome.unresolved),
-        unsatisfiable=[item.to_dict() for item in outcome.unsatisfiable],
         confirmed=outcome.confirmed,
     )
 

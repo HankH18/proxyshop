@@ -37,6 +37,12 @@ REASON_UNDECIDABLE_INTENT = "undecidable_hard_constraint"
 #: The candidate record itself is malformed (no bid id, no offer, no store).
 REASON_MALFORMED = "malformed_candidate"
 
+#: NOT an exclusion reason, and deliberately outside :data:`EXCLUSION_REASON_PREFIXES`: it
+#: names a constraint this auction SET ASIDE rather than a candidate it refused. It is
+#: published on the ranking result (``relaxed_constraints``) and never on a row's
+#: ``exclusion_reasons``, because the two say opposite things about the same candidate.
+REASON_UNEVIDENCED_CONSTRAINT = "hard_constraint_unevidenced_by_every_candidate"
+
 #: Every reason prefix this package can emit.
 EXCLUSION_REASON_PREFIXES: tuple[str, ...] = (
     REASON_BLACKLISTED,
@@ -59,4 +65,5 @@ __all__ = [
     "REASON_MALFORMED",
     "REASON_OFF_DOMAIN",
     "REASON_UNDECIDABLE_INTENT",
+    "REASON_UNEVIDENCED_CONSTRAINT",
 ]

@@ -50,7 +50,6 @@ from .errors import (
     InvalidPreference,
     UnstructuredIntent,
 )
-from .vocabulary import UnsatisfiableConstraint
 
 __all__ = [
     "BUDGET_BAND_UNSPECIFIED",
@@ -376,10 +375,6 @@ class ClarifyOutcome:
     answers: tuple[str, ...] = ()
     transcript: tuple[str, ...] = ()
     unresolved: tuple[str, ...] = ()
-    #: Must-haves the buyer stated that could not be made into filters, with the reason.
-    #: Distinct from ``unresolved``, which names questions nobody answered: this names
-    #: answers this network cannot act on. See :mod:`buyer_svc.intent.vocabulary`.
-    unsatisfiable: tuple[UnsatisfiableConstraint, ...] = ()
     llm_calls: int = 0
     confirmed: bool = False
 
@@ -389,7 +384,6 @@ class ClarifyOutcome:
         "answers",
         "transcript",
         "unresolved",
-        "unsatisfiable",
         "llm_calls",
         "confirmed",
     )
@@ -399,7 +393,6 @@ class ClarifyOutcome:
         object.__setattr__(self, "answers", _as_text_tuple(self.answers))
         object.__setattr__(self, "transcript", _as_text_tuple(self.transcript))
         object.__setattr__(self, "unresolved", tuple(self.unresolved))
-        object.__setattr__(self, "unsatisfiable", tuple(self.unsatisfiable))
         object.__setattr__(self, "confirmed", False)
         if len(self.questions) > MAX_CLARIFYING_QUESTIONS:
             raise QuestionCapBroken(
@@ -422,7 +415,6 @@ class ClarifyOutcome:
             "answers": list(self.answers),
             "transcript": list(self.transcript),
             "unresolved": list(self.unresolved),
-            "unsatisfiable": [item.to_dict() for item in self.unsatisfiable],
             "llm_calls": self.llm_calls,
             "confirmed": self.confirmed,
         }

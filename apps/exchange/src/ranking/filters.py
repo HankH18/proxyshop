@@ -65,6 +65,7 @@ from .reasons import (
     REASON_MALFORMED,
     REASON_OFF_DOMAIN,
     REASON_UNDECIDABLE_INTENT,
+    REASON_UNEVIDENCED_CONSTRAINT,
 )
 
 #: The one claim status that counts as supporting evidence (R19).
@@ -322,6 +323,36 @@ def verified_attributes(claims: Any, *, store_id: Any = None) -> list[dict[str, 
     return attributes
 
 
+def claimed_attributes(claims: Any) -> list[dict[str, Any]]:
+    """Every attribute key a candidate's claims NAME, whatever verdict they carry.
+
+    A strictly wider set than :func:`verified_attributes`, and the two are never
+    interchangeable. `verified` is the only thing that SATISFIES a hard constraint (R19), and
+    that rule is untouched here. This answers a different question — was the constraint
+    *spoken to* at all? — and the widest possible reading of "spoken to" is the safe one,
+    because the only thing this set can do is PREVENT a relaxation.
+
+    Two candidates make the width necessary, and both are hostile:
+
+    * a store whose claim this exchange's own verifier **contradicted** carries no verified
+      reading. Reading that as "nobody could answer" would hand the waiver of the constraint
+      to exactly the candidate caught failing it;
+    * a store whose attestation is **forged, absent or unreadable** carries no verdict at all
+      (ESC-020). It must not be able to convert "nothing checked my claim" into "the
+      constraint does not apply to anybody", which is a slot for the forger.
+
+    The cost of being this wide is that a store can suppress an auction's relaxation by
+    claiming a key it knows nothing about. That buys it nothing — the shortlist it empties is
+    the one it would have been in — so it is the right side to be wrong on.
+    """
+    seen: list[dict[str, Any]] = []
+    for claim in claims or ():
+        key = read(claim, "key", None)
+        if key is not None:
+            seen.append({"key": str(key)})
+    return seen
+
+
 def read_criteria(intent: Any) -> tuple[list[HardCriterion], str | None]:
     """The intent's hard constraints as decidable criteria, plus the reason they could not
     be read.
@@ -397,6 +428,79 @@ def hard_constraint_reasons(
 
 
 # ---------------------------------------------------------------------------------
+# The question nobody in the auction could be asked
+# ---------------------------------------------------------------------------------
+def unanswerable_criteria(
+    candidates: Sequence[Any],
+    criteria: Sequence[HardCriterion],
+    network_attributes: Sequence[Mapping[str, Any]] | None,
+) -> list[HardCriterion]:
+    """The criteria this exchange could not decide for ANY candidate, however honest.
+
+    R19 makes a hard constraint an eligibility filter decided on verified evidence, and
+    :func:`hard_constraint_reasons` applies that per candidate, correctly. What no single
+    candidate can be asked is whether the constraint was *answerable at all* — and that is a
+    different question with a different answer:
+
+    * a constraint this exchange can decide is a **filter**. It narrows. The candidates that
+      fail it — including the ones caught contradicting it — are worse answers to the buyer's
+      question, and excluding them is the whole point;
+    * a constraint it can decide for nobody narrows nothing. Every candidate is excluded on
+      it, so what it produces is not a strict shortlist but an empty one wearing a filter's
+      name, and the shopper is told "no stores matched" when the truth is "nobody could be
+      asked the question you asked".
+
+    TWO facts have to be absent before a constraint is called unanswerable, and either one on
+    its own keeps it a filter:
+
+    ``network_attributes``
+        the attributes the catalogue snapshots THIS EXCHANGE holds for this auction's stores
+        declare (:func:`~exchange.ranking.verification.declared_attributes`). ``None`` means
+        the exchange cannot say — an unwired catalog, a catalog service that is down — and
+        then NOTHING is unanswerable: an exchange that can verify nothing has discovered that
+        it is misconfigured, not that the buyer's must-have is meaningless, and ESC-020
+        already fixed which way that fails (shortlist nobody).
+    ``claimed_attributes``
+        anything any candidate said about the key, verdict or no verdict. See that function
+        for why the widest reading is the safe one.
+
+    The catalogue half is what makes this decidable here and nowhere else. A buyer service
+    holds no candidates and no snapshots, so the best it could do is guess from a catalogue
+    CONFIG file — and measured through ``POST /auctions`` on the S1 roster, that guess named
+    the wrong constraints in both directions: ``list_price``, ``boiler_type`` and
+    ``roast_level`` are all declared by ``fixtures/catalog/coffee.json`` and all produced 0
+    slots, exactly as the ``brew_method`` it refused did.
+
+    This function only NAMES them. Whether naming one changes an outcome is
+    :func:`~exchange.ranking.rank`'s decision, and it makes it only when the shortlist would
+    otherwise be empty.
+    """
+    if not criteria or not network_attributes:
+        return []
+    seen: list[Mapping[str, Any]] = list(network_attributes)
+    for candidate in candidates:
+        seen.extend(claimed_attributes(read(candidate, "claims", None)))
+    return [criterion for criterion in criteria if not criterion.is_evidenced_by(seen)]
+
+
+def unanswerable_reason(criterion: HardCriterion) -> str:
+    """Why one criterion was set aside, in the words a shopper's agent can repeat.
+
+    It names the constraint, says plainly that it was NOT applied, and says why — because a
+    must-have that quietly stops being a must-have is the failure this whole path exists to
+    avoid. The shortlist beside it is unfiltered on this attribute and the reader is told so.
+    """
+    return (
+        f"{REASON_UNEVIDENCED_CONSTRAINT}: no catalogue this exchange holds for the stores in "
+        f"this auction declares an attribute called {criterion.field!r}, and no store claimed "
+        f"one, so {criterion.field!r} {criterion.op} {criterion.value!r} could not be decided "
+        f"for anybody — it could not narrow the shortlist, only empty it. It was NOT applied: "
+        f"the slots below are unfiltered on {criterion.field!r}, and no store below has been "
+        f"shown to meet it."
+    )
+
+
+# ---------------------------------------------------------------------------------
 # The gate itself
 # ---------------------------------------------------------------------------------
 def exclusion_reasons(
@@ -461,8 +565,11 @@ __all__ = [
     "exclusion_reasons",
     "expiry_reason",
     "hard_constraint_reasons",
+    "claimed_attributes",
     "read",
     "read_criteria",
     "trust_row",
+    "unanswerable_criteria",
+    "unanswerable_reason",
     "verified_attributes",
 ]

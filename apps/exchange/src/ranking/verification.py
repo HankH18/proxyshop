@@ -61,6 +61,7 @@ __all__ = [
     "attest_candidates",
     "catalog_unit",
     "catalog_units",
+    "declared_attributes",
     "snapshot_for",
 ]
 
@@ -423,6 +424,51 @@ def catalog_units(snapshot: Any, product_ref: Any) -> dict[str, Any]:
         if wanted is not None:
             break
     return units
+
+
+def declared_attributes(
+    catalog: Any,
+    store_ids: Iterable[Any],
+    *,
+    product_refs: Mapping[str, Any] | None = None,
+) -> list[dict[str, Any]] | None:
+    """Which attributes this exchange could decide AT ALL for these stores, or ``None``.
+
+    ``None`` means "this exchange cannot say", and it is the answer whenever the exchange
+    holds no snapshot carrying attributes for any store in the auction — an unwired catalog
+    (:class:`NoCatalogSnapshots`), a catalog service that is down, or snapshots that declare
+    nothing. It is deliberately NOT the empty list. An exchange that can verify nothing has
+    not discovered that the buyer's question is unanswerable; it has discovered that it is
+    not wired, and ESC-020 fixes the direction that fails in: it satisfies no hard constraint
+    and it shortlists nobody. Reading it as "no attribute is decidable, so ignore every
+    constraint" would turn the one deployment fault this tree has already paid for into a
+    shortlist that quietly ignores every must-have a buyer states.
+
+    A non-empty answer is the real fact: these are the attribute names the catalogue snapshots
+    this exchange grades against actually declare. A hard constraint naming something not in
+    it cannot be decided for anybody here, however honest every store is — and that, not what
+    a catalogue CONFIG file lists somewhere else in the tree, is what makes a filter
+    unanswerable. Returned in the ``{"key": ...}`` shape
+    :meth:`~exchange.retrieval.criteria.HardCriterion.is_evidenced_by` reads, so the key fold
+    stays in the one place that owns it.
+    """
+    refs = dict(product_refs or {})
+    keys: list[str] = []
+    seen: set[str] = set()
+    for store_id in store_ids or ():
+        name = str(store_id or "")
+        if not name:
+            continue
+        snapshot = snapshot_for(catalog, name, refs.get(name))
+        if snapshot is None:
+            continue
+        for key in catalog_units(snapshot, refs.get(name)):
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+    if not keys:
+        return None
+    return [{"key": key} for key in keys]
 
 
 def catalog_unit(snapshot: Any, product_ref: Any, key: Any) -> Any:

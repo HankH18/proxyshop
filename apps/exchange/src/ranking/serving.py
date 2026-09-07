@@ -59,7 +59,7 @@ from . import rank
 from .candidates import candidates_from_entries
 from .features import attach_features
 from .filters import read
-from .verification import NoCatalogSnapshots, attest_candidates
+from .verification import NoCatalogSnapshots, attest_candidates, declared_attributes
 
 __all__ = [
     "DEFAULT_SHORTLIST_CAPACITY",
@@ -543,6 +543,18 @@ def rank_auction(
         trust_snapshot,
         {"now": float(now), "auction_id": auction_id},
         weights=weights,
+        # WHICH attributes this exchange's own catalogues declare for these stores, and the
+        # only reason this function can supply it: it holds the catalog and `rank()` does not.
+        # It is what lets the ranker tell "this candidate failed the must-have" apart from
+        # "this network cannot decide the must-have for anybody" — a shopper who says
+        # "espresso" states a constraint no catalogue here carries, and before this the whole
+        # shortlist was emptied by it with nothing said. `None` when the catalog is unwired or
+        # declares nothing, and then nothing is ever relaxed (ESC-020's direction).
+        network_attributes=declared_attributes(
+            catalog,
+            [read(candidate, "store_id", None) for candidate in candidates],
+            product_refs=product_refs,
+        ),
     )
     # `projected`, ADDITIVE, and it is the repair for T-349. `rank()` answers with its own
     # ROW projection under `"candidates"` — `bid_id`, `eligible`, `rank_score`, the trust

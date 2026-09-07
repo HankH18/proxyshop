@@ -654,6 +654,23 @@ class ExcludedBidOut(BaseModel):
     exclusion_reasons: list[str] = Field(default_factory=list)
 
 
+class RelaxedConstraintOut(BaseModel):
+    """One hard constraint this auction did NOT apply, and why it did not.
+
+    Published because the alternative is the failure it exists to replace. A buyer who says
+    "espresso" and is handed a shortlist that ignored it, silently, has been given the wrong
+    answer more confidently than an empty shortlist gives them no answer. So the constraint
+    comes back verbatim — the field, the op and the value the buyer stated — next to a reason
+    naming the auction-wide fact that made it undecidable. It appears only for a constraint
+    no candidate carried any verified reading for; see :func:`~exchange.ranking.rank`.
+    """
+
+    field: str
+    op: str
+    value: Any = None
+    reason: str
+
+
 class CreateAuctionResponse(BaseModel):
     auction_id: str
     state: str
@@ -668,6 +685,11 @@ class CreateAuctionResponse(BaseModel):
     #: The buyer-facing shortlist (R2/A6/D29/D30) — the same object
     #: ``GET /auctions/{auction_id}/shortlist`` serves, and the pinned ``Shortlist`` shape.
     shortlist: dict[str, Any] = Field(default_factory=dict)
+    #: The hard constraints this auction set aside, each saying why. Empty on every ordinary
+    #: auction. It is published HERE rather than on the shortlist because ``Shortlist`` is a
+    #: pinned two-field contract (``extra="forbid"``), and a reason that reached the buyer
+    #: only through a schema change would not have reached them at all.
+    relaxed_constraints: list[RelaxedConstraintOut] = Field(default_factory=list)
 
 
 def configure_auctions(
@@ -1222,6 +1244,24 @@ def _excluded_out(rows: Sequence[Mapping[str, Any]]) -> list[ExcludedBidOut]:
     ]
 
 
+def _relaxed_out(entries: Sequence[Mapping[str, Any]]) -> list[RelaxedConstraintOut]:
+    """The constraints the ranking set aside, rendered for the response.
+
+    Nothing is truncated the way ``_excluded_out``'s reasons are: the intent's own hard
+    constraints are already bounded by :data:`MAX_HARD_CONSTRAINTS` at the door, so this list
+    cannot be longer than the request the caller sent.
+    """
+    return [
+        RelaxedConstraintOut(
+            field=str(entry.get("field") or ""),
+            op=str(entry.get("op") or ""),
+            value=entry.get("value"),
+            reason=str(entry.get("reason") or ""),
+        )
+        for entry in entries
+    ]
+
+
 def _refuse_an_oversized_intent(intent: Any) -> None:
     """422 an intent carrying more hard constraints than :data:`MAX_HARD_CONSTRAINTS`.
 
@@ -1510,6 +1550,7 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
         ranked=_ranked_out(ranking["ranked"]),
         excluded=_excluded_out(ranking["candidates"]),
         shortlist=shortlist,
+        relaxed_constraints=_relaxed_out(ranking.get("relaxed_constraints") or ()),
     )
 
 

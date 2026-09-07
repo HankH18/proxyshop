@@ -189,6 +189,21 @@ class HardCriterion:
         """The folded key — the same fold ``AttributeFilter.as_parameter`` applies."""
         return slug(self.field)
 
+    def is_evidenced_by(self, attributes: Sequence[Mapping[str, Any]]) -> bool:
+        """Do these readings say ANYTHING about this constraint's attribute?
+
+        Not "is it satisfied" — :meth:`decide` answers that, and answers ``False`` for both
+        "the reading contradicts you" and "there is no reading". Those two are the same
+        verdict about one candidate and opposite facts about a *set* of them: a constraint
+        some candidate carries a reading for is a filter doing its job, while one no
+        candidate carries any reading for cannot narrow a shortlist and can only empty it.
+        Telling them apart needs this predicate, and it folds the key through :func:`slug`
+        exactly as :meth:`decide` does so the two cannot disagree about which key is which.
+        """
+        return any(
+            slug(str(attribute.get("key", ""))) == self.canonical_field for attribute in attributes
+        )
+
     def pushdown(self) -> AttributeFilter | None:
         """The graph-side filter for this constraint, or ``None`` when Cypher cannot say it.
 

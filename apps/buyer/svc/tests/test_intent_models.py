@@ -633,14 +633,26 @@ def test_the_refusal_names_the_field_and_the_ceiling_but_never_quotes_the_value(
 #                   "Roughly what budget should I stay under?",
 #                   "A ballpark number is fine - what is the ceiling?"]
 #
-# 1. ``brew_method`` names an attribute NO catalogue in this tree carries — not
-#    ``fixtures/catalog/coffee.json``, not a store agent's catalogue, not a bid, not a
-#    catalog snapshot. A hard constraint is an eligibility FILTER decided against verified
-#    supporting facts (R19), so a filter on an attribute nothing can supply evidence for is
-#    not a strict filter: it is a guaranteed-empty shortlist wearing one. Driven against the
-#    exchange's own ``POST /auctions`` + ``GET /auctions/{id}/shortlist`` with the S1
-#    roster, catalogues and trust snapshot, that intent produced **0 slots**; the same
-#    auction with the constraint expressed in the catalogue's own vocabulary produced 2.
+# 1. ``brew_method`` was emitted as a hard constraint, and every candidate was then excluded
+#    on it, so the shopper's shortlist was EMPTY with nothing said about why. That half was
+#    real and is closed. It was closed once HERE, by a guard that deleted any constraint
+#    naming an attribute ``fixtures/catalog/coffee.json`` did not declare, and that repair was
+#    at the wrong end twice over:
+#      * it edited the buyer's own confirmed intent. The frozen golden
+#        ``fixtures/dialogues/espresso_needs_a_budget.json`` pins ``brew_method eq espresso``
+#        ON that intent, because a confirmed intent is the record of what the shopper SAID;
+#      * and its premise was false. Driven through the exchange's own ``POST /auctions`` with
+#        the S1 roster, ``list_price lte 500``, ``boiler_type eq 'heat exchange'``,
+#        ``roast_level eq dark`` and ``voltage eq 120V`` — every one of them DECLARED by that
+#        catalogue config, and the first two carried verbatim in the stores' own catalogue
+#        rows — produced 0 slots apiece, exactly as ``brew_method`` did.
+#    Whether a stated must-have can be decided is a fact about the CANDIDATES in an auction,
+#    which this service does not have and the exchange has by construction. It decides it
+#    there now and publishes what it set aside and why
+#    (``exchange.ranking.rank`` -> the auction response's ``relaxed_constraints``), and
+#    ``apps/exchange/tests/test_unevidenced_hard_constraints.py`` is where the non-empty
+#    shortlist and its reason are driven over the served door. What is asserted below is this
+#    service's half and only it: the intent records the buyer's words, from every source.
 # 2. The budget was in the dialogue, verbatim, and was not read — so all THREE of R1's
 #    questions were spent asking for it again in different words.
 
@@ -660,48 +672,43 @@ def _served_clarify(client, turns: list[str]) -> dict[str, Any]:
 # --- defect 1: the filter nobody can satisfy ----------------------------------------
 
 
-def test_the_served_clarifier_emits_no_filter_the_catalogue_cannot_speak(confirm_door) -> None:
-    """R19: a hard constraint needs verified supporting facts, so it must name an attribute
-    a catalogue can carry. ``brew_method`` is carried by nothing."""
-    from apps.buyer.svc.src.intent import catalogue_speaks
+def test_the_served_clarifier_records_the_must_have_the_shopper_stated(confirm_door) -> None:
+    """R1: a confirmed intent is the record of what the buyer said, not an edited version.
 
+    The shopper says "espresso machine"; ``brew_method eq espresso`` is what that means, and
+    it belongs on the intent whether or not any catalogue in the network can decide it. This
+    service holds no candidates and no catalogue snapshots, so it cannot know — and the frozen
+    golden grades it on recording rather than on guessing.
+    """
     client, _exchange = confirm_door
     body = _served_clarify(client, S1_TURNS)
-    intent = body["intent"]
-    fields = [item["field"] for item in intent["hard_constraints"]]
-    assert "brew_method" not in fields, (
-        f"the clarifier still emits a filter no catalogue can satisfy: {fields}"
+    constraints = {(c["field"], c["op"], c["value"]) for c in body["intent"]["hard_constraints"]}
+    assert ("brew_method", "eq", "espresso") in constraints, (
+        f"the shopper's stated must-have is missing from their own confirmed intent: {constraints}"
     )
-    for field in fields:
-        assert catalogue_speaks(intent.get("category"), field), (
-            f"{field!r} is not an attribute the {intent.get('category')!r} catalogue carries; "
-            f"every candidate is excluded hard_constraint_unsatisfied and the shortlist is "
-            f"empty every time"
-        )
 
 
-def test_what_could_not_become_a_filter_is_reported_rather_than_silently_dropped(
+def test_the_clarify_response_claims_nothing_about_what_the_network_can_satisfy(
     confirm_door,
 ) -> None:
-    """A silent total exclusion reads as "no stores matched" and is really "the question was
-    unanswerable". The clarify response has to say so."""
+    """The removed field, asserted as removed, so it cannot come back by habit.
+
+    A previous version answered ``unsatisfiable: [...]`` here, sourced from a hand-kept table
+    of ``fixtures/catalog/coffee.json``'s attribute names. It is not that the field was
+    unhelpful — it was WRONG, in both directions, measured through ``POST /auctions``. The
+    answer is the exchange's ``relaxed_constraints``, computed from the catalogues it actually
+    grades claims against.
+    """
     client, _exchange = confirm_door
     body = _served_clarify(client, S1_TURNS)
-    assert "unsatisfiable" in body, "the clarify response names no unsatisfiable constraints"
-    reported = {item["field"] for item in body["unsatisfiable"]}
-    assert "brew_method" in reported, body["unsatisfiable"]
-    assert all(str(item.get("reason") or "").strip() for item in body["unsatisfiable"]), (
-        "an unsatisfiable constraint is reported without saying why"
+    assert "unsatisfiable" not in body, (
+        "the buyer service is again claiming to know which must-haves the network can "
+        "satisfy; it holds no candidates and no catalogue snapshots, so it cannot"
     )
 
 
 def test_a_catalogue_speakable_constraint_still_becomes_a_filter(confirm_door) -> None:
-    """The positive control for defect 1.
-
-    A guard that empties ``hard_constraints`` would also make every shortlist non-empty, and
-    that is a worse bug than the one it replaced. ``roast_level`` IS in
-    ``fixtures/catalog/coffee.json``, so it must survive.
-    """
+    """The lexicon still produces filters; nothing here empties ``hard_constraints``."""
     client, _exchange = confirm_door
     body = _served_clarify(client, ["I want a light roast under $20"])
     constraints = {(c["field"], c["op"], c["value"]) for c in body["intent"]["hard_constraints"]}
@@ -710,23 +717,19 @@ def test_a_catalogue_speakable_constraint_still_becomes_a_filter(confirm_door) -
 
 
 def test_a_category_this_service_declares_no_catalogue_for_is_left_alone() -> None:
-    """The second positive control: the guard refuses what it can PROVE unsatisfiable.
-
-    ``footwear`` has no catalogue in this tree, so this service knows nothing about what a
-    footwear catalogue carries and must not purge a footwear shopper's must-haves on a guess.
-    """
+    """A footwear shopper's must-haves survive, as they always did."""
     outcome = clarify(["trail running shoes, size 10, waterproof"])
     fields = {item.field for item in outcome.intent.hard_constraints}
     assert {"size", "waterproof"} <= fields, fields
-    assert outcome.unsatisfiable == (), outcome.unsatisfiable
 
 
-def test_a_model_proposed_constraint_is_guarded_on_the_same_terms() -> None:
-    """The model is the likelier source of invented vocabulary, not the safer one.
+def test_a_model_proposed_constraint_reaches_the_intent_on_the_same_terms() -> None:
+    """The model's proposals are recorded on exactly the buyer's terms — neither is filtered.
 
     ``packages/llm/fixtures/recorded/buyer_intent.json`` proposes ``brew_method eq espresso``
-    for a real recorded dialogue, so a guard that only covered the local lexicon would leave
-    the hole open for every deployment with a live model.
+    for a real recorded dialogue, and the frozen golden's ``llm_script`` proposes the same.
+    Whether that constraint can be decided is the exchange's question, and both halves of this
+    assertion say the buyer service does not pre-empt it.
     """
     scripted = (
         '{"constraints": [{"field": "brew_method", "op": "eq", "value": "espresso"},'
@@ -735,9 +738,7 @@ def test_a_model_proposed_constraint_is_guarded_on_the_same_terms() -> None:
     )
     outcome = clarify(["a dark roast for espresso", "under $30"], lambda prompt, system: scripted)
     fields = {item.field for item in outcome.intent.hard_constraints}
-    assert "brew_method" not in fields, fields
-    assert "roast_level" in fields, "the guard threw away a constraint the catalogue carries"
-    assert "brew_method" in {item.field for item in outcome.unsatisfiable}
+    assert {"brew_method", "roast_level"} <= fields, fields
 
 
 # --- defect 2: the budget that was stated and not read -------------------------------

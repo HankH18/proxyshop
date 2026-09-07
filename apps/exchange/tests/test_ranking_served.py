@@ -118,14 +118,24 @@ def _claim(key: str, value: Any) -> dict[str, Any]:
     }
 
 
-def _catalog(stores: tuple[str, ...], *, capacity_l: int = 35) -> Any:
+def _catalog(
+    stores: tuple[str, ...], *, capacity_l: int = 35, also_declares: tuple[str, ...] = ()
+) -> Any:
     """The catalogue the exchange grades these stores' claims against.
 
     It agrees with the default bid (``capacity_l = 35``), so an honest bid verifies and is
     ranked; a store bidding something else is judged against this, not against itself.
+
+    ``also_declares`` names further attributes the snapshot DECLARES (with no value any bid
+    could match). Declaring one is what makes a constraint on it decidable-and-unsatisfied
+    rather than undecidable-for-everybody, and since the ranker sets the second kind aside
+    rather than excluding on it (``rank()``'s ``relaxed_constraints``), a probe that wants
+    exclusion reasons has to ask about attributes this catalogue speaks.
     """
     from exchange.ranking.verification import StaticCatalogSnapshots
 
+    attributes: dict[str, Any] = {"capacity_l": {"value": capacity_l}}
+    attributes.update({key: {"value": None} for key in also_declares})
     return StaticCatalogSnapshots(
         {
             store: {
@@ -135,7 +145,7 @@ def _catalog(stores: tuple[str, ...], *, capacity_l: int = 35) -> Any:
                         "product_ref": "product-1",
                         "canonical_name": "product-1",
                         "evidence_ref": f"snap-{store}#product-1",
-                        "attributes": {"capacity_l": {"value": capacity_l}},
+                        "attributes": dict(attributes),
                     }
                 ],
             }
@@ -1248,10 +1258,22 @@ def test_a_huge_roster_and_a_huge_intent_do_not_produce_an_unbounded_response():
     The numbers here are small enough to run in a normal suite and large enough that an
     uncapped response fails the assertion by two orders of magnitude: 60 stores x 60
     constraints is 3600 reason strings uncapped and at most 60 x 9 capped.
+
+    The sixty attributes are DECLARED in this app's catalogue, and that is load-bearing rather
+    than decoration. A constraint naming an attribute no catalogue this exchange holds
+    declares is one it can decide for nobody, so ``rank()`` sets it aside instead of excluding
+    on it — which produces zero exclusion reasons and disarms this probe entirely. The test
+    caught that itself, through its own "the probe is unarmed" assertion, when the relaxation
+    landed; declaring the attributes puts every constraint back on the excluding path this
+    cap exists to bound.
     """
     stores = tuple(f"store-{index:03d}" for index in range(60))
-    intent = _intent([{"field": f"attr_{i}", "op": "gte", "value": i} for i in range(60)])
+    attributes = tuple(f"attr_{index}" for index in range(60))
+    intent = _intent(
+        [{"field": key, "op": "gte", "value": index} for index, key in enumerate(attributes)]
+    )
     app = _wired_app(bidders=Bidders({}), stores=stores)
+    configure_ranking(app, catalog=_catalog(stores, also_declares=attributes))
 
     body = _post(app, [_rostered(store, 100.0) for store in stores], intent=intent)
 

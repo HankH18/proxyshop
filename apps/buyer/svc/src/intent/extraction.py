@@ -45,7 +45,6 @@ from typing import Any
 from ..profile import coarsen_budget_band
 from .errors import InvalidConstraint, InvalidPreference
 from .models import BUDGET_BAND_UNSPECIFIED, HardConstraint, Preference
-from .vocabulary import UnsatisfiableConstraint, unspeakable_reason
 
 __all__ = [
     "GAP_BUDGET",
@@ -1085,11 +1084,6 @@ class IntentDraft:
     budget_band: str | None = None
     specific: bool = False
     dropped: list[str] = field(default_factory=list)
-    #: Filters this draft refused to emit because no catalogue for its category carries the
-    #: attribute they name. See :mod:`buyer_svc.intent.vocabulary`; the short version is
-    #: that R19 decides a hard constraint on verified evidence, so a constraint no evidence
-    #: can exist for excludes every candidate instead of narrowing anything.
-    unsatisfiable: list[UnsatisfiableConstraint] = field(default_factory=list)
 
     def absorb(self, utterance: str, *, gap: str | None = None) -> Extraction:
         """Fold one buyer turn into the draft.
@@ -1131,32 +1125,29 @@ class IntentDraft:
             self.budget_band = proposal.budget_band
 
     def _learn_category(self, category: str | None) -> None:
-        """Take the first category anybody names, and re-judge what is already on file.
+        """Take the first category anybody names. Nothing already on file is re-judged.
 
-        The re-judge is not tidiness. A constraint absorbed while the category was still
-        unknown was admitted because nothing could yet prove it unsatisfiable; the moment
-        the category arrives, that proof may exist. Without this, "waterproof, and it's for
-        coffee" and "coffee, and waterproof" would produce different filters from the same
-        two facts.
+        There was a re-judge here, and removing it is the point rather than a simplification.
+        It dropped any constraint naming an attribute ``fixtures/catalog/coffee.json`` did not
+        declare — so a shopper who said "espresso" had ``brew_method eq espresso`` deleted
+        from their own confirmed intent, which the frozen golden
+        ``fixtures/dialogues/espresso_needs_a_budget.json`` grades as a defect, and rightly:
+        a confirmed intent is the record of what the buyer said, and this service is not
+        entitled to edit it on a guess.
+
+        The guess was also wrong. Driven through the exchange's own ``POST /auctions`` with
+        the S1 roster, ``list_price lte 500``, ``boiler_type eq 'heat exchange'`` and
+        ``roast_level eq dark`` — all declared by that same catalogue config — each produced
+        0 slots exactly as ``brew_method`` did. What decides the question is whether the
+        CANDIDATES in an auction carry a verified reading, which is a fact no buyer service
+        holds and the exchange holds by construction. It decides it there now
+        (:func:`exchange.ranking.rank`, ``relaxed_constraints``), and tells the buyer.
         """
         if self.category is not None or category is None:
             return
         self.category = category
-        for key, constraint in list(self.constraints.items()):
-            reason = unspeakable_reason(self.category, constraint.field)
-            if reason is not None:
-                del self.constraints[key]
-                self._note_unsatisfiable(constraint, reason)
 
     def _add_constraint(self, constraint: HardConstraint, *, authoritative: bool) -> None:
-        reason = unspeakable_reason(self.category, constraint.field)
-        if reason is not None:
-            # Recorded, never silent, and never emitted as a filter: see
-            # `buyer_svc.intent.vocabulary`. The rule applies to a model proposal on exactly
-            # the same terms as to the buyer's own words — the model is the likelier source
-            # of invented vocabulary, not the safer one.
-            self._note_unsatisfiable(constraint, reason)
-            return
         existing = self.constraints.get(constraint.key)
         if existing is not None and not authoritative:
             return
@@ -1167,19 +1158,6 @@ class IntentDraft:
             self._note_budget(BudgetReading(ceiling=_as_float(constraint.value)))
         elif constraint.field == "price_usd" and constraint.op == "gte":
             self._note_budget(BudgetReading(floor=_as_float(constraint.value)))
-
-    def _note_unsatisfiable(self, constraint: HardConstraint, reason: str) -> None:
-        """Record a refused filter once, keyed the way a filter is keyed."""
-        if any(item.key == constraint.key for item in self.unsatisfiable):
-            return
-        self.unsatisfiable.append(
-            UnsatisfiableConstraint(
-                field=constraint.field,
-                op=constraint.op,
-                value=constraint.value,
-                reason=reason,
-            )
-        )
 
     def _add_preference(self, preference: Preference, *, authoritative: bool) -> None:
         existing = self.preferences.get(preference.key)

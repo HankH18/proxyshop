@@ -8,6 +8,7 @@ result is a plain mapping::
       "ranked":     [row, ...],           # eligible rows, best first
       "candidates": [row, ...],           # EVERY row, in the order they were given
       "shortlist":  {"auction_id": ..., "slots": [slot, ...]},
+      "relaxed_constraints": [ ... ],     # normally empty; see below
     }
 
 Each row records `eligible`, `rank_score` (``None`` when ineligible), `components` (empty
@@ -31,6 +32,32 @@ The order of operations, which is itself a requirement
 4. **Shortlist last.** :mod:`.shortlist` picks up to four differentiated slots, one per
    store, over the ranked rows.
 
+A filter that excludes everyone
+-------------------------------
+R19's rule is decided per candidate, and per candidate it is right: an attribute the
+candidate carries no verified reading for does not satisfy a constraint. But "not satisfied"
+and "unanswerable" are the same verdict about ONE candidate and opposite facts about a SET
+of them, and only this module sees the set. A constraint no candidate in the auction carries
+any reading for excludes all of them, and what the shopper is shown is "no stores matched"
+when the truth is "nobody here could answer the question you asked".
+
+That is not hypothetical. Measured through this exchange's own `POST /auctions` with the S1
+roster: `brew_method eq espresso` — a buyer saying "espresso" — produced **0 slots**, and so
+did `list_price lte 500`, `boiler_type eq 'heat exchange'` and `roast_level eq dark`, three
+attributes `fixtures/catalog/coffee.json` declares and the stores' own catalogue rows carry.
+The deciding fact is never what a catalogue CONFIG names; it is what the candidates in
+*this* auction carry as verified readings, which is a fact no upstream service holds.
+
+So one narrow relaxation lives here, and its guards are in :func:`rank`. A constraint is set
+aside only when no catalogue snapshot THIS EXCHANGE holds declares the attribute and no
+candidate claimed it — never one a candidate merely failed, and never one it was caught
+contradicting — and only when the caller could tell us what its catalogues declare
+(`network_attributes`), only when nothing is eligible without it, only when the intent itself
+was readable, and only when setting it aside actually fills a slot. The buyer is never
+quietly given a shortlist that ignores a must-have: every set-aside constraint is published
+verbatim, with its reason, under `relaxed_constraints`, and it is NOT counted in
+`verified_hard_fit_count`, so no store wins the D13 tie-break on a constraint nobody proved.
+
 `config` supplies `now` (so nothing here reads the wall clock) and optionally `auction_id`.
 `weights` and `eligibility` are keyword-only extras with inert defaults: the published
 surface is the four positionals, and an optional collaborator must never be something a
@@ -46,7 +73,14 @@ from typing import Any
 from contracts.ranking import DEFAULT_RANKING_WEIGHTS, RankingWeights
 
 from . import shortlist as _shortlist
-from .filters import exclusion_reasons, read, read_criteria, trust_row
+from .filters import (
+    exclusion_reasons,
+    read,
+    read_criteria,
+    trust_row,
+    unanswerable_criteria,
+    unanswerable_reason,
+)
 from .reasons import (
     EXCLUSION_REASON_PREFIXES,
     REASON_BLACKLIST_UNREADABLE,
@@ -170,6 +204,7 @@ def rank(
     *,
     weights: RankingWeights | None = None,
     eligibility: Any = None,
+    network_attributes: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Rank one auction's candidates and build its shortlist.
 
@@ -185,63 +220,122 @@ def rank(
         weights: the weight set to apply. Defaults to the published one.
         eligibility: an optional `SellerEligibility` source. Inert by default — the blacklist
             is derived from `trust_snapshot`, and this only ever adds denials.
+        network_attributes: which attributes this exchange's own catalogue snapshots declare
+            for the stores in this auction (`{"key": ...}` mappings, as
+            :func:`~exchange.ranking.verification.declared_attributes` builds them). The
+            DEFAULT IS `None`, meaning "the caller cannot say" — and then nothing is ever
+            relaxed, so every existing four-argument caller keeps the answer it had. Only a
+            caller holding the catalog can say, which is why the served path
+            (:func:`~exchange.ranking.serving.rank_auction`) is the one that passes it.
 
     Returns:
-        `{"ranked": [...], "candidates": [...], "shortlist": {"auction_id", "slots"}}`.
-        The inputs are never written to.
+        `{"ranked": [...], "candidates": [...], "shortlist": {"auction_id", "slots"},
+        "relaxed_constraints": [...]}`. The inputs are never written to.
+
+        `relaxed_constraints` is normally empty. It is non-empty only in the one case
+        described under "A filter that excludes everyone" above, and each entry names a
+        constraint that was NOT applied and says why.
     """
     weights = DEFAULT_RANKING_WEIGHTS if weights is None else weights
     candidates = list(candidates or ())
     now = _now_from(config)
     criteria, intent_reason = read_criteria(intent)
 
-    rows: list[dict[str, Any]] = []
-    for candidate in candidates:
-        reasons, verified_fits = exclusion_reasons(
-            candidate,
-            criteria=criteria,
-            intent_reason=intent_reason,
-            trust_snapshot=trust_snapshot,
-            now=now,
-            eligibility=eligibility,
-        )
-        store_id = str(read(candidate, "store_id", "") or "")
-        row_of_store = trust_row(store_id, trust_snapshot) if store_id else None
-        trust_score = None
-        if row_of_store is not None:
-            raw_trust = read(row_of_store, "score", None)
-            if raw_trust is not None and not isinstance(raw_trust, bool):
-                try:
-                    candidate_trust = float(raw_trust)
-                except (TypeError, ValueError):
-                    candidate_trust = None
-                # A snapshot score that is not a finite number is unreadable, not a number.
-                # Leaving it as NaN here would put NaN in the `trust` tie-break as well as in
-                # the score, and both comparators need it to be a real number or absent.
-                if candidate_trust is not None and math.isfinite(candidate_trust):
-                    trust_score = candidate_trust
-        offer = read(candidate, "offer", None)
+    def rows_for(applied: Sequence[Any]) -> list[dict[str, Any]]:
+        built: list[dict[str, Any]] = []
+        for candidate in candidates:
+            reasons, verified_fits = exclusion_reasons(
+                candidate,
+                criteria=applied,
+                intent_reason=intent_reason,
+                trust_snapshot=trust_snapshot,
+                now=now,
+                eligibility=eligibility,
+            )
+            store_id = str(read(candidate, "store_id", "") or "")
+            row_of_store = trust_row(store_id, trust_snapshot) if store_id else None
+            trust_score = None
+            if row_of_store is not None:
+                raw_trust = read(row_of_store, "score", None)
+                if raw_trust is not None and not isinstance(raw_trust, bool):
+                    try:
+                        candidate_trust = float(raw_trust)
+                    except (TypeError, ValueError):
+                        candidate_trust = None
+                    # A snapshot score that is not a finite number is unreadable, not a
+                    # number. Leaving it as NaN here would put NaN in the `trust` tie-break as
+                    # well as in the score, and both comparators need it to be a real number
+                    # or absent.
+                    if candidate_trust is not None and math.isfinite(candidate_trust):
+                        trust_score = candidate_trust
+            offer = read(candidate, "offer", None)
 
-        row: dict[str, Any] = {
-            "bid_id": str(read(candidate, "bid_id", "") or ""),
-            "store_id": store_id,
-            "eligible": not reasons,
-            "rank_score": None,
-            "components": {},
-            "features": {},
-            "exclusion_reasons": list(reasons),
-            "verified_hard_fit_count": verified_fits,
-            "trust": trust_score,
-            "price": _price_of(offer),
-            "trust_summary": _shortlist.trust_summary(store_id, row_of_store),
-            "provenance_labels": _shortlist.provenance_labels(read(candidate, "claims", None)),
-        }
-        if row["eligible"]:
-            rank_score, components, features = score(candidate, trust_score, weights)
-            row["rank_score"] = rank_score
-            row["components"] = components
-            row["features"] = features
-        rows.append(row)
+            row: dict[str, Any] = {
+                "bid_id": str(read(candidate, "bid_id", "") or ""),
+                "store_id": store_id,
+                "eligible": not reasons,
+                "rank_score": None,
+                "components": {},
+                "features": {},
+                "exclusion_reasons": list(reasons),
+                "verified_hard_fit_count": verified_fits,
+                "trust": trust_score,
+                "price": _price_of(offer),
+                "trust_summary": _shortlist.trust_summary(store_id, row_of_store),
+                "provenance_labels": _shortlist.provenance_labels(read(candidate, "claims", None)),
+            }
+            if row["eligible"]:
+                rank_score, components, features = score(candidate, trust_score, weights)
+                row["rank_score"] = rank_score
+                row["components"] = components
+                row["features"] = features
+            built.append(row)
+        return built
+
+    rows = rows_for(criteria)
+    relaxed: list[dict[str, Any]] = []
+
+    # A filter that excludes EVERYONE, and the one condition under which it is set aside.
+    #
+    # FIVE guards, and every one of them has to hold. Together they say: relax only a
+    # constraint that was never a filter in the first place, only when applying it left the
+    # buyer with nothing, and only when setting it aside actually gives them something.
+    #
+    #  0. The CALLER HOLDS THE CATALOGUE and it declares something. `network_attributes` of
+    #     `None` — every four-argument caller, and any served exchange whose catalog is not
+    #     wired — relaxes nothing at all. An exchange that can verify nothing has discovered a
+    #     misconfiguration, not an unanswerable question, and ESC-020 already settled which
+    #     way that fails: it satisfies no hard constraint and shortlists nobody.
+    #  1. NOTHING is eligible. One surviving candidate means the filters are narrowing rather
+    #     than emptying, and a narrowed shortlist is the correct answer — nothing is relaxed.
+    #  2. The intent was READABLE. `intent_reason` is "this exchange could not parse your
+    #     constraints", which denies everyone on purpose (R19); relaxing it would turn an
+    #     unreadable intent into an unconstrained one, which is the exact confusion
+    #     `read_criteria` exists to prevent.
+    #  3. The constraint is UNDECIDABLE FOR EVERYONE — no catalogue snapshot this exchange
+    #     holds declares the attribute and no candidate claimed it — not merely failed by
+    #     them. A constraint some store was graded on stays a filter for all of them, so a
+    #     store that fails a must-have (or is caught contradicting one) is still excluded.
+    #  4. Setting them aside CHANGES the answer. If the shortlist is empty because everyone
+    #     is blacklisted, off-domain or expired, the relaxed pass is empty too and nothing is
+    #     published — a relaxation nobody benefited from is a claim about a filter that was
+    #     never the reason.
+    if criteria and intent_reason is None and not any(row["eligible"] for row in rows):
+        unanswerable = unanswerable_criteria(candidates, criteria, network_attributes)
+        if unanswerable:
+            kept = [criterion for criterion in criteria if criterion not in unanswerable]
+            retried = rows_for(kept)
+            if any(row["eligible"] for row in retried):
+                rows = retried
+                relaxed = [
+                    {
+                        "field": criterion.field,
+                        "op": criterion.op,
+                        "value": criterion.value,
+                        "reason": unanswerable_reason(criterion),
+                    }
+                    for criterion in unanswerable
+                ]
 
     tie_breakers = tuple(str(name) for name in weights.tie_breakers)
     ranked = sorted(
@@ -253,6 +347,7 @@ def rank(
         "ranked": ranked,
         "candidates": rows,
         "shortlist": _shortlist.build(ranked, _auction_id(candidates, intent, config)),
+        "relaxed_constraints": relaxed,
     }
 
 

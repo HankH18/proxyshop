@@ -20,6 +20,10 @@
     "13": {
       "claimed_at": "2026-09-06T22:51:17",
       "agent_ref": "slop-config"
+    },
+    "2": {
+      "claimed_at": "2026-09-06T23:45:44",
+      "agent_ref": "fix-e7-vocabulary"
     }
   }
 }
