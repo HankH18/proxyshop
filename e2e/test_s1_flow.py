@@ -19,16 +19,16 @@ and no extra one. Every stage is the real entry point; the only doubles in the r
 offline LLM double the buyer's clarifier is *designed* to take (D19), and a code-creator
 recorder that the redirect path never calls and which the run asserts was never called.
 
-It does **not** mean the ledger has a production writer for every kind. ONE kind in this chain
-has no emitter anywhere in the tree and the run writes it itself from the real upstream data;
-``test_the_kinds_with_no_production_emitter_are_the_one_we_know_about`` states which, so the
-gap is in the suite's output and not only in a docstring. It was three:
+It does **not** mean every event in the ledger came from a production emitter — but the four
+that used to be written by the driver do now.
 ``test_the_run_records_the_three_auction_kinds_from_the_exchange_itself`` is the record of
 ``bid_placed``, ``shown`` and ``claim_verified`` becoming the served auction's own output, and
-is what stops this driver quietly writing them again. Nor does it
-mean the checkout seam is whole: the exchange's ``checkout_token`` and the merchant's are
-unrelated values, and ``test_the_checkout_token_seam_has_no_production_binding`` pins that
-defect where a reader will find it.
+``test_the_pixel_row_was_written_by_the_served_collector_and_not_by_the_run`` is the record of
+``checkout_pixel`` becoming the served merchant collector's. Both are what stop this driver
+quietly writing them again. Nor does it mean the checkout seam is whole: the exchange's
+``checkout_token`` and the merchant's are unrelated values, and
+``test_the_checkout_token_seam_has_no_production_binding`` pins that defect where a reader
+will find it.
 
 Markers: none. Only ``docker``/``graph``/``slow``/``needs_model`` are registered
 (``pyproject.toml``) and this run needs no datastore, so it must never be skippable — a
@@ -628,10 +628,24 @@ def test_the_blacklisted_store_stays_blacklisted_in_the_projection(s1_run, s1_fi
 #:   (apps/exchange/src/auction/state.py:267) writes ``{state, intent_id, cluster_id, reason}``
 #:   where the published shapes are ``("intent_id","cluster_id","roster_size")`` and
 #:   ``("shortlist_size","reason")``.
-#: * ``code_created`` — the checkout port (apps/exchange/src/checkout/provider.py:984) writes
-#:   ``{checkout_token, discount_code}`` where the published shape is
-#:   ``("code","permalink_url","expires_at")``.
-KNOWN_NONCONFORMING_KINDS = frozenset({"auction_opened", "auction_closed"})
+#: * ``checkout_pixel`` — the SHIPPED web pixel does not send the order total, so
+#:   ``merchant_svc.composition.pixel_ledger_payload`` projects ``total_price: None`` and the
+#:   published shape ``("checkout_token","client_id","total_price")`` is one key short.
+#:   ``pixel/src/beacon.ts``'s ``COLLECTOR_BODY_KEYS`` is ``clientId, checkoutToken, orderId,
+#:   discountApplications`` and the stub's ``shopify_stub.telemetry.collector_payload`` mirrors
+#:   exactly those four, so the beacon this run drives carries no total either. The gap is in
+#:   the EMITTER: the collector's door already accepts ``totalPrice``
+#:   (``merchant_svc.collector.CARRIED_FIELDS``) and the projection already carries it, so a
+#:   beacon that sends one conforms with no further change. This entry appeared the moment the
+#:   run stopped hand-building the row — the hand-built one put the ORDER's total on it, which
+#:   is the webhook's number and not the beacon's, so the driver was papering over a real
+#:   defect in the emitter it was standing in for.
+#:
+#: ``code_created`` used to be listed here — the checkout port writing ``{checkout_token,
+#: discount_code}`` against a published ``("code","permalink_url","expires_at")``. It is not
+#: exempted any more and the test below is what says so: with it out of this set the
+#: conformance test is green, so the port now writes the published shape.
+KNOWN_NONCONFORMING_KINDS = frozenset({"auction_opened", "auction_closed", "checkout_pixel"})
 
 
 def test_every_event_the_run_produced_satisfies_its_published_payload_shape(s1_run) -> None:
@@ -649,12 +663,12 @@ def test_every_event_the_run_produced_satisfies_its_published_payload_shape(s1_r
     assert not problems, f"events whose payload does not match the published shape: {problems}"
 
 
-def test_the_known_nonconforming_emitters_are_still_exactly_the_two_reported(s1_run) -> None:
+def test_the_known_nonconforming_emitters_are_still_exactly_the_ones_reported(s1_run) -> None:
     """The exemption above is a live measurement, not a permanent excuse.
 
-    If an emitter is fixed, this test goes red and the exemption is deleted. If a *fourth*
-    kind starts violating its published shape, the test above catches it. Between them the
-    list cannot quietly grow.
+    If an emitter is fixed, this test goes red and the exemption is deleted. If ANOTHER kind
+    starts violating its published shape, the test above catches it. Between them the list
+    cannot quietly grow.
     """
     from contracts.ledger import validate_ledger_payload
 
@@ -693,17 +707,30 @@ def _ledger_emitters(kind: str) -> list[str]:
       repo — and the regex stayed green through all three. A gate that a variable name can
       switch off is not a gate.
 
-    So the search parses each module and resolves a ``Name`` argument back to a module-level
-    string constant, and it recognises the two emission shapes this tree actually uses: a call
-    to ``recorder.record(<kind>, ...)`` / ``build_event(<kind>, ...)``, and an ``append(...)``
-    of a dict literal carrying ``"kind": <kind>``.
+    **And it was measured vacuous a THIRD time, by this ticket.** The rule below used to be
+    "an ``append(...)`` of a dict literal carrying ``"kind": <kind>``" — the call was part of
+    the pattern. ``merchant_svc.composition.pixel_ledger_event`` *returns* such a dict and a
+    separate line publishes it (``trust_publisher().publish(event)``), so when
+    ``collect_pixel_event`` started calling ``publish_pixel_observation`` — a served
+    ``POST /pixel/collect``, writing a real ``checkout_pixel`` row to the chained ledger — this
+    search still answered "no producer anywhere in the tree", and
+    ``KINDS_THE_RUN_STILL_EMITS_ITSELF`` stayed green while naming a kind that had one.
+    Measured on this tree with the emitter in place: ``_ledger_emitters("checkout_pixel")``
+    returned ``[]``.
+
+    So the dict rule no longer requires a particular enclosing call. Any dict literal in a
+    product module that maps ``"kind"`` to this kind counts, whether it is appended, returned,
+    published or handed to something else — a producer builds the event either way, and which
+    verb carries it away is not the question this function is asking. The call rule for
+    ``recorder.record(<kind>, ...)`` / ``build_event(<kind>, ...)`` is unchanged.
 
     It is still a proxy for "is there a producer", and its remaining blind spots are named
     rather than left to be discovered: a kind assembled from a non-constant expression, one
     read out of a config file, and one emitted by a service that is not under ``apps/``,
     ``packages/`` or ``services/``. The direct measurement of a producer is a served request,
     which is what ``test_the_run_records_the_three_auction_kinds_from_the_exchange_itself``
-    below does for the three kinds this run no longer writes for itself.
+    and ``test_the_pixel_row_was_written_by_the_served_collector_and_not_by_the_run`` below do
+    for the four kinds this run no longer writes for itself.
     """
     roots = [REPO_ROOT / "apps", REPO_ROOT / "packages", REPO_ROOT / "services"]
     sources = {
@@ -744,55 +771,57 @@ def _emitters_in(sources: dict[str, str], kind: str) -> list[str]:
             return None
 
         for node in ast.walk(tree):
+            if isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values, strict=True):
+                    if names(key) == "kind" and names(value) == kind:
+                        emitters.append(name)
+                        break
+                continue
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
             called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-            if called in ("record", "build_event") and node.args:
-                if names(node.args[0]) == kind:
-                    emitters.append(name)
-                    break
-            if called == "append":
-                for argument in node.args:
-                    if not isinstance(argument, ast.Dict):
-                        continue
-                    for key, value in zip(argument.keys, argument.values, strict=True):
-                        if names(key) == "kind" and names(value) == kind:
-                            emitters.append(name)
-                            break
+            if called in ("record", "build_event") and node.args and names(node.args[0]) == kind:
+                emitters.append(name)
     return sorted(set(emitters))
 
 
-#: The kinds the S1 chain needs that STILL have no production emitter, so the run writes them
-#: itself from real upstream data. It was three; ``shown`` and ``claim_verified`` left when
-#: ``apps/exchange`` started producing them on the served auction path, and the test below is
-#: what holds the list to what is actually true.
-KINDS_THE_RUN_STILL_EMITS_ITSELF = ("checkout_pixel",)
+#: The kinds the S1 chain needs that STILL have no production emitter, so the run would have
+#: to write them itself. It is EMPTY, and it was ``("checkout_pixel",)`` until this ticket.
+#:
+#: The tuple is kept rather than deleted because its emptiness is the assertion: a kind added
+#: here in future is a kind the driver is writing for itself, and
+#: ``test_no_kind_in_the_s1_chain_is_left_without_a_production_emitter`` holds the claim to
+#: the tree rather than to this comment.
+KINDS_THE_RUN_STILL_EMITS_ITSELF: tuple[str, ...] = ()
 
-#: The kinds the SERVED auction path produces for itself, which the run must therefore not
-#: write. Each maps to the module that has to contain the producer.
-EXCHANGE_PRODUCED_KINDS = {
+#: The kinds a SERVED route produces for itself, which the run must therefore not write. Each
+#: maps to the module that has to contain the producer.
+SERVICE_PRODUCED_KINDS = {
     "bid_placed": "apps/exchange/src/auction/routes.py",
     "shown": "apps/exchange/src/ranking/serving.py",
     "claim_verified": "apps/exchange/src/ranking/verification.py",
+    "checkout_pixel": "apps/merchant/svc/src/composition.py",
 }
 
 
-def test_the_kinds_with_no_production_emitter_are_the_one_we_know_about(s1_run) -> None:
-    """``checkout_pixel`` has no writer in the tree; the run builds it from the real beacon.
+def test_no_kind_in_the_s1_chain_is_left_without_a_production_emitter(s1_run) -> None:
+    """The list of kinds this driver writes for itself is empty, and it is checked empty.
 
-    This list used to be three. ``shown`` and ``claim_verified`` are gone from it because the
-    exchange now writes both on the served auction path, which is what the previous version of
-    this test asked for in as many words — "delete the run's emission in
-    e2e/support/s1/flow.py and drive that emitter instead". That is what happened, and the
-    test's other half now lives in
-    ``test_the_run_records_the_three_auction_kinds_from_the_exchange_itself``.
+    It used to hold ``checkout_pixel``, on the stated grounds that ``pixel/src/`` held a real
+    Web Pixel extension but nothing on a served path turned its beacon into a ledger event.
+    That stopped being true and **nothing in this suite noticed**, which is the part worth
+    keeping. ``merchant_svc.composition.publish_pixel_observation`` was on the served
+    ``POST /pixel/collect`` path, writing a real ``checkout_pixel`` row; the exact per-kind
+    multiset was supposed to double-count and turn red the moment such an emitter landed, and
+    it stayed green because the driver never drove the route — it called the collector's
+    library function directly and hand-built the row. A multiset cannot catch a second writer
+    that is never invoked.
 
-    ``checkout_pixel`` remains: ``pixel/src/`` holds a real Web Pixel extension, but nothing on
-    a served path turns its beacon into a ledger event — ``merchant_svc.collector`` stops at a
-    ``PixelObservation``. The run emits one from the observation the real collector parsed out
-    of the stub's real beacon, and this test turns red the moment a producer appears, at which
-    point the run must stop emitting its own or the exact multiset will double-count.
+    Whatever remains in this tuple must have no producer anywhere in the tree; that half is
+    unchanged. The half that failed is now
+    ``test_the_pixel_row_was_written_by_the_served_collector_and_not_by_the_run``, which
+    checks the row's provenance rather than its count.
     """
     for kind in KINDS_THE_RUN_STILL_EMITS_ITSELF:
         emitters = _ledger_emitters(kind)
@@ -802,6 +831,43 @@ def test_the_kinds_with_no_production_emitter_are_the_one_we_know_about(s1_run) 
             "emission in e2e/support/s1/flow.py and drive that emitter instead."
         )
         assert s1_run.kind_counts.get(kind, 0) > 0, f"the run produced no {kind} events at all"
+
+
+def test_the_pixel_row_was_written_by_the_served_collector_and_not_by_the_run(s1_run) -> None:
+    """``checkout_pixel`` came out of ``POST /pixel/collect``, proved by the row's own id.
+
+    Provenance and not presence, because presence is what failed before: the run hand-built a
+    ``checkout_pixel`` row while a production emitter sat on a served route, and every count
+    in this file agreed with itself.
+
+    The id is what makes this unfakeable by the driver.
+    ``merchant_svc.composition.pixel_ledger_event`` DERIVES ``event_id`` from a digest of the
+    projected body — deliberately, so a re-fired beacon collapses to one row — while
+    ``exchange.auction.ledger.build_event``, the only event builder this driver has, mints a
+    ``uuid4``. So recomputing the derived id from the observation the served collector
+    recorded and finding it on the row in the ledger says the row came from that function, on
+    that beacon. A driver-built row could not match it except by chance in 2^256.
+
+    The other two halves: the beacon's own token is on the row (so it is THIS checkout's), and
+    ``e2e/support/s1/flow.py`` contains no ``checkout_pixel`` emitter at all, measured with
+    the same parse that decides whether the product has one.
+    """
+    from merchant_svc.composition import pixel_ledger_event
+
+    (pixel,) = [event for event in s1_run.events if event["kind"] == "checkout_pixel"]
+    observation = s1_run.pixel_observation
+    assert observation is not None, "the served collector recorded no observation"
+
+    assert pixel["event_id"] == pixel_ledger_event(observation)["event_id"], (
+        "the checkout_pixel row's event_id is not the one composition.pixel_ledger_event "
+        "derives from the beacon the served collector parsed, so the row did not come out of "
+        f"publish_pixel_observation: {pixel['event_id']!r}"
+    )
+    assert pixel["payload"]["checkout_token"] == observation.checkout_token
+    assert not _emitters_in(
+        {"e2e/support/s1/flow.py": (REPO_ROOT / "e2e/support/s1/flow.py").read_text("utf-8")},
+        "checkout_pixel",
+    ), "e2e/support/s1/flow.py builds a checkout_pixel event again; the multiset double-counts"
 
 
 def test_the_run_records_the_three_auction_kinds_from_the_exchange_itself(s1_run) -> None:
@@ -814,23 +880,27 @@ def test_the_run_records_the_three_auction_kinds_from_the_exchange_itself(s1_run
     assertions, and neither is satisfiable by the harness doing the work:
 
     * a producer for each kind exists in the module that owns that stage; and
-    * ``e2e/support/s1/flow.py`` emits none of the three, so every one in the run's ledger came
-      out of the exchange.
+    * ``e2e/support/s1/flow.py`` emits none of them, so every one in the run's ledger came out
+      of a service.
 
-    The counts are then the exchange's own answer, cross-checked against the auction's
+    ``checkout_pixel`` joined the list when the driver stopped hand-building it and started
+    beaconing at the served ``POST /pixel/collect``; the merchant's composition root is the
+    module that owns that stage.
+
+    The counts are then the services' own answer, cross-checked against the auction's
     published response in
     ``test_the_run_covers_every_frozen_ledger_kind_with_an_exact_count``.
     """
     harness_path = "e2e/support/s1/flow.py"
     harness = (REPO_ROOT / harness_path).read_text(encoding="utf-8")
-    for kind, owner in EXCHANGE_PRODUCED_KINDS.items():
+    for kind, owner in SERVICE_PRODUCED_KINDS.items():
         emitters = _ledger_emitters(kind)
         assert owner in emitters, (
-            f"{kind!r} has no producer in {owner}; the served auction path stopped recording "
+            f"{kind!r} has no producer in {owner}; the served path stopped recording "
             f"it. Found in: {emitters or 'nowhere in the tree'}"
         )
         assert s1_run.kind_counts.get(kind, 0) > 0, (
-            f"the exchange produced no {kind!r} events for a served auction that ranked "
+            f"the services produced no {kind!r} events for a served auction that ranked "
             f"{len(s1_run.ranked)} candidates and filled "
             f"{len(s1_run.shortlist['slots'])} slots"
         )
@@ -838,8 +908,8 @@ def test_the_run_records_the_three_auction_kinds_from_the_exchange_itself(s1_run
         # but it must not WRITE one. Measured with the same parse, so "the driver emits it"
         # is decided the same way "the product emits it" is.
         assert not _emitters_in({harness_path: harness}, kind), (
-            f"e2e/support/s1/flow.py emits {kind!r} itself; the run must not write a kind the "
-            f"exchange produces, or the exact per-kind multiset double-counts"
+            f"e2e/support/s1/flow.py emits {kind!r} itself; the run must not write a kind a "
+            f"served route produces, or the exact per-kind multiset double-counts"
         )
 
 
@@ -849,51 +919,73 @@ def test_the_checkout_token_seam_has_no_production_binding(s1_run) -> None:
     ``CheckoutProvider.checkout`` invents its ``checkout_token`` with ``secrets.token_hex(16)``
     (apps/exchange/src/checkout/provider.py:828) and never transmits it — the cart permalink it
     builds carries the discount code and nothing else (provider.py:1072). The merchant mints a
-    different token when the cart is visited. ``trust.reconcile.reconcile`` joins an order to
-    its offer on exactly those tokens (apps/trust/src/reconcile/engine.py:227), so without a
-    binding the S1 chain produces zero ``reconciled`` events with every other stage green.
+    different token when the cart is visited, and nothing in the tree joins the two.
 
-    The run derives the binding from the single-use discount code, which the exchange minted
-    and the order came back carrying. This test holds that derivation to its premise: the two
-    tokens really are different, and the code really is the shared handle. If a production
-    binding lands and the tokens become the same value, this test goes red — which is the
-    correct moment to delete the run's own binding.
+    **The run no longer bridges it, and this test no longer reads a key the run invented.** It
+    used to rewrite the merchant's ``order_paid`` row to carry the EXCHANGE's token under
+    ``checkout_token``, keeping the platform's own beside it under ``platform_checkout_token``
+    — a spelling no production emitter writes — and this test read that invented key. Both are
+    gone: the served ``POST /pixel/collect`` publishes the MERCHANT's token, which is the value
+    D24 has the pixel and the webhook meet on, so a rewritten webhook token puts the two halves
+    of one checkout in different join groups (measured: ``pixel_missing: True`` on a run whose
+    stub really posted a beacon). Every token below is now the value its own emitter wrote.
+
+    What holds the chain together instead is the single-use discount code, which
+    ``trust.reconcile`` reads with ``code_created`` / ``checkout_redirect`` as bridges. So the
+    three assertions are: the two tokens really are different (the defect), the pixel and the
+    webhook really do share the merchant's (the join that works), and the order really did
+    redeem the code the exchange minted (the bridge's premise). If a production binding lands
+    and the exchange's token starts reaching the merchant, the first assertion goes red — which
+    is the correct moment to delete this test's premise, not to relax it.
     """
     (pixel,) = [event for event in s1_run.events if event["kind"] == "checkout_pixel"]
     (paid,) = [event for event in s1_run.events if event["kind"] == "order_paid"]
     accepted = next(event for event in s1_run.events if event["kind"] == "accepted")
 
     authorized = accepted["payload"]["checkout_token"]
-    platform = paid["payload"]["platform_checkout_token"]
+    platform = paid["payload"]["checkout_token"]
     assert platform and authorized
     assert platform != authorized, (
         "the exchange's checkout token and the merchant's are now the same value — a "
-        "production binding exists, so e2e/support/s1/flow.py::authorized_checkout_token "
-        "should be deleted and the merchant's own token used directly"
+        "production binding exists, so the discount-code bridge in trust.reconcile is no "
+        "longer the only thing joining an order to its offer"
     )
-    assert pixel["payload"]["checkout_token"] == authorized
-    assert paid["payload"]["checkout_token"] == authorized
+    assert pixel["payload"]["checkout_token"] == platform, (
+        "the beacon and the webhook do not name the same checkout, so R4's pixel<->webhook "
+        "reconciliation has nothing to join on"
+    )
     assert s1_run.completion["discount_code"] == s1_run.minted_code, (
-        "the binding's only premise is that the order redeemed the code the exchange minted"
+        "the bridge's only premise is that the order redeemed the code the exchange minted"
     )
 
 
-def test_the_exchange_cannot_read_the_snapshot_the_trust_service_serves(s1_fixture) -> None:
-    """The second unjoined seam in S1, and this one fails CLOSED across the whole auction.
+def test_the_snapshot_envelope_is_unwrapped_by_the_exchanges_own_published_reader(
+    s1_fixture,
+) -> None:
+    """The builder's envelope is unreadable by the ranker; the product's unwrap is what fixes it.
 
-    ``trust.snapshot.build_snapshot`` returns the served document
-    ``{version, score_version, dimensions, as_of, stores: {...}}`` — the body DESIGN's
-    ``GET /snapshot`` hands the exchange. ``exchange.ranking.filters.trust_row``
-    (apps/exchange/src/ranking/filters.py:108) reads a FLAT ``{store_id: row}`` mapping with
-    ``snapshot.get(store_id)``, so on the served document every lookup misses and R12's
-    fail-closed rule denies *every* store, not merely the dishonest one. Nothing in the tree
-    bridges the two shapes, because the exchange has no client for that endpoint at all.
+    **This test used to be called ``test_the_exchange_cannot_read_the_snapshot_the_trust_
+    service_serves`` and its premise was measurably false** — the same staleness this ticket
+    found in the pixel claim, one seam over. It said ``build_snapshot``'s envelope was "the
+    body DESIGN's ``GET /snapshot`` hands the exchange" and that "the exchange has no client
+    for that endpoint at all". Neither holds at HEAD: ``apps/trust/src/snapshot/routes.py``:813
+    serves ``{store_id: published_entry(entry)}`` — the FLAT mapping, with the version in
+    ``ETag`` / ``X-Trust-Snapshot-Version`` — and ``exchange.composition``'s
+    ``trust_snapshot_endpoint`` / ``HttpTrustSnapshot`` / ``LiveTrustSnapshot`` are a real
+    client for it, with ``snapshot_rows`` as the published unwrap for either shape. Its own
+    comment records the history: "until T-303 the exchange had no client for it".
 
-    The run unwraps ``["stores"]`` in one visible line
-    (``e2e/support/s1/flow.py::_trust_snapshot``). This test is why that line is a reported
-    defect and not a convenience: it measures both halves, so when a real snapshot client
-    lands the served document will start reading cleanly and this test will say so.
+    What IS still true, and is what this test now measures: ``build_snapshot`` — the in-process
+    producer, which is what the S1 run uses because it has no trust service to GET from — still
+    returns the envelope, and ``exchange.ranking.filters.trust_row``
+    (apps/exchange/src/ranking/filters.py:140) still reads a FLAT mapping with
+    ``snapshot.get(store_id)``, so handing the ranker the envelope denies *every* store under
+    R12's fail-closed rule rather than merely the dishonest one. The run therefore has to
+    unwrap — and it calls ``snapshot_rows`` to do it, so the S1 run and a deployment agree by
+    construction rather than by two copies of one line agreeing today.
     """
+    from exchange.composition import TRUST_SNAPSHOT_PATH, trust_snapshot_endpoint
+    from exchange.eligibility.trust_backed import snapshot_rows
     from exchange.ranking.filters import blacklist_reason
     from trust.snapshot import build_snapshot
 
@@ -914,18 +1006,27 @@ def test_the_exchange_cannot_read_the_snapshot_the_trust_service_serves(s1_fixtu
         as_of=AS_OF,
     )
 
-    assert "stores" in served, "the served snapshot no longer carries a `stores` envelope"
-    denial = blacklist_reason(honest, served)
-    assert denial is not None and "unreadable" in denial, (
-        "the exchange now reads trust's served snapshot document directly — the "
-        "`['stores']` unwrap in e2e/support/s1/flow.py::_trust_snapshot should be deleted. "
-        f"blacklist_reason returned {denial!r}"
+    # The client exists, and this is the assertion that keeps the docstring above honest: if
+    # it is deleted, this test goes red rather than the prose going quietly stale again.
+    url, _ = trust_snapshot_endpoint()
+    assert url.endswith(TRUST_SNAPSHOT_PATH), (
+        f"the exchange's snapshot client no longer addresses {TRUST_SNAPSHOT_PATH!r}: {url!r}"
     )
 
-    # …and unwrapped, the same document answers correctly for both stores, which is what the
-    # run relies on and what a real client would have to produce.
-    assert blacklist_reason(honest, served["stores"]) is None
-    assert "blacklisted" in (blacklist_reason(blocked, served["stores"]) or "")
+    assert "stores" in served, "build_snapshot no longer wraps its rows in a `stores` envelope"
+    denial = blacklist_reason(honest, served)
+    assert denial is not None and "unreadable" in denial, (
+        "the ranker now reads the builder's envelope directly, so the unwrap in "
+        "e2e/support/s1/flow.py::_trust_snapshot should be deleted. blacklist_reason "
+        f"returned {denial!r}"
+    )
+
+    # …and through the exchange's OWN unwrap — the one `_trust_snapshot` calls — the same
+    # document answers correctly for both stores.
+    rows = snapshot_rows(served)
+    assert rows is not None
+    assert blacklist_reason(honest, rows) is None
+    assert "blacklisted" in (blacklist_reason(blocked, rows) or "")
 
 
 def test_the_unmapped_claims_are_the_agents_own_policy_telemetry(s1_run, s1_fixture) -> None:

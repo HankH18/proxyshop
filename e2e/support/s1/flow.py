@@ -31,8 +31,10 @@ acceptance + code + redirect            ``exchange.accept.accept`` in ``CHECKOUT
                                         domain guard armed
 checkout at the merchant                ``shopify_stub`` — the real service, served in-process on
                                         loopback (D41), driven over HTTP by ``StubClient``
-pixel                                   ``merchant_svc.collector.accept_pixel_event`` over the
-                                        bytes the stub's web pixel really POSTed
+pixel                                   the SERVED ``POST /pixel/collect`` on a real
+                                        ``merchant_svc.main.create_app``, which the stub's web
+                                        pixel really beacons to, and whose route publishes the
+                                        ``checkout_pixel`` row itself
 webhook                                 ``merchant_svc.install.webhooks.handle_delivery`` over the
                                         bytes the stub really delivered, HMAC verified
 reconciliation                          ``trust.reconcile.reconcile``
@@ -57,25 +59,59 @@ legs; and what is left here READS what the served request produced — the respo
 published ``GET /auctions/{auction_id}/shortlist``, the exchange's own bid book, and the
 ``claim_verified`` events its ranker wrote.
 
-What this module still has to emit itself, and why
---------------------------------------------------
-ONE ledger kind in the S1 chain still has **no production emitter anywhere in the tree**, so
-the run constructs it from the real upstream data rather than pretending it appeared:
+What this module emits itself: nothing. And how the last one was found
+----------------------------------------------------------------------
+This docstring used to say that ONE ledger kind in the S1 chain had **no production emitter
+anywhere in the tree** — ``checkout_pixel`` — on the grounds that ``pixel/src/`` held a real
+Web Pixel extension but nothing on a served path turned its beacon into a ledger event, and
+``merchant_svc.collector`` stopped at a ``PixelObservation``. So the run called
+``accept_pixel_event`` on the stub's beacon body and built the row itself.
 
-* ``checkout_pixel`` — ``pixel/src/`` holds a real Web Pixel extension, but nothing on a
-  served path turns its beacon into a ledger event and ``merchant_svc.collector`` stops at a
-  ``PixelObservation``. Emitted here from the observation the real collector parsed out of the
-  stub's real beacon.
+**That was false, and had been for some time.** The emitter is
+``merchant_svc.composition.publish_pixel_observation``, called by
+``collector/routes.collect_pixel_event`` — a served ``POST /pixel/collect``, mounted by the
+frozen ``merchant_svc.main.create_app`` at ``install.config.COLLECTOR_PATH``, which is the
+same constant the install writes into the web pixel's ``collectorUrl``. It appends a real
+``checkout_pixel`` row to the chained ledger. The gap this file described had been closed and
+this file went on describing it.
 
-The behaviour is never faked — the beacon really was posted by the stub. It is the ledger
-*write* that has no owner yet. ``e2e/test_s1_flow.py`` states this again as a test, so the gap
-is visible in the suite's output rather than only in this docstring, and so the exact multiset
-turns red the moment a production emitter lands and starts double-counting.
+**The part worth keeping is why nothing went red.** The old docstring's own safety argument
+was that "the exact multiset turns red the moment a production emitter lands and starts
+double-counting", and ``e2e/test_s1_flow.py`` restated it as a test. Both were satisfied and
+both were empty: the driver called the collector's *library function* and wrote the row
+itself, so the served route was never invoked and there was never a second writer to
+double-count. A multiset over what a run produced cannot see a producer the run does not
+drive. (The AST emitter search in ``test_s1_flow.py`` was blind too, for a second, independent
+reason — it only recognised a dict literal that was the argument of an ``append(...)``, and
+this emitter *returns* the dict and publishes it on the next line. Two gates, aimed at the
+same claim, both vacuous.)
 
-Two seams the run still bridges, each reported as a defect by a test of its own:
-``authorized_checkout_token`` (the exchange's ``checkout_token`` and the merchant's are
-unrelated values) and ``_trust_snapshot``'s ``["stores"]`` unwrap (the exchange has no client
-for trust's served ``GET /snapshot``).
+So the run now stands up a real merchant on loopback and lets the stub's web pixel beacon at
+it, and this module builds no ledger event for the pixel at all. What was already true stays
+true: the beacon is never faked — the stub really posts it — and what changed is that the
+ledger *write* is the merchant's, not this file's.
+``test_the_pixel_row_was_written_by_the_served_collector_and_not_by_the_run`` holds it there
+by recomputing the row's DERIVED event id (``composition.pixel_ledger_event`` digests the
+projected body; this module's only builder mints a ``uuid4``), which is a claim about
+provenance that no count could have made.
+
+The two other seams this docstring used to list, re-measured against HEAD rather than repeated:
+
+* **the exchange's ``checkout_token`` and the merchant's are unrelated values** — still true,
+  still a product defect, still measured by
+  ``test_the_checkout_token_seam_has_no_production_binding``. The permalink the exchange mints
+  carries the discount code and nothing else, so the merchant never learns the exchange's
+  token. What the run no longer does is *bridge* it: ``trust.reconcile`` joins an order to its
+  offer through the single-use code, with ``code_created`` / ``checkout_redirect`` as bridges,
+  so every token in this run's ledger is now the value its own emitter wrote. See
+  :func:`require_redeemed_code`.
+* **"the exchange has no client for trust's served ``GET /snapshot``"** — FALSE at HEAD, and
+  it was the same shape of staleness as the pixel claim above. ``exchange.composition``'s
+  ``HttpTrustSnapshot`` / ``LiveTrustSnapshot`` (T-303) read that endpoint, and
+  ``exchange.eligibility.trust_backed.snapshot_rows`` is the published unwrap; the served
+  route does not even return the envelope any more. :func:`_trust_snapshot` now calls the
+  product's unwrap rather than keeping a copy of it, and says there what this run still does
+  not exercise.
 """
 
 from __future__ import annotations
@@ -83,6 +119,9 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -529,17 +568,19 @@ def run_s1_flow() -> S1Run:
     )
 
     # -- 6. the merchant leg: stub checkout, pixel, webhook -----------------------------
-    checkout = asyncio.run(_drive_merchant(run))
+    # The sink goes in because the merchant's own ledger writes come back out through it: the
+    # beacon reaches the SERVED `POST /pixel/collect`, and `publish_pixel_observation` appends
+    # the `checkout_pixel` row from inside that route, before this call returns.
+    checkout = asyncio.run(_drive_merchant(run, sink))
     run.completion = checkout["completion"]
     # The exact bytes the stub signed, and the headers it signed them with. Kept verbatim so
     # the tests can hand the merchant's verifier a delivery it must REFUSE; a suite that only
     # ever sees a valid signature accepted cannot tell `verify` from `lambda *_: True`.
     run.webhook_delivery = dict(checkout["webhook_requests"][0])
     run.second_redemption = dict(checkout["second_redemption"])
-    pixel_event, order_paid_event, run.pixel_observation, run.webhook_decision = _merchant_events(
+    order_paid_event, run.pixel_observation, run.webhook_decision = _merchant_events(
         run, checkout, build_event
     )
-    sink.emit(pixel_event)
     sink.emit(order_paid_event)
 
     # -- 7. reconciliation --------------------------------------------------------------
@@ -611,16 +652,28 @@ def _trust_snapshot(fixture: dict[str, Any]) -> dict[str, Any]:
     auction there is no history to fold in, so every store carries the published new-store
     prior; what is *not* a prior is ``blacklisted``, which comes from the seeded blacklist.
 
-    **The `["stores"]` unwrap is a seam defect this run reports, not a convenience.**
-    ``build_snapshot`` returns the served document
-    ``{version, score_version, dimensions, as_of, stores: {...}}``, and
-    ``exchange.ranking.filters.trust_row`` (apps/exchange/src/ranking/filters.py:108) reads a
-    FLAT ``{store_id: row}`` mapping with ``snapshot.get(store_id)``. Measured: handing the
-    ranker the served document denies every store with ``blacklist_unreadable ... failing
-    closed (R12)`` -- the whole auction, not just the dishonest store. Nothing in the tree
-    performs this unwrap, because the exchange has no client for trust's ``GET /snapshot``
-    at all. Until one exists, the unwrap is the run's, and it is one line so it stays visible.
+    **The envelope unwrap is the EXCHANGE's own, and this docstring used to claim there was
+    no such thing.** ``build_snapshot`` returns
+    ``{version, score_version, dimensions, as_of, stores: {...}, delistings: ...}`` while
+    ``exchange.ranking.filters.trust_row`` (apps/exchange/src/ranking/filters.py:140) reads a
+    FLAT ``{store_id: row}`` mapping with ``snapshot.get(store_id)``; handing the ranker the
+    envelope denies every store ``blacklist_unreadable``, failing closed (R12) — the whole
+    auction, not merely the dishonest store. That much is unchanged. What changed is that the
+    bridge exists and ships: ``exchange.eligibility.trust_backed.snapshot_rows`` unwraps
+    either published shape, and ``exchange.composition``'s ``HttpTrustSnapshot`` /
+    ``LiveTrustSnapshot`` (T-303) are a real client for trust's served ``GET /snapshot`` —
+    which, separately, no longer serves the envelope at all
+    (apps/trust/src/snapshot/routes.py:813 returns ``{store_id: published_entry(entry)}`` and
+    puts the version in ``ETag``). So the run calls the product's unwrap instead of writing
+    its own copy of it, and the previous claim that "the exchange has no client for trust's
+    ``GET /snapshot`` at all" is deleted because it is false.
+
+    What this run still does NOT exercise, stated so it is not mistaken for covered: it builds
+    the document in-process and hands ``configure_ranking`` a plain mapping, where a deployment
+    hands it ``LiveTrustSnapshot(HttpTrustSnapshot(...))`` over the served endpoint. The HTTP
+    reader, its cache, and its fail-closed behaviour on an outage are not driven here.
     """
+    from exchange.eligibility.trust_backed import snapshot_rows
     from trust.snapshot import build_snapshot
 
     served = build_snapshot(
@@ -635,7 +688,10 @@ def _trust_snapshot(fixture: dict[str, Any]) -> dict[str, Any]:
         blacklist=_seeded_blacklist(fixture),
         as_of=AS_OF,
     )
-    return dict(served["stores"])
+    rows = snapshot_rows(served)
+    if rows is None:
+        raise AssertionError(f"build_snapshot produced something that is not a snapshot: {served}")
+    return dict(rows)
 
 
 def _auction_record(run: S1Run, winning_bid_ref: str) -> dict[str, Any]:
@@ -673,13 +729,161 @@ class _RecordingCodeCreator:
     __call__ = create_code
 
 
-async def _drive_merchant(run: S1Run) -> dict[str, Any]:
-    """Complete the checkout at the real shopify-stub, in-process on loopback (D41)."""
+class _RecordingCollector:
+    """The merchant service, with the exact bytes of every request it is sent kept alongside.
+
+    Raw ASGI and not a framework, for the same reason ``shopify_stub.testing
+    .RecordingReceiver`` is: the beacon has to be observable as the bytes that were on the
+    wire, and a wrapper that parsed and re-serialised them would make this module the author
+    of what the collector read.
+
+    It records and then **forwards**, which is the whole difference between this and the
+    ``RecordingReceiver`` that used to stand where the merchant now stands. The recording is
+    evidence; the forward is the point. ``receive`` is replayed once with the body this
+    wrapper already drained and then reports a disconnect, which is what an ASGI app expects
+    after a complete request body.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+        self.requests: list[dict[str, Any]] = []
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        body = b""
+        while True:
+            message = await receive()
+            body += message.get("body", b"")
+            if not message.get("more_body"):
+                break
+        self.requests.append(
+            {
+                "path": scope["path"],
+                "headers": {
+                    key.decode("latin-1").lower(): value.decode("latin-1")
+                    for key, value in scope["headers"]
+                },
+                "body": body,
+            }
+        )
+        replayed = False
+
+        async def replay() -> dict[str, Any]:
+            nonlocal replayed
+            if replayed:
+                return {"type": "http.disconnect"}
+            replayed = True
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        await self.app(scope, replay, send)
+
+
+class _TrustLedgerEvents:
+    """``POST /events`` — the door ``apps/trust`` serves, over the run's own ledger sink.
+
+    ``merchant_svc.composition.publish_pixel_observation`` writes through a
+    :class:`~proxyshop_support.trust_ledger.TrustLedgerPublisher`, which is an HTTP client
+    for exactly one endpoint. That address is a deployment fact, resolved from ``TRUST_URL``,
+    and this run stands in for it the same way :func:`configure_ranking` stands in for the
+    catalogue and the domain registry: it serves the endpoint on loopback and hands what
+    arrives to ``InMemoryLedgerSink``, whose own docstring already calls itself "the trust
+    API stub". Nothing about the *production* half is stood in for — the route, the
+    projection, the derived event id, the publisher and the POST are all the shipped code.
+
+    A body is appended verbatim. This is not the place to validate one: ``_chain`` already
+    replays every event of the run through ``trust.events.InMemoryEventStore``, which refuses
+    an unknown kind and an unknown top-level field, so a malformed row fails the run there
+    rather than being quietly rejected at a door the producer never checks the answer of.
+    """
+
+    def __init__(self, sink: Any, path: str) -> None:
+        self.sink = sink
+        self.path = path
+        self.requests: list[bytes] = []
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope["type"] == "lifespan":
+            while True:
+                message = await receive()
+                if message["type"] == "lifespan.startup":
+                    await send({"type": "lifespan.startup.complete"})
+                elif message["type"] == "lifespan.shutdown":
+                    await send({"type": "lifespan.shutdown.complete"})
+                    return
+        body = b""
+        while True:
+            message = await receive()
+            body += message.get("body", b"")
+            if not message.get("more_body"):
+                break
+        status = 404
+        if scope.get("method") == "POST" and scope.get("path") == self.path:
+            self.requests.append(body)
+            self.sink.emit(json.loads(body))
+            status = 201
+        await send(
+            {
+                "type": "http.response.start",
+                "status": status,
+                "headers": [(b"content-type", b"application/json")],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"{}"})
+
+
+@contextmanager
+def _merchant_ledger_at(url: str) -> Iterator[None]:
+    """Point the merchant service's ledger writes at ``url`` for the duration.
+
+    ``TRUST_URL`` and not an injected publisher, so the run drives
+    ``proxyshop_support.trust_ledger.trust_endpoint``'s own resolution rather than reaching
+    past it — the default it would otherwise resolve to is ``http://trust:8084``, which the
+    session's socket guard refuses because it is not loopback, so a run that forgot this
+    would fail loudly rather than silently publishing nowhere.
+
+    ``set_trust_publisher(None)`` on both edges is a REBUILD and never an unwiring — the rule
+    that function's own docstring states — so the publisher this process holds is discarded
+    and the next publish resolves the address above, and the process is left exactly as it
+    was found.
+    """
+    from merchant_svc.composition import set_trust_publisher
+
+    from proxyshop_support.trust_ledger import ENV_TRUST_URL
+
+    previous = os.environ.get(ENV_TRUST_URL)
+    os.environ[ENV_TRUST_URL] = url
+    set_trust_publisher(None)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(ENV_TRUST_URL, None)
+        else:
+            os.environ[ENV_TRUST_URL] = previous
+        set_trust_publisher(None)
+
+
+async def _drive_merchant(run: S1Run, sink: Any) -> dict[str, Any]:
+    """Complete the checkout at the real shopify-stub, in-process on loopback (D41).
+
+    The merchant is real here too, and served: ``merchant_svc.main.create_app`` on loopback,
+    with the stub's web pixel installed against the merchant's OWN
+    :data:`~merchant_svc.install.config.COLLECTOR_PATH`. So the beacon the stub fires is a
+    real HTTP request to the real ``POST /pixel/collect``, and the ``checkout_pixel`` row in
+    ``sink`` is the one ``merchant_svc.composition.publish_pixel_observation`` wrote from
+    inside that route. Nothing in this module builds it.
+    """
     import httpx
+    from merchant_svc.collector import PIXEL_INBOX
+    from merchant_svc.install.config import COLLECTOR_PATH
+    from merchant_svc.main import create_app as create_merchant
     from shopify_stub.app import create_app as create_stub
     from shopify_stub.testing import RecordingReceiver, StubClient
 
     from proxyshop_support.asgi_server import serve
+    from proxyshop_support.trust_ledger import TRUST_EVENTS_PATH
 
     variant_id, quantity, code = permalink_parts(run.permalink_url)
     if code != run.minted_code:
@@ -687,12 +891,23 @@ async def _drive_merchant(run: S1Run) -> dict[str, Any]:
             f"the minted permalink carries {code!r}, not the code the ledger recorded "
             f"({run.minted_code!r})"
         )
-    collector = RecordingReceiver()
+    collector = _RecordingCollector(create_merchant())
+    ledger = _TrustLedgerEvents(sink, TRUST_EVENTS_PATH)
+    #: Where the SECOND-redemption probe's beacon goes. The probe must not perturb the run it
+    #: is probing, and a live collector makes that a live concern: the probe completes a
+    #: second checkout, whose beacon is a second real POST and would be a second
+    #: ``checkout_pixel`` row in the ledger the exact multiset grades. So the pixel is
+    #: re-pointed here before the probe runs, which records the beacon and publishes nothing.
+    probe_collector = RecordingReceiver()
     webhooks = RecordingReceiver()
+    already_observed = len(PIXEL_INBOX.observations())
     with (
         serve(create_stub()) as stub_url,
+        serve(ledger) as trust_url,
         serve(collector) as collector_url,
+        serve(probe_collector) as probe_collector_url,
         serve(webhooks) as webhook_url,
+        _merchant_ledger_at(trust_url),
     ):
         async with httpx.AsyncClient(base_url=stub_url, follow_redirects=False) as http:
             stub = StubClient(http, stub_url)
@@ -715,7 +930,10 @@ async def _drive_merchant(run: S1Run) -> dict[str, Any]:
             )
             assert seeded.status_code == 200, seeded.text
             await stub.configure(webhook_secret=WEBHOOK_SECRET)
-            await stub.install_pixel(f"{collector_url}/collect")
+            # The merchant's own collector path, off the merchant's own constant. The stub's
+            # `webPixel` settings therefore carry the URL a real install would carry, and a
+            # path this run spelled by hand could not drift from the service's.
+            await stub.install_pixel(f"{collector_url}{COLLECTOR_PATH}")
             await stub.subscribe("ORDERS_PAID", f"{webhook_url}/webhooks/shopify")
             created = await stub.create_code(run.minted_code, percentage=0.0)
             assert created.status_code == 200, created.text
@@ -726,13 +944,33 @@ async def _drive_merchant(run: S1Run) -> dict[str, Any]:
             # `_merchant_events` unpacks exactly one webhook delivery.
             pixel_requests = list(collector.requests)
             webhook_requests = list(webhooks.requests)
+            pixel_observations = list(PIXEL_INBOX.observations()[already_observed:])
+            # ONE ledger write reached the trust door while the merchant was pointed at it,
+            # and it came from the collector route. Checked here rather than left implicit
+            # because this window is the only one in which the merchant's publisher is
+            # addressable at all: `handle_delivery`'s default sink also publishes (an
+            # `order_paid`, through the same publisher), and `_merchant_events` calls it after
+            # `_merchant_ledger_at` has put the address back, so that write goes to the
+            # unreachable deployment default and this run's `order_paid` row stays the one
+            # `_merchant_events` builds. If that ever changes, the count below moves first.
+            if len(ledger.requests) != 1:
+                raise AssertionError(
+                    f"{len(ledger.requests)} ledger event(s) reached the trust door during the "
+                    "merchant leg; the run's checkout produced exactly one beacon and the "
+                    "served collector publishes exactly one row for it"
+                )
+            # …and the beacon is re-pointed away from the served collector for the same
+            # reason, because that snapshot cannot protect a ledger the probe writes to.
+            await stub.install_pixel(f"{probe_collector_url}/collect")
             second = await _second_redemption(stub, variant_id, quantity, code)
     return {
         "completion": completion,
         "variant_id": variant_id,
         "quantity": quantity,
         "pixel_requests": pixel_requests,
+        "pixel_observations": pixel_observations,
         "webhook_requests": webhook_requests,
+        "ledger_requests": list(ledger.requests),
         "deliveries": deliveries,
         "stub_url": stub_url,
         "second_redemption": second,
@@ -785,39 +1023,40 @@ def accepted_unit_price(run: S1Run) -> float:
     return float(accepted_bid(run)["offer"]["unit_price"])
 
 
-def authorized_checkout_token(run: S1Run, completion: dict[str, Any]) -> str:
-    """The token of the checkout the EXCHANGE authorized, for the order the merchant closed.
+def require_redeemed_code(run: S1Run, completion: dict[str, Any]) -> str:
+    """The single-use code the merchant's order redeemed, refusing anything but the mint's.
 
-    **This hop no longer needs a binding here, and this docstring is the record of that
-    changing.** ``CheckoutProvider.checkout`` still invents its ``checkout_token`` with
-    ``secrets.token_hex(16)`` (apps/exchange/src/checkout/provider.py:828) and still never
-    transmits it: the cart permalink it builds carries the discount code and nothing else
-    (provider.py:1072), and the merchant still mints its own, unrelated token when the cart is
-    visited. So ``accepted.payload.checkout_token`` and the merchant's own token remain two
-    different values for one checkout — that half has not changed and
-    ``test_the_checkout_token_seam_has_no_production_binding`` still measures it.
+    **This replaces the run's ``authorized_checkout_token`` binding, which is deleted**, and
+    the deletion is what the pixel change forced. That helper rewrote the merchant's
+    ``order_paid`` row to carry the EXCHANGE's ``checkout_token`` instead of the merchant's,
+    keeping the platform's own alongside under ``platform_checkout_token`` — a key no
+    production emitter writes. It was harmless while the run also hand-built the
+    ``checkout_pixel`` row and could give that the same rewritten token. It is not harmless
+    now: the served ``POST /pixel/collect`` publishes the MERCHANT's token, which is the
+    value D24 says the pixel and the webhook meet on, so a rewritten webhook token puts the
+    two halves of the reconciliation in different join groups. Measured, with the binding
+    still in place and the served collector driven: ``reconciled.payload.pixel_missing`` came
+    back ``True`` on a run whose stub really posted a beacon.
 
-    What changed is the consumer. ``trust.reconcile.reconcile`` used to join an order to its
-    offer on those tokens alone, so it found no shared key and emitted nothing: measured on
-    this tree, without this binding the run produced ZERO ``reconciled`` events with every
-    other stage green. It now also joins on the single-use discount code, reading
-    ``code_created`` / ``checkout_redirect`` as bridges, and the same measurement produces
-    ONE. The binding below is therefore no longer load-bearing and can be deleted — which
-    also means deleting the two ``checkout_token`` assertions in
-    ``test_the_checkout_token_seam_has_no_production_binding``, so it is left standing here
-    for a lane that owns that file.
+    The seam it was bridging is unchanged and is still a defect. ``CheckoutProvider.checkout``
+    invents its ``checkout_token`` with ``secrets.token_hex(16)``
+    (apps/exchange/src/checkout/provider.py:828) and never transmits it — the cart permalink
+    carries the discount code and nothing else (provider.py:1072) — and the merchant mints its
+    own, unrelated token when the cart is visited.
+    ``test_the_checkout_token_seam_has_no_production_binding`` measures exactly that, now off
+    the two events' own untouched tokens rather than off a key this module invented.
 
-    The binding is *derived*, never invented, and its premise is the same value the
-    production join now uses. The single-use discount code IS the exchange's handle on the
-    checkout: the exchange minted it, put it in the permalink, and the merchant's order came
-    back carrying it. Matching the order's ``discount_code`` to the minted code therefore
-    establishes that this order is the completion of that authorized checkout, and its token
-    is the one the ledger already recorded. The platform's own token is kept alongside under
-    ``platform_checkout_token`` so nothing is lost.
+    What makes the bridge unnecessary is the consumer: ``trust.reconcile.reconcile`` no longer
+    joins an order to its offer on those tokens alone. It reads the single-use discount code,
+    with ``code_created`` / ``checkout_redirect`` as bridges, and that is the exchange's real
+    handle on the checkout — minted by the exchange, put in the permalink, and carried back on
+    the merchant's order. So the premise below is the only thing the run still has to check,
+    and it is checked rather than assumed.
 
     Raises:
         AssertionError: the order does not carry the code the exchange minted, in which case
-            no binding exists and the run must fail rather than guess.
+            this order is not the completion of that authorized checkout and the run must
+            fail rather than guess.
     """
     redeemed = str(completion.get("discount_code") or "")
     if redeemed != run.minted_code:
@@ -825,37 +1064,37 @@ def authorized_checkout_token(run: S1Run, completion: dict[str, Any]) -> str:
             f"the merchant's order redeemed {redeemed!r}, not the single-use code the "
             f"exchange minted ({run.minted_code!r}); there is nothing to reconcile it to"
         )
-    return str(_event_of(run.accept_result, "accepted")["payload"]["checkout_token"])
+    return redeemed
 
 
 def _merchant_events(
     run: S1Run, checkout: dict[str, Any], build_event: Any
-) -> tuple[dict[str, Any], dict[str, Any], Any, Any]:
-    """The pixel beacon and the paid webhook, each read by the real merchant code."""
-    from merchant_svc.collector import accept_pixel_event
+) -> tuple[dict[str, Any], Any, Any]:
+    """The paid webhook, read by the real merchant code, and the beacon's own observation.
+
+    **There is no ``checkout_pixel`` here any more, and its absence is the ticket.** This
+    function used to call ``merchant_svc.collector.accept_pixel_event`` on the stub's beacon
+    body and then hand-build the ledger row from what came back, because no served path wrote
+    one. One does now: ``collector/routes.collect_pixel_event`` calls
+    ``composition.publish_pixel_observation``, and :func:`_drive_merchant` beacons at that
+    route, so the row is already in the sink before this function is reached. What is
+    returned here is the observation the SERVED route parsed and recorded, read back off
+    ``merchant_svc.collector.PIXEL_INBOX`` — the collector's own ring, not a second parse.
+    """
     from merchant_svc.install.webhooks import handle_delivery, ledger_record
 
     completion = checkout["completion"]
     store_id = run.fixture["expected"]["winning_store"]
     total_price = float(completion["total_price"])
-    authorized_token = authorized_checkout_token(run, completion)
+    require_redeemed_code(run, completion)
 
-    (beacon,) = checkout["pixel_requests"]
-    observation = accept_pixel_event(json.loads(beacon["body"]))
-    pixel_event = build_event(
-        "checkout_pixel",
-        auction_id=run.auction_id,
-        store_id=store_id,
-        order_ref=str(completion["order_id"]),
-        payload={
-            "checkout_token": authorized_token,
-            "platform_checkout_token": observation.checkout_token,
-            "client_id": observation.client_id,
-            # The stub's beacon carries no money on purpose (a web pixel is lossy and
-            # untrusted); the amount is the order's, which is the webhook's truth.
-            "total_price": total_price,
-        },
-    )
+    observations = checkout["pixel_observations"]
+    if len(observations) != 1:
+        raise AssertionError(
+            f"the served collector recorded {len(observations)} observation(s) for this "
+            "run's one checkout; the beacon either never arrived or arrived more than once"
+        )
+    (observation,) = observations
 
     (delivery,) = checkout["webhook_requests"]
     decision = handle_delivery(
@@ -880,8 +1119,12 @@ def _merchant_events(
         store_id=store_id,
         order_ref=str(record["order_ref"]),
         payload={
-            "checkout_token": authorized_token,
-            "platform_checkout_token": record["checkout_token"],
+            # The MERCHANT's own token, exactly as `ledger_record` lifted it off the signed
+            # body and exactly as `merchant_svc.composition.ledger_payload` would publish it.
+            # It used to be overwritten with the exchange's, which is a value no production
+            # emitter puts here and which now splits the pixel from its own webhook — see
+            # `require_redeemed_code`.
+            "checkout_token": record["checkout_token"],
             "order_ref": str(record["order_ref"]),
             "total_price": total_price,
             # D24 pins `discount_code` as one of the four join keys, and the signed
@@ -894,7 +1137,7 @@ def _merchant_events(
             "discount_codes": record["payload"].get("discount_codes") or [],
         },
     )
-    return pixel_event, order_paid_event, observation, decision
+    return order_paid_event, observation, decision
 
 
 def _reconcile(run: S1Run, sink: Any) -> list[dict[str, Any]]:
@@ -978,7 +1221,9 @@ def _resolved_module_files() -> dict[str, str]:
         "exchange.ranking",
         "exchange.retrieval.fit",
         "merchant_svc.collector",
+        "merchant_svc.composition",
         "merchant_svc.install.webhooks",
+        "merchant_svc.main",
         "shopify_stub.app",
         "store_agent.runtime",
         "trust.reconcile",
