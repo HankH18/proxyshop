@@ -20,9 +20,82 @@
 # scripts/check_verify_contracts.py. Makefile and scripts/verify.sh are hash-pinned in
 # .swarm-loop/manifest.json; this workflow calls them and does not touch them.
 #
-# NO SECRETS, NO NETWORK, NO DEPLOY. `secrets` is never read. LLM_PROVIDER is left unset so
-# it keeps its default deterministic offline double, and the embedding provider keeps
-# `lexical` (D56); the suite makes no outbound call. Nothing here pushes or publishes.
+# NO SECRETS, NO DEPLOY. `secrets` is never read. LLM_PROVIDER is left unset so it keeps its
+# default deterministic offline double, and the embedding provider keeps `lexical` (D56); the
+# suite makes no outbound call. The `stack` job below DOES reach the network — a container
+# build downloads from PyPI and npm, which is what building an image means — but it too reads
+# no secret, pushes nothing and deploys nowhere.
+#
+# =========================================================================================
+# TWO JOBS, AND WHY THE SECOND ONE HAD TO EXIST
+# =========================================================================================
+# `verify` is the in-process gate. It is thorough and it has one structural blind spot: it
+# imports from a CHECKOUT, where the editable root distribution puts every package on
+# `sys.path`, and it never opens a Dockerfile. An IMAGE ships a subset of that tree. For the
+# life of this project neither pipeline built a single first-party image or started a single
+# first-party container, and a commit that broke an image sailed through green — four times
+# in two days, found each time by a human running `docker compose up`.
+#
+# `stack` is the answer to that. It builds every image this repo contains, starts the whole
+# stack, and drives it over HTTP from outside the container network. It is slower than
+# `verify` and it runs in parallel with it, so the fast signal is not held up by the thorough
+# one.
+#
+# =========================================================================================
+# WHAT A BROKEN COMMIT CAN STILL GET PAST BOTH JOBS
+# =========================================================================================
+# Every gate has a boundary. An unstated one is how this repository keeps being surprised, so
+# here is this pipeline's, measured rather than hoped:
+#
+#  1. ONE ARCHITECTURE. Both jobs run on x86_64. Every image is built and run amd64-only, so
+#     an arm64-only break is invisible here — and the developers work on Apple Silicon. The
+#     `lxml==6.1.2` pin in `services/ingest/Dockerfile` is the live example: it needs a wheel
+#     for the target platform because the image installs no build toolchain, and "there is a
+#     wheel for amd64" is all this pipeline can ever prove.
+#  2. BOOTING IS NOT WORKING. `ci_image_proof.py probe` requires an HTTP ANSWER on every
+#     published port; a service that answers 404 on `/` counts as answering, because for most
+#     of these that is the correct response. Only two things get more: `buyer-web` gets
+#     content-level checks (a real page, a deep link that falls back, a proxied prefix that
+#     reaches the API and not the SPA, and an API that is actually answering behind it), and
+#     `exchange` has a whole auction driven through it by `make demo-check`. Every other
+#     service in the derived boot list is proven to start and answer, and nothing more than
+#     that. The list is not restated here on purpose — `ci_image_proof.py services` prints
+#     it, and both this job and GitLab's boot exactly what it prints.
+#  3. THE IMAGE BUILT HERE IS NOT AN IMAGE ANYONE DEPLOYS. Nothing is pushed to a registry.
+#     Each run builds from scratch and throws the result away, so there is no digest
+#     continuity between what this proves and what would ever ship.
+#  4. ONE CONFIGURATION. The stack comes up on compose's defaults: `LLM_PROVIDER=double`,
+#     `EMBEDDING_PROVIDER` empty so the lexical fallback is used, no `ANTHROPIC_API_KEY`,
+#     `PROXYSHOP_ROLE_PASSWORD` empty so the roles keep the dev default. A defect that needs a
+#     live model, real embedding weights or a non-default role password cannot appear here.
+#  5. THE STATIC ARTIFACT GATE CANNOT READ `COPY --from` BYTES. It proves the copy's SOURCE is
+#     the path the build tool writes to; the build proves the copy succeeds. Neither opens the
+#     bundle, so a bundle built from stale sources, or with the wrong `base`, is caught by
+#     nothing but the `buyer-web` page probes.
+#  6. `.dockerignore` IS APPROXIMATED, not implemented, AND IT ERRS TOWARD FALSE GREEN. The
+#     gate applies each pattern to the path and to every component; Docker anchors a
+#     non-`**/` pattern at the context root. That over-approximates, and over-approximating
+#     makes the gate DROP files from the graded set — a module nothing checks — rather than
+#     grade one the image lacks. Nothing in the tree hits it today; a `!negation` line in
+#     `.dockerignore` would be modelled wrongly in the same direction.
+#  7. ONE RUN IS NOT A DISTRIBUTION. `make demo-check` drives ONE auction. A flake that
+#     appears one run in twenty passes here nineteen times.
+#  8. A WEAKENED TEST IS NOT A DELETED ONE. `pytest`'s exit 5 catches a suite that vanished
+#     and `check_verify_contracts.py` catches a directory emptied of tests; an assertion
+#     quietly loosened inside a test that still runs is invisible to both, and to this file.
+#  9. THE FROZEN ACCEPTANCE SUITE RUNS AGAINST THE CHECKOUT. It executes in `verify`, in its
+#     own interpreter, with no container anywhere near it. A criterion that passes in-process
+#     and fails in an image is not graded by it — that gap is exactly what `stack` narrows,
+#     and `stack` does not run the acceptance suite against the containers.
+# 10. NOTHING AFTER THE BUILD. No deploy, no smoke test against a hosted environment, no
+#     migration rehearsal against a database that has data in it.
+#
+# The GitLab side carries two boundaries this file does not, and both are stated there: its
+# image job needs a PRIVILEGED runner it may not have, and under docker-in-docker a bind
+# mount resolves on the daemon's filesystem, so the services configured by a mounted document
+# — `buyer-svc`, `exchange`, the four store agents, the corpus load and `make demo-check` —
+# are started and driven HERE and nowhere else. If this workflow is ever disabled, that whole
+# half of the stack stops being run by anything.
 
 name: verify
 
@@ -112,3 +185,246 @@ jobs:
       - name: Datastore logs
         if: failure()
         run: docker compose logs --no-color --tail=200 postgres neo4j redis
+
+      # WHICH GATES THIS JOB ACTUALLY RAN — and it READS `scripts/verify.sh` to say so.
+      #
+      # The first version of this step printed nine hard-coded `echo` lines and claimed, in
+      # its own comment, that it "refuses if verify.sh no longer wires one of them". It read
+      # pyproject.toml and stat'd two files and never opened verify.sh, so deleting
+      # `ruff check .`, `lint-imports`, `eslint`, `mypy`, `tsc -b` or `vitest` from the gate
+      # would have left this step printing all nine and exiting 0 — a census that certified
+      # gates it had not looked for. `scripts/check_verify_contracts.py` pins four other
+      # needles and none of these, so nothing anywhere held them.
+      #
+      # It greps for them now. The invocation is quoted exactly as verify.sh spells it, so a
+      # gate that is renamed as well as one that is deleted reddens this step.
+      - name: Which gates this job actually ran
+        run: |
+          set -euo pipefail
+          .venv/bin/python - <<'PY'
+          import pathlib
+          import sys
+          import tomllib
+
+          # (what verify.sh must still invoke, what to call it in the log)
+          WIRED = [
+              ("ruff check .", "ruff lint"),
+              ("ruff format --check .", "ruff format"),
+              ("lint-imports", "import-linter (.importlinter)"),
+              ("banned_reset_gate", "the banned global-Redis-reset gate (D39)"),
+              ("eslint .", "eslint"),
+              ("mypy", "mypy"),
+              ("tsc -b", "tsc -b"),
+              ("run_vitest", "vitest"),
+              (".swarm-loop/acceptance/run.py", "the FROZEN acceptance suite, own interpreter"),
+              ("datastore_coverage_gate", "the datastore coverage gate"),
+              ("check_verify_contracts.py", "scripts/check_verify_contracts.py"),
+              ('run_pytest -q -m "not needs_model"', "pytest over pyproject's testpaths"),
+          ]
+          verify = pathlib.Path("scripts/verify.sh").read_text()
+          missing = [(needle, name) for needle, name in WIRED if needle not in verify]
+
+          print("gate                                            wired in scripts/verify.sh")
+          print("----------------------------------------------  --------------------------")
+          for needle, name in WIRED:
+              print(f"{name:<46}  {'yes' if needle in verify else 'NO'}")
+
+          config = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          paths = config["tool"]["pytest"]["ini_options"]["testpaths"]
+          print("\npytest collects (pyproject testpaths):")
+          for path in paths:
+              print(f"    - {path}")
+
+          # The pytest step passes NO paths, so testpaths alone decides whether the route
+          # census and the runbook gate execute at all. Both live in trees listed above.
+          required = {"docs", "proxyshop_support"}
+          gone = required - set(paths)
+          census = pathlib.Path("proxyshop_support/tests/test_route_reachability.py")
+          runbook = pathlib.Path("docs/tests/test_runbook_executability.py")
+          absent = [str(p) for p in (census, runbook) if not p.is_file()]
+          print(f"    route census:  {census}")
+          print(f"    runbook gate:  {runbook}")
+
+          problems = []
+          if missing:
+              problems += [
+                  f"scripts/verify.sh no longer invokes {name} (looked for {needle!r})"
+                  for needle, name in missing
+              ]
+          if gone:
+              problems.append(
+                  f"testpaths no longer collects {sorted(gone)} — the runbook gate and the "
+                  f"route census live there and this job stopped running them"
+              )
+          problems += [f"{path} is gone; a gate this job claims to run does not exist" for path in absent]
+          if problems:
+              print("\nFATAL: this job's own census does not match what it runs.", file=sys.stderr)
+              for problem in problems:
+                  print(f"  * {problem}", file=sys.stderr)
+              raise SystemExit(1)
+          PY
+
+      # The frozen acceptance suite ON ITS OWN, ahead of nothing and after everything.
+      #
+      # `make verify` already ran it, so this is a SECOND execution and that is deliberate:
+      # inside `verify.sh` it runs in the same shell as ~7,600 other tests, and the whole
+      # reason it goes through `.swarm-loop/acceptance/run.py` is that sharing a pytest
+      # session with the rest produces phantom failures that vanish in isolation. This step
+      # runs the identical runner as the only thing in the process, so a green here and a red
+      # there — or the reverse — is evidence about process state rather than about the code.
+      # It costs about two seconds.
+      - name: The frozen acceptance suite, in a process of its own
+        run: ./scripts/verify.sh acceptance
+
+  # =======================================================================================
+  # The images, and the stack they make.
+  # =======================================================================================
+  stack:
+    name: images and stack
+    runs-on: ubuntu-latest
+    # The build is the long pole: ten images, of which `buyer-web` runs a full workspace
+    # `npm ci` and a vite build, and `ingest` installs lxml. Then a corpus load that is
+    # minutes, not seconds. 90 rather than 60 so a slow registry is a slow run and not a red
+    # one; every step below carries its own budget so a hang is attributed rather than
+    # swallowed by the job timeout.
+    timeout-minutes: 90
+
+    env:
+      # Same index as `verify`, and for the same two reasons: NOT 0 (reserved for the frozen
+      # build_succeeds measurement, and protected by scripts/db_reclaim.py under every flag)
+      # and under 16 (a stock redis reports `databases 16`, and worker.redis_db_index refuses
+      # an index at or above the server's ceiling rather than silently sharing a logical DB).
+      PROXYSHOP_WORKER: "12"
+      UV_VERSION: "0.11.8"
+      # REQUIRED, or the stack never comes up. `merchant-svc`'s readiness probe is
+      # `service_launch ready --require-env MERCHANT_ADMIN_TOKEN`, and its compose default is
+      # EMPTY — so with this unset the container stays unhealthy forever and `up --wait`
+      # fails on a service whose code is fine. This is the ephemeral dev value `.env.example`
+      # ships, for a container destroyed when the job ends; it is not a secret and is not
+      # pretending to be one.
+      MERCHANT_ADMIN_TOKEN: dev-merchant-admin-token
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install uv ${{ env.UV_VERSION }}
+        run: |
+          curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" \
+            | env UV_INSTALL_DIR=/usr/local/bin sh
+          uv --version
+
+      # The venv is needed for `make db-init` / `make db-migrate` and for the image proof
+      # itself, which imports the repo's single Dockerfile-discovery function rather than
+      # walking the tree a second time.
+      - name: Provision (scripts/bootstrap.sh)
+        run: ./scripts/bootstrap.sh
+
+      # Printed before anything is built, so the log opens with the list of what this job
+      # claims to cover. An image missing from this list is an image nothing here grades.
+      - name: The first-party image inventory
+        run: .venv/bin/python scripts/ci_image_proof.py list
+
+      # THE STEP THIS PIPELINE WAS MISSING. Every image in the repo, including any that no
+      # compose fragment references yet — `docker compose build` would silently skip those,
+      # and an image nothing builds is an image that rots.
+      - name: Build every first-party image
+        timeout-minutes: 45
+        run: |
+          .venv/bin/python scripts/ci_image_proof.py build \
+            --profile demo --profile corpus --profile e2e
+
+      # The committed deployment documents are GENERATED from `fixtures/real-catalogs/` and
+      # then committed, and nothing anywhere checked the two still agree. They are bind-
+      # mounted into `exchange` and `buyer-svc`, and the product ids in them are
+      # `sha256(store_id \x1f native_key)` — so a corpus change that moves an id leaves the
+      # documents pointing at products the graph no longer has. Without this step that
+      # surfaces as a red `make demo-check` twenty-five minutes downstream, reported as an
+      # auction failure. Here it is one named drift failure, in seconds, before anything is
+      # even started. Read-only: `--check` compares and never writes.
+      - name: deploy/demo still matches the recorded corpus
+        run: .venv/bin/python scripts/build_demo_deployment.py --check
+
+      - name: Datastores (make deps-up)
+        timeout-minutes: 10
+        run: make deps-up
+
+      - name: Datastores answer where the services will look
+        run: .venv/bin/python scripts/ci_datastore_proof.py wait
+
+      # The boot list is DERIVED, not typed out here, and that is the repair for a defect
+      # this file introduced and its own header denied. The header says "nothing here can
+      # drift from docker-compose.yml because nothing here restates it" — and the first
+      # version of this step restated twelve service names and a port count. Add a service
+      # to a fragment and it would not be started, not be probed, and nothing would redden.
+      #
+      # `services` reads the fragments and applies three filters, each a measured
+      # requirement: FIRST-PARTY (the datastores speak no HTTP and are proven by
+      # ci_datastore_proof.py), NOT A JOB (`sim`, `seller-reference` and `corpus-loader`
+      # have `restart: "no"` and EXIT — `--wait` sees that and fails the whole command over
+      # a stack in which every server is healthy), and PUBLISHES A PORT.
+      #
+      # No `--profile` flags: naming a profiled service explicitly enables its profile,
+      # which is compose's documented behaviour and is measured — `up --dry-run buyer-web`
+      # with no flags schedules a `demo`-profile service.
+      - name: Start the stack
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          services="$(.venv/bin/python scripts/ci_image_proof.py services)"
+          echo "booting: $services"
+          # shellcheck disable=SC2086
+          docker compose up -d --wait $services
+
+      # `up --wait` proves each healthcheck passed INSIDE the container. This proves the
+      # published port reaches it from outside, which is the half a deployment depends on —
+      # plus the four things no healthcheck for a static bundle can see: that the page is
+      # the app and not the stock nginx page, that a deep link falls back instead of 404ing,
+      # that the reverse-proxied prefix reaches the API rather than being answered by the
+      # SPA's own fallback (which would make every fetch in the page receive HTML), and that
+      # the API behind that prefix is actually ANSWERING — an nginx 502 is not index.html
+      # either, and an earlier version of this check passed it.
+      #
+      # It expects the SAME derived list the step above booted, so there is no hand-set
+      # floor to be one too low. There was: `--min-answering 11` against twelve services
+      # tolerated exactly one silently absent, and a run with `shopify-stub` down reported a
+      # clean stack. The probe now names the missing service instead.
+      - name: Every service answers from outside its network
+        run: .venv/bin/python scripts/ci_image_proof.py probe
+
+      # The two images that are not servers. Their exit status IS their result — `sim`
+      # returns 0 caught / 1 S2 failure / 2 manifest digest chain failed — so an image that
+      # builds and cannot run is caught here and nowhere else in this job.
+      - name: The run-to-completion images really run
+        timeout-minutes: 15
+        run: |
+          docker compose run --rm --no-deps seller-reference
+          docker compose run --rm sim
+
+      # Minutes, not seconds: 3,093 products and 44,803 graph writes, and silent until it
+      # finishes. `make demo-check` fails without it — an empty Neo4j gives an empty roster —
+      # so this is the price of proving the auction end to end rather than proving that
+      # eleven containers are up.
+      - name: Load the recorded storefronts (make demo-corpus)
+        timeout-minutes: 25
+        run: make demo-corpus
+
+      # The after-deploy probe: one real roster-less auction over HTTP, asserting the roster
+      # came from Neo4j and not from the request, that the eligibility gate passed, that the
+      # shortlist has slots, and that at least one bid came from a hosted store agent rather
+      # than a list-price fallback. Every container in this stack can report healthy while
+      # this is dead, which is the whole reason it exists.
+      - name: Drive a real auction through the running stack (make demo-check)
+        timeout-minutes: 10
+        run: make demo-check
+
+      # Only on failure, and never allowed to mask the job's own status.
+      - name: What the stack was doing
+        if: failure()
+        run: |
+          docker compose ps --all
+          docker compose --profile demo --profile e2e --profile corpus logs \
+            --no-color --tail=120

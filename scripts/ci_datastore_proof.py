@@ -330,17 +330,33 @@ def _compose_images(compose: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def _github_env(config: dict[str, Any]) -> dict[str, str]:
-    env: dict[str, str] = {}
-    for key, value in (config.get("env") or {}).items():
-        env[str(key)] = str(value)
-    for job in (config.get("jobs") or {}).values():
-        for key, value in (job.get("env") or {}).items():
-            env[str(key)] = str(value)
+def _github_env_by_job(config: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """``{job name: the environment THAT JOB's steps actually see}``.
+
+    PER JOB, and the flattening this replaces was a real hole rather than a tidier
+    spelling. The old version merged the workflow env, every job's env and every step's env
+    into ONE dict, last write winning. With a single job that was harmless. The moment a
+    second job was added, its env silently overwrote the first's for every shared name —
+    and MEASURED, with `PROXYSHOP_WORKER: "0"` in the `verify` job and `"12"` in the job
+    below it, the merged value was `12` and `check-config` reported OK. Worker 0 is the one
+    value this check exists to refuse: it is reserved for the frozen `build_succeeds`
+    measurement and protected by `scripts/db_reclaim.py` under every flag. A second job
+    must not be able to vouch for the first.
+
+    Within a job the layering is still correct and still last-wins, because that is
+    GitHub's own precedence: workflow env, then the job's, then the step's.
+    """
+    workflow: dict[str, str] = {
+        str(key): str(value) for key, value in (config.get("env") or {}).items()
+    }
+    by_job: dict[str, dict[str, str]] = {}
+    for name, job in (config.get("jobs") or {}).items():
+        env = dict(workflow)
+        env.update({str(key): str(value) for key, value in (job.get("env") or {}).items()})
         for step in job.get("steps") or []:
-            for key, value in (step.get("env") or {}).items():
-                env[str(key)] = str(value)
-    return env
+            env.update({str(key): str(value) for key, value in (step.get("env") or {}).items()})
+        by_job[str(name)] = env
+    return by_job or {"<no jobs>": workflow}
 
 
 def _check_worker_index(label: str, env: dict[str, str], failures: list[str]) -> None:
@@ -476,9 +492,14 @@ def cmd_check_config(args: argparse.Namespace) -> int:
     if not github_path.exists():
         failures.append(f"{GITHUB_CI} is missing — the mirror has no pipeline.")
     else:
-        env = _github_env(_load(github_path))
-        _check_worker_index(GITHUB_CI, env, failures)
-        _check_forbidden_dsns(GITHUB_CI, env, failures)
+        by_job = _github_env_by_job(_load(github_path))
+        if not by_job:
+            failures.append(f"{GITHUB_CI} declares no jobs, so it grades nothing.")
+        for job_name, env in sorted(by_job.items()):
+            # The job NAME is in the label: with more than one job, "PROXYSHOP_WORKER is 0"
+            # is not actionable unless it says which job's.
+            _check_worker_index(f"{GITHUB_CI} (job {job_name})", env, failures)
+            _check_forbidden_dsns(f"{GITHUB_CI} (job {job_name})", env, failures)
 
     if failures:
         return _fail(

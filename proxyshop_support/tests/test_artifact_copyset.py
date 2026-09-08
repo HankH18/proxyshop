@@ -16,6 +16,18 @@ collected by ``make verify``, so a gate written there would never run in the bui
 exists to protect. ``proxyshop_support`` is collected, and this is orchestrator-shared
 runtime support, so the gate goes here.
 
+**TWO SHAPES OF IMAGE, not one, and the second one arrived ungraded.** For most of this
+file's life ``images()`` was ``REPO_ROOT.rglob("Dockerfile")`` — the exact filename — so a
+node/nginx image called ``apps/buyer/Dockerfile.web`` was collected by nothing while
+``find . -name "Dockerfile*"`` returned it. Every check parameterised over ``images()``
+skipped it in silence, which is the same defect as a ``COPY`` set that quietly ships a
+subset, one level up. Discovery is now total (:func:`dockerfile_labels`, the union of a
+filename convention and every ``build.dockerfile`` compose declares) and each file is
+CLASSIFIED (:func:`image_kind`); an image of a shape this file cannot grade is a FAILURE
+naming the file, never a skip. See the DISCOVERY block below for why widening the glob
+alone would have been worse than leaving it, and the STATIC-WEB block for what a copyset
+check even MEANS for an image with no python in it.
+
 **Two checks, and neither is redundant.**
 
 *Static* (:func:`unwired_first_party_imports`) reads the Dockerfile as text: every
@@ -258,6 +270,26 @@ def _instructions(text: str) -> list[tuple[str, str]]:
     return found
 
 
+def _final_stage_instructions(text: str) -> list[tuple[str, str]]:
+    """The instructions of the LAST ``FROM`` block — the only ones that describe the artifact.
+
+    A single-stage Dockerfile is unaffected (there is one block and this returns all of it),
+    which is why adding this changed no verdict about the nine python images that existed
+    when it was written. It matters the moment a python image grows a build stage:
+    ``apps/merchant/Dockerfile.web`` builds its dashboard bundle in a ``node:22-alpine``
+    stage and serves it from a ``python:3.12-slim`` stage, and reading the two as one file
+    hands :func:`shipped_sources` the node stage's ``COPY apps/merchant/ apps/merchant/``
+    — a relative destination under a ``WORKDIR`` that stage no longer has — and asks the
+    python import checker to explain an artifact that never existed.
+    """
+    instructions = _instructions(text)
+    last_from = max(
+        (index for index, (name, _rest) in enumerate(instructions) if name == "FROM"),
+        default=None,
+    )
+    return instructions if last_from is None else instructions[last_from + 1 :]
+
+
 def parse_dockerfile_text(text: str, label: str) -> ImageSpec:
     """Parse the COPY set, the ``ln -s`` pairs, ``PYTHONPATH``, the pip layer and the CMD.
 
@@ -288,7 +320,7 @@ def parse_dockerfile_text(text: str, label: str) -> ImageSpec:
     entrypoint: str | None = None
     workdir = "/"
 
-    for instruction, rest in _instructions(text):
+    for instruction, rest in _final_stage_instructions(text):
         if instruction == "WORKDIR":
             workdir = rest.strip()
         elif instruction == "COPY":
@@ -340,21 +372,426 @@ def parse_dockerfile_text(text: str, label: str) -> ImageSpec:
     )
 
 
+@dataclass(frozen=True)
+class Stage:
+    """One ``FROM`` block of a Dockerfile, with its own ``WORKDIR`` and its own COPY set.
+
+    :func:`parse_dockerfile_text` deliberately FLATTENS a Dockerfile — it was written for
+    the nine single-stage python images, where flattening loses nothing. A multi-stage
+    build is a different object: stage 1's ``WORKDIR /repo`` does not apply to stage 2's
+    ``COPY``, stage 1's files are not in the artifact at all, and the only bytes that ship
+    are the last stage's own copies plus whatever it pulls forward with ``COPY --from``.
+    Grading a multi-stage image off the flattened view produces confident nonsense (see the
+    DISCOVERY block above for the measured example), so multi-stage images are parsed here
+    instead.
+    """
+
+    index: int
+    #: The ``FROM`` argument, tag and all: ``node:22-alpine``.
+    base: str
+    #: The ``AS <name>`` alias, if the stage has one. This is what ``--from=`` refers to.
+    name: str | None
+    workdir: str
+    #: ``(position, repo-relative source, ABSOLUTE destination)`` for every build-context
+    #: ``COPY`` in this stage. Destinations are resolved against the stage's own ``WORKDIR``
+    #: and keep their trailing slash, because ``COPY a/b.json x/`` and ``COPY a/b.json x``
+    #: land different things at different paths.
+    #:
+    #: The POSITION is load-bearing and was added by a control that broke without it. A
+    #: layered Dockerfile copies the manifests, runs ``npm ci``, and only then copies the
+    #: sources — so the copy set at the moment ``npm ci`` runs is a PREFIX of the stage's
+    #: copy set, and grading the whole set answers a question nobody asked. Measured: delete
+    #: ``COPY apps/buyer/package.json apps/buyer/`` and the later ``COPY apps/buyer/`` still
+    #: covers the path, so an order-blind checker calls the image clean while ``npm ci``
+    #: fails on a workspace tree it cannot match.
+    copies: tuple[tuple[int, str, str], ...]
+    #: ``(stage reference, absolute source, absolute destination)`` for ``COPY --from=``.
+    from_copies: tuple[tuple[str, str, str], ...]
+    #: ``COPY ["src","dest"]`` JSON-array lines, recorded and refused rather than mis-parsed.
+    json_form_copies: tuple[str, ...]
+    #: ``(position, argument)`` for every ``RUN``, in file order.
+    runs: tuple[tuple[int, str], ...]
+    #: Every ``EXPOSE``d port that parsed as an integer.
+    exposes: tuple[int, ...]
+    #: ``(name, value)`` for every ``ENV`` assignment in this stage, in file order.
+    envs: tuple[tuple[str, str], ...]
+
+
+def _absolute(workdir: str, destination: str) -> str:
+    """A ``COPY`` destination as an absolute image path, trailing slash preserved."""
+    trailing = "/" if destination.endswith("/") else ""
+    if not destination.startswith("/"):
+        destination = posixpath.join(workdir, destination)
+    return posixpath.normpath(destination).rstrip("/") + trailing
+
+
+def parse_stages(text: str, label: str) -> tuple[Stage, ...]:
+    """Split a Dockerfile into its ``FROM`` blocks.
+
+    Instructions BEFORE the first ``FROM`` (legally only ``ARG``) belong to no stage and
+    are dropped; the pinned-base gate refuses a ``FROM`` whose tag interpolates a build
+    argument rather than pretending to have resolved one.
+    """
+    stages: list[dict[str, Any]] = []
+    for instruction, rest in _instructions(text):
+        if instruction == "FROM":
+            tokens = rest.split()
+            alias = tokens[-1] if len(tokens) >= 3 and tokens[-2].upper() == "AS" else None
+            stages.append(
+                {
+                    "base": tokens[0] if tokens else "",
+                    "name": alias,
+                    "position": 0,
+                    "workdir": "/",
+                    "copies": [],
+                    "from_copies": [],
+                    "json_form_copies": [],
+                    "runs": [],
+                    "exposes": [],
+                    "envs": [],
+                }
+            )
+            continue
+        if not stages:
+            continue
+        stage = stages[-1]
+        stage["position"] += 1
+        position = int(stage["position"])
+        if instruction == "WORKDIR":
+            stage["workdir"] = _absolute(stage["workdir"], rest.strip())
+        elif instruction == "COPY":
+            if rest.lstrip().startswith("["):
+                stage["json_form_copies"].append(rest)
+                continue
+            flags = [t for t in rest.split() if t.startswith("--")]
+            tokens = [t for t in rest.split() if not t.startswith("--")]
+            if len(tokens) < 2:
+                continue
+            destination = _absolute(stage["workdir"], tokens[-1])
+            origin = next((f for f in flags if f.startswith("--from=")), None)
+            if origin is not None:
+                reference = origin.removeprefix("--from=")
+                for source in tokens[:-1]:
+                    stage["from_copies"].append((reference, source, destination))
+                continue
+            for source in tokens[:-1]:
+                stage["copies"].append((position, source, destination))
+        elif instruction == "RUN":
+            stage["runs"].append((position, rest))
+        elif instruction == "EXPOSE":
+            for token in rest.split():
+                port = token.split("/")[0]
+                if port.isdigit():
+                    stage["exposes"].append(int(port))
+        elif instruction == "ENV":
+            # Both forms: `ENV K=V K2=V2` (possibly folded over continuations) and the
+            # legacy `ENV K V`, where the whole remainder is one value.
+            if "=" in rest.split(" ", 1)[0]:
+                for name, value in re.findall(r"([A-Za-z_][\w.]*)=(\"[^\"]*\"|'[^']*'|\S*)", rest):
+                    stage["envs"].append((name, value.strip("\"'")))
+            else:
+                name, _, value = rest.partition(" ")
+                if name:
+                    stage["envs"].append((name, value.strip().strip("\"'")))
+    return tuple(
+        Stage(
+            index=index,
+            base=str(stage["base"]),
+            name=stage["name"],
+            workdir=str(stage["workdir"]),
+            copies=tuple(stage["copies"]),
+            from_copies=tuple(stage["from_copies"]),
+            json_form_copies=tuple(stage["json_form_copies"]),
+            runs=tuple(stage["runs"]),
+            exposes=tuple(stage["exposes"]),
+            envs=tuple(stage["envs"]),
+        )
+        for index, stage in enumerate(stages)
+    )
+
+
+# =====================================================================================
+# DISCOVERY — every Dockerfile, and the SHAPE each one is
+#
+# This block replaces a one-line ``REPO_ROOT.rglob("Dockerfile")``, and the line it
+# replaces is the reason it exists. That glob matched the EXACT filename, so
+# ``apps/buyer/Dockerfile.web`` — a real image, built by a real compose service, published
+# on the demo's front door — was in no gate at all. ``find . -name "Dockerfile*"`` returned
+# ten files; ``images()`` returned nine; every check parameterised over ``images()``
+# silently graded the nine. A discovery function that quietly returns a SUBSET is the same
+# defect class as a COPY set that quietly ships a subset, one level up.
+#
+# WIDENING THE GLOB IS NOT THE WHOLE REPAIR, and doing only that would have been worse than
+# leaving it. MEASURED, feeding ``Dockerfile.web`` to ``parse_dockerfile_text`` as it
+# stands:
+#
+#     workdir      /repo          <- stage 1's, applied to stage 2's COPY as well
+#     pip_requirements  ()        <- trips the `no pip layer parsed` assertion
+#     stage_copies ('--from=bundle /repo/apps/buyer/dist/ ...',)  <- refused by design
+#     copies       ... ('apps/buyer/', 'apps/buyer/') ...
+#
+# That last one is the trap. ``COPY apps/buyer/ apps/buyer/`` in the vite stage drags
+# ``apps/buyer/svc/src/**.py`` and ``apps/buyer/devstack/run.py`` into ``shipped_sources``,
+# and the python import checker would then grade a node/nginx artifact's python "closure"
+# against a ``sys.path`` root of ``/repo`` — a page of confident nonsense about an image
+# that runs no python at all. A checker built for one shape does not become a checker for
+# two by being pointed at both.
+#
+# So discovery is total and CLASSIFICATION is explicit: every Dockerfile is found, each one
+# is sorted into a shape, and a shape this file does not know how to grade is a FAILURE
+# (``test_every_dockerfile_in_the_repo_is_graded_by_some_gate``) rather than a skip. The
+# next unfamiliar image reddens the build and says what it needs, instead of arriving
+# ungraded and silent the way this one did.
+# =====================================================================================
+
+#: The final stage's base image, by name, decides the shape. Derived from the file rather
+#: than listed per-image, so a second nginx image or a sixth python service is sorted with
+#: no edit here.
+KIND_PYTHON = "python"
+KIND_STATIC_WEB = "static-web"
+KIND_UNKNOWN = "unknown"
+
+#: ``{base image name: the shape this file grades it as}``. The name is everything left of
+#: the ``:`` or ``@`` in the LAST ``FROM`` — the stage that actually ships.
+_KIND_BY_FINAL_BASE = {
+    "python": KIND_PYTHON,
+    "nginx": KIND_STATIC_WEB,
+}
+
+
+def _looks_like_a_dockerfile(name: str) -> bool:
+    """``Dockerfile`` or ``Dockerfile.<variant>`` — the convention this repo follows.
+
+    Docker itself accepts any filename through ``-f``, so a name test can never be the
+    whole of discovery; :func:`compose_declared_dockerfiles` supplies the other half, and
+    the two are unioned. This half is what finds an image nothing has wired into compose
+    yet — which is exactly the state ``Dockerfile.web`` was in for part of its life.
+    """
+    if name == "Dockerfile":
+        return True
+    return name.startswith("Dockerfile.") and len(name) > len("Dockerfile.")
+
+
 @lru_cache(maxsize=1)
-def images() -> dict[str, ImageSpec]:
-    """Every Dockerfile in the repo, keyed by its repo-relative path.
+def compose_declared_dockerfiles() -> dict[str, tuple[str, ...]]:
+    """``{repo-relative Dockerfile: the compose services that build it}``.
+
+    The second half of discovery, and the half a filename convention cannot supply: an
+    image built from ``docker/web.Dockerfile`` is invisible to :func:`_looks_like_a_dockerfile`
+    and perfectly visible here, because a service that is in the stack has to say which file
+    it builds from. A Dockerfile that compose names and this file cannot find is a discovery
+    hole, and :func:`test_every_dockerfile_in_the_repo_is_graded_by_some_gate` refuses it.
+    """
+    found: dict[str, list[str]] = {}
+    for fragment in compose_fragments():
+        path = REPO_ROOT / fragment
+        if not path.is_file():
+            continue
+        parsed = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for name, definition in (parsed.get("services") or {}).items():
+            build = (definition or {}).get("build")
+            if isinstance(build, str):
+                context, declared = build, "Dockerfile"
+            elif isinstance(build, dict):
+                context = str(build.get("context", "."))
+                declared = str(build.get("dockerfile") or "Dockerfile")
+            else:
+                continue
+            resolved = (path.parent / context / declared).resolve()
+            if not resolved.is_file():
+                resolved = (REPO_ROOT / declared).resolve()
+            if not resolved.is_file():
+                continue
+            try:
+                label = str(resolved.relative_to(REPO_ROOT))
+            except ValueError:  # pragma: no cover - a build context outside the repo
+                continue
+            found.setdefault(label, []).append(str(name))
+    return {label: tuple(sorted(services)) for label, services in sorted(found.items())}
+
+
+@lru_cache(maxsize=1)
+def dockerfile_labels() -> tuple[str, ...]:
+    """EVERY Dockerfile in the repo, by repo-relative path. The one discovery function.
 
     Discovered, not listed: an image added later is graded automatically, and an image
-    DELETED cannot silently take its gate with it.
+    DELETED cannot silently take its gate with it. Nothing below may re-derive this set —
+    a second, narrower walk is precisely how ``Dockerfile.web`` went ungraded.
     """
-    found: dict[str, ImageSpec] = {}
-    for path in sorted(REPO_ROOT.rglob("Dockerfile")):
+    found = set()
+    for path in sorted(REPO_ROOT.rglob("Dockerfile*")):
         parts = set(path.parts)
         if ".venv" in parts or "node_modules" in parts or ".swarm-loop" in parts:
             continue
-        label = str(path.relative_to(REPO_ROOT))
-        found[label] = parse_dockerfile_text(path.read_text(encoding="utf-8"), label)
-    return found
+        if not path.is_file() or not _looks_like_a_dockerfile(path.name):
+            continue
+        found.add(str(path.relative_to(REPO_ROOT)))
+    found.update(compose_declared_dockerfiles())
+    return tuple(sorted(found))
+
+
+@cache
+def dockerfile_text(label: str) -> str:
+    """The Dockerfile's source. One reader, so every gate grades the same bytes."""
+    return (REPO_ROOT / label).read_text(encoding="utf-8")
+
+
+@cache
+def image_kind(label: str) -> str:
+    """Which shape of image this Dockerfile builds, from the file alone.
+
+    The LAST ``FROM`` is what ships — earlier stages are scaffolding whose bytes never
+    reach the artifact — so the final stage's base image name is the classifier. It is read
+    off the file rather than listed per-image, so a second nginx image or a sixth python
+    service is sorted with no edit here, and a shape nobody has taught this file comes back
+    :data:`KIND_UNKNOWN` and reddens
+    :func:`test_every_dockerfile_in_the_repo_is_graded_by_some_gate` instead of silently
+    landing in the python gates it would generate nonsense for.
+    """
+    stages = parse_stages(dockerfile_text(label), label)
+    if not stages:
+        return KIND_UNKNOWN
+    base = stages[-1].base
+    name = re.split(r"[:@]", base, maxsplit=1)[0].rsplit("/", 1)[-1]
+    return _KIND_BY_FINAL_BASE.get(name, KIND_UNKNOWN)
+
+
+@lru_cache(maxsize=1)
+def images() -> dict[str, ImageSpec]:
+    """The PYTHON images, keyed by repo-relative Dockerfile path.
+
+    Not "every Dockerfile" any more, and the narrowing is deliberate rather than a
+    regression: every gate below this line reads a python import graph out of the COPY set,
+    and an image with no python in it has none. The set is still DISCOVERED —
+    :func:`dockerfile_labels` finds them all and :func:`image_kind` sorts them — so nothing
+    is dropped by being unlisted; the images this filters out are graded by
+    :func:`web_images`'s gates instead, and
+    :func:`test_every_dockerfile_in_the_repo_is_graded_by_some_gate` proves the two sets
+    exhaust the repo.
+    """
+    return {
+        label: parse_dockerfile_text(dockerfile_text(label), label)
+        for label in dockerfile_labels()
+        if image_kind(label) == KIND_PYTHON
+    }
+
+
+def _is_under(child: str, parent: str) -> bool:
+    """Is ``child`` strictly inside directory ``parent``? ``/`` is a parent of everything.
+
+    Written out rather than spelled ``child.startswith(parent + "/")`` inline because that
+    spelling is wrong for exactly one value and it is the most dangerous one: with
+    ``parent`` of ``/`` it tests ``startswith("//")`` and answers False, so a ``COPY --from``
+    landing at the filesystem ROOT — which overwrites every path in the image — read as
+    touching nothing.
+    """
+    prefix = parent if parent.endswith("/") else parent + "/"
+    return child.startswith(prefix)
+
+
+def opaque_stage_copies(spec: ImageSpec) -> tuple[str, ...]:
+    """The ``COPY --from=`` lines whose bytes this checker's python verdicts DEPEND on.
+
+    The blanket refusal this replaces was right about the danger and wrong about its size,
+    and the difference stopped being academic the day ``apps/merchant/Dockerfile.web``
+    arrived: a node stage builds a JavaScript bundle, the python stage copies it to
+    ``/app/ui/``, and nothing about the python import graph is affected by bytes that are
+    not python and are not on an import path. Refusing that file wholesale would have left a
+    real python image — with a real ``pip`` layer, a real ``.pkgroot`` and a real
+    ``uvicorn`` entrypoint — outside every gate in this file, which is the same outcome as
+    the discovery hole this all began with, reached by a different route.
+
+    What is still refused, and the reason it must be: a ``--from`` copy landing at
+    ``<sys.path root>/<first-party package name>``. Those bytes could make ``import <pkg>``
+    work inside the container while every check here reports it unwired, or — worse in the
+    other direction — be missing while a claim says it is there. This checker cannot read
+    them, so it declines to grade an image that depends on them rather than guessing.
+
+    Deliberately NOT refused: a ``--from`` landing entirely OUTSIDE the import machinery. It
+    can carry an asset the service serves (the case above) and the python analysis is
+    complete without it. What such a copy CAN still hide is stated in the gate list at the
+    top of the CI pipeline: no check here opens those bytes, so a bundle that is empty,
+    stale or wrongly based is invisible to this file.
+
+    THE TEST IS ON WHAT AN IMPORT COULD REACH, NOT ON THE DESTINATION'S NAME. The first
+    draft compared ``basename(destination)`` against the package list; it caught
+    ``/app/exchange`` and an adversarial re-measurement walked straight past every one of
+    these, all of which are refused now:
+
+    * ``/app`` and ``/app/`` — the ``sys.path`` root ITSELF. ``COPY --from=b /build /app/``
+      copies the CONTENTS of the source, so the bytes land as ``/app/<anything>``, package
+      names included, while the destination text this function reads is just ``/app``.
+    * ``/app/.pkgroot`` — the symlink farm through which EVERY first-party import resolves.
+      Its basename is not a package name, so replacing it wholesale was permitted.
+    * ``/app/apps/merchant/svc/src/`` — a path the CONTEXT copy set also fills, and what
+      ``.pkgroot/merchant_svc`` points at. Overwriting it replaces the very bytes the
+      runtime probe grades, with bytes the probe cannot see. That is the one shape of
+      ``--from`` that produces a false GREEN rather than a false red.
+    * ``/app/yaml`` — a name a shipped module imports. In the image that import resolves to
+      unread bytes; in every verdict here it resolves to the venv.
+
+    And the case that is PERMITTED, because none of the above can be said of it:
+    ``/app/ui/``, where ``apps/merchant/Dockerfile.web`` puts its dashboard bundle. No
+    context copy fills it, it is not a root or a link target, and nothing the image ships
+    imports a module called ``ui`` — so no verdict in this file can be changed by bytes
+    that land there. Refusing it would have put a real python image, with a real pip layer
+    and a real uvicorn entrypoint, outside every gate here: the discovery hole this all
+    began with, reached by a different route.
+    """
+    roots = [root.rstrip("/") for root in spec.path_roots if root.strip()]
+    # Refused only when the copy IS one of these, or SWALLOWS one. A root is a directory
+    # that legitimately holds unrelated things -- `/app` holds `apps/`, `packages/` and the
+    # merchant's `ui/` -- so "somewhere under a root" is not by itself a reason to refuse.
+    # What lands under a root is judged by `overlapping` below, name by name.
+    containers = list(roots)
+    # Refused on ANY overlap in either direction: these are paths whose exact bytes some
+    # verdict here already depends on.
+    overlapping = [destination.rstrip("/") for _source, destination in _real_copies(spec)]
+    for target, link in spec.links:
+        pointed = (
+            target
+            if target.startswith("/")
+            else posixpath.normpath(posixpath.join(posixpath.dirname(link), target))
+        )
+        overlapping.append(pointed.rstrip("/"))
+        overlapping.append(link.rstrip("/"))
+    # Every top-level module name the shipped tree imports. A name nothing imports cannot
+    # change a resolution, and a checker that refused those would refuse a served asset.
+    imported: set[str] = set()
+    for module_path in shipped_sources(spec):
+        try:
+            tree = ast.parse((REPO_ROOT / module_path).read_text(encoding="utf-8"))
+        except (OSError, SyntaxError):  # pragma: no cover - graded elsewhere, loudly
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                imported.add(node.module.split(".")[0])
+    overlapping += [f"{root}/{name}" for root in roots for name in sorted(imported)]
+
+    opaque: list[str] = []
+    for line in spec.stage_copies:
+        tokens = [token for token in line.split() if not token.startswith("--")]
+        if not tokens:
+            opaque.append(line)
+            continue
+        destination = posixpath.normpath(tokens[-1]).rstrip("/") or "/"
+        # The interpreter's own third-party tree. Not a `path_roots` entry, so the loop
+        # below would miss it, and replacing it changes what every `import` in the image
+        # resolves to while the runtime probe keeps grading this venv's site-packages.
+        if any(part in {"site-packages", "dist-packages"} for part in destination.split("/")):
+            opaque.append(line)
+            continue
+        if any(destination == path or _is_under(path, destination) for path in containers):
+            opaque.append(line)
+            continue
+        if any(
+            destination == path or _is_under(destination, path) or _is_under(path, destination)
+            for path in overlapping
+        ):
+            opaque.append(line)
+    return tuple(opaque)
 
 
 def _real_copies(spec: ImageSpec) -> list[tuple[str, str]]:
@@ -515,9 +952,18 @@ def is_dockerignored(repo_relative: str) -> bool:
     An approximation, and named as one: it applies each pattern to the full repo-relative
     path and to every path component, which covers the ``**/__pycache__``, ``node_modules``,
     ``dist`` shapes this repo's ``.dockerignore`` actually uses. It does not implement
-    negation (``!pattern``) or Go's full ``filepath.Match`` semantics. The consequence of
-    getting it wrong is bounded: a file wrongly kept is graded when the image would not
-    contain it (a possible false red), never a file wrongly dropped from the graded set.
+    negation (``!pattern``) or Go's full ``filepath.Match`` semantics.
+
+    WHICH WAY IT ERRS — corrected, because the sentence this replaces claimed the safe
+    direction and the code does the other one. Applying a non-``**/`` pattern to EVERY path
+    component OVER-approximates: Docker anchors ``coverage`` or ``venv`` at the context
+    root, this matches them at any depth. An over-approximation makes
+    :func:`shipped_sources` DROP files, and a file dropped from the graded set is a module
+    nothing checks — the false-GREEN direction, not the false-red one the old wording
+    promised. Nothing in the tree hits it today (no ``.py`` under a directory named
+    ``coverage``, ``venv``, ``build``, ``dist`` or ``htmlcov`` is shipped by any image), so
+    this is a hazard to know about rather than a live defect; a ``!negation`` line added to
+    ``.dockerignore`` would be modelled wrongly in the same direction.
     """
     parts = repo_relative.split("/")
     for raw in dockerignore_patterns():
@@ -1679,11 +2125,16 @@ def test_the_repo_has_images_and_first_party_packages_to_grade() -> None:
     for label, spec in sorted(images().items()):
         assert spec.copies, f"{label}: no COPY instructions parsed — the parser is broken"
         assert shipped_sources(spec), f"{label}: the COPY set contains no python module"
-        assert spec.stage_copies == (), (
-            f"{label} uses `COPY --from=`, which this checker does not model: the bytes come "
-            f"from another stage or image, not the build context, so neither the COPY-set "
-            f"analysis nor the materialiser can say what is in the artifact. Teach it the "
-            f"construct before relying on any verdict about this image: {spec.stage_copies}"
+        opaque = opaque_stage_copies(spec)
+        assert opaque == (), (
+            f"{label} uses `COPY --from=` to land bytes where they could supply a first-party "
+            f"package, and this checker cannot model them: they come from another stage or "
+            f"image, not the build context, so neither the COPY-set analysis nor the "
+            f"materialiser can say what is in the artifact. A `--from` copy whose destination "
+            f"is a `sys.path` entry can make `import <pkg>` succeed in the container and fail "
+            f"in every verdict here — which is the false GREEN that stripping the `--from` "
+            f"flag and reading the source as a repo path once produced (T-298). Teach it the "
+            f"construct before relying on any verdict about this image: {opaque}"
         )
         assert spec.json_form_copies == (), (
             f"{label} uses the JSON-array COPY form, which this checker does not model: "
@@ -2603,4 +3054,1025 @@ def test_t334_the_report_says_why_a_claim_only_failure_is_a_failure() -> None:
     assert rendered >= 8, (
         f"only {rendered} of {len(cases)} witnesses exercised the claim-only report branch, "
         f"so it is still substantially unrendered"
+    )
+
+
+# =====================================================================================
+# THE OTHER SHAPE — a node/nginx image, and what a copyset check MEANS for one
+#
+# `apps/buyer/Dockerfile.web` builds the page a shopper opens: vite bundles the SPA in a
+# node stage, nginx serves the bundle and reverse-proxies `/buyer/` to `buyer-svc`. It has
+# no python and no import graph, so every gate above it is inapplicable — and "inapplicable"
+# is exactly the reasoning that leaves an image ungraded, which is how it got here.
+#
+# THE DEFECT CLASS IS THE SAME ONE; only the graph changes. A python module that imports a
+# package absent from its image dies at container boot. A node build whose context is
+# missing a file the toolchain resolves dies at BUILD time — and, measured during this very
+# image's construction, it does not say so:
+#
+#     RUN npm run build:ui --workspace @proxyshop/buyer
+#     ...
+#     transforming (3) app/main.tsx
+#     error during build: Tsconfig not found /repo/tsconfig.base.json
+#
+# `tsconfig.base.json` was not in the COPY set. The failure surfaced as a vite TRANSFORM
+# error after transforming three modules, which reads like a code fault in the third module
+# and sends you to read TypeScript. It is a copyset defect wearing a compiler's clothes.
+#
+# So the "import graph" of this image is its RESOLUTION graph, and it has four strands, each
+# with a measured failure behind it:
+#
+#   1. `npm ci` wants the root lockfile PLUS every workspace member's package.json — the
+#      lockfile describes the whole workspace tree and npm refuses a tree it cannot match.
+#      Add a workspace member and forget its COPY and the dependency layer stops installing.
+#   2. the tsconfig chain the built workspace `extends` (and `references`) has to be in the
+#      context. That is the measured failure above, verbatim.
+#   3. a workspace dependency resolves to another member's DIRECTORY, not just its manifest.
+#      `@proxyshop/buyer` depends on `@proxyshop/contracts`; COPY the manifest and not the
+#      sources and vite fails in the same illegible way.
+#   4. `.dockerignore` is part of the context. `**/dist` is in it, so a COPY that named a
+#      built directory would ship an EMPTY one — no error, just an image with no page.
+#
+# And then the half that no `docker build` can ever catch, because the build is green when
+# it happens: WHAT THE FINAL STAGE SERVES. `COPY --from=bundle` puts the bundle at some
+# path; nginx's `root` names some path; nothing checks they are the same path. Point `root`
+# one directory over and the image builds, the container reports healthy the moment nginx
+# answers, and every page is a 404. That is a container-boot copyset defect with no python
+# in it at all, and the checks below are what stand between it and the demo.
+# =====================================================================================
+
+
+@lru_cache(maxsize=1)
+def web_images() -> dict[str, tuple[Stage, ...]]:
+    """The STATIC-WEB images, keyed by repo-relative Dockerfile path, as parsed stages."""
+    return {
+        label: parse_stages(dockerfile_text(label), label)
+        for label in dockerfile_labels()
+        if image_kind(label) == KIND_STATIC_WEB
+    }
+
+
+@lru_cache(maxsize=1)
+def npm_workspaces() -> dict[str, str]:
+    """``{package name: repo-relative directory}`` for every npm workspace member.
+
+    Read off the root ``package.json``'s own ``workspaces`` globs — the node counterpart of
+    :func:`first_party_packages`, and derived for the same reason: a member added later is
+    graded with no edit here, which is the whole point of a checker that cannot be outrun.
+    """
+    root = json.loads((REPO_ROOT / "package.json").read_text(encoding="utf-8"))
+    found: dict[str, str] = {}
+    for pattern in root.get("workspaces") or []:
+        for path in sorted(REPO_ROOT.glob(str(pattern))):
+            manifest = path / "package.json"
+            if not manifest.is_file():
+                continue
+            name = json.loads(manifest.read_text(encoding="utf-8")).get("name")
+            if name:
+                found[str(name)] = str(path.relative_to(REPO_ROOT))
+    return found
+
+
+#: A `//` line comment or a `/* */` block comment outside a string. JSON with comments is
+#: legal in a tsconfig and is what `tsc --init` itself emits.
+_JSONC_COMMENT = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.DOTALL)
+
+
+def _read_jsonc(path: Path) -> Any:
+    """A tsconfig, comments and all. Raises ``ValueError`` if it is genuinely unreadable."""
+    text = path.read_text(encoding="utf-8")
+    stripped = _JSONC_COMMENT.sub(lambda m: m.group(0) if m.group(0).startswith('"') else "", text)
+    # Trailing commas are legal in a tsconfig and not in JSON.
+    return json.loads(re.sub(r",(\s*[}\]])", r"\1", stripped))
+
+
+def tsconfig_closure(repo_relative: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """``(files reachable from repo_relative, files that could not be read)``.
+
+    The node analogue of :func:`import_sites`: these are the files the TypeScript-aware
+    toolchain will open, so an image that builds this workspace has to ship all of them.
+
+    TypeScript's own two resolution rules are implemented rather than approximated, because
+    an adversarial re-measurement showed the approximation TRUNCATING the closure — the
+    false-green direction, silently:
+
+    * a path naming a DIRECTORY resolves to that directory's ``tsconfig.json``;
+    * a path with NO EXTENSION gets ``.json`` appended. ``"extends": "../base"`` is legal
+      and used to drop ``../base.json`` and everything it in turn extends.
+
+    A config that cannot be parsed is RETURNED as unreadable rather than skipped, so the
+    caller can report it. The first version of this said so in its docstring and did the
+    opposite in its body, which is the worst of both.
+    """
+    seen: list[str] = []
+    unreadable: list[str] = []
+    queue = [repo_relative]
+    while queue:
+        current = queue.pop(0)
+        if current in seen:
+            continue
+        path = REPO_ROOT / current
+        if path.is_dir():
+            current = str((path / "tsconfig.json").relative_to(REPO_ROOT))
+            path = REPO_ROOT / current
+        elif not path.is_file() and not posixpath.splitext(current)[1]:
+            current = f"{current}.json"
+            path = REPO_ROOT / current
+        if current in seen:
+            continue
+        if not path.is_file():
+            continue
+        seen.append(current)
+        try:
+            parsed = _read_jsonc(path)
+        except ValueError:
+            unreadable.append(current)
+            continue
+        extends = parsed.get("extends")
+        targets = [extends] if isinstance(extends, str) else list(extends or [])
+        targets += [ref.get("path") for ref in parsed.get("references") or [] if ref.get("path")]
+        for target in targets:
+            if not isinstance(target, str) or not target.startswith("."):
+                continue  # a bare specifier resolves out of node_modules, not the context
+            resolved = posixpath.normpath(posixpath.join(posixpath.dirname(current), target))
+            queue.append(resolved)
+    return tuple(seen), tuple(unreadable)
+
+
+def context_sources(source: str) -> list[str]:
+    """The repo-relative paths a ``COPY`` source names. ``[]`` when it names nothing.
+
+    Three spellings that a plain ``(REPO_ROOT / source).exists()`` gets wrong, each of them
+    legal Dockerfile and each found by breaking this checker on purpose:
+
+    * ``COPY . .`` — the commonest idiom there is. ``.`` never equals a repo-relative path
+      and never prefixes one, so every file in the context read as absent and a correct
+      Dockerfile was reported as four separate build failures.
+    * ``COPY package*.json ./`` — Docker matches Go filepath globs in a source. The literal
+      string is not a file, so it read as a COPY that would fail the build.
+    * a trailing slash on a directory, which is the same directory.
+    """
+    src = source.rstrip("/")
+    if src in {"", "."}:
+        return ["."]
+    if any(character in src for character in "*?["):
+        return sorted(
+            str(match.relative_to(REPO_ROOT))
+            for match in REPO_ROOT.glob(src)
+            if not match.is_symlink() or match.exists()
+        )
+    return [src] if (REPO_ROOT / src).exists() else []
+
+
+def stage_image_path(stage: Stage, repo_relative: str, before: int | None = None) -> str | None:
+    """Where a build-context path lands inside ``stage`` AS OF instruction ``before``.
+
+    :func:`image_path_for`'s rules — last COPY wins, a trailing-slash destination is a
+    directory — applied to one stage's own copy set and its own ``WORKDIR``, and bounded by
+    position. ``before`` is the position of the ``RUN`` that will read the file: a ``COPY``
+    that happens afterwards has not happened yet as far as that command is concerned, and
+    counting it is how an order-blind checker calls a broken ``npm ci`` clean.
+    """
+    landed: str | None = None
+    for position, source, destination in stage.copies:
+        if before is not None and position >= before:
+            break
+        dst = destination.rstrip("/")
+        for src in context_sources(source):
+            if src == ".":
+                # The whole context, laid down under the destination directory.
+                landed = f"{dst}/{repo_relative}"
+            elif repo_relative == src:
+                is_file = (REPO_ROOT / src).is_file()
+                landed = (
+                    f"{dst}/{posixpath.basename(src)}"
+                    if is_file and destination.endswith("/")
+                    else dst
+                )
+            elif repo_relative.startswith(src + "/"):
+                landed = dst + repo_relative[len(src) :]
+    return landed
+
+
+def _lands_at(stage: Stage, repo_relative: str, before: int | None = None) -> str | None:
+    """``repo_relative`` must land at the path the toolchain will look for it at, in time.
+
+    Returns a problem string, or ``None`` when it lands correctly. A file copied into the
+    image at the WRONG path is not a smaller failure than one left out — ``npm ci`` and
+    ``tsc`` both resolve by path, so a manifest under a different name is simply absent —
+    and a file copied at the right path AFTER the command that needs it is absent too.
+    """
+    wanted = posixpath.join(stage.workdir, repo_relative)
+    if is_dockerignored(repo_relative):
+        return (
+            f"{repo_relative} is excluded by .dockerignore, so the build context does not "
+            f"contain it however many COPY lines name it"
+        )
+    landed = stage_image_path(stage, repo_relative, before=before)
+    if landed is None:
+        if stage_image_path(stage, repo_relative) is not None:
+            return (
+                f"{repo_relative} is copied only AFTER this instruction, so it is not in the "
+                f"image yet when this command reads it"
+            )
+        return f"{repo_relative} is in no COPY of this stage; the build cannot resolve it"
+    if landed != wanted:
+        return f"{repo_relative} lands at {landed}, but the build resolves it at {wanted}"
+    return None
+
+
+#: ``npm run <script> --workspace <package>``, the line that names what an image builds.
+_NPM_RUN = re.compile(r"\bnpm\s+run\s+(?P<script>[\w:.-]+)(?:\s+--workspace[=\s]+(?P<pkg>\S+))?")
+#: ``npm ci`` / ``npm install`` — the layer that needs the whole workspace manifest set.
+_NPM_INSTALL = re.compile(r"\bnpm\s+(?:ci|install|i)\b")
+#: vite's output directory. Absent means vite's own default, which is ``dist``.
+_VITE_OUT_DIR = re.compile(r"\boutDir\s*:\s*['\"]([^'\"]+)['\"]")
+#: The nginx directives this file grades. Everything else in a server block is not its business.
+_NGINX_LISTEN = re.compile(r"^\s*listen\s+(?:[\d.]+:)?(\d+)", re.MULTILINE)
+_NGINX_ROOT = re.compile(r"^\s*root\s+(\S+?);", re.MULTILINE)
+_NGINX_TRY_FILES = re.compile(r"^\s*try_files\s+([^;]+);", re.MULTILINE)
+#: Where the stock nginx image actually reads configuration from.
+_NGINX_CONF_DIR = "/etc/nginx/conf.d"
+_NGINX_MAIN_CONF = "/etc/nginx/nginx.conf"
+#: The official image renders anything here into conf.d at container start (envsubst).
+_NGINX_TEMPLATE_DIR = "/etc/nginx/templates"
+
+
+#: The one idiom both vite configs in this repo use to pin `root` to the config's own
+#: directory, so a build is invariant to the working directory it was started from.
+_VITE_SELF_ROOT = re.compile(r"root\s*[:=]\s*fileURLToPath\(\s*new URL\(\s*['\"]\.['\"]")
+#: `root: '<literal>'`, resolved against the config file's directory.
+_VITE_LITERAL_ROOT = re.compile(r"^\s*root\s*:\s*['\"]([^'\"]+)['\"]", re.MULTILINE)
+
+
+#: `vite build --config <path>` — the build script naming its own configuration file.
+_VITE_CONFIG_FLAG = re.compile(r"--config[=\s]+(\S+)")
+
+
+def _vite_config_for(workspace_dir: str, script: str) -> tuple[Path | None, str | None]:
+    """``(config file, problem)`` — the config the workspace's build script actually names.
+
+    Read off the ``scripts`` entry rather than found by globbing, and the difference is not
+    cosmetic: ``tsconfig.base.json`` sets ``composite``/``declaration``, so ``tsc -b``
+    emits ``vite.config.js`` and ``vite.config.d.ts`` NEXT TO ``vite.config.ts``. A glob
+    picks up all three and cannot say which is the source, so the checker went from a
+    verdict to a shrug on a tree where nothing was wrong. The script says which file it
+    uses; believe it.
+    """
+    manifest_path = REPO_ROOT / workspace_dir / "package.json"
+    command = (json.loads(manifest_path.read_text(encoding="utf-8")).get("scripts") or {}).get(
+        script, ""
+    )
+    named = _VITE_CONFIG_FLAG.search(str(command))
+    if named is not None:
+        config = REPO_ROOT / workspace_dir / named.group(1)
+        if not config.is_file():
+            return None, (
+                f"{workspace_dir}'s `{script}` names --config {named.group(1)}, which is not "
+                f"a file in this repo, so the build has no configuration to read"
+            )
+        return config, None
+    default = REPO_ROOT / workspace_dir / "vite.config.ts"
+    if default.is_file():
+        return default, None
+    return None, (
+        f"{workspace_dir}'s `{script}` names no --config and has no vite.config.ts, so this "
+        f"checker cannot say where its build writes and cannot grade what the final stage "
+        f"copies out. Teach it the build tool before trusting any verdict about this image."
+    )
+
+
+def _vite_out_dir(workspace_dir: str, script: str) -> tuple[str | None, str | None]:
+    """``(repo-relative output directory, problem)`` for a workspace's vite build.
+
+    ``build.outDir`` is resolved against vite's ``root``, NOT against the config file and
+    not against the workspace — and the two configs in this repo put the config in
+    different places (``apps/buyer/vite.config.ts`` beside the manifest,
+    ``apps/merchant/app/vite.config.ts`` a directory down), so assuming either would be
+    wrong for one of them. ``root`` is therefore read, in vite's own order of precedence:
+    the self-referencing idiom both configs use, then a string literal, then vite's default
+    of the process working directory — which for ``npm run --workspace <x>`` is the
+    workspace root.
+
+    A config whose ``root`` this cannot resolve comes back as a PROBLEM rather than a guess.
+    The whole value of the artifact check is that it knows where the build writes; a
+    checker that guesses that has no business grading what the final stage copies out.
+    """
+    config, problem = _vite_config_for(workspace_dir, script)
+    if config is None:
+        return None, problem
+    config_dir = str(config.parent.relative_to(REPO_ROOT))
+    text = config.read_text(encoding="utf-8")
+    if _VITE_SELF_ROOT.search(text):
+        root = config_dir
+    elif (literal := _VITE_LITERAL_ROOT.search(text)) is not None:
+        root = posixpath.normpath(posixpath.join(config_dir, literal.group(1)))
+    elif "root" in text.replace("rootDir", ""):
+        return None, (
+            f"{config.relative_to(REPO_ROOT)} sets `root` in a form this checker cannot "
+            f"resolve, and `build.outDir` is relative to it. Teach it the form rather than "
+            f"letting it guess where the bundle lands."
+        )
+    else:
+        root = workspace_dir  # vite's default: the cwd, which `npm run --workspace` sets here
+    found = _VITE_OUT_DIR.search(text)
+    out_dir = found.group(1) if found else "dist"
+    if out_dir.startswith("/"):
+        return None, f"{config.name} sets an absolute outDir ({out_dir}); not modelled"
+    return posixpath.normpath(posixpath.join(root, out_dir)), None
+
+
+@lru_cache(maxsize=1)
+def _compose_service_bodies() -> dict[str, dict[str, Any]]:
+    """``{service name: its compose definition}`` across every included fragment."""
+    bodies: dict[str, dict[str, Any]] = {}
+    for fragment in compose_fragments():
+        path = REPO_ROOT / fragment
+        if not path.is_file():
+            continue
+        parsed = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for name, definition in (parsed.get("services") or {}).items():
+            bodies[str(name)] = definition or {}
+    return bodies
+
+
+def web_image_problems(label: str, text: str) -> dict[str, list[str]]:
+    """Grade the build-and-serve half of an image. ``{check name: problems}``; empty is clean.
+
+    Applies to any MULTI-STAGE image, whatever its final base, because the failure class is
+    the builder's, not the server's: ``apps/buyer/Dockerfile.web`` serves its bundle from
+    nginx and ``apps/merchant/Dockerfile.web`` serves its from the merchant's own uvicorn,
+    and both resolve the same npm workspace, the same lockfile and the same tsconfig chain
+    out of the same build context. The serving checks at the bottom are the only part that
+    is nginx-specific, and they are guarded as such.
+
+    Keyed by check so the controls below can prove each strand flips independently — a
+    checker that only ever reports "something is wrong" cannot be shown to detect the thing
+    it claims to.
+    """
+    problems: dict[str, list[str]] = {}
+
+    def report(check: str, message: str) -> None:
+        problems.setdefault(check, []).append(message)
+
+    stages = parse_stages(text, label)
+    if len(stages) < 2:
+        if image_kind(label) == KIND_STATIC_WEB:
+            report(
+                "shape",
+                f"{label} has {len(stages)} stage(s) and serves static files. A served-bundle "
+                f"image builds in one stage and serves from another; a single-stage one "
+                f"either ships its whole toolchain or ships no bundle, and this checker "
+                f"models neither.",
+            )
+        return problems
+    final = stages[-1]
+    builders = {stage.name: stage for stage in stages[:-1] if stage.name}
+
+    # ---- the build context: what it names must exist, and must not be excluded -------
+    for stage in stages:
+        for line in stage.json_form_copies:
+            report("context", f"stage {stage.index}: JSON-array COPY is not modelled: {line}")
+        for _position, source, _destination in stage.copies:
+            matched = context_sources(source)
+            if not matched:
+                report(
+                    "context",
+                    f"stage {stage.index} COPYs {source!r}, which matches nothing in the "
+                    f"build context, so `docker build` fails on this line",
+                )
+            elif matched != ["."] and all(is_dockerignored(src) for src in matched):
+                report(
+                    "context",
+                    f"stage {stage.index} COPYs {source!r}, which .dockerignore excludes. "
+                    f"The instruction is legal and copies NOTHING — this is the shape that "
+                    f"ships an image with no page and no error.",
+                )
+
+    # ---- what the build resolves: workspaces, tsconfigs, and the built member ---------
+    workspaces = npm_workspaces()
+    for stage in stages[:-1]:
+        installs = [position for position, run in stage.runs if _NPM_INSTALL.search(run)]
+        builds = [
+            (position, run, found)
+            for position, run in stage.runs
+            if (found := _NPM_RUN.search(run))
+        ]
+        for install_at in installs:
+            for repo_relative in ("package.json", "package-lock.json"):
+                problem = _lands_at(stage, repo_relative, before=install_at)
+                if problem:
+                    report("workspace", f"stage {stage.index} runs `npm ci`: {problem}")
+            for name, directory in sorted(workspaces.items()):
+                problem = _lands_at(stage, f"{directory}/package.json", before=install_at)
+                if problem:
+                    report(
+                        "workspace",
+                        f"stage {stage.index} runs `npm ci` and {problem}. npm resolves the "
+                        f"root lockfile against EVERY workspace member ({name}), and refuses "
+                        f"a tree it cannot match.",
+                    )
+        for build_at, run, found in builds:
+            package = (found.group("pkg") or "").strip("'\"")
+            script = str(found.group("script") or "")
+            if not package:
+                report(
+                    "build-script",
+                    f"stage {stage.index} runs {run!r} without `--workspace`, so which "
+                    f"member it builds depends on the working directory; not modelled",
+                )
+                continue
+            built_dir = workspaces.get(package)
+            if built_dir is None:
+                report(
+                    "build-script",
+                    f"stage {stage.index} builds workspace {package!r}, which the root "
+                    f"package.json declares no member for. Known: {sorted(workspaces)}",
+                )
+                continue
+            manifest = json.loads(
+                (REPO_ROOT / built_dir / "package.json").read_text(encoding="utf-8")
+            )
+            if script not in (manifest.get("scripts") or {}):
+                report(
+                    "build-script",
+                    f"stage {stage.index} runs `npm run {script}` in {package!r}, whose "
+                    f"package.json declares no such script",
+                )
+            if stage_image_path(stage, built_dir, before=build_at) is None:
+                report(
+                    "build-script",
+                    f"stage {stage.index} builds {package!r} but no COPY puts {built_dir}/ "
+                    f"in the image before that line, so there is nothing to build",
+                )
+            # the tsconfig chain the toolchain will open, and the member directories this
+            # one resolves imports out of.
+            reachable, unreadable = tsconfig_closure(f"{built_dir}/tsconfig.json")
+            for tsconfig in unreadable:
+                report(
+                    "tsconfig",
+                    f"{tsconfig} could not be parsed, so the chain below it is UNGRADED. A "
+                    f"closure this checker silently truncated would be a false green about "
+                    f"exactly the file class that broke this image's first build.",
+                )
+            for tsconfig in reachable:
+                problem = _lands_at(stage, tsconfig, before=build_at)
+                if problem:
+                    report(
+                        "tsconfig",
+                        f"stage {stage.index} builds {package!r} and {problem}. This is the "
+                        f"measured failure: vite reports it as `Tsconfig not found` mid-"
+                        f"transform, which reads like a code fault, not a missing file.",
+                    )
+            for dependency in sorted(manifest.get("dependencies") or {}):
+                sibling = workspaces.get(dependency)
+                if sibling is None or stage_image_path(stage, sibling, before=build_at) is not None:
+                    continue
+                report(
+                    "workspace-deps",
+                    f"stage {stage.index} builds {package!r}, which depends on the workspace "
+                    f"member {dependency!r}, but no COPY puts {sibling}/ in the image before "
+                    f"that line. Its manifest alone is not its source.",
+                )
+
+    # ---- what the final stage serves must be what a build stage produced --------------
+    #
+    # A multi-stage image whose FINAL stage pulls NOTHING forward built something and threw
+    # it away. That is not a hypothetical: deleting the single `COPY --from=bundle` line
+    # from either Dockerfile.web leaves an image that builds, starts, reports healthy and
+    # serves no page at all — and the first version of this function graded both of them
+    # CLEAN, because `served_roots` stayed empty and the check below was guarded on it
+    # being non-empty. A check that switches itself off when its subject is missing is the
+    # gate going quiet exactly when it matters, one more time.
+    if not final.from_copies:
+        report(
+            "artifact",
+            f"{label} builds in {len(stages) - 1} earlier stage(s) and its FINAL stage "
+            f"copies nothing forward with `COPY --from=`. Whatever those stages produced is "
+            f"not in the artifact: the image builds, the container starts, and it ships "
+            f"none of what the build was for.",
+        )
+    served_roots: list[str] = []
+    for reference, source, destination in final.from_copies:
+        builder = builders.get(reference)
+        if builder is None and reference.isdigit() and int(reference) < len(stages) - 1:
+            # `COPY --from=0` is legal and common in hand-written multi-stage files: a stage
+            # with no `AS` alias is referred to by its index.
+            builder = stages[int(reference)]
+        if builder is None:
+            report(
+                "artifact",
+                f"the final stage copies from {reference!r}, which is not a stage this "
+                f"Dockerfile defines. Its bytes come from somewhere this checker cannot "
+                f"read, so nothing below can be said about the artifact. Stages: "
+                f"{sorted(builders)}",
+            )
+            continue
+        built = [
+            ((found.group("pkg") or "").strip("'\""), found.group("script"))
+            for _position, run in builder.runs
+            if (found := _NPM_RUN.search(run))
+        ]
+        produced = [
+            (workspaces[package], script) for package, script in built if package in workspaces
+        ]
+        if not produced:
+            report(
+                "artifact",
+                f"stage {reference!r} runs no `npm run ... --workspace`, so this checker "
+                f"cannot say what it produces or whether {source} is it",
+            )
+            continue
+        expected: list[str] = []
+        for directory, script in produced:
+            out_dir, problem = _vite_out_dir(directory, script)
+            if problem:
+                report("artifact", problem)
+                continue
+            if out_dir is not None:
+                expected.append(posixpath.join(builder.workdir, out_dir))
+        if expected and posixpath.normpath(source).rstrip("/") not in expected:
+            report(
+                "artifact",
+                f"the final stage copies {source} out of stage {reference!r}, but that "
+                f"stage's build writes to {expected}. The copy would take a path the build "
+                f"never fills — or, worse, one a previous build left behind.",
+            )
+        served_roots.append(destination.rstrip("/"))
+
+    # ---- ...and whatever serves it has to be pointed at it ----------------------------
+    #
+    # An image that serves its bundle from its OWN application rather than from nginx says
+    # where the bundle is in an `ENV`. `apps/merchant/Dockerfile.web` sets
+    # `ENV MERCHANT_UI_DIST=/app/ui` and its own comment explains why: `dashboard/config.py`
+    # treats an unset variable and a non-directory identically — both are None, both are the
+    # unbuilt page — so a value naming a directory the image does not contain restores, in
+    # silence, the exact 503 that file was written to retire. Point the variable one
+    # character away from the COPY destination and the image builds, the container reports
+    # healthy, and every /dashboard request is the "run a build" page again.
+    #
+    # Which variables? Every one whose value is an ABSOLUTE PATH. Derived, not listed: a
+    # second image with a second such variable is graded with no edit here, and a variable
+    # holding a URL, a mode or a number is not a filesystem claim and is not treated as one.
+    filled = [destination.rstrip("/") for _position, _source, destination in final.copies]
+    filled += [destination.rstrip("/") for _reference, _source, destination in final.from_copies]
+    filled += [link.rstrip("/") for _target, link in parse_dockerfile_text(text, label).links]
+    for name, value in final.envs:
+        # A PATH-LIST or an interpolation is not a claim about one directory, and PYTHONPATH
+        # in particular is the import root, graded by `package_wiring` rather than here.
+        if not value.startswith("/") or ":" in value or "$" in value or name == "PYTHONPATH":
+            continue
+        wanted = posixpath.normpath(value).rstrip("/")
+        if any(wanted == path or _is_under(wanted, path) for path in filled):
+            continue
+        report(
+            "env-path",
+            f"the final stage sets {name}={value}, an absolute path inside the image that "
+            f"no COPY fills. It resolves to nothing at runtime, and a service that reads it "
+            f"cannot tell that from 'not configured'. Filled by this stage: "
+            f"{sorted(set(filled))}",
+        )
+
+    if image_kind(label) != KIND_STATIC_WEB:
+        return problems
+
+    configs = [
+        # A destination written with a trailing slash is a DIRECTORY, so a file source lands
+        # inside it under its own basename: `COPY x/nginx.conf /etc/nginx/conf.d/` is
+        # `/etc/nginx/conf.d/nginx.conf`, which nginx reads perfectly well. Comparing the
+        # raw destination string called that unread and reported a working image broken —
+        # the same trailing-slash rule `image_path_for` has always implemented.
+        (
+            source,
+            f"{destination.rstrip('/')}/{posixpath.basename(source.rstrip('/'))}"
+            if destination.endswith("/")
+            else destination,
+        )
+        for _position, source, destination in final.copies
+        if destination.startswith("/etc/nginx")
+    ]
+    if not configs:
+        report(
+            "served",
+            "the final stage copies no file under /etc/nginx, so the container serves the "
+            "base image's stock configuration and none of this repo's routing. The "
+            "reverse-proxy to buyer-svc that keeps the SPA same-origin lives in that file.",
+        )
+    for source, destination in configs:
+        readable = (
+            destination == _NGINX_MAIN_CONF
+            or (_is_under(destination, _NGINX_CONF_DIR) and destination.endswith(".conf"))
+            # The official image's documented envsubst convention: anything in
+            # /etc/nginx/templates is rendered into conf.d at container start.
+            or _is_under(destination, _NGINX_TEMPLATE_DIR)
+        )
+        if not readable:
+            report(
+                "served",
+                f"{source} lands at {destination}, which nginx never reads: it loads "
+                f"{_NGINX_MAIN_CONF} and whatever that includes from {_NGINX_CONF_DIR}/*.conf. "
+                f"The image would build, start, and serve the stock page.",
+            )
+            continue
+        if not (REPO_ROOT / source).is_file():
+            continue  # already reported by the context check above
+        conf = (REPO_ROOT / source).read_text(encoding="utf-8")
+        roots = _NGINX_ROOT.findall(conf)
+        if not roots:
+            report("served", f"{source} sets no `root`, so it serves nothing from the image")
+        fallbacks = {
+            token
+            for clause in _NGINX_TRY_FILES.findall(conf)
+            for token in clause.split()
+            if token.startswith("/")
+        }
+        for root in roots:
+            for entry in sorted(fallbacks) or ["/index.html"]:
+                target = posixpath.normpath(posixpath.join(root, entry.lstrip("/")))
+                # The DIRECTORY the entry file would be read from has to be a directory the
+                # final stage actually filled — not merely somewhere underneath one. A
+                # containment test passes `root /usr/share/nginx/html/does-not-exist` while
+                # the bundle sits one level up, and that is the identical 404-every-page
+                # failure as pointing the root one level down.
+                if served_roots and posixpath.dirname(target) not in served_roots:
+                    report(
+                        "served",
+                        f"{source} serves `root {root}` and falls back to {entry}, so it "
+                        f"asks nginx for {target}. The final stage puts the bundle at "
+                        f"{served_roots} and nothing at that path. The image BUILDS, the "
+                        f"container reports healthy the moment nginx answers, and every "
+                        f"page is a 404 — no build can catch this one.",
+                    )
+        # the port the block answers on, the port the image advertises, and the port the
+        # stack publishes and probes all have to be the same number.
+        listens = {int(port) for port in _NGINX_LISTEN.findall(conf)}
+        if final.exposes and listens and not (listens & set(final.exposes)):
+            report(
+                "ports",
+                f"{source} listens on {sorted(listens)} and the final stage EXPOSEs "
+                f"{sorted(final.exposes)}. Nothing is listening where the image says it is.",
+            )
+        for service in compose_declared_dockerfiles().get(label, ()):
+            body = _compose_service_bodies().get(service) or {}
+            published = {
+                int(str(entry).rsplit(":", 1)[-1].split("/")[0])
+                for entry in body.get("ports") or []
+                if str(entry).rsplit(":", 1)[-1].split("/")[0].isdigit()
+            }
+            if published and listens and not (published & listens):
+                report(
+                    "ports",
+                    f"compose service {service!r} publishes to container port(s) "
+                    f"{sorted(published)}; {source} listens on {sorted(listens)}. The "
+                    f"published port reaches nothing.",
+                )
+            probe = " ".join(str(t) for t in ((body.get("healthcheck") or {}).get("test") or []))
+            probed = {int(p) for p in re.findall(r"://[^\s/]*?:(\d+)", probe)}
+            if probed and listens and not (probed & listens):
+                report(
+                    "ports",
+                    f"compose service {service!r} health-probes port(s) {sorted(probed)}; "
+                    f"{source} listens on {sorted(listens)}. The probe cannot be measuring "
+                    f"this server, so whatever it reports healthy is not this container's page.",
+                )
+    return problems
+
+
+# =====================================================================================
+# The gates
+# =====================================================================================
+
+
+def test_every_dockerfile_in_the_repo_is_graded_by_some_gate() -> None:
+    """THE anti-blindness gate: no image may be present and ungraded.
+
+    This is the test whose absence let ``apps/buyer/Dockerfile.web`` exist for a night with
+    no gate on it at all. ``images()`` globbed the exact filename ``Dockerfile``, returned
+    nine entries where the tree held ten, and every check parameterised over it skipped the
+    tenth in silence — the same silence a missing ``COPY`` produces, one level up.
+
+    Three things are asserted, and each closes a different way back into that silence:
+
+    * every discovered Dockerfile classifies into a shape this file actually grades. A new
+      image of an unfamiliar shape is a FAILURE naming the file, not a skip;
+    * every Dockerfile a compose fragment builds from is in the discovered set, so an image
+      whose filename does not follow the convention cannot hide from the name test;
+    * both shapes are non-empty, because a classifier that sorted everything into one
+      bucket would pass this test while grading nothing with the other bucket's checks.
+    """
+    labels = dockerfile_labels()
+    # An INDEPENDENT walk, deliberately: a floor like `>= 10` cannot tell "an image was
+    # deleted" from "discovery stopped finding it", which is precisely the difference this
+    # test exists to make. This finds the files the way a person would — `find . -name
+    # 'Dockerfile*'` — and demands discovery account for every one of them, so a narrowing
+    # of the convention is a failure NAMING the file it dropped.
+    on_disk = {
+        str(path.relative_to(REPO_ROOT))
+        for path in REPO_ROOT.rglob("*")
+        if path.is_file()
+        and not {".venv", "node_modules", ".swarm-loop", ".git"} & set(path.parts)
+        and ("Dockerfile" in path.name or path.name.lower().endswith(".dockerfile"))
+        and not path.name.endswith((".md", ".txt", ".orig", ".rej", ".bak"))
+    }
+    undiscovered = on_disk - set(labels)
+    assert undiscovered == set(), (
+        f"these files are Dockerfiles by any reading of the tree and discovery does not "
+        f"return them: {sorted(undiscovered)}. That is the original defect verbatim — "
+        f"`images()` globbed the exact filename `Dockerfile`, the tree held ten files, and "
+        f"apps/buyer/Dockerfile.web was graded by nothing. Widen "
+        f"`_looks_like_a_dockerfile`; do NOT add an exception here."
+    )
+    assert labels, "discovery found no Dockerfiles at all; every gate below is vacuous."
+
+    def _final_base(label: str) -> str:
+        stages = parse_stages(dockerfile_text(label), label)
+        return stages[-1].base if stages else "<no FROM instruction at all>"
+
+    unknown = {label: image_kind(label) for label in labels if image_kind(label) == KIND_UNKNOWN}
+    assert unknown == {}, (
+        "these Dockerfiles are in the repo and no gate in this file grades them:\n"
+        + "\n".join(
+            f"    {label}: final stage is `FROM {_final_base(label)}`, "
+            f"a shape this checker does not model"
+            for label in sorted(unknown)
+        )
+        + "\n\nAdd its base to _KIND_BY_FINAL_BASE and give the shape a check that suits it. "
+        "Do NOT route it through the python gates to make this green: they read an import "
+        "graph out of the COPY set, and an image without one is graded into nonsense.\n"
+        "Do NOT narrow discovery to exclude it either — that is the original defect."
+    )
+
+    missing = set(compose_declared_dockerfiles()) - set(labels)
+    assert missing == set(), (
+        f"compose builds these images and discovery does not find them: {sorted(missing)}. "
+        f"A Dockerfile the stack deploys and no gate reads is an ungraded artifact."
+    )
+
+    assert images(), "no python images classified; every python gate below is now vacuous"
+    assert web_images(), (
+        "no static-web images classified. If the repo really has none, the checks written "
+        "for that shape are dead code and this test is the only thing that says so."
+    )
+    assert set(images()) | set(web_images()) == set(labels), "a shape was classified and not graded"
+
+    # CLASSIFICATION AGAINST INDEPENDENT EVIDENCE, because "every label landed in some
+    # bucket" is satisfied by a bucket that is wrong. A python service whose final `FROM`
+    # drifted to an nginx base would move out of `images()` and into the static-web gates —
+    # set-equality above stays green, and its whole import graph stops being graded. The pip
+    # layer is the evidence: an image whose final stage installs python dependencies is a
+    # python image, whatever its base says.
+    misfiled = [
+        label
+        for label in labels
+        if image_kind(label) != KIND_PYTHON
+        and any(
+            "pip install" in run
+            for _position, run in parse_stages(dockerfile_text(label), label)[-1].runs
+        )
+    ]
+    assert misfiled == [], (
+        f"these images install python dependencies in their FINAL stage and are not "
+        f"classified as python images, so the import-graph gates skip them: {misfiled}"
+    )
+
+
+def test_every_image_pins_the_base_it_builds_from() -> None:
+    """A floating base is an artifact that changes with no commit to point at.
+
+    Cheap, and it applies to BOTH shapes: an unpinned ``FROM`` means the image built by CI
+    and the image built on a laptop are different artifacts, and every other gate in this
+    file grades a Dockerfile's text rather than a specific build.
+    """
+    unpinned: list[str] = []
+    for label in dockerfile_labels():
+        for stage in parse_stages(dockerfile_text(label), label):
+            base = stage.base
+            if "$" in base:
+                unpinned.append(f"{label} stage {stage.index}: `FROM {base}` interpolates a build")
+            elif "@" in base:
+                continue  # a digest is the strongest pin there is
+            elif ":" not in base.rsplit("/", 1)[-1]:
+                unpinned.append(f"{label} stage {stage.index}: `FROM {base}` has no tag")
+            elif base.rsplit(":", 1)[-1] in {"latest", "edge"}:
+                unpinned.append(f"{label} stage {stage.index}: `FROM {base}` floats")
+    assert unpinned == [], "\n".join(unpinned)
+
+
+@lru_cache(maxsize=1)
+def multi_stage_images() -> tuple[str, ...]:
+    """Every Dockerfile with more than one ``FROM``, whatever its final base."""
+    return tuple(
+        label
+        for label in dockerfile_labels()
+        if len(parse_stages(dockerfile_text(label), label)) > 1
+    )
+
+
+def test_every_multi_stage_image_resolves_its_build_and_serves_what_it_built() -> None:
+    """The copyset gate for the build-and-serve shape.
+
+    Two halves, and the second is the one no ``docker build`` can reach. The first says the
+    build context contains everything the toolchain resolves — the workspace manifests
+    ``npm ci`` matches the lockfile against, the tsconfig chain vite opens, the sibling
+    workspace a dependency points at, and nothing that ``.dockerignore`` silently empties.
+    The second says the bytes the final stage copies out of the builder are the bytes the
+    server is pointed at: a `root` one directory away from the bundle builds green, reports
+    healthy, and 404s every page.
+    """
+    failures: list[str] = []
+    # The UNION, not just the multi-stage set. A SINGLE-stage nginx image — one that serves
+    # a bundle nothing in the repo builds — has exactly the failure this file exists to
+    # catch, and iterating `multi_stage_images()` alone made `web_image_problems`'s own
+    # "shape" branch unreachable: it was computed by nobody, so an nginx Dockerfile with no
+    # builder passed every gate here while claiming to serve a page it does not contain.
+    for label in sorted(set(multi_stage_images()) | set(web_images())):
+        problems = web_image_problems(label, dockerfile_text(label))
+        if not problems:
+            continue
+        rendered = "\n".join(
+            f"  [{check}] {line}" for check in sorted(problems) for line in problems[check]
+        )
+        failures.append(f"{label}:\n{rendered}")
+    assert failures == [], "\n\n".join(failures)
+
+
+# =====================================================================================
+# The controls. A checker nobody has broken on purpose is a checker nobody has measured.
+# =====================================================================================
+
+
+def _sole_web_image() -> tuple[str, str]:
+    """The static-web image the controls flip, and its text. Derived, never named."""
+    labels = sorted(web_images())
+    assert labels, "no static-web image to sabotage; the controls below prove nothing"
+    label = labels[0]
+    return label, dockerfile_text(label)
+
+
+def _drop_lines(text: str, needle: str) -> str:
+    """Every line containing ``needle``, removed. Comments are stripped before parsing, so
+    this cannot be defeated by a comment that happens to mention the same string."""
+    return "\n".join(line for line in text.splitlines() if needle not in line)
+
+
+#: Every check :func:`web_image_problems` can report. This list is what
+#: :func:`test_every_static_web_check_has_a_control_that_flips_it` measures against, so a
+#: check added without a control fails the build, and a check deleted from the function
+#: fails the build too.
+WEB_CHECKS = (
+    "artifact",
+    "build-script",
+    "context",
+    "env-path",
+    "ports",
+    "served",
+    "shape",
+    "tsconfig",
+    "workspace",
+    "workspace-deps",
+)
+
+
+def _web_sabotages() -> list[tuple[str, str, str, str]]:
+    """``(name, label, sabotaged text, the check it must provoke)``.
+
+    Derived from the tree rather than written out, so these keep testing the real images.
+    """
+    label, text = _sole_web_image()
+    stages = parse_stages(text, label)
+    final = stages[-1]
+    builder = next(stage for stage in stages[:-1] if stage.name)
+    _reference, artifact_source, artifact_dest = final.from_copies[0]
+    conf_source, conf_dest = next(
+        (source, destination)
+        for _position, source, destination in final.copies
+        if destination.startswith("/etc/nginx")
+    )
+    tsconfigs = [t for t in tsconfig_closure("apps/buyer/tsconfig.json")[0] if "/" not in t]
+    manifest = next(
+        f"{directory}/package.json"
+        for directory in sorted(npm_workspaces().values())
+        if f"{directory}/package.json" in text
+    )
+    lockfile = "package-lock.json"
+    sibling = npm_workspaces()["@proxyshop/contracts"]
+    return [
+        (
+            "a COPY source the context does not contain",
+            label,
+            text.replace(lockfile, "package-lock-that-does-not-exist.json", 1),
+            "context",
+        ),
+        (
+            "the root lockfile npm ci matches the tree against",
+            label,
+            _drop_lines(text, lockfile),
+            "workspace",
+        ),
+        ("the inherited tsconfig", label, _drop_lines(text, tsconfigs[0]), "tsconfig"),
+        ("a workspace member's manifest", label, _drop_lines(text, manifest), "workspace"),
+        (
+            "the sibling workspace a dependency resolves to",
+            label,
+            _drop_lines(text, f"COPY {sibling}/ "),
+            "workspace-deps",
+        ),
+        (
+            "the build script the image names",
+            label,
+            text.replace("build:ui", "build:no-such-script", 1),
+            "build-script",
+        ),
+        (
+            "the bundle the final stage pulls forward",
+            label,
+            _drop_lines(text, "--from="),
+            "artifact",
+        ),
+        (
+            "the path the builder actually writes to",
+            label,
+            text.replace(artifact_source, artifact_source.replace("/dist/", "/build/"), 1),
+            "artifact",
+        ),
+        (
+            "the directory the server is pointed at",
+            label,
+            text.replace(artifact_dest, artifact_dest.rstrip("/") + "-elsewhere/", 1),
+            "served",
+        ),
+        (
+            "a config nginx will never read",
+            label,
+            text.replace(conf_dest, "/etc/nginx/unread/default.conf.bak", 1),
+            "served",
+        ),
+        (
+            "the port the image says it listens on",
+            label,
+            re.sub(r"^EXPOSE\s+\d+", "EXPOSE 9999", text, count=1, flags=re.MULTILINE),
+            "ports",
+        ),
+        (
+            "the second stage, leaving a builder that serves nothing",
+            label,
+            "\n".join(text.splitlines()[: text.splitlines().index(f"FROM {final.base}")]),
+            "shape",
+        ),
+        (
+            "an ENV naming a directory no COPY fills",
+            label,
+            text.replace(f"FROM {final.base}", f"FROM {final.base}\nENV UI_DIST=/srv/nowhere", 1),
+            "env-path",
+        ),
+        (
+            "the whole build context, replaced by a stage reference nothing defines",
+            label,
+            text.replace(f"--from={builder.name}", "--from=some-image:1.0", 1),
+            "artifact",
+        ),
+    ]
+
+
+def test_every_static_web_check_has_a_control_that_flips_it() -> None:
+    """Every check this file can report must be REACHABLE by a real sabotage.
+
+    An adversarial re-measurement of the first version of these controls neutered each
+    ``report(...)`` call in turn and re-ran the suite: nine of thirteen call sites could be
+    DELETED OUTRIGHT with everything still green — including both halves of ``artifact``,
+    which is the check that carries this gate's headline claim, "serves what it built".
+    Four individually-good controls had been mistaken for coverage.
+
+    So the controls are a TABLE now, and this test closes it in both directions: a check
+    with no sabotage that provokes it is unmeasured and fails here, and a sabotage that
+    stops provoking its check — because someone deleted the check — fails here too. The
+    only way to make this green is for every branch to be real.
+    """
+    label, text = _sole_web_image()
+    assert web_image_problems(label, text) == {}, (
+        f"{label} is not clean at baseline, so nothing below can be attributed to a "
+        f"sabotage: {web_image_problems(label, text)}"
+    )
+
+    provoked: dict[str, list[str]] = {}
+    for name, sabotaged_label, sabotaged, expected in _web_sabotages():
+        assert sabotaged != text, f"the sabotage {name!r} changed nothing; it is not armed"
+        problems = web_image_problems(sabotaged_label, sabotaged)
+        assert expected in problems, (
+            f"removing {name} from {sabotaged_label} left the [{expected}] check silent, so "
+            f"it does not detect what it claims to. Reported instead: {sorted(problems)}"
+        )
+        provoked.setdefault(expected, []).append(name)
+
+    unmeasured = set(WEB_CHECKS) - set(provoked)
+    assert unmeasured == set(), (
+        f"these checks are in web_image_problems and NO control provokes them: "
+        f"{sorted(unmeasured)}. An unmeasured check can be deleted with the suite green, "
+        f"which is how nine of the first thirteen call sites here were unfalsifiable. Add a "
+        f"sabotage to `_web_sabotages` or delete the check."
+    )
+    surplus = set(provoked) - set(WEB_CHECKS)
+    assert surplus == set(), (
+        f"a control provoked {sorted(surplus)}, which WEB_CHECKS does not list. Either the "
+        f"list is stale or a sabotage is provoking a different failure than it claims."
     )

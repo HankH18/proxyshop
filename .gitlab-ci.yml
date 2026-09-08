@@ -21,10 +21,19 @@
 # ---------------------------------------------------------------------------------------
 # RUNNER REQUIREMENT — the project owner's to satisfy, not this file's
 # ---------------------------------------------------------------------------------------
-# This needs a runner enabled on the project with the **docker** executor. Nothing here
-# needs a PRIVILEGED runner: the three datastores are declared as CI services rather than
-# brought up with `docker compose`, precisely so an ordinary shared runner can run it.
-# Settings > CI/CD > Runners on labs.gauntletai.com is where that is turned on.
+# This needs a runner enabled on the project with the **docker** executor. Settings > CI/CD >
+# Runners on labs.gauntletai.com is where that is turned on.
+#
+# THE `verify:` JOB NEEDS NOTHING MORE THAN THAT — no PRIVILEGED runner: its three datastores
+# are declared as CI services rather than brought up with `docker compose`, precisely so an
+# ordinary shared runner can run it.
+#
+# THE `images:` JOB, ADDED LATER, DOES NEED A PRIVILEGED ONE, and this paragraph used to say
+# flatly that nothing here did. Building an image needs a daemon; a daemon in a GitLab job
+# means the `docker:dind` service; that service needs `privileged = true` in the runner's
+# config.toml. The full reasoning, and what is and is not graded when that runner is absent,
+# is in the block above `images:` below. Said here too because this is the paragraph an
+# operator reads first, and a stale "nothing here needs it" is how a requirement goes unmet.
 #
 # THE COST OF THAT CHOICE, AND HOW IT IS PAID. A GitLab docker-executor job cannot reach a
 # compose stack on its own `localhost` — services answer on their alias — so using the
@@ -46,6 +55,40 @@
 # defaults that already live in docker-compose.yml, for containers that are destroyed when
 # the job ends.
 
+# ---------------------------------------------------------------------------------------
+# WHAT A BROKEN COMMIT CAN STILL GET PAST THIS PIPELINE
+# ---------------------------------------------------------------------------------------
+# Every gate has a boundary, and an unstated one is how this repository keeps being
+# surprised. The full list is in `.github/workflows/verify.yml`, kept in one place rather
+# than in two copies free to drift; it covers, in short: ONE ARCHITECTURE (x86_64 only, while
+# the developers work on Apple Silicon), BOOTING IS NOT WORKING (most services are proven to
+# answer and nothing more), NOTHING IS PUSHED (no registry, no digest continuity with any
+# deployment), ONE CONFIGURATION (the offline doubles, the lexical embedding fallback, the
+# dev role password), `COPY --from` BYTES ARE UNREAD, `.dockerignore` IS APPROXIMATED, ONE
+# RUN IS NOT A DISTRIBUTION, A WEAKENED TEST IS NOT A DELETED ONE, and THE FROZEN ACCEPTANCE
+# SUITE RUNS AGAINST THE CHECKOUT rather than against the images.
+#
+# THIS FILE CARRIES ONE MORE, and it is the biggest of them:
+#
+#   THE IMAGE JOB NEEDS A PRIVILEGED RUNNER AND THIS INSTANCE MAY NOT HAVE ONE. `images:`
+#   below needs the `docker:dind` service, which needs `privileged = true` in the runner's
+#   config.toml. On a runner without it the job FAILS — deliberately, rather than skipping,
+#   because a skip would restore the green-pipeline-that-graded-no-image this whole stage
+#   exists to end. But a red job is not a graded image: while that runner is missing,
+#   NOTHING ON THIS INSTANCE CHECKS THAT ANY IMAGE BUILDS OR ANY CONTAINER STARTS, and the
+#   GitHub mirror is the only place that class is graded. Read the failure message; it says
+#   which of the two you are looking at.
+#
+# TWO MORE THAT ARE SPECIFIC TO THE `verify:` JOB'S SHAPE:
+#
+#   * IT DOES NOT USE THIS REPO'S OWN COMPOSE STACK. It declares CI services instead, so the
+#     image tags and two dev credentials exist in two places. `ci_datastore_proof.py
+#     check-config` compares them on every run, which makes the duplication checked rather
+#     than silent — but it compares only the three datastore services, their image tags and
+#     four environment values. A compose change anywhere else is not mirrored and not caught.
+#   * SERVICE CONTAINER LOGS ARE NOT IN THE TRACE unless the project sets CI_DEBUG_SERVICES.
+#     A neo4j that died on a bad setting is invisible here until that is turned on.
+
 # One pipeline per change, not two: without this, a branch that also has an open merge
 # request gets a branch pipeline AND a merge-request pipeline for the same commit, and the
 # suite is expensive enough that running it twice is a real cost.
@@ -57,10 +100,251 @@ workflow:
     - if: $CI_COMMIT_BRANCH
 
 stages:
+  - build
   - verify
+
+# =========================================================================================
+# THE IMAGES, AND THE STACK THEY MAKE
+# =========================================================================================
+# WHAT WAS MISSING. Everything below `verify:` grades a CHECKOUT. `make verify` imports from
+# a tree where the editable root distribution puts every package on `sys.path`, and it never
+# opens a Dockerfile. An image ships a SUBSET of that tree, so a commit that breaks an image
+# moved no gate here at all — four times in two days, each one found by a human running
+# `docker compose up` rather than by this pipeline.
+#
+# ---------------------------------------------------------------------------------------
+# A SECOND RUNNER REQUIREMENT, and it is the project owner's to satisfy
+# ---------------------------------------------------------------------------------------
+# The `verify` job below was written to need NOTHING but an ordinary shared docker-executor
+# runner: its three datastores are declared as CI services precisely so no privileged runner
+# is needed. Building an image cannot be bought that cheaply. `docker build` needs a daemon,
+# a daemon inside a GitLab job means the `docker:dind` SERVICE, and that service requires
+# `privileged = true` in the runner's config.toml. Settings > CI/CD > Runners on
+# labs.gauntletai.com is where that is turned on.
+#
+# THIS JOB DOES NOT DEGRADE QUIETLY WHEN THAT RUNNER IS ABSENT, and the choice is deliberate.
+# An `allow_failure: true` here, or a `rules:` clause that skips the job unless someone opts
+# in, would restore exactly the state this exists to end: a green pipeline that has graded no
+# image. On a runner without privileged mode this job FAILS, and the failure is the truth —
+# the images are not being graded on this instance. Until such a runner exists, the GitHub
+# mirror (`.github/workflows/verify.yml`, whose runner is a VM with its own daemon) is the
+# only place the image class is graded, and that is stated there and here rather than
+# discovered later.
+#
+# WHY `node:22-bookworm` AND NOT `docker:27-cli`. The job needs BOTH a docker client and this
+# repo's own toolchain: `make deps-up` runs `scripts/db_init.py` and `scripts/db_migrate.py`
+# out of `.venv`, and `scripts/ci_image_proof.py` imports the repository's single
+# Dockerfile-discovery function rather than walking the tree a second time. `uv sync --locked`
+# is proven to work on this base by the job below; adding a docker client to it is two apt
+# packages, while adding a python toolchain to `docker:27-cli` (alpine/musl) is not.
+#
+# WHERE THE PORTS ARE. Compose runs against the dind daemon, so everything it publishes lands
+# on the SERVICE container's interfaces, not on this job's localhost — `http://docker:8083`,
+# `PGHOST=docker`. That is one of two substantive differences from the GitHub mirror, which
+# publishes on its own localhost and therefore needs no endpoint variables at all.
+#
+# ---------------------------------------------------------------------------------------
+# THE SECOND DIFFERENCE, AND THE HALF OF THE STACK THIS JOB CANNOT RUN
+# ---------------------------------------------------------------------------------------
+# A BIND MOUNT RESOLVES ON THE DAEMON'S FILESYSTEM. Compose turns `../../deploy/demo` into an
+# absolute path and hands it to the daemon; the daemon here is the `docker:dind` SERVICE, a
+# sibling container that does not have this repository checked out. Docker's answer to a bind
+# source that does not exist is to CREATE AN EMPTY DIRECTORY — silently — so under
+# docker-in-docker every mounted document arrives blank and the container reports healthy
+# over it. `apps/exchange/compose.yaml` records that exact failure in its own words: with the
+# deployment document missing "the exchange answers `ranked: []` while reporting healthy".
+#
+# A build is not affected — the build CONTEXT is streamed from this job to the daemon, which
+# is why `build` below is complete and is the headline of this job. Runtime mounts are.
+# FIVE things in this stack use them, and the fifth is the one a reader would miss:
+# `docker-compose.yml`'s own `postgres` mounts `./db/init:/docker-entrypoint-initdb.d:ro`, so
+# under docker-in-docker `db/init/00-roles.sql` never runs. That is BENIGN today, and benign
+# for a reason this file already measured for the `verify` job: `db/migrations/
+# 0001_schemas_roles_grants.sql` re-creates the four cluster-global roles idempotently, with
+# the identical `coalesce(nullif(current_setting('proxyshop.role_password', true), ''), 'x')`
+# default, before it grants — so `make deps-up`'s `db-migrate` supplies exactly what the
+# missing hook would have. It is listed anyway, because an inventory that is quietly one
+# short is how the next required init hook gets added and silently lost.
+# The other four: `buyer-svc` and `exchange` mount `deploy/demo`, the four
+# configured `store-agent-*` containers mount their context files, and `corpus-loader` mounts
+# `fixtures/real-catalogs`.
+#
+# SO THIS JOB DOES NOT PRETEND TO RUN THEM. It starts only the services whose behaviour does
+# not depend on a mounted document, with `--no-deps` so compose does not pull the others in
+# behind them, and it says here which ones it left out and why.
+#
+# AND IT DOES NOT TRY TO TALK THEM INTO STARTING UNCONFIGURED, which was this file's first
+# draft and was simply wrong. `buyer-svc` and `exchange` both accept an EMPTY deployment
+# setting as "unconfigured" — a service that starts, answers and declines to auction — so
+# exporting `BUYER_DEPLOYMENT=""` looked like the clean way to have them up honestly. It is
+# not: the fragments interpolate `${BUYER_DEPLOYMENT:-/srv/deploy/buyer-deployment.json}`,
+# and the `:-` form substitutes its default when the variable is EMPTY as well as when it is
+# unset. The export would have been a no-op, the container would have been handed a path
+# into a blank mount, and `buyer-svc` refuses a named-but-unreadable path loudly — a red job
+# whose message is about a document rather than about the commit. Compose's `:-` is in a
+# frozen fragment and not this file's to change, so the two services are simply left out.
+#
+# WHAT IS THEREFORE NOT GRADED HERE, and is graded on the GitHub mirror instead: `buyer-svc`
+# and `exchange` starting, the corpus load, `make demo-check`'s end-to-end auction, and the
+# four configured store agents. Their IMAGES are still built here — the build step covers
+# every Dockerfile in the repo — so the "a commit broke an image" class, which is the one
+# that keeps happening, is fully covered on this instance. It is the RUNNING of those four
+# that is not. Working around it would mean copying the checkout into the daemon container
+# at a matching absolute path before every run: a mechanism nobody could test from here,
+# standing between this pipeline and the truth. A stated gap beats an untested bridge.
+images:
+  stage: build
+  image: node:22-bookworm
+  timeout: 1h30m
+  interruptible: true
+
+  services:
+    # The daemon. `DOCKER_TLS_CERTDIR: ""` below turns TLS off and makes it listen on 2375,
+    # which is the standard non-TLS dind shape and is safe here because the service is
+    # reachable only from this job's own network and is destroyed when the job ends.
+    - name: docker:27-dind
+      alias: docker
+
+  variables:
+    # NOT read by scripts/ci_datastore_proof.py's drift check, which inspects the top level
+    # and the `verify` job only — so nothing here can satisfy or violate that check. It is
+    # still kept consistent with `verify` on purpose: two jobs disagreeing about the worker
+    # index is how two halves of a pipeline end up talking to different databases.
+    PROXYSHOP_WORKER: "12"
+    UV_VERSION: "0.11.8"
+    GIT_DEPTH: "20"
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_DRIVER: overlay2
+    FF_NETWORK_PER_BUILD: "true"
+
+  before_script:
+    # The docker client and the compose plugin, from Docker's own Debian repository — one
+    # source for both, rather than a static CLI tarball plus a separately-sourced plugin
+    # binary. `node:22-bookworm` is bookworm, which is why this suite is the right one.
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends ca-certificates curl gnupg
+    - install -m 0755 -d /etc/apt/keyrings
+    - curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
+    - chmod a+r /etc/apt/keyrings/docker.asc
+    - echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian bookworm stable" > /etc/apt/sources.list.d/docker.list
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends docker-ce-cli docker-compose-plugin
+    # Refuse HERE, by name, if the daemon is not there. Without this the first failure is a
+    # `docker compose build` error forty lines into a log, which reads as a broken image.
+    - |
+      docker version >/dev/null 2>&1 || {
+        echo "FATAL: no docker daemon at ${DOCKER_HOST}." >&2
+        echo "       This job needs the docker:dind SERVICE, which needs a runner with" >&2
+        echo "       privileged = true in its config.toml (Settings > CI/CD > Runners)." >&2
+        echo "       This is NOT a defect in the commit under test: it means this GitLab" >&2
+        echo "       instance is not grading container images at all, and the GitHub" >&2
+        echo "       mirror is currently the only place that class is checked." >&2
+        exit 1
+      }
+    - docker compose version
+    - curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | env UV_INSTALL_DIR=/usr/local/bin sh
+    - ./scripts/bootstrap.sh
+    # Exported here rather than declared in `variables:`, following this file's own rule —
+    # `variables:` is for what the SERVICES need, `before_script` for what this job's
+    # processes need. `docker` is the dind service's alias, and every port compose publishes
+    # lands on it.
+    - export PGHOST=docker PG_PORT=5432
+    - export PROXYSHOP_PG_DSN_ADMIN="postgresql://proxyshop@docker:5432/proxyshop_template"
+    - export NEO4J_URI="bolt://docker:7687"
+    - export REDIS_URL="redis://docker:6379/0"
+    # REQUIRED, or the stack never comes up: `merchant-svc`'s readiness probe is
+    # `service_launch ready --require-env MERCHANT_ADMIN_TOKEN` and its compose default is
+    # EMPTY, so without this the container stays unhealthy forever and `up --wait` fails on a
+    # service whose code is fine. The ephemeral dev value `.env.example` ships, for containers
+    # destroyed when the job ends.
+    - export MERCHANT_ADMIN_TOKEN=dev-merchant-admin-token
+    # NOTHING IS EXPORTED FOR THE DEPLOYMENT DOCUMENTS, and the absence is deliberate: see
+    # the header. `${VAR:-default}` substitutes on EMPTY as well as on unset, so an override
+    # here could not make `buyer-svc` or `exchange` unconfigured; those two are left out of
+    # the boot list instead.
+
+  script:
+    # The list this job claims to cover, printed before anything is built. An image missing
+    # from it is an image nothing here grades.
+    - .venv/bin/python scripts/ci_image_proof.py list
+    # THE STEP THIS PIPELINE WAS MISSING. Every image in the repo — including any that no
+    # compose fragment references yet, which `docker compose build` would silently skip.
+    - .venv/bin/python scripts/ci_image_proof.py build --profile demo --profile corpus --profile e2e
+    # The committed deployment documents are GENERATED from `fixtures/real-catalogs/` and
+    # then committed, and nothing anywhere checked the two still agree. `--check` compares
+    # and never writes; it costs seconds and turns a corpus/document desync into one named
+    # failure instead of a red auction twenty-five minutes later on the mirror. It runs HERE
+    # even though this job cannot mount those documents, because the check is on the files in
+    # the checkout and has nothing to do with what the daemon can see.
+    - .venv/bin/python scripts/build_demo_deployment.py --check
+    # Datastores, this worker's database, and the schema. `deps-up` chains all three.
+    - make deps-up
+    - .venv/bin/python scripts/ci_datastore_proof.py wait
+    # Services are NAMED, never left to the profile, for TWO reasons here.
+    #
+    # First, the one the Makefile records: `sim`, `seller-reference` and `corpus-loader` are
+    # run-to-completion JOBS with `restart: "no"`, and `--wait` sees them exit and fails the
+    # whole command over a stack in which every server is healthy.
+    #
+    # Second, the docker-in-docker one — and BOTH filters are DERIVED rather than typed
+    # here, because a hand-written boot list is a copy of compose that nothing checks:
+    # add a service to a fragment and it is not started, not probed, and nothing reddens.
+    # `services --exclude-bind-mounts` drops every service configured by a mounted document,
+    # which on this runner is `buyer-svc` and `exchange` (`deploy/demo`) and the four
+    # CONFIGURED `store-agent-*` containers (their context files). The UNCONFIGURED
+    # `store-agent` survives the filter — same image, same entrypoint, same port — so that
+    # image is still proven to start and answer and nothing pretends the demo roster is
+    # being exercised.
+    #
+    # `--no-deps` is REQUIRED and is not belt-and-braces: `buyer-web` declares
+    # `depends_on: buyer-svc: service_healthy`, so without it compose pulls in the very
+    # service the filter just excluded, and the job dies waiting on a container that cannot
+    # become healthy here. The datastores every other service depends on are already up —
+    # `make deps-up` ran two steps ago — so skipping dependency resolution skips nothing
+    # that is not already running.
+    #
+    # WHAT `buyer-web` WITHOUT `buyer-svc` DOES AND DOES NOT PROVE. It proves the page is
+    # the app and not the stock nginx page, that a deep link falls back through `try_files`,
+    # and that `/buyer/` is a PROXY block rather than being swallowed by that fallback —
+    # the bundle is baked into the image rather than mounted, so all three are graded here
+    # exactly as on the mirror. It does NOT prove the API is reachable through the proxy,
+    # and an earlier draft of this comment claimed the opposite two lines after admitting
+    # `buyer-svc` was absent. The probe now refuses a 5xx on the proxied prefix outright,
+    # so that claim cannot be made by accident either: on this runner the prefix is expected
+    # to be un-upstreamed, and `probe --exclude-bind-mounts` is what tells it so.
+    - >
+      docker compose up -d --wait --no-deps
+      $(.venv/bin/python scripts/ci_image_proof.py services --exclude-bind-mounts)
+    # `up --wait` proved each healthcheck passed INSIDE its container. This proves the
+    # published port reaches it from outside, and adds the three things no healthcheck for a
+    # static bundle can make: that the page is the app rather than the stock nginx page, that
+    # a deep link falls back instead of 404ing, and that the reverse-proxied prefix reaches
+    # the API rather than being answered by the SPA's own fallback. That last one is the
+    # highest-value check in this job and it survives docker-in-docker intact, because the
+    # bundle is baked into the image rather than mounted.
+    - .venv/bin/python scripts/ci_image_proof.py probe --host docker --exclude-bind-mounts
+    # The two images that are not servers: their exit status IS their result. Neither mounts
+    # anything, so both are as meaningful here as on the mirror.
+    - docker compose run --rm --no-deps seller-reference
+    - docker compose run --rm sim
+    # NOT RUN HERE, and deliberately: `make demo-corpus` mounts `fixtures/real-catalogs` and
+    # `make demo-check` needs the corpus, the deployment documents and the four configured
+    # store agents. Every one of those arrives through a bind mount this daemon cannot fill.
+    # Running them anyway would produce a failure that says nothing about the commit, and
+    # working around it would mean an untestable mechanism for copying the checkout into the
+    # daemon. They run on the GitHub mirror, which has a real filesystem under its daemon.
+
+  after_script:
+    - docker compose ps --all || true
+    - docker compose --profile demo --profile e2e --profile corpus logs --no-color --tail=120 || true
 
 verify:
   stage: verify
+  # `needs: []` so this starts immediately instead of waiting for the `build` stage. The two
+  # jobs grade different things and neither's result changes the other's; serialising them
+  # would only delay the fast signal behind the slow one.
+  needs: []
   # node:22-bookworm rather than a python image: package.json pins node >= 22.12 (D8), the
   # image is Debian-based so `make`, `git` and `curl` are already there, and uv provisions
   # the interpreter itself — .python-version pins 3.12.13 and `uv sync --locked` fetches
@@ -192,6 +476,14 @@ verify:
     - .venv/bin/python scripts/ci_datastore_proof.py prove
     # 5. This file and the GitHub mirror must still agree with docker-compose.yml.
     - .venv/bin/python scripts/ci_datastore_proof.py check-config
+    # 6. The frozen acceptance suite ON ITS OWN. `make verify` already ran it, so this is a
+    #    SECOND execution and that is the point: inside verify.sh it runs in the same shell
+    #    as ~7,600 other tests, and the reason it goes through `.swarm-loop/acceptance/run.py`
+    #    at all is that sharing a pytest session with the rest produces phantom failures that
+    #    vanish in isolation. Running the identical runner as the only thing in the process
+    #    makes a disagreement between the two evidence about process state rather than about
+    #    the code. Two seconds. Same step exists on the GitHub mirror.
+    - ./scripts/verify.sh acceptance
 
   after_script:
     # What this DOES show: the alias-to-IP table GitLab wrote for the three services. A
