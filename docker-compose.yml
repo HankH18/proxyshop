@@ -53,7 +53,12 @@ services:
     #
     # The default stays EMPTY rather than `:-x` for the reason above: two copies of one
     # password is how the seed side and the connect side stopped agreeing the first time.
-    environment: { POSTGRES_USER: proxyshop, POSTGRES_PASSWORD: proxyshop_dev_pw,
+    # `POSTGRES_PASSWORD` was hardcoded here for the same reason and with the same consequence
+    # as NEO4J_AUTH below: a deployment could not change the superuser's password. It is
+    # env-driven now, with the dev value as the explicit default. Like Neo4j, it is baked at
+    # first init — changing it against an existing `pg-data` volume does nothing.
+    environment: { POSTGRES_USER: proxyshop,
+                   POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-proxyshop_dev_pw}",
                    POSTGRES_DB: proxyshop_template,
                    PROXYSHOP_ROLE_PASSWORD: "${PROXYSHOP_ROLE_PASSWORD:-}" }
     ports: ["${PG_PORT:-5432}:5432"]
@@ -67,7 +72,23 @@ services:
     image: neo4j:5.26-community      # 5.26.30 verified for D6's 1024-d cosine index
     pull_policy: missing
     environment:
-      NEO4J_AUTH: neo4j/proxyshop_dev_pw            # 5.x rejects passwords under 8 chars
+      # The password the database is INITIALISED with, and it could not be changed by a
+      # deployment until now — it was the literal `proxyshop_dev_pw`, hardcoded, while
+      # `NEO4J_PASSWORD` next door was what every client offered. On a laptop those agreed by
+      # construction. On a hosted box they do not: a generated `NEO4J_PASSWORD` in `.env` left
+      # every service authenticating with a credential this container had never been told,
+      # which reads as `AuthenticationRateLimit` after a few retries rather than as a wrong
+      # password. Measured on the demo droplet.
+      #
+      # `NEO4J_PASSWORD` is the ONE value now: `proxyshop_support/neo4j_auth.graph_credentials`
+      # resolves it for every client and this line initialises the server from it. The dev
+      # default is kept explicit, and it is the same string that resolver falls back to.
+      # 5.x rejects passwords under 8 characters.
+      #
+      # Auth is baked at FIRST init: changing this on a stack whose `neo4j-data` volume already
+      # exists does nothing, and the old password keeps working. `docker compose down -v`, or a
+      # `cypher-shell` password change, is what actually moves it.
+      NEO4J_AUTH: "neo4j/${NEO4J_PASSWORD:-proxyshop_dev_pw}"
       NEO4J_server_memory_heap_max__size: 1g        # cap the ceiling…
       NEO4J_server_memory_pagecache_size: 512m      # …but do NOT set heap_initial:
                                                     # the image runs -XX:+AlwaysPreTouch, so a 1G
