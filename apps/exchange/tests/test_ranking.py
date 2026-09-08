@@ -928,13 +928,76 @@ def _served_bid(store_id, price, *, claims=None, delivery_days=None, offer_extra
     return bid
 
 
-def _served_app(bids, *, trust=None, stores=SERVED_STORES, capacity_l=35, catalog=None):
+#: A `shipped_on_time` Beta that ADMITS a store's delivery promise: ten clean dispatches folded
+#: into the manifest's Beta(2, 2) prior, so `alpha + beta = 14` clears
+#: `features.MIN_DISPATCH_OBSERVATIONS` (5) above `features.TRUST_PRIOR_MASS` (4) with room to
+#: spare, and the posterior is 12/14.
+#:
+#: It is the DEFAULT for every served store because the credibility adjustment is a division,
+#: therefore scale-free, therefore invisible to `delivery_fits` when every store in the auction
+#: carries the same posterior: `(k*slowest − k*mine)/(k*slowest − k*fastest)` is the unscaled
+#: ratio. So a served test that says nothing about dispatch records reads exactly the numbers it
+#: read while `delivery_fit`'s feed was the declared estimate, and a test that means to exercise
+#: D57 has to say so by passing `dispatch=`.
+SERVED_KEPT_ITS_WORD = (12.0, 2.0)
+
+#: The opposite, and still admissible: ten missed dispatch promises, `alpha + beta = 14`, posterior
+#: 2/14 = 0.143 — under `features.MIN_DISPATCH_CREDIBILITY`, so the quote is inflated by the
+#: capped 4x rather than by 7x.
+SERVED_BROKE_ITS_WORD = (2.0, 12.0)
+
+#: Enough of a record to be watched, not enough to be believed: four graded dispatches, so
+#: `alpha + beta = 8` is one short of the floor and the promise is NOT admitted.
+SERVED_TOO_FEW_DISPATCHES = (6.0, 2.0)
+
+TRUST_DIMENSION_NAMES = (
+    "price_honored",
+    "discount_honored",
+    "shipped_on_time",
+    "not_returned",
+    "feedback_match",
+    "catalog_claim_accuracy",
+)
+
+
+def _served_trust_row(store_id, *, score, dispatch):
+    """One served trust-snapshot row, carrying all six published dimensions.
+
+    `dispatch` is the `shipped_on_time` Beta as `(alpha, beta)`, or `None` for a store with NO
+    row for that dimension at all — which is what a store the trust system has never observed
+    dispatching looks like, and which `features.dispatch_credibility` refuses to score.
+    """
+    dims = {
+        name: {"alpha": 2.0, "beta": 2.0, "decayed_at": T_PAST} for name in TRUST_DIMENSION_NAMES
+    }
+    if dispatch is None:
+        dims.pop("shipped_on_time")
+    else:
+        alpha, beta = dispatch
+        dims["shipped_on_time"] = {"alpha": alpha, "beta": beta, "decayed_at": T_PAST}
+    return {
+        "store_id": store_id,
+        "blacklisted": False,
+        "score": float(score),
+        "confidence": 0.4,
+        "dims": dims,
+    }
+
+
+def _served_app(
+    bids, *, trust=None, dispatch=None, stores=SERVED_STORES, capacity_l=35, catalog=None
+):
     """A fully wired exchange, answering from `bids` (`{store_id: bid}`).
 
     `catalog` overrides the wired snapshot source. `None` means the one built below — a
     snapshot per store, which is what almost every test here wants. Pass
     `NoCatalogSnapshots()` for the deployment that wired none, which is a supported
     configuration rather than a broken one and has its own ranking behaviour to pin.
+
+    `dispatch` is `{store_id: (alpha, beta) | None}` for the `shipped_on_time` dimension that
+    `delivery_fit` is weighed against since D57; anything unnamed gets
+    :data:`SERVED_KEPT_ITS_WORD`. `trust` still sets the row's aggregate `score`, which is the
+    separate input the `trust` TERM reads — the two move independently on purpose.
     """
     import time
 
@@ -961,7 +1024,11 @@ def _served_app(bids, *, trust=None, stores=SERVED_STORES, capacity_l=35, catalo
     configure_ranking(
         app,
         trust_snapshot={
-            store: {"blacklisted": False, "score": float((trust or {}).get(store, 0.6))}
+            store: _served_trust_row(
+                store,
+                score=(trust or {}).get(store, 0.6),
+                dispatch=(dispatch or {}).get(store, SERVED_KEPT_ITS_WORD),
+            )
             for store in stores
         },
         registered_domains=StaticRegisteredDomains(
@@ -1412,6 +1479,15 @@ def test_the_served_delivery_fit_orders_the_estimates_the_offers_declare():
     eligible set, neutral when there is nothing to discriminate on" rule
     `retrieval.criteria.NEUTRAL_ALIGNMENT` already applies. An offer that declares nothing
     is absent, therefore neutral.
+
+    **These three numbers are unchanged by D57, and that is the point of leaving them here.**
+    The estimates are weighed against each store's `shipped_on_time` record before they are
+    normalised, and `_served_app` gives every store the same record
+    (:data:`SERVED_KEPT_ITS_WORD`) unless a test says otherwise. The adjustment is a division,
+    so a posterior shared by the whole auction cancels out of `(slowest - mine)/(slowest -
+    fastest)` exactly. Equal records therefore still rank the declared quotes; what D57 changed
+    is what happens when the records are NOT equal, which
+    `test_a_fast_promise_from_a_store_that_breaks_it_ranks_below_a_slower_kept_one` is for.
     """
     bids = {
         "store-a": _served_bid("store-a", 100.0, delivery_days=1.0),
@@ -1468,6 +1544,372 @@ def test_an_unreadable_delivery_estimate_is_absent_rather_than_the_fastest():
     assert features["store-a"]["delivery_fit"] == pytest.approx(0.5)
     assert features["store-b"]["delivery_fit"] == pytest.approx(1.0)
     assert features["store-c"]["delivery_fit"] == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------------
+# D57 — `delivery_fit` compares CREDIBLE delivery promises, not declared ones.
+# ---------------------------------------------------------------------------------
+def test_a_fast_promise_from_a_store_that_breaks_it_ranks_below_a_slower_kept_one():
+    """THE gate for D57, asserted on `rank_score` over the served route.
+
+    `delivery_fit` carries `w_d = 0.10`, and its feed was `Offer.delivery_estimate_days`
+    verbatim — a number the bidding store types into its own reply. So a store bought up to a
+    tenth of the published score by promising sooner, and nothing anywhere asked whether it had
+    ever shipped that fast.
+
+    Two stores, identical in every other respect: the same bid price against the same list
+    price, the same claims, the same aggregate trust `score`. `store-a` promises 1 day and has
+    missed that kind of promise ten times; `store-b` promises 3 and has kept it ten times. The
+    arithmetic, all of it published:
+
+    * `store-a`: posterior `2/14 = 0.143`, clamped up to the `MIN_DISPATCH_CREDIBILITY` floor
+      of 0.25, so its effective quote is `1 / 0.25 = 4.0`;
+    * `store-b`: posterior `12/14 = 0.857`, so its effective quote is `3 / 0.857 = 3.5`;
+    * normalised across the auction, `store-b` is the fastest CREDIBLE offer and reads 1.0,
+      `store-a` is the slowest and reads 0.0.
+
+    The whole gap between the two served scores is therefore `w_d`, and the assertion is on
+    `rank_score` rather than on the feature so that a change that computes the right feature and
+    fails to spend it is still red.
+    """
+    from contracts.ranking import DEFAULT_RANKING_WEIGHTS
+
+    bids = {
+        "store-a": _served_bid("store-a", 100.0, delivery_days=1.0),
+        "store-b": _served_bid("store-b", 100.0, delivery_days=3.0),
+    }
+    stores = ("store-a", "store-b")
+    roster = _served_roster({"store-a": 100.0, "store-b": 100.0})
+
+    body = _served_post(
+        _served_app(
+            bids,
+            stores=stores,
+            dispatch={
+                "store-a": SERVED_BROKE_ITS_WORD,
+                "store-b": SERVED_KEPT_ITS_WORD,
+            },
+        ),
+        roster,
+    )
+    scores = _served_scores(body)
+    assert scores["store-b"] > scores["store-a"], (
+        "a store promising 1 day it has never once met still outranks a store promising 3 days "
+        f"it always meets — the delivery term is still reading the declared number: {scores}"
+    )
+    assert _served_order(body) == ["store-b", "store-a"], body["ranked"]
+
+    w_d = DEFAULT_RANKING_WEIGHTS.feature_weights["delivery_fit"]
+    assert scores["store-b"] - scores["store-a"] == pytest.approx(w_d * (1.0 - 0.0)), (
+        "the gap is not the delivery term's alone, so something other than `delivery_fit` "
+        f"moved between two otherwise identical stores: {_served_features(body)}"
+    )
+
+    # THE CONTROL, and without it this test proves nothing: the same two bids, the same prices,
+    # the same everything — with both stores keeping their word. Now nothing distinguishes the
+    # promises but the promises, the division cancels, and the store quoting 1 day wins. So it
+    # is the RECORD that reversed the order above and not the quote, the price or the roster.
+    control = _served_post(
+        _served_app(
+            bids,
+            stores=stores,
+            dispatch=dict.fromkeys(stores, SERVED_KEPT_ITS_WORD),
+        ),
+        roster,
+    )
+    assert _served_order(control) == ["store-a", "store-b"], control["ranked"]
+
+
+def test_the_credibility_of_a_promise_moves_the_served_shortlist():
+    """The served SHORTLIST — the artefact a shopper is actually handed — moves with the record.
+
+    `POST /auctions` publishes `shortlist.slots`, and this drives the real app twice over one
+    unchanged request body. The only thing that differs between the two runs is what the trust
+    snapshot says each store has done with its past dispatch promises; the intent, the roster,
+    the list prices, the bids and the quoted estimates are byte-identical.
+
+    A fix that computes a credible estimate somewhere the served route does not reach is worth
+    nothing, and this is the assertion that would catch it.
+    """
+    bids = {
+        "store-a": _served_bid("store-a", 100.0, delivery_days=1.0),
+        "store-b": _served_bid("store-b", 100.0, delivery_days=3.0),
+    }
+    stores = ("store-a", "store-b")
+    roster = _served_roster({"store-a": 100.0, "store-b": 100.0})
+
+    kept = _served_post(
+        _served_app(bids, stores=stores, dispatch=dict.fromkeys(stores, SERVED_KEPT_ITS_WORD)),
+        roster,
+    )
+    broke = _served_post(
+        _served_app(
+            bids,
+            stores=stores,
+            dispatch={"store-a": SERVED_BROKE_ITS_WORD, "store-b": SERVED_KEPT_ITS_WORD},
+        ),
+        roster,
+    )
+
+    assert _served_slot_stores(kept)[0] == "store-a", kept["shortlist"]
+    assert _served_slot_stores(broke)[0] == "store-b", broke["shortlist"]
+    assert _served_slot_stores(kept) != _served_slot_stores(broke), (
+        "the store's dispatch record changed and the served shortlist did not — either "
+        "`rank_auction` is not handing the trust snapshot to `attach_features`, or the feed is "
+        "still the declared estimate"
+    )
+    assert _served_scores(kept) != _served_scores(broke)
+
+
+def test_a_store_with_no_dispatch_record_has_the_feature_absent_rather_than_scored():
+    """No history reads NEUTRAL: not good, not bad, and not a number on the record.
+
+    The two shapes a store with nothing to show up in, asserted on the RECORD rather than on the
+    served component map, because the component map has already substituted the published
+    `when_absent` and cannot tell an absent feature from a computed 0.5:
+
+    * no `shipped_on_time` in the snapshot's dims at all;
+    * the dimension present but EMPTY — `Beta(0, 0)`, no mass whatsoever;
+    * the dimension present but thin — four graded dispatches, one short of
+      `MIN_DISPATCH_OBSERVATIONS` above the Beta(2, 2) prior's mass of 4.
+
+    All three must leave `delivery_fit` OFF the record, which is how this module has always
+    signalled
+    "could not compute" (`attach_features`: a feature that cannot be computed is removed rather
+    than written as a number, so `scoring.feature_vector` applies the published neutral). Writing
+    a 1.0 would hand an unmeasured store the full value of a promise it has never kept, and
+    writing anything below 1.0 would charge it for a record it has not had the chance to build.
+    """
+    from exchange.ranking.features import attach_features
+
+    candidates = [
+        make_candidate("bid-a", "store-a", unit_price=100.0, total_price=100.0),
+        make_candidate("bid-b", "store-b", unit_price=100.0, total_price=100.0),
+        make_candidate("bid-c", "store-c", unit_price=100.0, total_price=100.0),
+        make_candidate("bid-d", "store-d", unit_price=100.0, total_price=100.0),
+    ]
+    for candidate, days in zip(candidates, (1.0, 3.0, 5.0, 7.0), strict=True):
+        candidate["offer"]["delivery_estimate_days"] = days
+
+    snapshot = {
+        # watched, and believed
+        "store-a": _served_trust_row("store-a", score=0.6, dispatch=SERVED_KEPT_ITS_WORD),
+        # no `shipped_on_time` dimension at all
+        "store-b": _served_trust_row("store-b", score=0.6, dispatch=None),
+        # present, but four dispatches is one short of the floor
+        "store-c": _served_trust_row("store-c", score=0.6, dispatch=SERVED_TOO_FEW_DISPATCHES),
+        # present and EMPTY — a Beta with no mass at all, which is not a posterior of anything
+        "store-d": _served_trust_row("store-d", score=0.6, dispatch=(0.0, 0.0)),
+    }
+    records = attach_features(candidates, intent=_intent(), trust_snapshot=snapshot)
+    by_store = {record["store_id"]: record for record in records}
+
+    assert "delivery_fit" not in by_store["store-b"], by_store["store-b"]
+    assert "delivery_fit" not in by_store["store-c"], by_store["store-c"]
+    assert "delivery_fit" not in by_store["store-d"], by_store["store-d"]
+    # `store-a` is admissible, but it is now the ONLY admissible estimate in this auction, so
+    # `delivery_fits` refuses to hand the sole declarant a free 1.0 and it is absent too. Both
+    # facts matter: an unadmitted promise is out of the term AND out of the range its rivals are
+    # measured against.
+    assert "delivery_fit" not in by_store["store-a"], by_store["store-a"]
+
+    # And a caller that hands NO snapshot gets the same answer for everybody rather than an
+    # invented posterior — the discipline `entries` already follows for `price_value`.
+    unwired = attach_features(candidates, intent=_intent())
+    assert all("delivery_fit" not in record for record in unwired), unwired
+
+    # The positive control: give all four a record and the feature appears on every one of them,
+    # from the same candidates and the same quoted estimates.
+    believed = attach_features(
+        candidates,
+        intent=_intent(),
+        trust_snapshot={
+            store: _served_trust_row(store, score=0.6, dispatch=SERVED_KEPT_ITS_WORD)
+            for store in ("store-a", "store-b", "store-c", "store-d")
+        },
+    )
+    assert all("delivery_fit" in record for record in believed), believed
+
+
+def test_the_trust_term_and_the_delivery_term_move_independently():
+    """Reading `dims.shipped_on_time` is not a second helping of `trust`, and this pins it.
+
+    `trust` is the snapshot's aggregate `score`, read in `scoring.feature_vector` and nowhere
+    else; `delivery_fit` reads one DIMENSION's Beta, in `features.dispatch_credibility`, and
+    never touches `score`. So the two are separately addressable and each direction is asserted
+    here — a change that folded one into the other turns one of these two red.
+
+    Both requests below are otherwise identical, and every store quotes a different number of
+    days so the delivery term has something to say in each.
+    """
+    bids = {
+        "store-a": _served_bid("store-a", 100.0, delivery_days=1.0),
+        "store-b": _served_bid("store-b", 100.0, delivery_days=3.0),
+    }
+    stores = ("store-a", "store-b")
+    roster = _served_roster({"store-a": 100.0, "store-b": 100.0})
+
+    # 1. Move the RECORD, hold the score. `delivery_fit` moves; `trust` does not.
+    kept = _served_features(
+        _served_post(
+            _served_app(
+                bids,
+                stores=stores,
+                trust=dict.fromkeys(stores, 0.6),
+                dispatch=dict.fromkeys(stores, SERVED_KEPT_ITS_WORD),
+            ),
+            roster,
+        )
+    )
+    broke = _served_features(
+        _served_post(
+            _served_app(
+                bids,
+                stores=stores,
+                trust=dict.fromkeys(stores, 0.6),
+                dispatch={"store-a": SERVED_BROKE_ITS_WORD, "store-b": SERVED_KEPT_ITS_WORD},
+            ),
+            roster,
+        )
+    )
+    assert kept["store-a"]["delivery_fit"] != broke["store-a"]["delivery_fit"]
+    for store in stores:
+        assert kept[store]["trust"] == pytest.approx(broke[store]["trust"]), (
+            "a store's `shipped_on_time` dimension moved its aggregate `trust` term, so the "
+            f"delivery record is being counted twice: {kept} vs {broke}"
+        )
+
+    # 2. Move the SCORE, hold the record. `trust` moves; `delivery_fit` does not.
+    scored = _served_features(
+        _served_post(
+            _served_app(
+                bids,
+                stores=stores,
+                trust={"store-a": 0.2, "store-b": 0.9},
+                dispatch=dict.fromkeys(stores, SERVED_KEPT_ITS_WORD),
+            ),
+            roster,
+        )
+    )
+    assert scored["store-a"]["trust"] != scored["store-b"]["trust"]
+    for store in stores:
+        assert scored[store]["delivery_fit"] == pytest.approx(kept[store]["delivery_fit"]), (
+            "the aggregate trust `score` moved `delivery_fit`, so the delivery term is reading "
+            f"the whole snapshot rather than its `shipped_on_time` dimension: {scored} vs {kept}"
+        )
+
+
+def test_the_dispatch_credibility_floor_bounds_the_inflation():
+    """The two published constants, checked against the arithmetic they claim.
+
+    `MIN_DISPATCH_OBSERVATIONS` is the admissibility floor and `MIN_DISPATCH_CREDIBILITY` is the
+    clamp that bounds the inflation at `1/0.25 = 4x`. Without the clamp a store with a long bad
+    record would have its quote inflated without limit and would leave the comparison rather than
+    lose it, which is a different — and unbounded — thing from the discount this term applies.
+    """
+    from exchange.ranking.features import (
+        MIN_DISPATCH_CREDIBILITY,
+        MIN_DISPATCH_OBSERVATIONS,
+        TRUST_PRIOR_MASS,
+        credible_delivery_estimate,
+        dispatch_credibility,
+    )
+
+    # THE VALUES, pinned as literals. Without this the rest of the file states every expectation
+    # in terms of the constants themselves, so `MIN_DISPATCH_CREDIBILITY = 0.05` (a 20x bound
+    # under a docstring that says 4x), `MIN_DISPATCH_OBSERVATIONS = 9.9` and
+    # `TRUST_PRIOR_MASS = 5.0` all pass the whole suite. Measured: all three survived every other
+    # assertion here. These are published numbers with published justifications; moving one is a
+    # decision, and this line is what makes it one.
+    assert TRUST_PRIOR_MASS == 4.0, "the manifest's trust_prior is Beta(2, 2), so the mass is 4.0"
+    assert MIN_DISPATCH_OBSERVATIONS == 5.0
+    assert MIN_DISPATCH_CREDIBILITY == 0.25, "the docstring's bound is 1/0.25 = 4x"
+
+    def row(alpha, beta):
+        return _served_trust_row("store-a", score=0.6, dispatch=(alpha, beta))
+
+    # Exactly at the floor is admitted; one observation short is not.
+    at_floor = TRUST_PRIOR_MASS + MIN_DISPATCH_OBSERVATIONS
+    assert dispatch_credibility(row(at_floor - 1.0, 1.0)) == pytest.approx(
+        (at_floor - 1.0) / at_floor
+    )
+    assert dispatch_credibility(row(at_floor - 2.0, 1.0)) is None
+
+    # A spotless record is quoted at (very nearly) face value; a ruinous one at exactly 4x —
+    # stated as a literal so the bound is pinned rather than restated from the constant.
+    spotless = dispatch_credibility(row(102.0, 2.0))
+    assert spotless is not None
+    assert credible_delivery_estimate(2.0, spotless) == pytest.approx(2.0 / (102.0 / 104.0))
+    ruinous = dispatch_credibility(row(2.0, 1002.0))
+    assert ruinous is not None and ruinous < MIN_DISPATCH_CREDIBILITY
+    assert credible_delivery_estimate(2.0, ruinous) == pytest.approx(8.0)
+
+    # Monotone in both arguments, and unadmitted on either half being missing.
+    assert credible_delivery_estimate(1.0, 0.9) < credible_delivery_estimate(1.0, 0.5)
+    assert credible_delivery_estimate(1.0, 0.9) < credible_delivery_estimate(2.0, 0.9)
+    assert credible_delivery_estimate(None, 0.9) is None
+    assert credible_delivery_estimate(1.0, None) is None
+    assert dispatch_credibility(None) is None
+    assert dispatch_credibility({"store_id": "store-a", "score": 0.9}) is None
+
+    # UNREADABLE IS UNADMITTED, NEVER PROPAGATED. `_number`'s own docstring names NaN as "the
+    # fail-open direction on anything that then gets normalised or ordered", and both of these
+    # feed straight into `delivery_fits`'s min/max — where a NaN compares false against
+    # everything and silently becomes an admissible estimate.
+    assert credible_delivery_estimate(float("nan"), 0.9) is None
+    assert credible_delivery_estimate(1.0, float("nan")) is None
+    assert credible_delivery_estimate(float("inf"), 0.9) is None
+    assert credible_delivery_estimate(1.0, float("inf")) is None
+    # A mass that overflows to inf would clear the evidence gate and then read `alpha/inf = 0.0`
+    # — the maximum penalty for a store whose real posterior is 0.5.
+    assert dispatch_credibility(row(1e308, 1e308)) is None
+    assert dispatch_credibility(row(float("nan"), 2.0)) is None
+    assert dispatch_credibility(row(-1.0, 20.0)) is None
+
+
+def test_the_admissibility_floor_reads_weighted_decayed_mass_not_an_episode_count():
+    """What the floor actually measures, pinned so nobody restates it as "five deliveries".
+
+    `TrustDims` publishes only `alpha`, `beta` and `decayed_at` per dimension, so evidence MASS is
+    the sole signal a served snapshot carries for one dimension — there is no count to read. Two
+    consequences follow from the trust engine's own published weights and decay, both of them
+    surprising enough that stating them wrongly in a docstring was the first thing an adversarial
+    read caught:
+
+    * a missed promise is `contradicted` at weight 2.0 and a kept one `fulfilled` at 1.0
+      (`trust.reconcile.engine`), so THREE broken promises clear this floor while FOUR kept ones
+      do not;
+    * observations decay toward the prior, so five clean dispatches clear the floor only while
+      they are fresh.
+
+    Neither is a defect — the floor exists to stop an UNMEASURED store being judged, not to
+    shelter a measured bad one, and stale evidence should stop counting — but both are real and
+    neither is what "five observations" sounds like.
+    """
+    from exchange.ranking.features import dispatch_credibility
+    from trust.scoring import score as trust_score
+
+    def snapshot_after(events):
+        """A real served `shipped_on_time` row, folded by the real trust engine."""
+        rows = trust_score(
+            [{"dim": "shipped_on_time", "type": kind, "observed_at": at} for kind, at in events],
+            as_of="2026-03-01T00:00:00Z",
+        )
+        return {"store_id": "store-a", "blacklisted": False, "score": 0.5, "dims": rows["dims"]}
+
+    fresh = "2026-03-01T00:00:00Z"
+    stale = "2026-01-30T00:00:00Z"  # one 30-day half-life back
+
+    # Four kept promises: mass 8, one short of 4 + 5. Not admitted.
+    assert dispatch_credibility(snapshot_after([("fulfilled", fresh)] * 4)) is None
+    # Five kept promises, contemporaneous: mass 9 exactly. Admitted, at 7/9.
+    assert dispatch_credibility(snapshot_after([("fulfilled", fresh)] * 5)) == pytest.approx(
+        7.0 / 9.0
+    )
+    # The SAME five, a half-life old: decayed under the floor. An old record is not a promise.
+    assert dispatch_credibility(snapshot_after([("fulfilled", stale)] * 5)) is None
+    # Three BROKEN promises: 3 x 2.0 = 6 of mass, so a worse store is judged on fewer episodes.
+    assert dispatch_credibility(snapshot_after([("contradicted", fresh)] * 3)) == pytest.approx(0.2)
 
 
 def test_trust_still_moves_a_served_ranking_with_price_held_constant():

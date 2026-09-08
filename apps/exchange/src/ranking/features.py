@@ -31,9 +31,12 @@ every list price on the roster returned bit-identical scores and the identical s
     here, from the attested verdicts and from nothing else.
 
 ``delivery_fit``
-    The input existed (``Offer.delivery_estimate_days``) and nothing read it. See
-    :func:`delivery_fits` for exactly what is and is not modelled, because this is the one
-    feature whose published definition names something the exchange does not hold.
+    The input existed (``Offer.delivery_estimate_days``) and nothing read it. Reading it turned
+    out to be only half the fix: the declared number is written by the bidder, so see
+    :func:`delivery_fits`, :func:`dispatch_credibility` and D57 for why a delivery PROMISE is now
+    weighed against the store's ``shipped_on_time`` record before it counts, and for exactly what
+    is and is not modelled — this is still the one feature whose published definition names
+    something (``Intent.ship_to``) the exchange does not hold.
 ``intent_match``
     **Genuinely not computable from what a served auction knows, and therefore not produced.**
     DESIGN.md:132 says it "comes from retrieval+rerank". The producer exists —
@@ -53,36 +56,43 @@ Three properties this module keeps
   offer, and may not state its own score.
 * **A fee, a tier and an envelope's contents are unreachable from here.** The inputs are
   named, one by one:
-  the roster's list price, the offer's total price, the offer's delivery estimate, and the
-  exchange's own attested claim verdicts. ``tier``, ``max_discount_pct``, any network fee and
-  the envelope's commitments are on objects this module is handed and never reads.
+  the roster's list price, the offer's total price, the offer's delivery estimate, the trust
+  snapshot's ``dims.shipped_on_time`` Beta, and the exchange's own attested claim verdicts.
+  ``tier``, ``max_discount_pct``, any network fee and the envelope's commitments are on objects
+  this module is handed and never reads — and neither is the snapshot's aggregate ``score``,
+  which is ``trust``'s own term and is read one layer up in :func:`.scoring.feature_vector`.
 * **Absent stays absent.** A feature this module cannot compute is REMOVED from the candidate
   rather than written as a number, so :func:`.scoring.feature_vector` applies the published
   ``when_absent`` value. Writing 0.0 for "we do not know" is the D13/D14 bias against every
   store nobody has measured yet.
 
-The redefinition this module now carries (features version 2.0.0)
+The redefinition this module now carries (features version 3.0.0)
 -----------------------------------------------------------------
 The product is a MATCHING AND PERSUASION market (D55): a store buys a dedicated advocate that
 writes a pitch for THIS shopper. **The published formula paid nothing for that.** Classify each
 term by whether a store can move it at bid time and whether its value depends on this buyer:
 
-===================== ====== ==================== ================
-term                  weight movable at bid time  buyer-dependent
-===================== ====== ==================== ================
-intent_match          0.35   no (catalogue)       YES
-verified_claim_ratio  0.20   YES                  no
-trust                 0.20   no (months)          no
-price_value           0.15   YES                  no
-delivery_fit          0.10   YES                  no
-===================== ====== ==================== ================
+===================== ====== ============================ ================
+term                  weight movable at bid time           buyer-dependent
+===================== ====== ============================ ================
+intent_match          0.35   no (catalogue)                YES
+verified_claim_ratio  0.20   YES                           no
+trust                 0.20   no (months)                   no
+price_value           0.15   YES                           no
+delivery_fit          0.10   only as far as its record     no
+===================== ====== ============================ ================
+
+That last cell used to read a plain "YES", and it was the defect D57 closes. A promise costs a
+store nothing to type, so an unbacked ``delivery_estimate_days`` bought up to a tenth of the
+published score outright; the term is still movable at bid time, but only within what the store's
+``shipped_on_time`` record will carry.
 
 The movable-AND-buyer-dependent cell was EMPTY, and :func:`.scoring.score` is strictly additive
 with no interaction term — so a store's argmax over pitches was identical for every buyer and
 customization returned exactly zero. Worse, the store-agent learning loop would have measured
 that correctly and converged every store onto one generic pitch.
 
-Two features are redefined here to fill that cell and to stop the race to the bottom, both under
+Three features are redefined here to fill that cell and to stop the race to the bottom, all under
 their existing published names and weights (which is why
 :data:`contracts.ranking.RANKING_FEATURES_VERSION` exists — see there):
 
@@ -93,6 +103,15 @@ their existing published names and weights (which is why
   per store.
 * :func:`price_value` saturates at :func:`band_depth` — full credit for clearing this auction's
   own price band, zero marginal return past it.
+* ``delivery_fit`` compares CREDIBLE delivery estimates instead of declared ones (D57). Its feed
+  was ``Offer.delivery_estimate_days`` verbatim, which is a number the bidding store writes: the
+  auction normalised the declared numbers against each other, so the store that typed the
+  smallest one took the term and nothing checked whether it had ever shipped that fast.
+  :func:`dispatch_credibility` reads the store's ``shipped_on_time`` Beta off the trust snapshot
+  this exchange already holds at ranking time, and :func:`credible_delivery_estimate` divides the
+  quote by that posterior before the normalisation runs. A store nobody has watched dispatch has
+  its promise UNADMITTED, so the feature is absent for it and reads the published neutral — not
+  good, not bad, which is the whole of D13/D14 applied to a store with no history.
 
 And one penalty is minted: :func:`contradicted_claim_events`, the only asymmetric downside in
 the design. Without it, a false claim costs one auction's share of one ratio and nothing else,
@@ -116,20 +135,25 @@ from contracts.ranking import (
 )
 
 from .attestation import ATTESTATION_FIELD, attested_status
-from .filters import VERIFIED, read
+from .filters import VERIFIED, read, trust_row
 
 __all__ = [
     "CONTRADICTED",
+    "MIN_DISPATCH_CREDIBILITY",
+    "MIN_DISPATCH_OBSERVATIONS",
     "MIN_QUERY_TOKEN",
     "PRODUCED_FEATURES",
     "QUERY_STOPWORDS",
+    "TRUST_PRIOR_MASS",
     "UNDECIDED",
     "IntentSurface",
     "attach_features",
     "band_depth",
     "contradicted_claim_events",
+    "credible_delivery_estimate",
     "delivery_estimate",
     "delivery_fits",
+    "dispatch_credibility",
     "intent_surface",
     "offer_price",
     "price_band",
@@ -650,6 +674,82 @@ def contradicted_claim_events(claims: Any, *, store_id: Any = None) -> list[str]
     return events
 
 
+#: The neutral Beta's total mass — ``alpha + beta`` — on a trust dimension nobody has observed.
+#:
+#: ``fixtures/manifest.json``'s ``trust_prior`` publishes Beta(2, 2): "a new store is not
+#: 'probably fine', it is 'unknown'". ``trust.scoring.score`` serves all six dimensions always,
+#: an unobserved one at that prior rather than omitted, so 4.0 is the mass a store carries
+#: having been observed dispatching exactly nothing.
+#:
+#: It is restated here rather than imported because :mod:`exchange.ranking` imports nothing out
+#: of :mod:`trust` — the exchange READS a served snapshot, it does not run the scorer, and
+#: importing the engine to reach one float would couple the serving path to the scorer's
+#: deployment.
+#:
+#: **What a mismatched prior would actually do, stated because the first draft of this comment
+#: claimed the line "cannot be erased" and that is false.** The prior is manifest-driven
+#: (``trust.scoring.PRIOR_ALPHA``/``PRIOR_BETA``), and a deployment whose prior carried mass 9 or
+#: more would clear :data:`MIN_DISPATCH_OBSERVATIONS` with ZERO observations behind it — every
+#: store admitted at the prior, which is exactly the "unmeasured store collects the term" failure
+#: this constant exists to prevent. The number here has to track the manifest's; it is not a
+#: conservative guess that degrades gracefully.
+TRUST_PRIOR_MASS = 4.0
+
+#: How much observed dispatch evidence a store needs before its delivery promise is ADMITTED to
+#: ``delivery_fit`` at all, measured as ``alpha + beta`` in excess of :data:`TRUST_PRIOR_MASS`.
+#:
+#: **Read what this actually measures before reading the number: WEIGHTED, DECAYED evidence mass,
+#: which is not an episode count and must not be described as one.** ``TrustDims`` publishes
+#: exactly ``alpha``, ``beta`` and ``decayed_at`` per dimension (``trust.snapshot.routes``'s
+#: ``PUBLISHED_DIMENSION_FIELDS``), so mass is the only evidence signal a served snapshot carries
+#: for one dimension — there is no count to read. Two consequences follow and both are real:
+#:
+#: * **A miss weighs twice a keep.** ``trust.reconcile`` emits ``fulfilled`` at weight 1.0 and
+#:   ``contradicted`` at 2.0, so three broken promises (mass 6.0) clear this floor while four kept
+#:   ones (mass 4.0) do not. That is the defensible direction — the floor exists to stop an
+#:   UNMEASURED store being judged, not to shelter a measured bad one — but it is a real asymmetry
+#:   and it is written down rather than left to be discovered.
+#: * **Decay moves the line.** Observations decay toward the prior (30-day half-life, D17), so
+#:   five clean dispatches clear the floor only if they are contemporaneous; spread across a
+#:   half-life they land near mass 7.7 and the promise is NOT admitted. A real store needs closer
+#:   to ten dispatches inside a couple of half-lives. That makes this a staleness gate as well as
+#:   an evidence gate — an old record is not a current promise — which is intended.
+#:
+#: **Five is borrowed as a MAGNITUDE from ``fixtures/manifest.json``'s ``new_store_prior_n``, and
+#: it is not the same measurement.** That constant is a count of clean episodes and drives the
+#: snapshot's store-level ``low_data`` flag; this one is per-dimension weighted mass. They will
+#: disagree at the edges, deliberately: ``low_data`` answers "is this store new to the network"
+#: over all six dimensions, and the question here is the narrower "has anyone watched THIS store
+#: dispatch enough times to believe its next dispatch promise". Taking the magnitude rather than
+#: inventing one keeps the two in the same order of evidence without pretending they are one
+#: number.
+#:
+#: For scale, at decay 1.0 against the Beta(2, 2) prior: five kept promises post a posterior of
+#: ``7/9 = 0.778`` and five broken ones ``2/14 = 0.143`` (five contradictions at weight 2.0 put
+#: 10 on ``beta``). Under the floor the posterior is dominated by the prior, so admitting it would
+#: score the exchange's own ignorance as a fact about the store.
+MIN_DISPATCH_OBSERVATIONS = 5.0
+
+#: The floor the ``shipped_on_time`` posterior is clamped at before it divides a quoted estimate,
+#: which is what bounds the inflation at ``1/0.25 = 4x`` the store's own number.
+#:
+#: A posterior of 0.25 is a store whose dispatch promises fail three times for every time they
+#: hold; that store is already decided, and letting the divisor keep shrinking past it would push
+#: the effective quote past every rival's — turning a bounded discount on one term into effective
+#: exclusion from it, which is a different and unbounded thing.
+#:
+#: **What 4x does and does not buy, because the arithmetic is easy to state wrongly.** It does NOT
+#: mean an unreliable store always loses to a reliable one; ordering depends on the QUOTES as well
+#: as the records, and the break-even is exact: a store quoting ``d_bad`` at or below the floor
+#: loses to a rival quoting ``d_good`` with posterior ``p`` if and only if
+#: ``d_good / p < d_bad / 0.25`` — that is, ``d_good < 4 * p * d_bad``. Against a rival with a
+#: near-spotless ``p = 0.857``, a store promising 1 day it never keeps is beaten by a 3-day
+#: promise (3 < 3.43) and beats a 4-day one (4 > 3.43). A term that instead guaranteed the
+#: unreliable store lost at every quote would not be a delivery comparison at all — it would be a
+#: trust term wearing ``delivery_fit``'s name, which is the double-count D57 exists to avoid.
+MIN_DISPATCH_CREDIBILITY = 0.25
+
+
 def delivery_estimate(offer: Any) -> float | None:
     """``Offer.delivery_estimate_days`` as a usable number of days, or ``None``.
 
@@ -657,6 +757,10 @@ def delivery_estimate(offer: Any) -> float | None:
     guard on this input: normalised across the auction, the SMALLEST estimate wins the term
     outright, so a store writing ``-1000`` would take it. A promise of minus a thousand days
     is not a fast delivery, it is not a delivery estimate at all.
+
+    This is the DECLARED number and nothing else. What reaches :func:`delivery_fits` is this
+    number after :func:`credible_delivery_estimate` has weighed it against the store's record;
+    see there for why the declared value alone is not a feed a published weight may be spent on.
     """
     days = _number(read(offer, "delivery_estimate_days", None))
     if days is None or days < 0.0:
@@ -664,12 +768,133 @@ def delivery_estimate(offer: Any) -> float | None:
     return days
 
 
+def dispatch_credibility(row: Any) -> float | None:
+    """One store's ``shipped_on_time`` posterior, or ``None`` when it has not earned one.
+
+    ``row`` is the store's row out of the trust snapshot the exchange already holds at ranking
+    time — :func:`.filters.trust_row` is the one reader that turns a snapshot into one, and it is
+    reused rather than reimplemented so the blacklist gate (R12) and this feed can never disagree
+    about which row belongs to whom.
+
+    ``TrustDims.shipped_on_time`` is a Beta and the posterior is ``alpha / (alpha + beta)``. That
+    dimension is the one the trust engine sets by grading a store's PROMISED dispatch window
+    against what actually shipped (``trust.reconcile.engine``: one-sided, so shipping early is
+    never a broken promise), which is why it — and not the aggregate ``score`` — is what a
+    delivery promise has to be weighed against.
+
+    ``None``, meaning **the store's promise is not admitted**, in three cases:
+
+    * there is no row for the store at all — reachable by a direct caller, but NOT on the served
+      route, where R12's blacklist gate excludes a store with no row before it can be scored
+      (:func:`.filters.blacklist_reason`, ``blacklist_unreadable``). It is handled anyway because
+      this is an exported function and "no row" must not mean "raise";
+    * the dimension is unreadable as two finite, non-negative numbers, or its mass is zero or not
+      finite;
+    * the evidence behind it is thinner than :data:`MIN_DISPATCH_OBSERVATIONS` in excess of
+      :data:`TRUST_PRIOR_MASS` — the store has not been watched dispatching enough times for its
+      posterior to be about the store rather than about the prior.
+
+    **``None`` is "no record", and no record must read NEUTRAL — not good, not bad.** It is
+    returned instead of a number because every number available here is a claim: 1.0 hands an
+    unmeasured store the full value of a promise it has never once kept, and anything under 1.0
+    charges it for a record it has not yet had the chance to build. The caller turns this into an
+    ABSENT feature, which is the published neutral 0.5 (D13/D14) — a store with no shipping
+    history can neither win this term nor be punished by it.
+    """
+    dims = read(row, "dims", None) if row is not None else None
+    dimension = read(dims, "shipped_on_time", None) if dims is not None else None
+    if dimension is None:
+        return None
+    alpha = _number(read(dimension, "alpha", None))
+    beta = _number(read(dimension, "beta", None))
+    if alpha is None or beta is None or alpha < 0.0 or beta < 0.0:
+        return None
+    # `_number` refuses a non-finite alpha or beta one at a time; their SUM can still overflow to
+    # inf, and an infinite mass would clear the evidence gate and then read `alpha/inf = 0.0` —
+    # the maximum penalty, for a store whose actual posterior is 0.5. Unreadable, not decided.
+    mass = _number(alpha + beta)
+    if mass is None or mass <= 0.0 or mass - TRUST_PRIOR_MASS < MIN_DISPATCH_OBSERVATIONS:
+        return None
+    return _clamp01(alpha / mass)
+
+
+def credible_delivery_estimate(days: float | None, credibility: float | None) -> float | None:
+    """A quoted dispatch estimate re-expressed in the days the store's own record supports.
+
+    **The formula**::
+
+        effective_days = days / max(credibility, MIN_DISPATCH_CREDIBILITY)
+
+    where ``credibility`` is :func:`dispatch_credibility` — the store's ``shipped_on_time``
+    posterior. A store whose posterior is 1.0 is quoted at FACE VALUE; one at 0.5 has its quote
+    doubled; one at or below :data:`MIN_DISPATCH_CREDIBILITY` has it multiplied by 4 and no more.
+    (The Beta(2, 2) prior means a real posterior approaches 1.0 without reaching it, so a
+    spotless record pays a vanishing inflation rather than exactly none — ``7/9`` after five
+    clean dispatches is ``1.29x``, ``22/24`` after twenty is ``1.09x``.)
+
+    Three properties **of this function**, and the reasons each was required. Read the scoping
+    literally: they are claims about the adjustment, not about the composed feature, and the
+    difference is spelled out under "what this cannot do" below.
+
+    * **monotone** — strictly decreasing in ``credibility`` and increasing in ``days``, so within
+      this function keeping a promise never costs a store and quoting sooner never costs it
+      either. No band, no bucket, no interval in which shipping later or promising later returns
+      a smaller effective quote.
+    * **scale-free** — a pure multiplication, so it holds no opinion about what a day is worth.
+      No absolute days-to-score curve is introduced here, for the same reason
+      :func:`delivery_fits` refuses to introduce one: every constant such a curve needs would be
+      invented in this file and would move rankings for a reason nobody could audit.
+    * **auditable** — one division by one published posterior against one published floor, all
+      three of which a store can read off its own trust snapshot and check.
+
+    ``None`` — the feature is ABSENT for this store, which reads the published neutral 0.5 — when
+    either half is missing or unreadable: no quoted estimate (unchanged from before), no
+    admissible record behind the quote, or a value that is not a finite number. NaN in particular
+    is refused rather than propagated, for the reason :func:`_number` already gives: every
+    comparison against NaN is silently false, which is the fail-open direction on a value that is
+    about to be normalised and ordered.
+
+    **What this cannot do**, in two parts, both written here rather than discovered later.
+
+    *A quote of exactly 0.0 days is the fixed point of any scale-free map*, so a store with the
+    worst possible record still reads 0.0 effective days if it claims same-day dispatch. That
+    follows from scale-freedom rather than being an oversight; the guard against it is not in this
+    function but in the dimension it feeds, because a store that keeps quoting 0 and keeps missing
+    is being graded on exactly that promise by ``trust.reconcile.engine`` every time it ships.
+
+    *The COMPOSED feature is not monotone across the admissibility cliff, and the direction is the
+    one D13 already published.* An unadmitted promise reads the neutral 0.5, while an admitted one
+    can read as low as 0.0 — so a store whose credible quote would land in the bottom half of its
+    auction scores better unadmitted than admitted, and earning a record can cost it up to
+    ``w_d/2``. This is the SAME incentive :func:`delivery_fits` already documents for saying
+    nothing at all ("a store with a slow delivery scores better by saying nothing than by saying
+    it. That is D13's published ``when_absent`` value, not this module's choice"); D57 adds a
+    second route to the same absence — letting a dispatch record go thin or stale — and does not
+    change the published neutral that creates it. Closing it means moving
+    ``delivery_fit_when_absent``, which is a published contract and a different decision.
+    """
+    quoted = _number(days)
+    earned = _number(credibility)
+    if quoted is None or earned is None:
+        return None
+    return quoted / max(_clamp01(earned), MIN_DISPATCH_CREDIBILITY)
+
+
 def delivery_fits(estimates: Sequence[float | None]) -> list[float | None]:
     """One ``delivery_fit`` per estimate, normalised across the auction. Read this first.
 
     **What is modelled:** sooner is better, among the offers this auction actually received.
-    The fit is ``(slowest − mine)/(slowest − fastest)`` over the estimates declared in this
-    auction, so the fastest declared offer reads 1.0 and the slowest reads 0.0.
+    The fit is ``(slowest − mine)/(slowest − fastest)`` over the estimates handed in for this
+    auction, so the fastest reads 1.0 and the slowest reads 0.0.
+
+    **The estimates handed in are CREDIBLE ones, not declared ones**, and that is the whole
+    difference between this feed and the one it replaces. ``delivery_fit`` carries a published
+    weight of 0.10, and while the input was ``Offer.delivery_estimate_days`` verbatim, a store
+    bought up to a tenth of the score by typing a smaller number — nothing anywhere asked whether
+    it had ever shipped that fast. :func:`credible_delivery_estimate` divides each quote by the
+    store's ``shipped_on_time`` posterior first, and :func:`dispatch_credibility` refuses to
+    supply a posterior for a store nobody has watched dispatch. So a promise has to be earned
+    before it counts, and an unearned one is ABSENT rather than good or bad (D57).
 
     **What is NOT modelled, stated plainly because DESIGN's sentence says more than the
     exchange can do:** DESIGN.md:128 has ``delivery_fit`` read ``Offer.delivery_estimate_days``
@@ -683,9 +908,10 @@ def delivery_fits(estimates: Sequence[float | None]) -> list[float | None]:
 
     ``None`` — absent, therefore the published neutral 0.5 — in three cases:
 
-    * an offer that declares no usable estimate (D13/D14's rule, and the one DESIGN states
-      explicitly for this feature);
-    * fewer than two declared estimates in the whole auction, so there is no comparison to
+    * an offer whose promise is not admitted: it declares no usable estimate (D13/D14's rule,
+      and the one DESIGN states explicitly for this feature), or it declares one and the store
+      has no dispatch record credible enough to weigh it against;
+    * fewer than two admissible estimates in the whole auction, so there is no comparison to
       make. Without this the single store that bothered to state one would collect a free
       1.0 for having no competition;
     * a degenerate range — every declarant said the same thing — for the same reason
@@ -708,13 +934,13 @@ def delivery_fits(estimates: Sequence[float | None]) -> list[float | None]:
       gap between them, which is a lever only for whoever writes the roster — and that is the
       buyer's own agent, not a bidding store.
 
-    Deterministic: ``min``/``max`` over the declared values are order-independent, and the
+    Deterministic: ``min``/``max`` over the admissible values are order-independent, and the
     same inputs produce the same floats (R11, and S3's replay properties).
     """
-    declared = [days for days in estimates if days is not None]
-    if len(declared) < 2:
+    admissible = [days for days in estimates if days is not None]
+    if len(admissible) < 2:
         return [None] * len(estimates)
-    fastest, slowest = min(declared), max(declared)
+    fastest, slowest = min(admissible), max(admissible)
     span = slowest - fastest
     if span <= 0.0:
         return [None] * len(estimates)
@@ -722,7 +948,11 @@ def delivery_fits(estimates: Sequence[float | None]) -> list[float | None]:
 
 
 def attach_features(
-    candidates: Sequence[Any], entries: Sequence[Any] = (), *, intent: Any = None
+    candidates: Sequence[Any],
+    entries: Sequence[Any] = (),
+    *,
+    intent: Any = None,
+    trust_snapshot: Any = None,
 ) -> list[Any]:
     """Every candidate of one auction, carrying the features this module can compute.
 
@@ -753,6 +983,19 @@ def attach_features(
     term discriminates nobody rather than guessing. Nothing on the intent reaches the published
     WEIGHTS: `Intent.preferences[].weight` is not read here at all (D50).
 
+    ``trust_snapshot`` is the same snapshot :func:`~exchange.ranking.rank` is handed, and it is
+    read for exactly one thing: each store's ``dims.shipped_on_time`` Beta, which is what makes
+    ``delivery_fit`` a comparison of CREDIBLE promises rather than declared ones (D57). It is
+    resolved per store through :func:`.filters.trust_row` — by ``store_id`` rather than
+    positionally, because a snapshot is a keyed structure and `trust_row` is already the one
+    reader that decides which row is whose; two readers of one snapshot that disagreed about that
+    would put the blacklist gate and this feed on different stores. **A caller that hands nothing
+    gets the absent path for everybody** — every promise unadmitted, `delivery_fit` absent on
+    every candidate, the published neutral 0.5 all round — which is the same discipline
+    ``entries`` follows and the opposite of inventing a posterior nobody measured. The snapshot's
+    aggregate ``score`` is NOT read here; that is `trust`'s own term, read in
+    :func:`.scoring.feature_vector`, and the two are separate inputs on purpose.
+
     ``policy_events`` are APPENDED, never replaced: one
     :data:`contracts.ranking.CONTRADICTED_CLAIM` per claim this exchange's own snapshot
     contradicts. Appending matters because a record may already carry events from a producer
@@ -771,18 +1014,36 @@ def attach_features(
         listed = [None] * len(records)
 
     offers = [read(record, "offer", None) for record in records]
-    fits = delivery_fits([delivery_estimate(offer) for offer in offers])
+    store_ids = [read(record, "store_id", None) for record in records]
+    # The QUOTE, then the RECORD behind it, then the normalisation across the auction — in that
+    # order, because the credibility adjustment has to happen before the min/max is taken or the
+    # scale it is taken over is still the declared one. A store with no admissible record
+    # contributes `None` here, so it is out of the range as well as out of the term: an
+    # unadmitted promise must not stretch the scale its rivals are measured on either.
+    credibility = [
+        dispatch_credibility(trust_row(str(store_id), trust_snapshot))
+        if store_id is not None
+        else None
+        for store_id in store_ids
+    ]
+    fits = delivery_fits(
+        [
+            credible_delivery_estimate(delivery_estimate(offer), earned)
+            for offer, earned in zip(offers, credibility, strict=True)
+        ]
+    )
     # ONE band and ONE surface for the whole auction, computed before the loop: both are
     # statements about the auction rather than about a candidate, and deriving either one
     # per candidate would let the answer depend on which candidate was being scored.
     depth_to_clear = band_depth(price_band(listed))
     surface = intent_surface(intent)
 
-    for record, offer, list_price, fit in zip(records, offers, listed, fits, strict=True):
+    for record, offer, store_id, list_price, fit in zip(
+        records, offers, store_ids, listed, fits, strict=True
+    ):
         if not isinstance(record, dict):
             continue
         claims = read(record, "claims", None)
-        store_id = read(record, "store_id", None)
         produced = {
             "price_value": price_value(list_price, offer, depth_to_clear=depth_to_clear),
             "verified_claim_ratio": verified_claim_ratio(

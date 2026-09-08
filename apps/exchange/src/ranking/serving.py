@@ -864,7 +864,19 @@ def rank_auction(
     # candidate's evidence term is absent and the one feature a store can move for THIS buyer
     # goes flat, which is the defect the redefinition exists to close. Only the intent's asks
     # are read; `Intent.preferences[].weight` never touches the published weights (D50).
-    candidates = attach_features(candidates, entries, intent=intent)
+    #
+    # `trust_snapshot` is handed over because `delivery_fit` is a comparison of CREDIBLE
+    # delivery promises now, not declared ones (D57). It carries `w_d = 0.10` and its feed was
+    # `Offer.delivery_estimate_days` verbatim — a number the bidding store types — so a store
+    # bought up to a tenth of the published score by promising sooner, with nothing anywhere
+    # asking whether it had ever shipped that fast. `features.dispatch_credibility` reads the
+    # `shipped_on_time` DIMENSION off this same snapshot (not its aggregate `score`, which is
+    # `trust`'s own term and is read separately below) and divides the quote by it before the
+    # auction-normalisation runs. **Without this argument every promise is unadmitted**, so
+    # `delivery_fit` is absent on every candidate and reads its published neutral — which is the
+    # honest failure, and is why the parameter is not optional in practice even though it
+    # defaults to `None`.
+    candidates = attach_features(candidates, entries, intent=intent, trust_snapshot=trust_snapshot)
     # The PLATFORM's fit measurement, applied last so it is the last writer of the key. See
     # `with_intent_match` for what an unreadable measurement does and why it is refused here.
     candidates = with_intent_match(candidates, intent_match)

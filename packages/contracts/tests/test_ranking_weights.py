@@ -222,7 +222,7 @@ def test_a_negative_penalty_is_rejected() -> None:
         RankingWeights.model_validate(payload)
 
 
-# --- features 2.0.0: the published definitions the weights are applied TO -------------------
+# --- features 3.0.0: the published definitions the weights are applied TO -------------------
 
 
 def test_the_feature_definitions_are_versioned_separately_from_the_weights() -> None:
@@ -239,8 +239,18 @@ def test_the_feature_definitions_are_versioned_separately_from_the_weights() -> 
 
     assert RANKING_FEATURES_VERSION
     assert RANKING_FEATURES_VERSION != RANKING_WEIGHTS_VERSION
-    # 2.x, because two of the five features were REDEFINED and not merely retuned.
-    assert RANKING_FEATURES_VERSION.split(".")[0] == "2"
+    # 3.x. This literal is a TRIPWIRE, not a description: it is here so that redefining a
+    # published feature cannot happen without a human editing this line and saying why.
+    #
+    # It read "2" from the commit that introduced the constant (d4386a8) until D57 replaced
+    # `delivery_fit`'s FEED — `Offer.delivery_estimate_days` verbatim, a number the bidding
+    # store writes, so a store bought up to `w_d = 0.10` of the published score by promising
+    # sooner with nothing checking whether it had ever shipped that fast. The feature now reads
+    # the quote divided by the store's `shipped_on_time` posterior, and a store nobody has
+    # watched dispatch has no admitted promise at all. Same name, same weight, same published
+    # neutral, different number — which is the exact case `RANKING_FEATURES_VERSION` exists to
+    # make visible to a replay, so the major had to move and this pin had to move with it.
+    assert RANKING_FEATURES_VERSION.split(".")[0] == "3"
 
 
 def test_intent_match_has_a_published_neutral_of_its_own() -> None:

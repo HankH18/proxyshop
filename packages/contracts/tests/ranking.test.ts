@@ -143,13 +143,20 @@ describe("normalization and penalties", () => {
   });
 });
 
-describe("features 2.0.0 — the definitions the weights are applied to", () => {
+describe("features 3.0.0 — the definitions the weights are applied to", () => {
   it("versions the feature definitions separately from the weights", () => {
     // A feature redefined under an unchanged weights version re-scores history silently:
     // every stored number still validates and every published weight still matches (R15/S3).
     expect(RANKING_FEATURES_VERSION).toBeTruthy();
     expect(RANKING_FEATURES_VERSION).not.toBe(RANKING_WEIGHTS_VERSION);
-    expect(RANKING_FEATURES_VERSION.split(".")[0]).toBe("2");
+    // The major is a TRIPWIRE, not a description: redefining a published feature must not be
+    // possible without a human editing this line. It read "2" from the commit that introduced
+    // the constant (d4386a8) until D57 replaced `delivery_fit`'s FEED — the declared
+    // `Offer.delivery_estimate_days`, a number the bidding store writes — with the same quote
+    // divided by that store's `shipped_on_time` posterior, and made an unwatched store's
+    // promise inadmissible. Same name, same weight, same neutral, different number, so a
+    // replay must be able to see that the definitions moved.
+    expect(RANKING_FEATURES_VERSION.split(".")[0]).toBe("3");
   });
 
   it("publishes intent_match's neutral without moving it", () => {

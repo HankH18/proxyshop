@@ -33,14 +33,22 @@ export const RANKING_WEIGHTS_VERSION = "1.0.0";
 /**
  * The version of the FEATURE DEFINITIONS the published weights are applied to.
  *
- * `2.0.0` because two features were REDEFINED rather than retuned: `verified_claim_ratio` became
- * buyer-conditional evidence and `price_value` became saturating at the auction's own price band.
- * Both kept their published name and weight, so `RANKING_WEIGHTS_VERSION` did not move — which is
- * exactly why this second version exists. R15/S3 promise a replay reproduces served scores, and a
- * feature redefined under an unchanged weights version breaks that silently: every recorded number
- * still validates and every published weight still matches.
+ * `3.0.0` because `delivery_fit`'s FEED was replaced (D57). It read `Offer.delivery_estimate_days`
+ * — a number the bidding store writes — normalised against the other declared numbers in the
+ * auction, so a store bought up to `w_d = 0.10` of the published score by promising sooner and
+ * nothing asked whether it had ever shipped that fast. It now reads a CREDIBLE estimate: the quote
+ * divided by the store's `shipped_on_time` posterior off the trust snapshot, with an unwatched
+ * store's promise not admitted at all (absent, therefore the published neutral).
+ *
+ * `2.0.0` was the set before that: two features REDEFINED rather than retuned —
+ * `verified_claim_ratio` became buyer-conditional evidence and `price_value` became saturating at
+ * the auction's own price band. All of these kept their published name and weight, so
+ * `RANKING_WEIGHTS_VERSION` did not move — which is exactly why this second version exists. R15/S3
+ * promise a replay reproduces served scores, and a feature redefined under an unchanged weights
+ * version breaks that silently: every recorded number still validates and every published weight
+ * still matches.
  */
-export const RANKING_FEATURES_VERSION = "2.0.0";
+export const RANKING_FEATURES_VERSION = "3.0.0";
 
 /**
  * What `intent_match` reads when it is ABSENT.

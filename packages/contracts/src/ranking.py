@@ -136,19 +136,29 @@ RANKING_WEIGHTS_VERSION = "1.0.0"
 
 #: The version of the FEATURE DEFINITIONS the published weights are applied to.
 #:
-#: ``2.0.0`` because two of the five features were REDEFINED, not retuned: `verified_claim_ratio`
-#: became buyer-conditional evidence (see :data:`EVIDENCE_GAIN_BY_RELEVANCE`) and `price_value`
-#: became saturating at the auction's own price band. Both kept their published name and their
-#: published weight, so `RANKING_WEIGHTS_VERSION` did not move — and that is precisely the case
-#: this constant exists for. R15/S3 promise that replaying the ledger reproduces the served
-#: scores; a feature redefined under an unchanged weights version breaks that promise SILENTLY,
-#: because every recorded number still validates and every published weight still matches. A
-#: replay must compare BOTH versions before it may claim its recomputation reproduces a score.
+#: ``3.0.0`` because `delivery_fit`'s FEED was replaced (D57). It read
+#: ``Offer.delivery_estimate_days`` — a number the bidding store writes — normalised against the
+#: other declared numbers in the auction, so a store bought up to ``w_d = 0.10`` of the published
+#: score by promising sooner and nothing asked whether it had ever shipped that fast. It now
+#: reads a CREDIBLE estimate: the quote divided by the store's `shipped_on_time` posterior off
+#: the trust snapshot, with an unwatched store's promise not admitted at all (absent, therefore
+#: the published neutral). Same name, same weight, same neutral, different number — which is
+#: exactly the kind of change this constant exists to make visible.
 #:
-#: ``1.0.0`` is the definition set that shipped before this: `verified_claim_ratio` as the raw
+#: ``2.0.0`` was the definition set before that: two of the five features REDEFINED, not retuned —
+#: `verified_claim_ratio` became buyer-conditional evidence (see
+#: :data:`EVIDENCE_GAIN_BY_RELEVANCE`) and `price_value` became saturating at the auction's own
+#: price band. Both kept their published name and their published weight, so
+#: `RANKING_WEIGHTS_VERSION` did not move — and that is precisely the case this constant exists
+#: for. R15/S3 promise that replaying the ledger reproduces the served scores; a feature redefined
+#: under an unchanged weights version breaks that promise SILENTLY, because every recorded number
+#: still validates and every published weight still matches. A replay must compare BOTH versions
+#: before it may claim its recomputation reproduces a score.
+#:
+#: ``1.0.0`` is the definition set that shipped before both: `verified_claim_ratio` as the raw
 #: share of decided claims verified, and `price_value` as the unsaturated
 #: ``clamp((list_price - total_price)/list_price, 0, 1)``.
-RANKING_FEATURES_VERSION = "2.0.0"
+RANKING_FEATURES_VERSION = "3.0.0"
 
 #: What `intent_match` reads when it is ABSENT — published, at last, rather than inherited.
 #:
