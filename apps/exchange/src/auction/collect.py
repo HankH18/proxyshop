@@ -211,6 +211,9 @@ __all__ = [
     "MAX_REFUSAL_DETAIL_LENGTH",
     "MINIMUM_PAYABLE_AMOUNT",
     "NOT_ASKED_FIELD",
+    "NO_AGENT_DETAIL",
+    "NO_AGENT_FIELD",
+    "NO_AGENT_REASON",
     "PRICE_BELOW_FLOOR_REASON",
     "PRICE_FLOOR_FRACTION",
     "PROVENANCE_REASON_PREFIXES",
@@ -546,6 +549,59 @@ FAN_OUT_CAPACITY_REASON = "fan_out_capacity_exhausted"
 #: carrying them are the ones the fan-out builds itself, keyed by the store it ASKED.
 TIMED_OUT_FIELD = "exchange_timed_out"
 NOT_ASKED_FIELD = "exchange_not_asked"
+
+#: The third marker, written by the SOLICITATION gate rather than by the fan-out: *this
+#: exchange holds no bidding agent for this store, so nobody was dialled.*
+#:
+#: It exists because the exchange was making a false statement about a shop that had done
+#: nothing. The deployment document gives four of its ten sellers a ``bid_endpoint`` and six
+#: none; ``HttpBidSolicitor.solicit`` answers ``None`` for the six without opening a socket
+#: ("a Tier-0 store, or one the registry holds no agent for, is represented at list price
+#: rather than asked a question nobody is home to hear") — and the six were then reported to
+#: the shopper as ``no_response``, which the buyer's own panel glosses as "switched off or too
+#: slow to reach". Measured on the deployed droplet: ``solicited`` named all six stores, and
+#: ``bulksupplements.com`` and ``nutricost.com`` reached the buyer's screen as shops that had
+#: been asked and had stayed silent. Neither had been asked. In D55 terms that is the platform
+#: putting words in an ORGANIC result's mouth: a scraped shop carried at its catalogue price
+#: has declined nothing, and saying otherwise is the one thing the organic half must not do.
+#:
+#: Written under the same rule as the two above and DELETED by :func:`~.fanout._stamped` for
+#: the same reason: it is the exchange's account of its own deployment, so a store that could
+#: set it would be excusing its own silence.
+NO_AGENT_FIELD = "exchange_holds_no_agent"
+
+#: What :data:`NO_AGENT_FIELD` is reported as: the ``tier_0_no_agent`` FAMILY, with the
+#: exchange's own detail naming which of the two conditions it was.
+#:
+#: **Why that family and not a thirteenth word.** The two are the same fact about the shop —
+#: *there is no bidding agent for this exchange to ask* — and the buyer's gloss for the family
+#: already says exactly that, without mentioning a tier: "means that store has no bidding agent
+#: for the exchange to ask. It is on the roster from its catalogue alone, so the exchange
+#: represented it at its list price without anybody having declined anything." True of a
+#: catalogue-only merchant and true of a shop this deployment holds no endpoint for. What
+#: differs is WHOSE decision it was — the merchant's tier, or this exchange's deployment
+#: document — and that is what the detail carries, which is what ``refusal_reason`` details are
+#: for.
+#:
+#: **And a thirteenth word is a change to files this repair may not touch.**
+#: ``test_prose_counts_match_the_code`` grades the written-out count of this tuple in five
+#: places, three of them under ``packages/contracts`` (``protocol.schema.json`` and the two
+#: files generated from it), and the buyer's ``REASON_GLOSSES`` is a
+#: ``Record<FallbackReasonFamily, …>`` that a new family would need a sentence in. A reason
+#: word that reached the shopper as an unglossed machine string would be a worse answer than
+#: an accurate family with an accurate detail. If the distinction is later judged to deserve
+#: its own word, the schema sentence, the two generated mirrors and the buyer gloss are what
+#: it costs, and this constant is the one place to change.
+NO_AGENT_DETAIL = "no_bid_endpoint"
+
+#: The whole reason string those two compose to, spelled ONCE.
+#:
+#: Two readers need to recognise it exactly — :func:`_unusable_because`, which writes it, and
+#: :func:`~exchange.auction.routes.market_summary`, which counts it so an operator can tell a
+#: catalogue-only MERCHANT from a store this DEPLOYMENT forgot to wire. Every aggregate in the
+#: system groups fallback reasons by family (:func:`fallback_reason_family`), so without a count
+#: keyed on the whole string the detail exists on the entry and nowhere a report can see it.
+NO_AGENT_REASON = f"tier_0_no_agent:{NO_AGENT_DETAIL}"
 
 FALLBACK_REASONS: tuple[str, ...] = (
     "tier_0_no_agent",
@@ -1291,6 +1347,8 @@ def _unusable_because(response: Mapping[str, Any], deadline: float) -> str | Non
         return RESPONSE_TIMED_OUT_REASON
     if response.get(NOT_ASKED_FIELD):
         return FAN_OUT_CAPACITY_REASON
+    if response.get(NO_AGENT_FIELD):
+        return NO_AGENT_REASON
 
     bid = response.get("bid")
     if not isinstance(bid, Mapping):

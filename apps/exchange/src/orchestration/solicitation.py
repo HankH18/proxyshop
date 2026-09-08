@@ -40,7 +40,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..auction.collect import BidEntry, collect_bids
+from ..auction.collect import NO_AGENT_FIELD, BidEntry, collect_bids
 from ..auction.fanout import (
     DEFAULT_BID_WINDOW_SECONDS,
     ArrivalClock,
@@ -55,7 +55,7 @@ from ..eligibility import (
     speaks_supported_interface,
 )
 
-__all__ = ["Denial", "SolicitationResult", "solicit_bids"]
+__all__ = ["Denial", "SolicitationResult", "solicit_bids", "stores_with_no_agent"]
 
 
 @dataclass(frozen=True)
@@ -95,6 +95,59 @@ def _denial(decision: EligibilityDecision) -> Denial:
     elif not reason.lower().startswith(decision.status.lower()):
         reason = f"{decision.status}: {reason}"
     return Denial(store_id=decision.store_id, status=decision.status, reason=reason)
+
+
+def stores_with_no_agent(solicitor: Any, stores: Sequence[Mapping[str, Any]]) -> set[str]:
+    """Which of these stores the SOLICITOR says it holds no way to reach.
+
+    **The false statement this ends.** ``askable`` selected on tier alone, so a Tier-1 store
+    the exchange holds no ``bid_endpoint`` for was named in ``solicited`` — the auction's own
+    claim about who it asked — and then, because no response object existed for it, recorded
+    ``no_response``. Measured on the deployed droplet: the ``201`` listed all six rostered
+    stores as solicited with ``not_asked: 0``, while ``HttpBidSolicitor.solicit`` had returned
+    ``None`` for ``bulksupplements.com`` and ``nutricost.com`` without opening a socket. Both
+    reached the shopper as shops that had been asked and had said nothing. Neither had been
+    asked, and ``no_response`` is glossed to a shopper as "switched off or too slow to reach".
+
+    **Why the solicitor is asked rather than the roster read.** The endpoint registry lives on
+    the outbound client (``HttpBidSolicitor._endpoints``, built in the composition root from
+    the deployment document) and this module cannot see it — nor should it, since a different
+    solicitor reaches stores by a different means entirely. So the port grows one optional
+    question, ``can_solicit(store_id) -> bool``, answered by whoever actually holds the
+    addresses.
+
+    **Optional, and absent means reachable.** Every solicitor in this repository that does not
+    implement it — ``NullSolicitor``, ``e2e``'s ``HostedAgentSolicitor``, the simulator's
+    scripted doubles, every in-process test double — keeps exactly the behaviour it had. That
+    direction is deliberate and it is NOT the usual fail-closed: the closed answer here is "ask
+    nobody", which would silently empty the market on any deployment whose solicitor predates
+    this hook. What is being decided is how truthfully a run is REPORTED, not who is allowed to
+    trade, and a reporting hook that could stop an auction happening would be a worse fault
+    than the one it fixes.
+
+    A store whose ``can_solicit`` RAISES is treated as reachable and is asked — **per store,
+    not per solicitor**. The distinction is worth stating because the first draft of this
+    sentence said the hook was "treated as one that is not there", which is a different and
+    weaker promise: a predicate that raises for one store and answers ``False`` for the next
+    still has the second answer believed. That is the right behaviour — an answer this exchange
+    did get is still an answer — but a reader relying on the stronger reading would be wrong
+    about half the roster.
+    """
+    knows = getattr(solicitor, "can_solicit", None)
+    if not callable(knows):
+        return set()
+    unreachable: set[str] = set()
+    for store in stores:
+        store_id = str(store.get("store_id") or "")
+        if not store_id:
+            continue
+        try:
+            reachable = knows(store_id)
+        except Exception:
+            continue
+        if not reachable:
+            unreachable.add(store_id)
+    return unreachable
 
 
 def solicit_bids(
@@ -185,7 +238,18 @@ def solicit_bids(
 
     # Only now does anyone get asked. Tier-0 is catalog-only — there is no agent to ask —
     # so it is skipped here and still represented at list price by `collect_bids` (R10).
-    askable = [store for store in eligible if int(store.get("tier", 1)) > 0]
+    tiered = [store for store in eligible if int(store.get("tier", 1)) > 0]
+
+    # AND the stores this exchange holds no way to reach, which is the same fact arriving from
+    # the other side: the merchant chose catalogue-only above, the deployment document is
+    # silent about an endpoint here. Both mean "there is no agent to ask", and neither is a
+    # store that stayed silent when spoken to. See `stores_with_no_agent`.
+    no_agent = stores_with_no_agent(solicitor, tiered)
+    askable = [store for store in tiered if str(store["store_id"]) not in no_agent]
+
+    # `solicited` is the auction's own claim about WHO IT ASKED, published on the 201 and
+    # counted by `market_summary`. It is written from `askable` and not from `tiered`, so it
+    # cannot name a store no socket was ever opened to.
     result.solicited = [str(store["store_id"]) for store in askable]
 
     strategy: FanOut = fan_out if fan_out is not None else sequential_fan_out
@@ -194,7 +258,18 @@ def solicit_bids(
     arrival = (
         clock if clock is not None else ArrivalClock(now, window=window, started_at=started_at)
     )
-    responses = strategy(askable, solicitor, deadline=now, clock=arrival)
+    responses = list(strategy(askable, solicitor, deadline=now, clock=arrival))
+
+    # The exchange's own record of the stores it did not dial, minted here for the same reason
+    # the fan-out mints its two markers: no response object exists, so the only honest account
+    # of what happened is the one the exchange writes about itself. Without it these stores
+    # still reach `collect_bids` through `eligible` and still take its `no_response` default —
+    # dropping them from `askable` alone would move the false statement rather than end it.
+    responses.extend(
+        {"store_id": store["store_id"], NO_AGENT_FIELD: True}
+        for store in tiered
+        if str(store["store_id"]) in no_agent
+    )
 
     result.entries = collect_bids(eligible, responses, now)
     return result

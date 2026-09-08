@@ -201,6 +201,41 @@ def expiry_reason(offer: Any, now: float) -> str | None:
 
     Fail-closed hid it rather than excusing it: an eligibility gate that refuses every
     conformant offer is not a strict gate, it is a shortlist that is always empty.
+
+    **`now` is the instant the offer had to be STANDING AT, and the comparison is inclusive
+    of it.** An offer whose last valid instant is exactly `now` stood for every moment up to
+    `now`, so it is live here rather than expired. That one character used to be `<=`, and
+    with it this filter voided every honest bid in an auction whose fan-out overran:
+    :meth:`store_agent.runtime.context.AuctionContext.offer_expires_at` stamps an offer with
+    the auction's own `respond_by` when the merchant's context states no expiry (no store
+    context in `deploy/demo` states one), and the served path judged that stamp against a
+    clock read taken AFTER the fan-out returned. Measured on the deployed droplet, 2 runs in
+    12::
+
+        expired_offer: the offer expired at 1788872951.113, which is not after the
+        caller-supplied now=1788872951.1345184
+
+    Twenty-one milliseconds, and the shopper's shortlist held nothing but the exchange's own
+    list-price stand-ins — which survive because `auction.collect.fallback_expires_at` gives
+    them `deadline + 900 s`. Passing the right `now` is half the repair and lives in
+    :func:`~exchange.ranking.serving.rank_auction`, which caps it at the auction's published
+    deadline; this half is the boundary, because a cap at the deadline is worth nothing while
+    an offer stamped AT the deadline still reads as dead.
+
+    **Deliberately different from `contracts.boundary`'s `<=`, and the two are asking
+    different questions.** The boundary asks "is this offer live at the instant I am
+    validating it", a point question about a bid arriving now. This filter asks "did this
+    offer stand through the auction it was solicited for", an interval question decided after
+    that auction is over — and an offer covering the closed interval up to the close covered
+    the auction. A bid admitted here on the boundary instant is still refused at accept time
+    if a shopper clicks it later: `checkout.validity.window_reason` opens the window only on
+    `expires_at > now`, pre-mint, and answers 409 rather than minting a code.
+
+    Nothing above this line moves. An absent `expires_at` and a non-finite one still fail
+    closed, and they have to: the accept path refuses neither — measured, an offer with no
+    expiry mints a code against the flat 48-hour ceiling and a NaN one mints a live `PSX-`
+    code — so this filter is the only gate in the system that requires an offer to say when
+    it stops standing.
     """
     raw = read(offer, "expires_at", _MISSING)
     if raw is _MISSING or raw is None:
@@ -213,17 +248,17 @@ def expiry_reason(offer: Any, now: float) -> str | None:
     except (UnusableOffer, TypeError, ValueError):
         return f"{REASON_EXPIRED}: expires_at {raw!r} is not a readable instant; failing closed"
     if not math.isfinite(expires_at):
-        # NaN in particular: EVERY comparison against it is False, so a plain `expires_at <=
+        # NaN in particular: EVERY comparison against it is False, so a plain `expires_at <
         # now` test says "not expired" and a NaN-expiry offer walks straight into a shortlist
         # slot. An instant that is not a finite number is not an instant.
         return (
             f"{REASON_EXPIRED}: expires_at {raw!r} is not a finite instant, so the offer "
             f"cannot be shown to be live; failing closed"
         )
-    if expires_at <= now:
+    if expires_at < now:
         return (
-            f"{REASON_EXPIRED}: the offer expired at {expires_at!r}, which is not after the "
-            f"caller-supplied now={now!r}"
+            f"{REASON_EXPIRED}: the offer expired at {expires_at!r}, which is before the "
+            f"instant it had to be standing at, now={now!r}"
         )
     return None
 

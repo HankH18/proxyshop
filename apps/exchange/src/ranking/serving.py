@@ -936,6 +936,7 @@ def rank_auction(
     auction_id: str,
     intent: Any,
     now: float,
+    deadline: float | None = None,
     trust_snapshot: Any,
     registered_domains: Any = None,
     weights: RankingWeights | None = None,
@@ -948,9 +949,30 @@ def rank_auction(
 ) -> dict[str, Any]:
     """Rank one closed auction's collected bids and build its shortlist.
 
-    ``now`` is the instant the auction closed, passed in rather than read here, so the expiry
-    filter and the auction's own ``closed_at`` are the same instant and a shortlist is
-    reproducible from its inputs.
+    ``now`` is the instant the auction closed, passed in rather than read here, so the
+    shortlist is reproducible from its inputs rather than from whenever this ran.
+
+    ``deadline`` is the ``respond_by`` the auction PUBLISHED — the instant the exchange itself
+    told every store to answer by — and it is a CEILING on the instant offer liveness is judged
+    at: ``live_at`` below is ``min(now, deadline)``, or ``now`` alone when the stated deadline
+    is not a positive finite instant (see the comment there for why both halves are refused). Without it, an auction whose fan-out
+    overran its own window by milliseconds voided every honest bid in it, and the whole
+    reproduction is in :func:`~exchange.ranking.filters.expiry_reason`'s docstring. The short
+    version: a hosted agent stamps its offer's ``expires_at`` with the request's ``respond_by``
+    when the merchant states no expiry of its own, ``closed_at`` is read AFTER the fan-out
+    returns, and ``closed_at > respond_by`` on any run that used the full window — so the store
+    that answered in time was refused ``expired_offer`` for the exchange's own latency. Measured
+    on the droplet at 21 ms, 2 runs in 12; the shopper was served the exchange's own list-price
+    stand-ins alone, which survive because they are minted with ``deadline + 900 s``.
+
+    **A ceiling and never a floor**, which is what makes it safe to hand in. ``min`` can only
+    move the judging instant EARLIER than the wall clock, so an auction that finished early
+    still judges at the moment it really ended and no offer reaches a shortlist it would have
+    missed on a shorter run. What it refuses to do is let the exchange's own overrun decide.
+
+    ``None`` — the default — judges at ``now`` exactly as every four-argument caller did before
+    this parameter existed. Only a caller holding the auction's record knows its ``respond_by``,
+    which is why the served route is the one that passes it.
 
     The eligibility SOURCE is not passed through to :func:`rank`. R12's gate already ran over
     exactly this roster inside ``solicit_bids`` — every entry here belongs to a store that
@@ -1067,11 +1089,37 @@ def rank_auction(
         [read(candidate, "store_id", None) for candidate in candidates],
         product_refs=product_refs,
     )
+    # WHEN AN OFFER HAD TO BE STANDING, which is the auction's close and never later than the
+    # window the exchange itself published. `rank()`'s `config["now"]` feeds exactly one filter
+    # — `filters.expiry_reason`, through `exclusion_reasons` — so capping it here changes the
+    # liveness question and nothing else about the ranking.
+    #
+    # A deadline that is not a finite number is not a deadline, and it is refused EXPLICITLY
+    # rather than left to `min`: `min(now, nan)` happens to answer `now` while `min(nan, now)`
+    # answers `nan`, so the safe behaviour would be an accident of argument order — and a
+    # `nan` here would put `nan` on every expiry comparison, where every comparison is False
+    # and every offer reads as live. That is the same trap `filters.expiry_reason` names on
+    # the offer's own side, arriving from the caller instead of from the bid.
+    # A deadline that is not a POSITIVE FINITE instant is not a deadline, and both halves are
+    # refused explicitly rather than left to `min`. Non-finite, because `min(now, nan)` answers
+    # `now` while `min(nan, now)` answers `nan` — safety would be an accident of argument
+    # order, and a `nan` here puts `nan` on every expiry comparison, where every comparison is
+    # False and every offer reads as live. Non-positive, because `min(now, 0.0)` is `0.0`, and
+    # judging liveness at the epoch admits every readable expiry with no reason recorded: the
+    # gate is not weakened there, it is gone. Both were reachable through this published
+    # parameter even though the served route cannot produce either.
+    #
+    # A merely WRONG finite deadline is trusted, exactly as a wrong `now` is. This parameter
+    # says which auction is being ranked; a caller that lies about that is ranking a different
+    # auction, and no arithmetic here can tell.
+    stated = None if deadline is None else float(deadline)
+    usable = stated is not None and math.isfinite(stated) and stated > 0.0
+    live_at = min(float(now), stated) if usable and stated is not None else float(now)
     ranked = rank(
         candidates,
         intent,
         trust_snapshot,
-        {"now": float(now), "auction_id": auction_id},
+        {"now": live_at, "auction_id": auction_id},
         weights=weights,
         # WHICH attributes this exchange's own catalogues declare for these stores, and the
         # only reason this function can supply it: it holds the catalog and `rank()` does not.

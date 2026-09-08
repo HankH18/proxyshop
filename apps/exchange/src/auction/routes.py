@@ -56,8 +56,10 @@ import os
 import time
 import uuid
 from collections.abc import Collection, Mapping, Sequence
+from datetime import UTC, datetime
 from typing import Any, Final
 
+from contracts import parse_timestamp
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -88,6 +90,7 @@ from ..retrieval.fit import FitLogError, annotate_bid_payload
 from ..retrieval.roster import NoShopRoster, ShopRoster
 from .collect import (
     FAN_OUT_CAPACITY_REASON,
+    NO_AGENT_REASON,
     RESPONSE_TIMED_OUT_REASON,
     fallback_reason_family,
 )
@@ -123,8 +126,12 @@ __all__ = [
     "market_summary",
     "merged_candidates",
     "renderable_validation_detail",
+    "PUBLISHED_DEADLINE_TIMESPEC",
+    "publishable_deadline",
     "resolve_bid_window_seconds",
+    "rfc3339_deadline",
     "router",
+    "with_shortlist_outcome",
 ]
 
 #: This module's logger, named ``exchange.auction.routes`` — what an operator greps to see
@@ -1034,6 +1041,15 @@ class MarketSummaryOut(BaseModel):
     #: free. An exchange-side condition, kept apart from the store-side ones for the same
     #: reason.
     not_asked: int
+    #: And how many it never dialled because it holds no ``bid_endpoint`` for them at all.
+    #:
+    #: The other exchange-side condition, and it is broken out because ``fallback_reasons``
+    #: cannot answer it: that histogram groups by FAMILY, and this shares the
+    #: ``tier_0_no_agent`` family with a merchant's own catalogue-only choice. Six of one and
+    #: six of the other look identical there and have completely different fixes — nothing, and
+    #: an edit to the deployment document. ``deploy/demo/exchange-deployment.json`` gives four
+    #: of its ten eligible Tier-1 sellers an endpoint, so this is not a hypothetical count.
+    no_endpoint: int
     #: Stores R12 refused before anyone was asked. Not a market failure — a gate working.
     denied: int
     #: The window that was actually in force, after every clamp. Published next to the counts
@@ -1043,10 +1059,31 @@ class MarketSummaryOut(BaseModel):
     #: its count. The families are :data:`~.collect.FALLBACK_REASONS`; the detail after a colon
     #: is open by design and is grouped away here, so a report is not counting HTTP statuses.
     fallback_reasons: dict[str, int] = Field(default_factory=dict)
-    #: **True when every solicited store failed to bid** — the all-fallback market. False for
-    #: an auction that solicited nobody: an empty roster served no list prices either, and
-    #: calling that a degraded market would fire the alarm on every request an unconfigured
-    #: exchange refuses.
+    #: How many rows the shopper was actually shown — the shortlist's slot count.
+    shortlisted: int
+    #: **And how many of those rows were a store's OWN offer.** Every count above this one is
+    #: about who BID; this is the only one about who was SHOWN, and until it existed the two
+    #: were silently assumed equal. They are not: a bid can be excluded by the ranking (an
+    #: expired offer, an off-domain checkout URL, a blacklisted store, a budget the shopper
+    #: stated) or simply lose its slot, and a market summary reporting ``sponsored: 4`` beside
+    #: a screen showing four list prices is the diagnostic contradicting the product.
+    #:
+    #: Published BESIDE ``sponsored`` rather than instead of it, because the disagreement
+    #: between them is the useful signal: equal means the market ran end to end, and
+    #: ``sponsored: 4, shortlisted_sponsored: 0`` says the stores answered and the exchange
+    #: dropped every one of them — which is a fault in this service, not in the stores.
+    shortlisted_sponsored: int
+    #: **True when the shopper was shown rows and not one of them was a store's own offer** —
+    #: the all-fallback market. The shopper's fact and not the fan-out's: it followed
+    #: ``sponsored == 0`` until an auction was measured in which every store bid, every bid was
+    #: excluded at ranking, and this flag stayed ``false`` while the screen held nothing but
+    #: list prices.
+    #:
+    #: False for an auction that solicited nobody, and false for one that shortlisted nobody.
+    #: An empty roster served no list prices either and an empty shortlist showed no rows at
+    #: all; both are real conditions with their own fixes, and neither is "the market reverted
+    #: to catalogue prices". ``solicited`` and ``shortlisted`` are published beside this flag
+    #: so a reader can tell all three apart without re-deriving anything.
     all_fallback: bool
 
 
@@ -1890,13 +1927,98 @@ def record_policy_events(
     return events
 
 
+#: The precision an auction's deadline is PUBLISHED at — milliseconds, because that is what
+#: ``BidRequest.respond_by`` carries: a ``format: date-time`` string, rendered by
+#: :func:`rfc3339_deadline` with ``timespec="milliseconds"``.
+#:
+#: It is a constant here rather than a spelling in the renderer because the exchange has to
+#: JUDGE against the same instant it STATED. See :func:`publishable_deadline`.
+PUBLISHED_DEADLINE_TIMESPEC: Final[str] = "milliseconds"
+
+
+def rfc3339_deadline(moment: float | None) -> str:
+    """An epoch as the ``date-time`` string ``BidRequest.respond_by`` publishes.
+
+    THE renderer, singular. ``exchange.composition``'s outbound solicitor calls this rather
+    than carrying its own copy, because the string it puts on the wire and the number this
+    module judges an offer against have to be the same instant — and a second implementation
+    of a wire format is a second answer to that question. See :func:`publishable_deadline`
+    for the half-millisecond that made the difference measurable.
+    """
+    if moment is None:
+        return ""
+    return (
+        datetime.fromtimestamp(float(moment), tz=UTC)
+        .isoformat(timespec=PUBLISHED_DEADLINE_TIMESPEC)
+        .replace("+00:00", "Z")
+    )
+
+
+def publishable_deadline(moment: float) -> float:
+    """``moment`` as the exchange is able to STATE it — round-tripped through the wire format.
+
+    **The exchange may not hold a deadline more precise than the one it publishes.** A raw
+    ``opened_at + window`` is a full-precision double; ``respond_by`` on the wire is an RFC-3339
+    string truncated to milliseconds. A hosted agent stamps its offer's ``expires_at`` with the
+    string it was sent, so the offer's expiry comes back up to a millisecond BEFORE the number
+    the exchange kept — and the exchange then refused the offer for missing a deadline it never
+    told anybody. Measured on the live stack, driving ``POST /auctions`` against four hosted
+    agents with one of them paused so the fan-out ran the full window::
+
+        expired_offer: the offer expired at 1788876293.595, which is before the instant it
+        had to be standing at, now=1788876293.5952678
+
+    Two hundred and sixty-eight MICROSECONDS, and all three stores that answered in time were
+    excluded. Capping the judging instant at the auction's deadline is not enough on its own
+    while the deadline itself is unstatable; this is the other half.
+
+    Round-tripped rather than arithmetically truncated, so the answer is the instant a store
+    actually parses out of the wire and not the nearest double to a decimal that looks like it.
+    An unreadable render leaves the moment alone — a deadline that cannot be stated is a
+    different fault, and silently moving it would not be an improvement on it.
+    """
+    published = _rendered_epoch(moment)
+    if published is None:
+        return float(moment)
+    if published > moment:
+        # `datetime.fromtimestamp` ROUNDS to the nearest microsecond before `timespec` truncates
+        # to milliseconds, so a moment within half a microsecond below a millisecond boundary
+        # renders as the boundary — later than the window allows. Measured:
+        # ``1700000000.9999995 -> 2023-11-14T22:13:21.000Z -> 1700000001.0``, 477 nanoseconds
+        # past its own deadline, on roughly one auction in two thousand.
+        #
+        # Stepping a whole millisecond back and re-rendering, rather than returning `moment`:
+        # the value has to be one the wire can carry EXACTLY, because a store echoes the string
+        # and the ranker parses it back, and `moment` itself is precisely the number that
+        # cannot be. One step is always enough — the re-render can only round up by less than a
+        # microsecond, and it starts a full millisecond lower.
+        stepped = _rendered_epoch(moment - 0.001)
+        if stepped is not None and stepped <= moment:
+            return stepped
+    return published
+
+
+def _rendered_epoch(moment: float) -> float | None:
+    """``moment`` through the wire format and back, or ``None`` when it will not render.
+
+    ``contracts.parse_timestamp`` answers a ``datetime``, which is what ``checkout.codes``'
+    ``expiry_epoch`` turns into the epoch the ranker compares against — the same two steps in
+    the same order, so the round-trip lands on the number a store's echo will actually produce.
+    """
+    parsed = parse_timestamp(rfc3339_deadline(moment))
+    return None if parsed is None else parsed.timestamp()
+
+
 def market_summary(result: Any, *, window: float) -> dict[str, Any]:
     """Count what this auction's market actually was. See :class:`MarketSummaryOut`.
 
-    One computation, three readers — the ``201`` body, the ``auction_closed`` ledger payload
-    and the log line at close. Counted here rather than three times, because a summary that
-    disagrees with itself across surfaces is worse than no summary: an operator reconciling
-    the log against the response would be debugging the arithmetic instead of the market.
+    One summary OBJECT, three readers — the ``201`` body, the ``auction_closed`` ledger payload
+    and the log line at close. Counted once rather than three times, because a summary that
+    disagrees with itself across surfaces is worse than no summary: an operator reconciling the
+    log against the response would be debugging the arithmetic instead of the market. It is
+    built in two steps now (this function, then :func:`with_shortlist_outcome`) and the property
+    is unchanged, because the steps run in sequence on one object and every reader is handed the
+    finished one.
 
     ``result`` is the :class:`~..orchestration.solicitation.SolicitationResult`, read through
     ``getattr`` for the same reason :func:`auction_outcome` reads it that way — this module is
@@ -1907,6 +2029,14 @@ def market_summary(result: Any, *, window: float) -> dict[str, Any]:
     before the colon) drawn from :data:`~.collect.FALLBACK_REASONS` — so a store's own
     ``x-proxyshop-decline-reason``, which is caller-controlled text on an unauthenticated
     path, contributes a bounded word to a bounded vocabulary and never its detail.
+
+    **What this half CANNOT answer, and why the summary is finished elsewhere.** Everything
+    counted here is a fact about who BID. Who was SHOWN is a fact about the ranking, which has
+    not run when this is called, so ``shortlisted`` and ``shortlisted_sponsored`` come back
+    ``None`` — *not yet known*, which is a third state and not a zero.
+    :func:`with_shortlist_outcome` fills them in once the shortlist exists and re-decides
+    ``all_fallback`` on them. Splitting it that way rather than moving the whole computation is
+    what keeps a market line on the auction whose ranking raises.
     """
     entries = list(getattr(result, "entries", ()) or ())
     solicited = len(list(getattr(result, "solicited", ()) or ()))
@@ -1922,20 +2052,138 @@ def market_summary(result: Any, *, window: float) -> dict[str, Any]:
         reasons[family] = reasons.get(family, 0) + 1
 
     sponsored = sum(1 for entry in entries if not getattr(entry, "fallback", False))
+    # Counted on the WHOLE reason string rather than on its family, and it is the only count
+    # here that is. `fallback_reasons` groups by family, and this condition shares the
+    # `tier_0_no_agent` family with a merchant's own catalogue-only choice — so without this
+    # line an operator reading "tier_0_no_agent: 6" cannot tell six catalogue-only merchants
+    # from six stores this deployment forgot to give a `bid_endpoint`. Those have completely
+    # different fixes: nothing, and an edit to the deployment document.
+    no_endpoint = sum(
+        1
+        for entry in entries
+        if str(getattr(entry, "fallback_reason", "") or "") == NO_AGENT_REASON
+    )
     return {
         "solicited": solicited,
         "sponsored": sponsored,
         "list_price": len(entries) - sponsored,
         "timed_out": reasons.get(RESPONSE_TIMED_OUT_REASON, 0),
         "not_asked": reasons.get(FAN_OUT_CAPACITY_REASON, 0),
+        "no_endpoint": no_endpoint,
         "denied": denied,
         "bid_window_seconds": float(window),
         "fallback_reasons": dict(sorted(reasons.items())),
+        "shortlisted": None,
+        "shortlisted_sponsored": None,
         # `solicited > 0` is what keeps this from firing on an auction that asked nobody —
         # an unconfigured exchange denies every store (R12 fail-closed) and serves no list
         # prices at all, which is a different condition with a different fix.
+        #
+        # The BID-side answer, and it stands only until the ranking has run. It is what an
+        # operator gets when the ranking raises, and it is strictly better than nothing on
+        # that path; `with_shortlist_outcome` overwrites it with the shopper's answer on
+        # every auction that reaches a shortlist.
         "all_fallback": solicited > 0 and sponsored == 0,
     }
+
+
+def with_shortlist_outcome(
+    summary: Mapping[str, Any], shortlist: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Finish a :func:`market_summary` with what the SHOPPER actually got.
+
+    **The defect this closes.** ``market_summary`` counts ``result.entries`` — who bid — and is
+    computed before ranking, so it reported ``"sponsored": 4`` on droplet runs where the shopper
+    saw zero sponsored rows and ``all_fallback`` stayed ``false``. A summary whose entire purpose
+    is telling an operator whether the market happened cannot say it happened while the screen
+    says it did not; that is the summary failing at its one job, and it is worse than no summary
+    because it is the line an operator would stop investigating on.
+
+    **Both facts are kept, because they are different facts and both are worth having.**
+    "Four stores bid" is a statement about the fan-out and about store latency; "none reached
+    the shopper" is a statement about the ranking and about the shortlist. An auction where
+    they disagree is exactly the auction someone needs to look at, and collapsing either into
+    the other would hide the disagreement. So ``sponsored`` keeps its meaning untouched and
+    ``shortlisted_sponsored`` is published beside it.
+
+    ``all_fallback`` — and therefore the WARNING :func:`announce_market` fires on it — follows
+    the SHOPPER. It is the flag that claims a degraded market, the buyer service forwards it
+    verbatim to a shopper-facing panel, and a market is degraded when no store's own offer
+    reached a slot, whatever the bid layer managed.
+
+    **``shortlisted > 0`` is a second guard, and it is not decoration.** "Every row was a
+    fallback" is vacuously true of a shortlist with no rows, and an auction that showed the
+    shopper NOTHING is a different condition with a different fix — an unwired ranking, a
+    catalogue that satisfies no hard constraint, a trust snapshot nobody loaded. It is not
+    silently dropped: :func:`announce_market` warns on it separately and by its own name, so
+    the loudest failure in the system is not the one nobody is told about. What it must not do
+    is claim the market reverted to catalogue prices, because there were no catalogue prices
+    either.
+
+    **``COULD anybody have bid`` is the third, and it replaced a straight ``solicited > 0``
+    that this repair itself had broken.** The all-fallback alarm means *the exchange had
+    somewhere to get a store's own offer and got none onto the screen*, so it must not fire on
+    an auction where no such store existed — an all-Tier-0 roster is catalogue-only by every
+    merchant's own choice, D55 makes that a legitimate result rather than a degraded one, and
+    warning on it would warn on every organic auction. ``solicited > 0`` said that correctly
+    until the no-agent repair (:func:`~exchange.orchestration.solicitation.stores_with_no_agent`)
+    stopped counting stores this deployment holds no ``bid_endpoint`` for — after which a
+    roster of nothing but unwired Tier-1 sellers had ``solicited: 0``, showed the shopper two
+    list-price rows, and reported ``all_fallback: false``. Measured live on exactly the demo
+    document's own shape, and it was a REGRESSION: at HEAD those stores were falsely counted as
+    solicited, so the alarm fired for the right outcome by the wrong mechanism.
+    ``no_endpoint`` is what puts it back honestly — a store this exchange cannot reach is a
+    store that could have bid, and somebody should go and wire it.
+
+    Slots are read through ``fallback`` — the published ``ShortlistSlot`` field that says
+    whether this row is a store's own quote or the exchange standing in for it at the roster's
+    list price (R10). It is the exchange's own verdict, not a bidder's: nothing on the slot is
+    copied from a reply.
+
+    One thing ``shortlisted_sponsored`` does NOT claim: that those rows are still BUYABLE. It
+    counts what reached the screen, and a hosted agent that stamps its offer with the auction's
+    own ``respond_by`` (the fallback in
+    :meth:`store_agent.runtime.context.AuctionContext.offer_expires_at`) has made an offer that
+    lapses when the window does — a shopper clicking it later gets an honest ``409`` from the
+    accept door. That is a lifetime question, it is answered in that method's docstring, and it
+    is not a thing this summary measures.
+    """
+    slots = list(shortlist.get("slots") or ())
+    shortlisted_sponsored = sum(1 for slot in slots if not _slot_is_fallback(slot))
+    return {
+        **dict(summary),
+        "shortlisted": len(slots),
+        "shortlisted_sponsored": shortlisted_sponsored,
+        "all_fallback": (
+            bool(slots) and shortlisted_sponsored == 0 and _anyone_could_have_bid(summary)
+        ),
+    }
+
+
+def _anyone_could_have_bid(summary: Mapping[str, Any]) -> bool:
+    """Whether this auction held a store the exchange could have got its own offer from.
+
+    Two ways, and they are the two halves of "askable". A store that was SOLICITED obviously
+    could have bid. So could one this exchange holds no ``bid_endpoint`` for — it bids
+    elsewhere, and the reason no socket opened is a line missing from the deployment document,
+    which is a thing an operator fixes. What is left out is the Tier-0 store, whose merchant
+    chose catalogue-only, and about which there is nothing to do.
+    """
+    return int(summary.get("solicited") or 0) > 0 or int(summary.get("no_endpoint") or 0) > 0
+
+
+def _slot_is_fallback(slot: Any) -> bool:
+    """Whether one shortlist slot is the exchange standing in at list price.
+
+    Read defensively — ``.get`` through a mapping, ``getattr`` otherwise — because this module
+    is handed the shortlist object, not the class, exactly as :func:`market_summary` is handed
+    the solicitation result. A slot that cannot be read at all counts as a store's own offer:
+    the alternative direction would let an unreadable shortlist fire the WARNING that says the
+    market did not happen.
+    """
+    if isinstance(slot, Mapping):
+        return bool(slot.get("fallback", False))
+    return bool(getattr(slot, "fallback", False))
 
 
 def announce_market(summary: Mapping[str, Any], *, auction_id: str) -> None:
@@ -1947,34 +2195,78 @@ def announce_market(summary: Mapping[str, Any], *, auction_id: str) -> None:
     exchange emitted nothing whatsoever at close, so the condition was visible only to whoever
     thought to count ``entries[].fallback`` by hand.
 
-    WARNING is reserved for exactly that condition — *solicited stores, none of which bid* —
-    because a warning that also fires on a healthy auction is a warning that gets filtered.
-    Everything else is INFO, which is still infinitely more than the nothing it replaces: the
-    counts are the same either way, so an operator grepping one line gets the same numbers on
-    a good day and a bad one.
+    **Two conditions warn, and they are named apart.** ``market=all_fallback`` is *rows on the
+    shopper's screen and not one of them a store's own offer* — the market reverted to
+    catalogue prices. ``market=nothing_shown`` is *stores to represent and no rows at all* —
+    strictly worse, and until it had its own word it was the loudest failure in the system with
+    nothing above INFO said about it: four stores could bid, be excluded to the last one, leave
+    the shopper a blank screen, and be logged ``market=mixed``. Everything else is INFO, which
+    is still infinitely more than the nothing it replaces: the counts are the same either way,
+    so an operator grepping one line gets the same numbers on a good day and a bad one.
 
-    The window is named on both, because "4 stores timed out" is not actionable without it.
+    Neither fires on an auction with nothing to represent. An unconfigured exchange denies
+    every store (R12, fail-closed) and reaches this with no entries, no slots and nobody
+    solicited; alarming on that would alarm on every request such a deployment refuses, which
+    is the one way to make a warning worth ignoring.
+
+    **The condition is the SHOPPER's, not the fan-out's**, and that is this line's own repair.
+    It used to fire on ``sponsored == 0`` — nobody bid — which is a different and strictly
+    narrower failure: an auction where four stores bid and the ranker excluded all four served
+    exactly the same list-price-only screen and was logged ``market=mixed``. Both counts are on
+    the line so the two are told apart at a glance: ``sponsored=4 shown_sponsored=0`` is "the
+    stores answered, the exchange dropped them", and ``sponsored=0`` is "nobody answered".
+
+    ``shown_sponsored=?`` means the ranking had not run when this was announced, which happens
+    on exactly one path: the ranking raised, and this line was emitted so that the auction
+    nobody can serve is still the auction an operator can read. On THAT path ``all_fallback``
+    is still the bid-side answer ``market_summary`` computed — so a ``market=all_fallback``
+    warning beside ``shown=?`` is saying "nobody bid", not "nobody was shown", and the ``?``
+    is what distinguishes them. It is deliberately not suppressed: a 500 that also collected no
+    bids is worth two facts, not one.
+
+    The window is named on every line, because "4 stores timed out" is not actionable without
+    it.
     """
     shape = (
-        "auction=%s market=%s solicited=%d sponsored=%d list_price=%d timed_out=%d "
-        "not_asked=%d denied=%d window=%.2fs reasons=%s"
+        "auction=%s market=%s solicited=%d sponsored=%d shown_sponsored=%s shown=%s "
+        "list_price=%d timed_out=%d not_asked=%d no_endpoint=%d denied=%d window=%.2fs "
+        "reasons=%s"
     )
+    unknown = "?"
+    shown_sponsored = summary.get("shortlisted_sponsored")
+    shown = summary.get("shortlisted")
+    # An auction with stores to represent that filled no slot. `shown is None` is the
+    # ranking-raised path, where the shopper's half was never computed and a `0` here would be
+    # a measurement of something that did not happen — so it is not this condition either.
+    represented = int(summary.get("solicited") or 0) > 0 or int(summary.get("list_price") or 0) > 0
+    nothing_shown = shown == 0 and represented
     values = (
         auction_id,
-        "all_fallback" if summary.get("all_fallback") else "mixed",
+        "all_fallback"
+        if summary.get("all_fallback")
+        else ("nothing_shown" if nothing_shown else "mixed"),
         summary.get("solicited", 0),
         summary.get("sponsored", 0),
+        unknown if shown_sponsored is None else shown_sponsored,
+        unknown if shown is None else shown,
         summary.get("list_price", 0),
         summary.get("timed_out", 0),
         summary.get("not_asked", 0),
+        summary.get("no_endpoint", 0),
         summary.get("denied", 0),
         float(summary.get("bid_window_seconds", 0.0)),
         summary.get("fallback_reasons", {}),
     )
     if summary.get("all_fallback"):
         _log.warning(
-            "NO STORE BID: every solicited store fell back, so this market served LIST "
-            "PRICES ONLY — no store's own offer reached the shortlist. " + shape,
+            "NO STORE'S OWN OFFER REACHED THE SHOPPER: not one shortlist row was a store's "
+            "own quote, so this market showed LIST PRICES ONLY. " + shape,
+            *values,
+        )
+    elif nothing_shown:
+        _log.warning(
+            "NOTHING REACHED THE SHOPPER: this auction had stores to represent and filled no "
+            "shortlist slot at all, so the screen was blank — not even a catalogue price. " + shape,
             *values,
         )
     else:
@@ -2459,7 +2751,13 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
     # the part of it that talks to stores.
     started_at = time.monotonic()
     window = bid_window_seconds(body.bid_timeout_seconds)
-    deadline = opened_at + window
+    # Truncated to the precision `respond_by` is PUBLISHED at, so this exchange never holds a
+    # deadline it cannot state. A full-precision `opened_at + window` is up to a millisecond
+    # later than the RFC-3339 string every store is sent, and a store that stamps its offer with
+    # the string it was given then looks late against a number nobody told it — measured live at
+    # 268 microseconds, which cost three honest stores their shortlist slots. See
+    # `publishable_deadline`.
+    deadline = publishable_deadline(opened_at + window)
 
     # `UnknownAuction` is caught on every write, not only on the read below, and that is a
     # consequence of the store having a CAP. Before it had one, an id that `create` had just
@@ -2513,22 +2811,33 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
         machine.ledger, result.entries, auction_id=auction_id, assessments=found.assessments()
     )
 
-    # WHAT KIND OF MARKET THIS WAS, counted once and then said three ways: in the log line
-    # below, on the `auction_closed` payload, and on the 201. Computed here — after the
-    # fan-out and before the close — because `result.entries` is the auction's own record of
-    # who offered what, and the ranking that follows cannot change who bid, only who is shown.
+    # WHO BID, counted here — after the fan-out and before the close — because `result.entries`
+    # is the auction's own record of who offered what, and it is the only thing that exists to
+    # count at this point in the request.
     #
-    # Announced here as well, rather than after `machine.close`, so the operator is told even
-    # when the ranking below raises. That path is a 500 that leaves the auction OPEN, and it is
-    # exactly the run someone will be reading the log for; a market line emitted only on the
-    # happy path is missing from every auction anybody investigates.
+    # It is HALF a summary. The other half is who reached the shopper, which the ranking below
+    # decides, and the two used to be silently assumed equal: this line reported `sponsored: 4`
+    # on droplet runs where the screen held four list prices and `all_fallback` stayed false.
+    # `with_shortlist_outcome` finishes it once the shortlist exists, and the finished summary
+    # is the one that reaches the `auction_closed` payload and the 201 — one object, still, so
+    # the three readers cannot disagree.
+    #
+    # The comment that used to sit here said this was announced BEFORE the ranking so the
+    # operator is told even when the ranking raises. That reason is still right and it is why
+    # `except` below exists rather than a plain move: a ranking that raises is a 500 that leaves
+    # the auction OPEN, it is exactly the run someone will be reading the log for, and a market
+    # line emitted only on the happy path is missing from every auction anybody investigates.
+    # What changed is that the LINE now waits for the shortlist whenever there is going to be
+    # one, because a verdict about the market that cannot see the market's output was the
+    # defect.
     summary = market_summary(result, window=window)
-    announce_market(summary, auction_id=auction_id)
 
-    # ONE clock reading, used for the close transition and for the ranking's `now`. Two
-    # readings would let an offer expire between the auction closing and the ranking that
-    # decides whether it was live at the close, which is not a question two instants can
-    # answer consistently.
+    # ONE clock reading, used for the close transition, for the ranking's `now` and for every
+    # TTL stamped below. Two readings would let an offer expire between the auction closing and
+    # the ranking that decides whether it was live at the close, which is not a question two
+    # instants can answer consistently. What it is NOT is the instant offer liveness is judged
+    # at — see the `deadline=` argument to `rank_auction` for why the auction's own published
+    # `respond_by` caps that, and for the race that ran for want of the cap.
     closed_at = time.time()
 
     trust_snapshot = trust_snapshot_of(request.app)
@@ -2539,46 +2848,72 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
         for entry in roster
         if entry.get("product_ref") is not None
     }
-    ranking = rank_auction(
-        result.entries,
-        auction_id=auction_id,
-        intent=intent,
-        now=closed_at,
-        trust_snapshot=trust_snapshot,
-        registered_domains=registered_domains_of(request.app),
-        weights=weights,
-        catalog=catalog,
-        # Which product each store is bidding on is the ROSTER's answer, never the reply's:
-        # a store that named a different product on its bid would otherwise choose which of
-        # its own catalogue entries its claims are graded against (ESC-020). On a graph-sourced
-        # roster the answer is the PLATFORM's own crawl, which is stronger still. D58 tried
-        # inverting this and withdrew it on the measurement — see `ranking.verification`'s
-        # module docstring — and what it changed instead is that `BidRequest` now NAMES this
-        # product, so a solicited agent answers about it rather than guessing.
-        product_refs=product_refs,
-        # The ranker's own audit trail. Every verdict it mints for this auction is announced
-        # as `claim_verified` on the way through, instead of being consumed by the filters and
-        # dropped when the request ends — see `ranking.verification.attest_candidate_claims`,
-        # including for why an exchange with no `claim_dimensions` wired announces nothing.
-        recorder=machine.ledger,
-        claim_dimensions=claim_dimensions_of(request.app),
-        # `intent_match` — w_m = 0.35, the largest term in the published formula — stops being
-        # a constant here, because this is the first place in the service's history that holds
-        # both an auction and a retrieval measurement for it. `{}` whenever the roster came
-        # from the request body or no graph is wired, and then every candidate keeps the
-        # published neutral exactly as it did before.
-        #
-        # It goes in as an ARGUMENT rather than being applied to the answer. The route used to
-        # call the published `rank()` a second time over the candidates `rank_auction` had
-        # already returned — correct, and a whole second filter/score/shortlist pass per served
-        # auction, plus a second copy of the shortlist's offer-field join living in this file.
-        # Both are gone; `ranking.serving.with_intent_match` is the seam.
-        intent_match=found.intent_match_by_store,
-        # R12's exploration slice: the read half of the loop `POST /internal/outcomes` writes.
-        # The book is READ and never created here — see `bandit_posteriors_of`.
-        bandit_posteriors=bandit_posteriors_of(request.app),
-    )
+    # The ranking, wrapped ONLY so the market line survives a ranking that raises. That path
+    # is a 500 which leaves the auction OPEN and stores no shortlist, and it is exactly the
+    # run an operator goes to the log for; the summary announced there is the bid-side half,
+    # with `shown_sponsored=?` saying plainly that the shopper's half was never computed.
+    # Nothing is swallowed — the exception is re-raised untouched, and this is not a place
+    # that decides what a failed ranking means.
+    try:
+        ranking = rank_auction(
+            result.entries,
+            auction_id=auction_id,
+            intent=intent,
+            now=closed_at,
+            # THE AUCTION'S OWN CLOSE, as a ceiling on when an offer had to be standing. `closed_at`
+            # is read after the fan-out returns, so on any run that used the full window it is LATER
+            # than the `respond_by` this exchange published — and a hosted agent stamps its offer's
+            # expiry with that `respond_by` when the merchant states none. Without this argument the
+            # exchange voided every honest bid for its own overrun (21 ms on the droplet, 2 runs in
+            # 12) and served a shortlist of nothing but its own list-price stand-ins, which survive
+            # on `deadline + 900 s`. See `ranking.serving.rank_auction` for why it is a ceiling and
+            # never a floor.
+            deadline=deadline,
+            trust_snapshot=trust_snapshot,
+            registered_domains=registered_domains_of(request.app),
+            weights=weights,
+            catalog=catalog,
+            # Which product each store is bidding on is the ROSTER's answer, never the reply's:
+            # a store that named a different product on its bid would otherwise choose which of
+            # its own catalogue entries its claims are graded against (ESC-020). On a graph-sourced
+            # roster the answer is the PLATFORM's own crawl, which is stronger still. D58 tried
+            # inverting this and withdrew it on the measurement — see `ranking.verification`'s
+            # module docstring — and what it changed instead is that `BidRequest` now NAMES this
+            # product, so a solicited agent answers about it rather than guessing.
+            product_refs=product_refs,
+            # The ranker's own audit trail. Every verdict it mints for this auction is announced
+            # as `claim_verified` on the way through, instead of being consumed by the filters and
+            # dropped when the request ends — see `ranking.verification.attest_candidate_claims`,
+            # including for why an exchange with no `claim_dimensions` wired announces nothing.
+            recorder=machine.ledger,
+            claim_dimensions=claim_dimensions_of(request.app),
+            # `intent_match` — w_m = 0.35, the largest term in the published formula — stops being
+            # a constant here, because this is the first place in the service's history that holds
+            # both an auction and a retrieval measurement for it. `{}` whenever the roster came
+            # from the request body or no graph is wired, and then every candidate keeps the
+            # published neutral exactly as it did before.
+            #
+            # It goes in as an ARGUMENT rather than being applied to the answer. The route used to
+            # call the published `rank()` a second time over the candidates `rank_auction` had
+            # already returned — correct, and a whole second filter/score/shortlist pass per served
+            # auction, plus a second copy of the shortlist's offer-field join living in this file.
+            # Both are gone; `ranking.serving.with_intent_match` is the seam.
+            intent_match=found.intent_match_by_store,
+            # R12's exploration slice: the read half of the loop `POST /internal/outcomes` writes.
+            # The book is READ and never created here — see `bandit_posteriors_of`.
+            bandit_posteriors=bandit_posteriors_of(request.app),
+        )
+    except BaseException:
+        announce_market(summary, auction_id=auction_id)
+        raise
+
+    # WHAT THE SHOPPER GOT, folded into the same object the counts of who bid are on, and
+    # THEN said out loud. `all_fallback` and the WARNING it fires now follow the shortlist:
+    # a market where four stores bid and the ranker excluded all four served the same
+    # list-price-only screen as one where nobody bid, and was logged `market=mixed`.
     shortlist = ranking["shortlist"]
+    summary = with_shortlist_outcome(summary, shortlist)
+    announce_market(summary, auction_id=auction_id)
     shortlist_store(request.app).put(auction_id, shortlist, now=closed_at)
 
     # The penalties this ranking APPLIED, written down where the formula says they come from.

@@ -78,7 +78,7 @@ from typing import Any
 # declared next to the function that READS them (`collect._unusable_because`), exactly as
 # `REFUSAL_FIELD` is declared there and written by `composition`'s solicitor — one spelling,
 # owned by the reader, so a writer cannot drift away from it silently.
-from .collect import NOT_ASKED_FIELD, TIMED_OUT_FIELD
+from .collect import NO_AGENT_FIELD, NOT_ASKED_FIELD, TIMED_OUT_FIELD
 
 __all__ = [
     "DEFAULT_BID_WINDOW_SECONDS",
@@ -306,10 +306,16 @@ def _stamped(
     ``bid["store_id"]`` (the checkout request, the ledger) must name the store that was
     actually asked.
 
-    :data:`~.collect.TIMED_OUT_FIELD` and :data:`~.collect.NOT_ASKED_FIELD` are **deleted**
+    :data:`~.collect.TIMED_OUT_FIELD`, :data:`~.collect.NOT_ASKED_FIELD` and
+    :data:`~.collect.NO_AGENT_FIELD` — the first two this module's own account of a run, the
+    third the solicitation gate's account of this deployment, and none of them a store's — are
+    **deleted**
     rather than overwritten, and that is the same rule pointed at a field a store has no
-    honest use for at all. They are this module's account of stores it heard nothing from, so
-    a store that sends one is describing a run it did not observe: ``exchange_timed_out`` on
+    honest use for at all. They are the EXCHANGE's account of stores it heard nothing
+    from — two written here and the third by
+    :func:`~exchange.orchestration.solicitation.solicit_bids`, which is why this function
+    strips a field it never writes — so a store that sends one is describing a run it did not
+    observe: ``exchange_timed_out`` on
     an otherwise good reply would talk the collector out of the bid the store just made, and
     on a malformed one it would relabel the store's own serializer bug as the exchange's
     clock. Nothing is preserved under a ``store_reported_`` key because, unlike an arrival
@@ -321,6 +327,12 @@ def _stamped(
     stamped = dict(response)
     stamped.pop(TIMED_OUT_FIELD, None)
     stamped.pop(NOT_ASKED_FIELD, None)
+    # And :data:`~.collect.NO_AGENT_FIELD`, on the same argument: it is this exchange's
+    # statement that it holds no endpoint for a store, so a store that could set it would be
+    # excusing its own silence with a fact about our deployment. That it can only arrive here
+    # from a store — the gate mints it for stores this function is never called for — is
+    # exactly why it is stripped rather than trusted.
+    stamped.pop(NO_AGENT_FIELD, None)
 
     claimed = stamped.get("received_at")
     if claimed is not None and claimed != finished_at:

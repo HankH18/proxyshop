@@ -64,8 +64,10 @@ from exchange.auction.routes import (
     configure_auctions,
     resolve_bid_window_seconds,
 )
+from exchange.checkout.sellers import StaticRegisteredDomains
 from exchange.eligibility import ELIGIBLE, StaticSellerEligibility
 from exchange.main import create_app
+from exchange.ranking.serving import configure_ranking
 from fastapi.testclient import TestClient
 
 T_NOW = 1_700_000_000.0
@@ -87,7 +89,15 @@ def rostered(store_id: str, list_price: float, tier: int = 1) -> dict[str, Any]:
 def bid_response(
     store_id: str, price: float, *, received_at: float = T_NOW - 1.0
 ) -> dict[str, Any]:
-    """A well-formed reply carrying a real discounted offer AND the store's own pitch."""
+    """A well-formed reply carrying a real discounted offer AND the store's own pitch.
+
+    ``checkout_url`` and ``expires_at`` are here so the offer is one the RANKER can admit, not
+    only one the collector can read. Without them every bid in this file reached the shortlist
+    filters and was refused ``off_domain``/``expired_offer``, so every served auction here
+    produced an empty shortlist — which stayed invisible for as long as ``market`` counted
+    only who bid. It counts who was SHOWN as well now, and a summary about the shopper cannot
+    be graded against a fixture that shows the shopper nothing.
+    """
     return {
         "store_id": store_id,
         "received_at": received_at,
@@ -95,7 +105,14 @@ def bid_response(
             "auction_id": "auction-1",
             "store_id": store_id,
             "message": PITCH,
-            "offer": {"product_ref": "product-1", "unit_price": price, "total_price": price},
+            "offer": {
+                "product_ref": "product-1",
+                "unit_price": price,
+                "total_price": price,
+                "currency": "USD",
+                "checkout_url": f"https://{store_id}.example.com/cart/1:1",
+                "expires_at": "2038-01-01T00:00:00Z",
+            },
             "claims": [],
         },
     }
@@ -151,11 +168,39 @@ def _auction(
         solicitor=solicitor,
         eligibility=StaticSellerEligibility({row["store_id"]: ELIGIBLE for row in roster}),
     )
+    # AND the ranking, which this helper used to leave unwired. An exchange with no trust
+    # snapshot and no registered domains fails closed on every candidate (R12/C10), so every
+    # auction in this file answered with an EMPTY shortlist and no assertion here noticed —
+    # ``market`` was a count of who bid and nothing else. It now also counts who reached the
+    # shopper, and ``all_fallback`` is the shopper's verdict, so the fixture has to be an
+    # exchange that can actually show somebody something. Every assertion below is unchanged
+    # except the exhaustive market dict, which GAINED the keys the summary now publishes and
+    # kept every value it already stated; otherwise what changed is only that the same
+    # assertions are now true of an exchange that serves a shortlist.
+    configure_ranking(
+        app,
+        trust_snapshot={row["store_id"]: {"blacklisted": False, "score": 0.6} for row in roster},
+        registered_domains=StaticRegisteredDomains(
+            {row["store_id"]: f"{row['store_id']}.example.com" for row in roster}
+        ),
+    )
     client = TestClient(app)
     posted = client.post(
         "/auctions",
         json={
-            "intent": {"intent_id": "intent-1", "cluster_id": "cluster-1"},
+            # ``hard_constraints: []`` states an UNCONSTRAINED request. Omitting the key is
+            # not the same thing and never was: R19 refuses a candidate whose constraints this
+            # exchange cannot read — "cannot tell an unconstrained request from an unread one"
+            # — so every auction this helper served excluded every bid on
+            # ``undecidable_hard_constraint`` alone. Invisible while ``market`` counted only
+            # who bid; it is the whole shortlist once ``market`` counts who was shown. Every
+            # served body in this repo that reaches a shortlist sends this key, including the
+            # one ``scripts/demo_check.sh`` posts.
+            "intent": {
+                "intent_id": "intent-1",
+                "cluster_id": "cluster-1",
+                "hard_constraints": [],
+            },
             "roster": roster,
             **body,
         },
@@ -391,7 +436,10 @@ def test_a_store_that_answers_in_time_still_wins_with_its_own_price_and_its_own_
         "not_asked": 0,
         "denied": 0,
         "bid_window_seconds": 2.0,
+        "no_endpoint": 0,
         "fallback_reasons": {},
+        "shortlisted": 1,
+        "shortlisted_sponsored": 1,
         "all_fallback": False,
     }
 

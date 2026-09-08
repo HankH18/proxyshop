@@ -345,7 +345,6 @@ import time
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -1572,6 +1571,13 @@ class HttpBidSolicitor:
         if not endpoint:
             # Not an error: a Tier-0 store, or one the registry holds no agent for, is
             # represented at list price rather than asked a question nobody is home to hear.
+            #
+            # Reachable only when the caller did not ASK first. `can_solicit` below is how the
+            # solicitation gate finds these stores before the fan-out runs, so on the served
+            # path they are never submitted here at all; a caller that skips the question still
+            # gets the old, harmless `None`. What is no longer harmless — and is what
+            # `can_solicit` exists for — is the REPORT: this store was named in `solicited` and
+            # then recorded `no_response`, which said it had been asked and had gone quiet.
             return None
 
         payload = dict(self._context) or {"auction_id": "", "intent": {}, "profile": {}}
@@ -1624,6 +1630,28 @@ class HttpBidSolicitor:
         # `store_id` and `received_at` are stamped authoritatively by `fanout._stamped`; they
         # are named here only so the reply is a well-formed response envelope.
         return {"store_id": store_id, "bid": dict(bid)}
+
+    def can_solicit(self, store_id: Any) -> bool:
+        """Whether this exchange holds an agent endpoint for ``store_id``.
+
+        The optional half of the solicitor port that
+        :func:`~exchange.orchestration.solicitation.stores_with_no_agent` asks, and the reason
+        it is asked HERE: ``_endpoints`` is built in this composition root out of the
+        deployment document's ``sellers[].bid_endpoint``, and nothing outside this class can
+        see it. The gate one layer up cannot read a mapping it is not handed, and handing it
+        one would tie the orchestration to this transport.
+
+        The shipped demo document is exactly the shape that made it necessary: ten eligible
+        sellers, four with a ``bid_endpoint`` and six without, every one of them Tier-1. The
+        six are catalogue-only in this deployment's eyes and were reported to the shopper as
+        having been asked and stayed silent.
+
+        The same ``not endpoint`` test :meth:`solicit` makes, so the two cannot disagree about
+        which stores are reachable — a predicate that answered differently from the code it
+        predicts would produce a store that is solicited and then never dialled, which is the
+        defect wearing a fresh coat.
+        """
+        return bool(self._endpoints.get(str(store_id or "")))
 
     __call__ = solicit
 
@@ -1704,15 +1732,25 @@ def _solicited_product_ref(store: Mapping[str, Any]) -> str | None:
     return stated.strip()
 
 
+#: THE renderer for ``BidRequest.respond_by``, imported rather than restated.
+#:
+#: It used to live here, and the copy was the defect: the auction route mints the deadline at
+#: full double precision and this rendered it at millisecond precision, so the instant a store
+#: was TOLD to answer by was up to a millisecond earlier than the instant the exchange judged
+#: its offer against — and a store stamping its offer with the string it was sent was refused
+#: ``expired_offer`` for missing a deadline nobody had published. The route now mints a deadline
+#: it can state (``auction.routes.publishable_deadline``) and this door states it with the same
+#: function, so the two cannot drift apart again.
 def _rfc3339(moment: float | None) -> str:
-    """A deadline epoch as the ``date-time`` string ``BidRequest.respond_by`` publishes."""
-    if moment is None:
-        return ""
-    return (
-        datetime.fromtimestamp(float(moment), tz=UTC)
-        .isoformat(timespec="milliseconds")
-        .replace("+00:00", "Z")
-    )
+    """Delegates to :func:`exchange.auction.routes.rfc3339_deadline`. See the note above.
+
+    Imported inside the call for the same reason ``configure_auctions`` is throughout this
+    module: ``auction.routes`` is a feature module and this is the composition root, so the
+    dependency runs one way at import time and is resolved on use.
+    """
+    from .auction.routes import rfc3339_deadline  # noqa: PLC0415 — see the import note
+
+    return rfc3339_deadline(moment)
 
 
 # =====================================================================================
