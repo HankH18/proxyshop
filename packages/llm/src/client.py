@@ -113,6 +113,17 @@ class AnthropicLLM:
         api_key: overrides ``ANTHROPIC_API_KEY``.
         max_tokens: overrides ``LLM_MAX_TOKENS``.
         timeout: overrides ``LLM_TIMEOUT_SECONDS``.
+        max_retries: overrides the SDK's own retry count. **Left at `None` — the default —
+            nothing is passed and the SDK keeps `DEFAULT_MAX_RETRIES = 2`**, so every role
+            that does not ask for this behaves byte-identically to before this argument
+            existed. Pass ``0`` when ``timeout`` is a *budget* rather than a hint, because
+            `anthropic==1.2.0` RETRIES `APITimeoutError`: measured against the pinned SDK
+            with a per-call timeout of 0.8s, ``max_retries=2`` raised `APITimeoutError`
+            after **3.92s** and ``max_retries=0`` raised it after **0.84s**. A caller that
+            must answer inside a deadline therefore cannot express that with ``timeout``
+            alone, and `anthropic.Messages.create` accepts a per-request ``timeout`` but
+            **not** a per-request ``max_retries`` — it is a client-level setting, which is
+            why it is set here.
         client: a pre-built client object. Injecting one is how tests exercise this class
             with no SDK, no key and no network.
         env: environment mapping to resolve from; defaults to ``os.environ``.
@@ -129,6 +140,7 @@ class AnthropicLLM:
         api_key: str | None = None,
         max_tokens: int | None = None,
         timeout: float | None = None,
+        max_retries: int | None = None,
         client: Any | None = None,
         env: Mapping[str, str] | None = None,
     ) -> None:
@@ -138,6 +150,7 @@ class AnthropicLLM:
         self._api_key = api_key
         self._max_tokens = max_tokens
         self._timeout = timeout
+        self._max_retries = max_retries
         self._client = client
 
     @property
@@ -153,6 +166,16 @@ class AnthropicLLM:
     def timeout(self) -> float:
         return self._timeout if self._timeout is not None else resolve_timeout(self._env)
 
+    @property
+    def max_retries(self) -> int | None:
+        """The retry count this client pins, or ``None`` to leave the SDK's own default.
+
+        ``None`` is not "no retries" — it is "do not say", and the SDK then applies
+        ``DEFAULT_MAX_RETRIES = 2``. See :meth:`__init__` for the measurement that makes the
+        difference matter to anyone holding a deadline.
+        """
+        return self._max_retries
+
     def _ensure_client(self) -> Any:
         """Build the SDK client on first use. The only place the SDK is imported."""
         if self._client is None:
@@ -167,7 +190,15 @@ class AnthropicLLM:
             # of the file is what breaks every offline suite that imports this package.
             import anthropic
 
-            self._client = anthropic.Anthropic(api_key=api_key, timeout=self.timeout)
+            # `max_retries` is passed ONLY when a caller asked for one. Passing
+            # `max_retries=None` would not be the same thing: the SDK's parameter is not
+            # optional at the constructor, so an unconditional keyword would change the
+            # behaviour of every role that never asked — buyer, interview, extract — which
+            # is the one thing this addition must not do.
+            options: dict[str, Any] = {"api_key": api_key, "timeout": self.timeout}
+            if self._max_retries is not None:
+                options["max_retries"] = self._max_retries
+            self._client = anthropic.Anthropic(**options)
         return self._client
 
     def complete(

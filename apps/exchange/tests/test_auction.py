@@ -30,6 +30,7 @@ from exchange.auction import (
     parallel_fan_out,
     sequential_fan_out,
 )
+from exchange.auction.collect import TIMED_OUT_FIELD
 from exchange.auction.routes import MAX_IDENTIFIER_LENGTH, configure_auctions
 from exchange.eligibility import (
     BLACKLISTED,
@@ -492,9 +493,20 @@ def test_parallel_fan_out_stops_waiting_at_the_deadline_and_ignores_the_straggle
         elapsed = time.time() - started
 
         assert elapsed < 3.0, "the hard timeout did not stop the wait"
-        answered = {r["store_id"] for r in responses}
+        # `answered` means "came back with something to rank", which is what this assertion
+        # has always been about. It used to be spelled `{r["store_id"] for r in responses}`,
+        # which was the same set only because a store the exchange abandoned left NOTHING in
+        # the responses — the defect: `collect_bids` then recorded it as `no_response`, the
+        # word for a store that was asked and never spoke, and a store answering at 4.5s
+        # against a 3.0s window became indistinguishable from a container that is switched
+        # off. The straggler is now represented, without a bid, and the claim being made here
+        # is untouched: its LATE OFFER was not counted.
+        answered = {r["store_id"] for r in responses if r.get("bid") is not None}
         assert "store-quick" in answered
         assert "store-hung" not in answered, "a store that missed the window was counted"
+        # ...and the new half, which is the point of the repair: the exchange wrote down that
+        # it walked away from a reply in flight, rather than losing the fact with the future.
+        assert {"store_id": "store-hung", TIMED_OUT_FIELD: True} in responses
 
         entries = {e.store_id: e for e in collect_bids(roster, responses, deadline)}
         assert entries["store-quick"].fallback is False

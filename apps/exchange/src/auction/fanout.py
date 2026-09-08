@@ -37,6 +37,20 @@ completed, and ``collect_bids`` rejects any stamped after the deadline. Stopping
 without stamping would still let a straggler that landed a microsecond late be counted; the
 stamp is what makes the deadline mean something rather than merely being a hint.
 
+**A late store is not a silent store, and this module is the only thing that knows.** The
+wait ends and a store's future is left pending; abandoning it used to mean abandoning the
+*fact* as well, so ``collect_bids`` saw nothing for that store and recorded ``no_response`` —
+the same word it records for a container that is switched off. Measured on a live hosted
+deployment with a real model writing each pitch: four agents logged ``200 OK`` for every
+solicitation, 24 samples over the wire ran 1.97 s – 4.73 s against a 3.0 s window, and the
+auction reported ``hosted bids=0  fallback reasons=['no_response']``. Nothing was broken and
+every diagnostic said the agents were not running. So both strategies now **mint a response
+for a store that produced none** — ``{store_id, exchange_timed_out}`` for a future still
+pending at the close, ``{store_id, exchange_not_asked}`` for a store no worker was free to
+dial — and ``collect_bids`` names them apart (``response_timed_out`` /
+``fan_out_capacity_exhausted``). The fallback is unchanged in every case: R10 still puts the
+store on the shortlist at its list price. What changed is that the *reason* is true.
+
 **The exchange stamps, never the store.** ``received_at`` is the value the deadline is
 enforced on, so a bidder that could set it would be setting its own deadline: answer
 whenever you like, claim you answered a second before the close, and ``collect_bids`` counts
@@ -59,6 +73,12 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from typing import Any
+
+# The names of the two fields this module writes on a response it mints itself. They are
+# declared next to the function that READS them (`collect._unusable_because`), exactly as
+# `REFUSAL_FIELD` is declared there and written by `composition`'s solicitor — one spelling,
+# owned by the reader, so a writer cannot drift away from it silently.
+from .collect import NOT_ASKED_FIELD, TIMED_OUT_FIELD
 
 __all__ = [
     "DEFAULT_BID_WINDOW_SECONDS",
@@ -84,8 +104,17 @@ MAX_FAN_OUT_WORKERS = 32
 
 #: How long a bidding window really lasts, in wall-clock seconds, when the caller does not
 #: say. Matches ``auction.routes.DEFAULT_BID_TIMEOUT_SECONDS``: a buyer is synchronously
-#: waiting on this.
-DEFAULT_BID_WINDOW_SECONDS = 3.0
+#: waiting on this. This is its mirror, read by ``orchestration.solicitation`` for a caller
+#: that states no window of its own; the measurement behind the number lives beside that
+#: constant and is not restated here, because two copies of a measurement drift.
+#:
+#: One thing worth carrying across, since this module is where it is enforced: 5.0 guarantees
+#: the **bid**, not the store's model-written prose. A store reserves 0.35 s of the window
+#: before handing the remainder to its model, so at 5.0 s the pitch budget is ~4.64 s against
+#: a measured 4.73 s p100 — a store on that tail ships a deterministic fallback pitch and
+#: still wins its bid, which is the repair. The offer itself, which is all this fan-out has to
+#: get back for the auction to be a market, costs 12.7 ms.
+DEFAULT_BID_WINDOW_SECONDS = 5.0
 
 
 class BoundedFanOutPool:
@@ -276,10 +305,22 @@ def _stamped(
     The bid body is re-attributed for the same reason: everything downstream that reads
     ``bid["store_id"]`` (the checkout request, the ledger) must name the store that was
     actually asked.
+
+    :data:`~.collect.TIMED_OUT_FIELD` and :data:`~.collect.NOT_ASKED_FIELD` are **deleted**
+    rather than overwritten, and that is the same rule pointed at a field a store has no
+    honest use for at all. They are this module's account of stores it heard nothing from, so
+    a store that sends one is describing a run it did not observe: ``exchange_timed_out`` on
+    an otherwise good reply would talk the collector out of the bid the store just made, and
+    on a malformed one it would relabel the store's own serializer bug as the exchange's
+    clock. Nothing is preserved under a ``store_reported_`` key because, unlike an arrival
+    stamp or a store id, there is no version of this claim an auditor could want: the value
+    is not evidence about the store, it is a word about us.
     """
     if response is None:
         return None
     stamped = dict(response)
+    stamped.pop(TIMED_OUT_FIELD, None)
+    stamped.pop(NOT_ASKED_FIELD, None)
 
     claimed = stamped.get("received_at")
     if claimed is not None and claimed != finished_at:
@@ -297,6 +338,31 @@ def _stamped(
             attributed["store_id"] = store_id
             stamped["bid"] = attributed
     return stamped
+
+
+def _minted(store: Mapping[str, Any], field: str) -> Mapping[str, Any] | None:
+    """The exchange's own record of a store it got no answer from, or ``None``.
+
+    Built from the roster row the exchange **asked**, and from nothing else: there is no
+    response to copy, so there is nothing a bidder could have contributed. That is the whole
+    security argument for the two marker fields, and it is why they are minted here rather
+    than defaulted by the collector — the collector cannot tell an absence apart from a store
+    it was never told about.
+
+    ``None`` for a roster row carrying no ``store_id``: :func:`collect_bids` keys responses by
+    that field and drops any response without one, so an anonymous marker would be a mapping
+    built to be discarded. The row cannot be attributed, so nothing is claimed about it.
+    """
+    store_id = store.get("store_id")
+    if store_id is None:
+        return None
+    return {"store_id": store_id, field: True}
+
+
+def _minted_for(stores: Sequence[Mapping[str, Any]], field: str) -> list[Mapping[str, Any]]:
+    """:func:`_minted` over a run of roster rows, skipping the unattributable ones."""
+    minted = (_minted(store, field) for store in stores)
+    return [record for record in minted if record is not None]
 
 
 def sequential_fan_out(
@@ -342,17 +408,42 @@ def sequential_fan_out(
     keeping the order deterministic; it does **not** buy R10's latency property (N stores at
     400 ms still cost N × 400 ms). A live auction passes :func:`parallel_fan_out` for that —
     the route does.
+
+    **What it reports about the stores it got nothing from**, and the one case it deliberately
+    stays quiet about. Two facts here are unambiguous and both are minted:
+
+    * the store the loop was *inside* when the window shut — asked, still answering, and
+      exactly the case :data:`~.collect.RESPONSE_TIMED_OUT_REASON` names; and
+    * every store on the roster when no worker was free at all — nobody was asked, and
+      :data:`~.collect.FAN_OUT_CAPACITY_REASON` says so instead of blaming N healthy stores.
+
+    The **tail the loop never reached** is left as ``no_response``, on purpose. A single
+    worker walks the roster in order, so the moment the wait ends the loop is either inside a
+    store or between two of them, and between two of them "the next store was never asked"
+    and "the next store is being asked right now" are the same observable state. Minting a
+    marker on that guess would put a fabricated verdict where an honest absence was, which is
+    the defect this repair exists to end rather than a smaller version of it — and this is not
+    the live path: :func:`parallel_fan_out`, which submits every store up front and therefore
+    knows exactly which ones it never submitted, is what the route passes.
     """
     responses: list[Mapping[str, Any]] = []
     lock = threading.Lock()
+    # The store the worker is currently blocked inside, or ``None`` between asks. Read under
+    # the lock after the wait: it is the one thing this strategy knows for certain about a
+    # store that produced nothing.
+    pending: Mapping[str, Any] | None = None
 
     def run() -> None:
+        nonlocal pending
         for store in stores:
             if deadline is not None and clock() > float(deadline):
                 return
+            with lock:
+                pending = store
             answer = _stamped(ask_store(solicitor, store), store, clock())
-            if answer is not None:
-                with lock:
+            with lock:
+                pending = None
+                if answer is not None:
                     responses.append(answer)
 
     if deadline is None:
@@ -365,15 +456,22 @@ def sequential_fan_out(
     if future is None:
         # Every worker is held by a store that has not answered. Asking inline would hand
         # this request the very unbounded wait the pool exists to prevent, so nobody is
-        # asked and the whole roster falls back to list price.
-        return []
+        # asked and the whole roster falls back to list price — now saying so, rather than
+        # reporting an exhausted pool as N stores that did not pick up.
+        return _minted_for(stores, NOT_ASKED_FIELD)
 
     wait({future}, timeout=max(0.0, float(deadline) - clock()))
     with lock:
         # Whatever landed before the window shut. A store still mid-answer is abandoned;
         # anything it produces later appends to a list nobody reads again, and the worker
-        # returns itself to the pool when the store finally answers.
-        return list(responses)
+        # returns itself to the pool when the store finally answers. The abandoned store is
+        # named, because "we walked away from your reply" is a different fact from "you never
+        # sent one" and only this function is in a position to tell them apart.
+        collected = list(responses)
+        abandoned = None if pending is None else _minted(pending, TIMED_OUT_FIELD)
+    if abandoned is not None:
+        collected.append(abandoned)
+    return collected
 
 
 def parallel_fan_out(
@@ -391,6 +489,16 @@ def parallel_fan_out(
     process-wide ceiling is :attr:`BoundedFanOutPool.max_workers` and is what actually
     bounds thread count. ``pool`` is a test seam — production always uses the shared pool
     from :func:`fan_out_pool`, because a per-request pool is exactly the leak this replaced.
+
+    **Every store on the roster is accounted for in the return value**, which is the part that
+    was missing and is the whole reason the live market could go 100% list-price without
+    anyone noticing. This function submits the whole roster up front, so at the close it knows
+    precisely which stores it never submitted (no worker was free, or the per-call cap ran
+    out) and which ones it submitted and then abandoned mid-answer. Both used to leave no
+    trace at all, and ``collect_bids`` defaulted the store to ``no_response`` — the word for a
+    store that was asked and said nothing. Now each gets a mapping the exchange minted for it,
+    naming which of the three actually happened. The store still falls back to its list price;
+    R10 is untouched. See the module docstring for the hosted measurement.
     """
     roster = list(stores)
     if not roster:
@@ -406,35 +514,54 @@ def parallel_fan_out(
         answer = ask_store(solicitor, store)
         return _stamped(answer, store, clock())
 
-    futures: list[Future[Mapping[str, Any] | None]] = []
-    for store in roster:
-        if len(futures) >= max(1, int(workers)):
+    asked: list[tuple[Mapping[str, Any], Future[Mapping[str, Any] | None]]] = []
+    unasked: list[Mapping[str, Any]] = []
+    for position, store in enumerate(roster):
+        if len(asked) >= max(1, int(workers)):
+            unasked = roster[position:]
             break
         submitted = executor.submit(ask, store)
         if submitted is None:
             # No free worker anywhere in the process. This store is not asked, and
             # `collect_bids` represents it at its list price — R10's own degradation,
-            # rather than a thread created to hold a wait nobody bounded.
+            # rather than a thread created to hold a wait nobody bounded. The whole
+            # remaining roster goes with it: admission is non-blocking and the pool does
+            # not refill inside this loop, so trying the rest would be N failed acquires.
+            unasked = roster[position:]
             break
-        futures.append(submitted)
-
-    if not futures:
-        return []
+        asked.append((store, submitted))
 
     # One wait for the whole field: returns when everyone has answered OR when the
     # window closes, whichever comes first. Whatever is still pending after this is
     # abandoned — that is the hard part of the hard timeout. The workers are NOT
     # abandoned with it: each returns itself to the shared pool when its store answers.
-    timeout = None if deadline is None else max(0.0, deadline - clock())
-    wait(set(futures), timeout=timeout)
+    if asked:
+        timeout = None if deadline is None else max(0.0, deadline - clock())
+        wait({future for _, future in asked}, timeout=timeout)
 
     responses: list[Mapping[str, Any]] = []
-    for future in futures:
-        if not future.done() or future.cancelled():
+    for store, future in asked:
+        if future.cancelled():
+            # The pool was shut down under this call, so the task never ran. That is the
+            # exchange having no capacity, not a store that took too long — and it is worth
+            # the extra branch precisely because the two used to be one word.
+            minted = _minted(store, NOT_ASKED_FIELD)
+            if minted is not None:
+                responses.append(minted)
+            continue
+        if not future.done():
+            # THE CASE THIS REPAIR EXISTS FOR: asked, still answering, window shut. The
+            # future is abandoned exactly as before — nothing here waits on it — but the
+            # exchange now writes down that it was in flight rather than letting the store
+            # be reported as silent.
+            minted = _minted(store, TIMED_OUT_FIELD)
+            if minted is not None:
+                responses.append(minted)
             continue
         if future.exception() is not None:
             continue  # a store that errored simply did not bid; R10 falls it back
         answer = future.result()
         if answer is not None:
             responses.append(answer)
+    responses.extend(_minted_for(unasked, NOT_ASKED_FIELD))
     return responses

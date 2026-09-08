@@ -86,6 +86,45 @@ services:
       # `ensure_configured` binds the machine on both branches. An unreachable Redis is a 503
       # naming the store, never a silent downgrade to the in-memory one.
       EXCHANGE_AUCTION_STORE: "${EXCHANGE_AUCTION_STORE:-redis}"
+      # R10'S BIDDING WINDOW, in seconds — how long the exchange waits for the stores it
+      # solicited before every one of them falls back to its catalogue price.
+      #
+      # Forwarded because the number is a MEASUREMENT and measurements go stale. The code
+      # default is 5.0s, taken from 24 samples across the four hosted agents in
+      # `packages/store-agent/compose.yaml` (1.97s-4.73s over the wire, with a real model
+      # writing each pitch); slower hardware, a longer prompt or a different model moves that
+      # distribution, and an operator who can see the latency should not need a rebuild to
+      # answer it. The previous 3.0s sat UNDER the measured floor, so every hosted agent
+      # answered 200 OK, every reply landed after the close, and the market served list
+      # prices only while every container reported healthy.
+      #
+      # WHAT 5.0s BUYS IS THE BID, NOT THE MODEL-WRITTEN PITCH, and an operator raising or
+      # lowering this needs the arithmetic. A store subtracts PITCH_RESERVE_SECONDS (0.35s)
+      # from the `respond_by` this exchange sends before handing the rest to its model — the
+      # Anthropic SDK overshoots its own timeout by ~40-100ms and a reply after the close is
+      # worth nothing — so at 5.0s the pitch budget is ~4.64s (measured from the gaiaherbs
+      # container: `pitch budget=4.636s elapsed=1.956s outcome=ok source=model`). That is
+      # ~0.1s BELOW the 4.73s p100, so a store sitting exactly on that tail writes its pitch
+      # locally instead. It still bids, with its own price, which is the whole repair: the
+      # offer is 12.7ms of the request and it lands with seconds to spare.
+      #
+      # The window was deliberately NOT widened past 5.0s to buy that last 0.1s of prose.
+      # `create_auction` is `async def` and blocks the single event loop of a `--workers 1`
+      # container for the length of the window (see the command: line below), so concurrent
+      # auctions serialize — three concurrent 10.0s auctions against hung stores measured
+      # 10.11s / 20.19s / 30.29s, and starved this service's own /openapi.json healthcheck
+      # for ten consecutive probes. That is a pre-existing structural limit, not something
+      # this variable fixed; it is the reason the number here is sized for the bid rather
+      # than for the tail of the pitch distribution.
+      #
+      # Empty means "use the code default" — the same convention as the RANK_W_* block below,
+      # and for the same reason: `auction/routes.py` already holds the number, so a copy here
+      # would be a second source of truth that stops agreeing with it. A malformed or
+      # non-positive value also takes the code default, with a WARNING naming this variable;
+      # it is never an exception, because a typo here must not turn every auction into a 500.
+      # The server's 10.0s ceiling (MAX_BID_TIMEOUT_SECONDS) still binds whatever is set: the
+      # window is time a worker is parked on an unauthenticated route.
+      EXCHANGE_BID_WINDOW_SECONDS: "${EXCHANGE_BID_WINDOW_SECONDS:-}"
       # ...and the graph it reads. `proxyshop_support/neo4j_auth.py` builds the driver from
       # three names, defaulting the URI to `bolt://localhost:7687` — the CONTAINER'S own
       # loopback, where nothing listens — so without these lines every solicitation came back

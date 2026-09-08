@@ -113,6 +113,45 @@ x-store-agent-llm: &store-agent-llm
   # here. All three move together, or `test_the_documented_defaults_are_the_values_env_example
   # _ships` goes red for no change in behaviour.
   STORE_AGENT_MODEL: "${STORE_AGENT_MODEL:-claude-sonnet-5}"
+  # ── THE PITCH BUDGET, which existed in code and in no deployment ────────────────────────
+  # `STORE_AGENT_PITCH_TIMEOUT_SECONDS` has been read by
+  # `solicitation/copywriter.py:resolve_pitch_timeout` since the copywriter was written and was
+  # set in NO compose file and NO .env.example — an operator whose agents were timing out had
+  # no supported way to move the number, which is this repository's recurring "configuration
+  # nothing sets" defect. Both are on the SHARED anchor, so all four hosted agents inherit
+  # them; an empty value means "use the code default", because both resolvers treat an empty
+  # string, a non-number and a non-positive number as unset and log a WARNING.
+  #
+  # These are a CEILING and a RESERVE, not the budget. The budget is per solicitation and comes
+  # from the exchange's own `respond_by` on the BidRequest:
+  #     budget = min(TIMEOUT, respond_by - now - RESERVE)   floored at 0
+  # A budget of 0 means the model is not called at all and the bid ships immediately with the
+  # deterministic fallback pitch.
+  #
+  # Two measurements on the live stack, of two different populations — quoting one as if it
+  # bounded the other is what made them look contradictory:
+  #   * IN PROCESS, one store (gaiaherbs) driven through AgentRunner.run with a real key: the
+  #     pitch 3.35–5.04 s (n=5), the same population's offer-only run 12.7 ms median (n=20).
+  #     That pair, and only that pair, is where 99.67% comes from.
+  #   * OVER THE WIRE, POST /v1/bid-requests against all four hosted containers: 1.97–4.73 s
+  #     (n=24) — gaiaherbs 3.12–4.73, toniiq 2.05–2.76, paradiseherbs 2.16–2.51,
+  #     oregonswildharvest 1.97–2.39. Lower floor than the in-process range because the
+  #     in-process one is gaiaherbs alone and gaiaherbs is the slow store.
+  #
+  # Either way the pitch dominates the request, so this is the number that decides whether a
+  # hosted store answers inside the auction window or is carried at list price (R10).
+  #
+  # Forwarded EMPTY rather than with a copy of the code default, which is the same convention
+  # `EXCHANGE_BID_WINDOW_SECONDS` and the `RANK_W_*` block use: `copywriter.py` already holds
+  # both numbers, and a second spelling here is a second source of truth that stops agreeing
+  # with it the first time either is tuned. Empty is not "off" — both resolvers read an empty
+  # string as unset and answer with the documented default.
+  STORE_AGENT_PITCH_TIMEOUT_SECONDS: "${STORE_AGENT_PITCH_TIMEOUT_SECONDS:-}"
+  # What the agent still needs AFTER the model answers — screen the prose, assemble the Bid,
+  # serialise it, get the bytes on the wire — plus margin for clock skew between the exchange's
+  # container and this one, since `respond_by` is an absolute instant compared against this
+  # container's clock.
+  STORE_AGENT_PITCH_RESERVE_SECONDS: "${STORE_AGENT_PITCH_RESERVE_SECONDS:-}"
 
 # The half every hosted agent shares: one image, one container port, one policy about what
 # this image may read. Defined as a compose extension field (`x-`) BEFORE `services:` so the

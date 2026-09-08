@@ -64,6 +64,15 @@ def is_transient_datastore_error(exc: BaseException) -> bool:
         ``True`` for connection-level failures against Postgres or Redis, ``False`` for
         everything else -- integrity violations, privilege denials and programming errors
         all included, because none of them becomes true on a second attempt.
+
+    Its caller on a SERVED path is :func:`trust.events.routes._datastore_outage`, the
+    ``/events`` router's backstop: it turns whatever this recognises into
+    :class:`~trust.events.errors.StoreUnavailable` and therefore into a ``503`` naming the
+    datastore. Worth stating because the alternative was measured -- for everything except
+    :class:`~trust.events.pg.PostgresEventStore`, which classifies psycopg's outages inside
+    its own connection guard, an unreachable datastore left the door answering ``500
+    text/plain "Internal Server Error"``. Until then this predicate had no caller outside
+    its own test, which is a classification the repo had written down and never consulted.
     """
     if isinstance(exc, psycopg.errors.IntegrityError | psycopg.errors.InsufficientPrivilege):
         return False

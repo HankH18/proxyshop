@@ -979,7 +979,15 @@ def test_a_served_slot_carries_r2s_product_price_and_commitments_off_the_bid():
 
     (slot,) = body["shortlist"]["slots"]
     assert set(slot) >= R2_SLOT_FIELDS, slot
-    assert slot["product"] == {"product_ref": "product-1", "variant_ref": "variant-9"}, slot
+    # The two REFERENCES are the store's offer's, and they are what this test is about. The
+    # exact-dict form this replaces also pinned the ABSENCE of every field the contract might
+    # later add, so `ShortlistProduct.identity` — a platform-authored name the exchange now
+    # publishes beside the ref (D55) — failed it. Asserted key by key here, with the identity
+    # asserted rather than merely tolerated, so the same test grades strictly more than before.
+    assert slot["product"]["product_ref"] == "product-1", slot
+    assert slot["product"]["variant_ref"] == "variant-9", slot
+    assert slot["product"]["identity"]["title"] == "product-1", slot
+    assert slot["product"]["identity"]["source"] == "snap-store-a", slot
     assert slot["price"]["unit_price"] == pytest.approx(105.0), slot
     assert slot["price"]["total_price"] == pytest.approx(210.0), slot
     assert slot["price"]["currency"] == "USD", slot
@@ -1011,7 +1019,15 @@ def test_a_fallback_slot_shows_the_roster_list_price_and_commits_to_nothing():
 
     assert body["entries"][0]["fallback"] is True, "the store answered nothing; it must fall back"
     (slot,) = body["shortlist"]["slots"]
-    assert slot["product"] == {"product_ref": "product-1", "variant_ref": None}, slot
+    assert slot["product"]["product_ref"] == "product-1", slot
+    assert slot["product"]["variant_ref"] is None, "a manufactured offer names no variant"
+    # The PLATFORM's own name for it (D55). A stand-in is the slot that needs one most: nothing
+    # a store wrote survives on this branch, so without it the card is a bare reference and a
+    # price nobody quoted.
+    assert slot["product"]["identity"]["title"] == "product-1", slot
+    assert slot["fallback"] is True, "the slot must say this price is the exchange's, not a bid"
+    assert slot["fallback_reason"] == "no_response", slot
+    assert slot["message"] is None, "a store that never spoke has no words to quote"
     assert slot["price"]["unit_price"] == pytest.approx(137.5), slot
     assert slot["price"]["total_price"] == pytest.approx(137.5), slot
     assert slot["price"]["unit_price"] != 0.0, "a manufactured 0.00 beats every real bid there is"
@@ -1271,7 +1287,12 @@ def test_reverting_the_slot_enrichment_leaves_r2s_three_fields_null(monkeypatch)
 
     monkeypatch.setattr(
         "exchange.ranking.serving._with_offer_fields",
-        lambda shortlist, candidates: Shortlist.model_validate(shortlist).model_dump(mode="json"),
+        # `*_`: the producer also joins the catalogue identities and D55's three fields now, and
+        # a lambda pinned to the old arity would fail with a `TypeError` that reads like a bug in
+        # the code under test rather than like this stub being out of date.
+        lambda shortlist, candidates, *_: Shortlist.model_validate(shortlist).model_dump(
+            mode="json"
+        ),
     )
     bid = _bid_with_offer(STORE_A, commitments=[_commitment("free_returns", "30 days")])
     app = _wired_app(bidders=Bidders({STORE_A: bid}), stores=(STORE_A,))

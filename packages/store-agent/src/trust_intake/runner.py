@@ -66,6 +66,14 @@ def configure_trust_intake(app: Any, *, runner: Any) -> None:
     It is the same object the BID door then serves through, because there is one runner per
     process: a wired runner that only the trust door used would leave the two doors disagreeing
     about which store this process advocates for.
+
+    **And that is why no ``pitch=`` is named here.** This call used to hand over a runner and
+    nothing else, which built an advocate with ``pitch=None``; the bid door then computed a
+    budget from the exchange's `respond_by` and had nothing to arm it on, so the copywriter fell
+    back to its fixed ceiling — the exact defect the budget closes, reintroduced by a
+    composition root that wired its own runner. :func:`configure_advocate` now recovers the
+    copywriter from the runner that holds it, so a caller that wired a `PitchClient` gets the
+    budget whether or not it thought to mention it, and one that wired something else is told.
     """
     configure_advocate(app, runner=runner)
 

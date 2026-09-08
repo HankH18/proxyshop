@@ -72,6 +72,7 @@ auction — R10 carries a non-bidding store at catalogue list price either way.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from contracts import Bid, BidRequest, EnvelopeActivation
@@ -79,6 +80,7 @@ from fastapi import APIRouter, Request, Response
 
 from ..runtime import Decline, DeclineReason, is_decline
 from .advocate import Advocate, advocate
+from .copywriter import PitchAttempt, pitch_budget_seconds
 from .refusal import REFUSAL_SCHEMA, EnrichedRefusalRoute
 
 __all__ = [
@@ -89,6 +91,7 @@ __all__ = [
     "UNCONFIGURED_REASON",
     "UNDISCLOSED_REASON",
     "answer_bid_request",
+    "log_solicitation",
     "no_submission_reason",
     "router",
 ]
@@ -230,6 +233,33 @@ def answer_bid_request(bid_request: BidRequest, request: Request) -> Any:
     with a reason — that is its documented contract — so anything still escaping is a defect in
     this package, and answering a defect with a 204 would make a broken agent indistinguishable
     from a store that declined. A 500 is visible; a silently-declining agent is not.
+
+    **THE EXCHANGE'S DEADLINE IS THIS STORE'S DEADLINE, and this is where the two are joined.**
+    ``bid_request.respond_by`` is a required field of the contract and it is not decoration: it
+    is the instant the exchange abandons this solicitation. The store already parsed it — as a
+    fallback *offer expiry* — and had never once read it as a time budget, so the copywriter ran
+    against a fixed five seconds nobody had reconciled with the auction window. Measured on the
+    live stack in process (one store, driven through ``AgentRunner.run`` with a real key), the
+    offer took 12.7 ms median (n=20) and the pitch 3.35–5.04 s (n=5) — the pitch is 99.67% of
+    that request. Measured over the wire against all four hosted containers, this endpoint ran
+    1.97–4.73 s (n=24). Against a 3-second window every hosted agent missed, and a market of
+    four bidding stores silently degraded to R10's list-price fallback for all four. So the
+    remaining time is computed here, once, and armed on the copywriter for the duration of the
+    run.
+
+    **What that buys, stated exactly.** This path is synchronous end to end: the offer is
+    computed first, in ~12.7 ms, and then the request WAITS on the copywriter for as long as
+    the budget allows — a default-window auction measured 2.9–3.7 s wall for precisely that
+    reason. So the offer does not run concurrently with the prose and this route has never
+    claimed a watchdog. What the budget guarantees is the thing that was actually broken:
+    **the prose cannot push the bid past the exchange's deadline.** The offer is finished long
+    before the model is asked for anything and is never *lost* to a slow copywriter — it is
+    held until the budget expires and then shipped with the deterministic fallback pitch,
+    instead of shipping late to an exchange that has stopped listening.
+
+    The clock read is HERE and nowhere deeper — ``runtime/`` may not read one at all
+    (``test_the_runtime_reads_no_clock_and_no_randomness``), and this is the one place on the
+    path where "what time is it" is a legitimate question rather than an ambient input.
     """
     hosted = advocate(request.app)
     if hosted is None:
@@ -242,14 +272,21 @@ def answer_bid_request(bid_request: BidRequest, request: Request) -> Any:
         # the next caller — and the store may have been killed in between.
         channel.take()
 
-    entry = hosted.runner.run(bid_request)
-    _log.info(
-        "%s: answered a solicitation in mode %s (submitting=%s); %d entr(y|ies) in the bid log",
-        hosted.runner.store_id or "an unidentified store",
-        entry.mode,
-        entry.submitting,
-        len(hosted.log) if hosted.log is not None else -1,
-    )
+    # `time.time()` and not `monotonic`, because this is compared against an ABSOLUTE instant
+    # the exchange stated; a monotonic reading has no relationship to it. The reserve inside
+    # `pitch_budget_seconds` is what absorbs the clock skew that comparison invites.
+    budget = pitch_budget_seconds(bid_request.respond_by, now=time.time())
+    pitch = hosted.pitch
+    if pitch is not None:
+        pitch.arm(budget)
+    try:
+        entry = hosted.runner.run(bid_request)
+    finally:
+        # In a `finally` so a raising bid path cannot leave a budget armed on a threadpool
+        # thread, where the NEXT auction on that thread would inherit it.
+        attempt = pitch.disarm() if pitch is not None else PitchAttempt()
+
+    log_solicitation(hosted, entry, attempt)
     if not entry.submitting:
         return Response(
             status_code=204,
@@ -269,6 +306,61 @@ def answer_bid_request(bid_request: BidRequest, request: Request) -> Any:
     if is_decline(answer):
         return Response(status_code=204, headers={DECLINE_REASON_HEADER: _reason_of(answer)})
     return answer
+
+
+#: What :func:`log_solicitation` calls the pitch a bid ended up carrying, per outcome. The
+#: copywriter's own record is the only honest source for this: the route never sees the two
+#: candidate strings, and `screen` can still refuse a reply that arrived on time — which is a
+#: content decision, not a missed deadline, and is deliberately not reported as one.
+_PITCH_SOURCE = {
+    "ok": "model",
+    "timed_out": "fallback",
+    "failed": "fallback",
+    "skipped": "fallback",
+    "not_attempted": "unattempted",
+}
+
+
+def log_solicitation(hosted: Advocate, entry: Any, attempt: PitchAttempt) -> None:
+    """One operator line per solicitation, saying what the copywriter cost and whether it made it.
+
+    **This line used to carry no timing at all**, which is why a defect that made every hosted
+    store miss every auction was invisible from the outside: the store logged "answered a
+    solicitation in mode active (submitting=True)" and served a 200 whether the pitch had taken
+    40 ms or 5 s, and whether the bytes on `Bid.message` were the model's sentences or the
+    deterministic fallback. An operator reading the log had no way to tell a market of four
+    advocating stores from a market of four stores serving template prose after the exchange had
+    already given up on them.
+
+    So: the store, the mode, the budget it was given, what the copywriter actually spent, and
+    which of the two pitches the bid carries — at WARNING whenever the merchant did not get its
+    prose, INFO otherwise. WARNING is the right level because that is a *deployment* fact, not a
+    bid fact: the bid is fine, and the thing a merchant pays for is not being delivered.
+
+    **``outcome`` says WHICH, and the two point at different repairs.** ``skipped`` and
+    ``timed_out`` are the clock — the auction had closed, or the model did not answer inside the
+    budget — and they are what a wider window or a faster model fixes. ``failed`` is the
+    copywriter itself: an auth error, a connection reset, a provider 500, none of which any
+    auction window repairs. Both are WARNINGs, and until they were separate words a dead API key
+    logged identically to a slow model, which is the misdiagnosis this whole line exists against.
+
+    ``budget`` and ``elapsed`` are ``-`` rather than ``0`` when they do not exist, because "no
+    budget was armed" and "the budget was zero seconds" are opposite facts and a log that spells
+    them the same way is the log that hid this in the first place.
+    """
+    _log.log(
+        logging.WARNING if attempt.degraded else logging.INFO,
+        "%s: answered a solicitation in mode %s (submitting=%s); "
+        "pitch budget=%s elapsed=%s outcome=%s source=%s; %d entr(y|ies) in the bid log",
+        hosted.runner.store_id or "an unidentified store",
+        entry.mode,
+        entry.submitting,
+        "-" if attempt.budget is None else f"{attempt.budget:.3f}s",
+        "-" if attempt.elapsed is None else f"{attempt.elapsed:.3f}s",
+        attempt.outcome,
+        _PITCH_SOURCE.get(attempt.outcome, "unknown"),
+        len(hosted.log) if hosted.log is not None else -1,
+    )
 
 
 def no_submission_reason(hosted: Advocate, mode: EnvelopeActivation) -> str:

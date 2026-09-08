@@ -421,8 +421,9 @@ MAX_RECORDED_AUCTIONS = 64
 #: How long one call to the exchange may take, when the document does not say.
 #:
 #: The exchange's ``POST /auctions`` holds the request open for R10's whole bid window while
-#: it fans out to stores (``DEFAULT_BID_TIMEOUT_SECONDS`` is 3.0s, and a caller may ask for
-#: more), so a buyer-side timeout tuned to a normal JSON round trip would abandon healthy
+#: it fans out to stores (``DEFAULT_BID_TIMEOUT_SECONDS`` is 5.0s, a deployment may move it with
+#: ``EXCHANGE_BID_WINDOW_SECONDS``, and a caller may ask for up to ``MAX_BID_TIMEOUT_SECONDS``
+#: = 10.0s), so a buyer-side timeout tuned to a normal JSON round trip would abandon healthy
 #: auctions. This is deliberately longer than any window the buyer service itself asks for.
 DEFAULT_EXCHANGE_TIMEOUT_SECONDS = 15.0
 

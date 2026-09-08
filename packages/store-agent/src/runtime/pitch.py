@@ -43,16 +43,41 @@ key therefore produces a serviceable pitch rather than an error or an empty bid*
 whole of C.
 
 **D. A failed or slow model must not cost the store its bid.** :func:`compose_pitch` cannot
-raise: every path out of it is a `str` or `None`. A client that throws, times out, returns an
-empty string, returns JSON, returns a paragraph of markdown, or returns something that fails the
-screen, all land on the same branch — the deterministic fallback, and failing that, no message
-at all. The bid itself is untouched either way. The *wall-clock* bound is the provider's own
-timeout, set by the composition root that builds the client
-(:data:`store_agent.solicitation.copywriter.PITCH_TIMEOUT_SECONDS`, 5 seconds by default,
-against a bid path the exchange solicits synchronously); on breach the SDK raises, this module
-catches it, and the store bids with the fallback. There is deliberately no watchdog thread here:
-a wall-clock deadline evaluated on the bid path would make the served bytes depend on machine
-load, which is exactly what S4 forbids.
+raise: every path out of it is a `str` or `None`. A client that throws, times out, is refused a
+budget it has already overrun, returns an empty string, returns JSON, returns a paragraph of
+markdown, or returns something that fails the screen, all land on the same branch — the
+deterministic fallback, and failing that, no message at all. The bid itself is untouched either
+way.
+
+The *wall-clock* bound is the provider's own, and the number is chosen outside this package by
+the composition root that builds the client
+(:mod:`store_agent.solicitation.copywriter`): per request, ``min(ceiling, respond_by - now -
+reserve)``, where `respond_by` is **the exchange's own stated deadline off the `BidRequest`** and
+the ceiling is :data:`~store_agent.solicitation.copywriter.PITCH_TIMEOUT_SECONDS` (5 s). It used
+to be that fixed 5 s alone, reconciled with nothing. Measured in process — one store context
+driven through ``AgentRunner.run`` with a live Anthropic client — the pitch took 3.35–5.04 s
+(n=5) against the same population's offer-only 12.7 ms median (n=20), which is where the 99.67%
+figure comes from and the only pair it is computed from. Measured over the wire instead —
+``POST /v1/bid-requests`` against all four hosted containers — the whole endpoint ran
+1.97–4.73 s (n=24); that range starts lower because it averages four stores and the in-process
+one is the slowest of them alone. Against an exchange deadline of 3 s, every hosted store missed
+on either measurement and every auction fell through to R10's list-price fallback. When the
+budget is already spent the client raises without calling the model at all; on breach the SDK
+raises; this module catches both and the store bids with the deterministic fallback, composed
+from its own verified facts in microseconds.
+
+There is deliberately **no watchdog thread here** — nothing interrupts this path, and the bound
+stays the provider's, where the latency is. What this paragraph used to claim beside that, that
+there is no wall-clock deadline and therefore that the served bytes do not depend on machine
+load, was not true even then: the fixed 5-second SDK timeout already decided between the model's
+prose and the fallback on latency. Stated honestly: **which of the two pitches a bid carries can
+depend on how loaded this machine is.** What S4's determinism actually covers is untouched — the
+OFFER is computed with no model call at all (12.7 ms median, n=20 in process: `unit_price`,
+`discount`, `total_price`, `commitments`, `expires_at`), and both candidate pitches pass the same
+:func:`screen`, so a slow copywriter changes which true sentences a shopper reads and never what
+the store charges. Every offline path — no client, `DeterministicLLM`, `RecordedLLM` — makes no
+network call, spends no budget and is byte-identical run to run, which is the determinism this
+repository's suite verifies (D3/D20).
 
 **E. No buyer identity may enter a prompt or the output.** :data:`PROFILE_BUCKET_KEYS` is an
 **allowlist**, so the profile is read key by key rather than dumped: `pseudonym` is not on it,

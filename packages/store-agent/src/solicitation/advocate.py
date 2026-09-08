@@ -51,6 +51,7 @@ without a ceiling on a request path.
 
 from __future__ import annotations
 
+import logging
 import threading
 from collections import deque
 from collections.abc import Mapping
@@ -59,7 +60,7 @@ from typing import Any
 
 from ..learning import from_context_priors, initial_state
 from ..modes import AgentRunner
-from .copywriter import pitch_client
+from .copywriter import PitchClient, pitch_client
 from .serving import store_context
 
 __all__ = [
@@ -73,6 +74,8 @@ __all__ = [
     "configure_advocate",
     "reset_advocate",
 ]
+
+_log = logging.getLogger(__name__)
 
 #: Set on ``app.state``. Read through :func:`advocate` rather than by name, so "does this
 #: process have a runner" is one question with one answer. The name is historical — the trust
@@ -136,16 +139,25 @@ class ResponseChannel:
 
 @dataclass(frozen=True, slots=True)
 class Advocate:
-    """One process's advocate: the runner, the log it writes to, the channel it submits by.
+    """One process's advocate: the runner, the log, the channel, and the copywriter.
 
-    ``log`` and ``channel`` are optional because :func:`configure_advocate` accepts a runner a
-    composition root already built and wired to collaborators of its own. Everything this
-    module builds itself carries all three.
+    ``log``, ``channel`` and ``pitch`` are optional because :func:`configure_advocate` accepts a
+    runner a composition root already built and wired to collaborators of its own. Everything
+    this module builds itself carries all four.
+
+    ``pitch`` is the SAME object the runner holds as its ``llm``, named here so the route can
+    reach it. The route needs a handle because the pitch budget is a property of one
+    solicitation — it comes off that request's `respond_by` — and the client is a property of
+    the process. The field exists so the served door does not have to reach into
+    ``runner._llm`` on every solicitation; :func:`_recovered_pitch` does read that private name,
+    but exactly once, while the advocate is being built, and only for a caller that wired its
+    own runner and named no ``pitch``.
     """
 
     runner: Any
     log: BoundedBidLog | None = None
     channel: ResponseChannel | None = None
+    pitch: PitchClient | None = None
 
 
 def configure_advocate(
@@ -154,6 +166,7 @@ def configure_advocate(
     runner: Any,
     log: BoundedBidLog | None = None,
     channel: ResponseChannel | None = None,
+    pitch: PitchClient | None = None,
 ) -> None:
     """Give ``app`` the runner both its served doors use. ``None`` clears it.
 
@@ -161,9 +174,72 @@ def configure_advocate(
     and for tests. The environment path (:func:`advocate`) is what the shipped container
     uses, because the Dockerfile runs ``uvicorn store_agent.main:app`` and nothing in that
     path could call this.
+
+    ``pitch`` is an OVERRIDE, not the only way to get one. Left out, the copywriter is recovered
+    from the runner — see :func:`_recovered_pitch` — because "the advocate's pitch client" and
+    "the client the runner writes with" are the same object by construction, and the caller has
+    already handed over the runner that holds it.
+
+    **It used to default to no handle, and that default was the defect this file exists to
+    close, reintroduced.** ``store_agent.trust_intake.runner.configure_trust_intake`` calls this
+    with a runner and no ``pitch=``; the resulting advocate armed nothing, so the route computed
+    a budget from the exchange's `respond_by` and threw it away, and the copywriter reverted to
+    the fixed ceiling that made every hosted store miss its auction in the first place. Silently
+    — an unbudgeted advocate serves 200s and logs ``budget=-`` exactly like a store with no
+    copywriter at all. Recovering it here means no future composition root has to remember, and
+    a runner whose copywriter genuinely cannot be recovered SAYS so instead of degrading quietly.
     """
-    resolved = None if runner is None else Advocate(runner=runner, log=log, channel=channel)
+    resolved: Advocate | None = None
+    if runner is not None:
+        recovered = _recovered_pitch(runner) if pitch is None else pitch
+        resolved = Advocate(runner=runner, log=log, channel=channel, pitch=recovered)
     setattr(app.state, RUNNER_ATTR, resolved)
+
+
+#: Where a runner keeps the copywriter it writes with, most public spelling first.
+#: :class:`~store_agent.modes.AgentRunner` uses ``_llm`` (it is in its ``__slots__``); the other
+#: two are here so a composition root that wraps or reimplements the runner is not required to
+#: expose a private name to get a budget.
+_RUNNER_PITCH_ATTRS = ("pitch", "llm", "_llm")
+
+
+def _recovered_pitch(runner: Any) -> PitchClient | None:
+    """The `PitchClient` ``runner`` writes with, or ``None`` — loudly, when there was one.
+
+    Three outcomes, and the third is the one worth having:
+
+    * a `PitchClient` — returned, and the route arms this solicitation's budget on it;
+    * no copywriter at all — ``None``, silently. Nothing to bound, no budget to lose: the bid
+      already carries the deterministic fallback pitch and always did (D20's offline default);
+    * a copywriter that is NOT a `PitchClient` — ``None``, with a WARNING. This is the only
+      genuinely degraded case: the store has a model writing its prose and no way to hold it to
+      the exchange's deadline, so a slow one pushes the bid past the auction's close exactly as
+      it did before any of this existed. It is stated once, where the advocate is built, rather
+      than once per solicitation.
+
+    Never raises. A composition root's wiring mistake must cost the store its budget at worst,
+    never its advocate — the same rule every other failure on this path follows.
+    """
+    copywriter = next(
+        (
+            candidate
+            for candidate in (getattr(runner, name, None) for name in _RUNNER_PITCH_ATTRS)
+            if candidate is not None
+        ),
+        None,
+    )
+    if isinstance(copywriter, PitchClient):
+        return copywriter
+    if copywriter is None:
+        return None
+    _log.warning(
+        "this advocate's runner writes with a %s, which is not a PitchClient, so no per-request "
+        "pitch budget can be armed from the exchange's respond_by: the copywriter keeps whatever "
+        "fixed bound it was built with, and a slow one will push this store's bid past the "
+        "auction's close. Wrap it in PitchClient, or pass pitch= to configure_advocate.",
+        type(copywriter).__name__,
+    )
+    return None
 
 
 def reset_advocate(app: Any) -> None:
@@ -223,12 +299,17 @@ def _advocate_for(context: Mapping[str, Any]) -> Advocate:
     # the environment (see `store_agent.solicitation.copywriter`). `None` — no model configured,
     # or a misconfigured one — is an ordinary answer, and the bid then carries the deterministic
     # fallback pitch rather than nothing.
+    #
+    # It is held in a local and put on the `Advocate` as well as in the runner, because the two
+    # roles are different: the runner USES it to write, and the route ARMS it with this
+    # solicitation's remaining time before the exchange's `respond_by`.
+    pitch = pitch_client()
     runner = AgentRunner(
         context,
         sink=log,
         submitter=channel,
         mode=None,
-        llm=pitch_client(),
+        llm=pitch,
         # R17's loop, and the reason it is built HERE. `store_agent.learning` had no product
         # importer at all: the served door went routes -> runner -> `bid()` and never touched it,
         # so a store's own record could not reach the policy its own bids were answered under.
@@ -247,4 +328,4 @@ def _advocate_for(context: Mapping[str, Any]) -> Advocate:
             store_id=context.get("store_id"),
         ),
     )
-    return Advocate(runner=runner, log=log, channel=channel)
+    return Advocate(runner=runner, log=log, channel=channel, pitch=pitch)

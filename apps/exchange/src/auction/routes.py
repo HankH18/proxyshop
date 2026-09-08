@@ -50,7 +50,9 @@ un-wired service is **safe rather than convenient**:
 from __future__ import annotations
 
 import json
+import logging
 import math
+import os
 import time
 import uuid
 from collections.abc import Collection, Mapping, Sequence
@@ -84,12 +86,18 @@ from ..retrieval.clusters import assign_cluster, configure_clusters, intent_clus
 from ..retrieval.criteria import MAX_CANDIDATE_LIMIT
 from ..retrieval.fit import FitLogError, annotate_bid_payload
 from ..retrieval.roster import NoShopRoster, ShopRoster
+from .collect import (
+    FAN_OUT_CAPACITY_REASON,
+    RESPONSE_TIMED_OUT_REASON,
+    fallback_reason_family,
+)
 from .fanout import parallel_fan_out
 from .state import AuctionStateMachine, UnknownAuction
 
 __all__ = [
     "BOUNDED_INTENT_IDENTIFIERS",
     "DEFAULT_BID_TIMEOUT_SECONDS",
+    "ENV_BID_WINDOW_SECONDS",
     "MAX_BID_TIMEOUT_SECONDS",
     "MAX_EXCLUSION_REASONS_PER_BID",
     "MAX_HARD_CONSTRAINT_BYTES",
@@ -99,6 +107,7 @@ __all__ = [
     "MAX_RECORDED_OFFER_ITEMS",
     "MAX_RECORDED_OFFER_VALUE_CHARS",
     "MAX_ROSTER_ENTRIES",
+    "MIN_USEFUL_BID_WINDOW_SECONDS",
     "RECORDED_OFFER_ACCEPTED_TYPES",
     "RECORDED_OFFER_ATOMIC_TYPES",
     "RECORDED_OFFER_CONTAINER_TYPES",
@@ -107,13 +116,28 @@ __all__ = [
     "NullSolicitor",
     "RenderableJSONResponse",
     "RenderableValidationErrorRoute",
+    "announce_market",
     "bid_window_seconds",
     "collected_bid_records",
     "configure_auctions",
+    "market_summary",
     "merged_candidates",
     "renderable_validation_detail",
+    "resolve_bid_window_seconds",
     "router",
 ]
+
+#: This module's logger, named ``exchange.auction.routes`` — what an operator greps to see
+#: what the market actually did.
+#:
+#: Logging from here is new and is the point of half this ticket. ``apps/exchange`` configures
+#: application logging in ``main.py`` (T-308) and five other packages already hold a logger;
+#: what the AUCTION emitted at close was nothing at all, so an all-fallback market — every
+#: store on the roster at list price, no store's own offer anywhere in the shortlist — looked
+#: exactly like a healthy one from outside the process. The remark in ``auction/ledger.py``
+#: that this app "has no logging call site at all" described a state, and this is the line
+#: that ends it.
+_log = logging.getLogger(__name__)
 
 
 # =====================================================================================
@@ -252,8 +276,74 @@ router = APIRouter(
     default_response_class=RenderableJSONResponse,
 )
 
-#: R10's hard timeout. Short on purpose: a buyer is synchronously waiting on this call.
-DEFAULT_BID_TIMEOUT_SECONDS = 3.0
+#: R10's hard timeout, in seconds, when the caller names none. A buyer is synchronously
+#: waiting on this call, so it is short — but it is no longer *shorter than the product*.
+#:
+#: **3.0 was measured to be below the floor of what a real store agent costs.** The marquee
+#: feature is a live model writing each store's pitch, and with it on, 24 samples over the
+#: wire across 4 hosted agents ran **1.97 s – 4.73 s**. The offer itself — the price, the
+#: discount, the expiry, everything a bid is actually ranked on — measures **12.7 ms**; the
+#: pitch is 99.67% of the request. Against a 3.0 s window every hosted agent answered
+#: ``200 OK``, every response landed after the close, and the exchange recorded
+#: ``hosted bids=0``: an all-fallback market, at full list price, with every container
+#: healthy and every log line green.
+#:
+#: **What 5.0 guarantees is the BID, not the prose, and the distinction is arithmetic rather
+#: than pedantry.** An earlier version of this comment claimed 5.0 "sits above the measured
+#: p100 with headroom, so a healthy hosted store ships model prose rather than losing its
+#: bid". The second half of that does not follow from the first, and it is measurably false.
+#: The store does not hand the model the whole window: it subtracts ``PITCH_RESERVE_SECONDS``
+#: (0.35 s) from the ``respond_by`` this route sends, because the Anthropic SDK overshoots its
+#: own timeout by ~40–100 ms and an answer that lands after the close is worth nothing. So at
+#: a 5.0 s window the model's budget is ~4.64 s, not 5.0 s — measured live from the
+#: ``gaiaherbs`` container::
+#:
+#:     pitch budget=4.636s elapsed=1.956s outcome=ok source=model
+#:     pitch budget=4.638s elapsed=2.375s outcome=ok source=model
+#:
+#: 4.636 s is BELOW the 4.73 s p100, by roughly 0.1 s. A store sitting exactly on that tail
+#: has its model call refused by its *own* budget and ships the deterministic fallback pitch.
+#:
+#: What 5.0 does guarantee, with enormous margin, is the part a bid is ranked on: the offer
+#: costs 12.7 ms against a ~4.6 s budget. The prose lands for the large majority of
+#: solicitations — both samples above are ``source=model``, at 1.96 s and 2.38 s — and a store
+#: at the latency tail ships its deterministic fallback pitch **instead of losing the
+#: auction**. That substitution IS the repair. The failure being fixed was not "the pitch was
+#: written locally"; it was ``hosted bids=0``.
+#:
+#: 5.0 was chosen above the measured p100 of the *unfixed, blocking* path — the numbers above
+#: this paragraph are from a store that spent its whole reply on the pitch. **The window was
+#: deliberately not widened further to close that last ~0.1 s**, because the window is a
+#: per-request cost on an unauthenticated route (see :data:`MAX_BID_TIMEOUT_SECONDS`, and the
+#: head-of-line-blocking measurement recorded there). Buying model prose for the single
+#: slowest store would raise what every honest request costs, on a route where concurrent
+#: requests currently serialize — a bad trade against a fallback pitch that already keeps the
+#: bid. It is exactly half of :data:`MAX_BID_TIMEOUT_SECONDS`, and that ceiling — the only
+#: number a hostile caller is bounded by — is unchanged.
+#:
+#: **Why a wider window is affordable now and was not before, because this is the objection
+#: that kept it at 3.0.** The window is a CEILING, not a fee. :func:`~.fanout.parallel_fan_out`
+#: returns the moment every store has answered, so an auction whose stores answer in 400 ms
+#: costs 400 ms whatever this number says. What made the ceiling read like a fee was a store
+#: that blocked its whole reply on its pitch: then every auction really did cost the pitch,
+#: and the only lever was to cut the window and lose the bid. The store agent now derives its
+#: pitch budget from the ``respond_by`` the exchange already sends and falls back to a
+#: locally-composed pitch when the model is slow — so a healthy store answers at *its own*
+#: budget, and the full window is paid only by a store that is genuinely hung. That is R10's
+#: case, and R10 is unchanged: the timeout is still hard, a silent store is still represented
+#: at its list price, and the wait is still abandoned rather than joined.
+DEFAULT_BID_TIMEOUT_SECONDS = 5.0
+
+#: The environment variable an operator sets to move that default without a rebuild.
+#:
+#: It exists because the number above is a *measurement*, and a measurement is exactly the
+#: kind of thing that goes stale: a deployment on slower hardware, a longer pitch prompt or a
+#: different model moves the distribution it was taken from, and an operator who can see the
+#: latency should not need a code change to answer it. Resolved through
+#: :func:`resolve_bid_window_seconds`, which clamps it through :func:`bid_window_seconds` like
+#: any other request — an operator may not set an unbounded window either, because the wait it
+#: buys is a worker parked on an unauthenticated route.
+ENV_BID_WINDOW_SECONDS = "EXCHANGE_BID_WINDOW_SECONDS"
 
 #: The **server's** ceiling on that timeout, and it is not negotiable by the caller.
 #:
@@ -265,7 +355,63 @@ DEFAULT_BID_TIMEOUT_SECONDS = 3.0
 #: when it asks for more. Clamping rather than rejecting is deliberate: a client that asks
 #: for too long is not attacking anyone in particular, and giving it the maximum window is
 #: a better answer than a 422 it has no way to interpret.
+#:
+#: **This ceiling, and not the default, is the bound that matters against a hostile caller —
+#: which is why moving the default from 3.0 to 5.0 did not widen the attack surface at all.**
+#: ``bid_timeout_seconds`` is a caller-supplied body field, so an attacker never sees the
+#: default: it states 10.0 and gets 10.0, exactly as it could before. 10.0 is unchanged. An
+#: earlier version of this comment said the default's move left "the DoS bound on this
+#: unauthenticated route untouched", which is true of this constant and was being read as a
+#: claim about the service. It is not one. What the default actually changes is the cost of an
+#: *honest* request that states no timeout, and that cost does not compose the way the
+#: per-request ceiling suggests.
+#:
+#: **The pre-existing structural limit this constant's size interacts with, stated because it
+#: is a real property of the deployed service and not a hypothetical.** :func:`create_auction`
+#: is ``async def`` and calls the **blocking** :func:`~.fanout.parallel_fan_out` — ultimately a
+#: ``concurrent.futures.wait()`` — directly on the event loop, in a container running
+#: ``uvicorn … --workers 1`` (``apps/exchange/compose.yaml``). Every auction therefore holds
+#: the whole exchange for its duration, so concurrent requests do not overlap: a burst of N
+#: costs N x per-request rather than ``max()``. Measured on the live stack, three concurrent
+#: unauthenticated ``POST /auctions`` with ``bid_timeout_seconds: 10.0`` against hung stores::
+#:
+#:     total wall = 30.29s   per-request = [10.11, 20.19, 30.29]
+#:     GET /openapi.json during the run: 10 consecutive 2s timeouts, then ('ok', 0.19)
+#:
+#: ``/openapi.json`` is what the compose healthcheck calls (``interval: 10s, timeout: 5s,
+#: retries: 6``), so a long enough burst starves the probe as well as the buyer.
+#:
+#: **This is NOT fixed here, and it is not harmless.** The cause is the three facts named
+#: above together — ``async def create_auction`` + a blocking ``wait()`` + ``--workers 1`` —
+#: and the fix is to move the fan-out off the event loop (or to run more workers), which is a
+#: change with its own blast radius and does not belong to the constant that bounds one
+#: request. It is written down here because this ceiling is the number that decides how much
+#: head-of-line blocking one request can buy, and a reader sizing it has to know that the
+#: requests behind it queue.
 MAX_BID_TIMEOUT_SECONDS = 10.0
+
+#: The smallest window an operator can state that any real store could answer inside.
+#:
+#: **It exists to close an inconsistency, not to add a rule.** :func:`resolve_bid_window_seconds`
+#: refused ``0`` with a warning on the grounds that nobody sets it on purpose, while accepting
+#: ``0.0001`` in silence — and the two have *identical* effects on the market: every store on
+#: every roster falls back at list price. One of those branches was going to be found by an
+#: operator reading a log, and the other by an operator timing an auction.
+#:
+#: The two are still treated differently, and now the difference is defensible rather than
+#: accidental. ``0`` is not a small window, it is the ABSENCE of one — a value that cannot be
+#: told apart from a typo or an unset-but-present variable — so it takes the code default, and
+#: says so. A tiny positive number IS a window: it is a real, if aggressive, statement of
+#: intent, so it is HONOURED, and warned about in the same voice the ceiling clamp uses. Every
+#: branch that does something an operator would not predict from the value says so; that is
+#: the rule this whole module is written to.
+#:
+#: 0.05 s, and it is measured rather than picked: the offer a bid is ranked on costs 12.7 ms to
+#: compose and put on the wire on the hosted stack, so a window under ~50 ms cannot clear one
+#: solicitation round trip even from a store that never calls a model. Above it a small window
+#: is a legitimate deployment choice — "I would rather serve catalogue prices than wait" — and
+#: is not warned about beyond this floor.
+MIN_USEFUL_BID_WINDOW_SECONDS = 0.05
 
 
 def bid_window_seconds(requested: float) -> float:
@@ -276,6 +422,122 @@ def bid_window_seconds(requested: float) -> float:
     becomes "no window", never "an infinite one". ``inf`` clamps to the ceiling.
     """
     return min(MAX_BID_TIMEOUT_SECONDS, max(0.0, float(requested)))
+
+
+#: The last :data:`ENV_BID_WINDOW_SECONDS` value this process complained about.
+#:
+#: The variable is read per request, because caching it would make an operator's change take a
+#: restart to land and this route has no other configuration seam. Warning per request would
+#: then put one line per auction in the log for a single typo, which is how a real warning
+#: stops being read. So the complaint is deduplicated on the VALUE, not suppressed after the
+#: first: a second, differently-broken setting is a second thing an operator needs told.
+_warned_bid_window_value: str | None = None
+
+
+def _warn_about_bid_window(
+    stated: str, complaint: str, resolved: float, *, honoured: bool = False
+) -> None:
+    """Say once, by name, what this exchange actually did with the window it was handed.
+
+    ``honoured`` is the difference between "we could not use your value" and "we used your
+    value and you should know what it buys". Both are worth a WARNING — a window that is
+    running is still one an operator has to be able to find out about — but a line that says
+    "instead" about a number the exchange is in fact running would be its own small lie.
+    """
+    global _warned_bid_window_value
+    if _warned_bid_window_value == stated:
+        return
+    _warned_bid_window_value = stated
+    _log.warning(
+        "%s=%r %s; this exchange is running a %.2fs bidding window %s. A store that "
+        "answers after it falls back to its list price.",
+        ENV_BID_WINDOW_SECONDS,
+        stated,
+        complaint,
+        resolved,
+        "as stated" if honoured else "instead",
+    )
+
+
+def resolve_bid_window_seconds(env: Mapping[str, str] | None = None) -> float:
+    """The default bidding window this exchange runs, honouring the environment.
+
+    The resolution order, and every branch of it is deliberate:
+
+    unset, or set to whitespace
+        :data:`DEFAULT_BID_TIMEOUT_SECONDS`, silently. An empty value is compose's own way of
+        spelling "use the code default" — ``EXCHANGE_BID_WINDOW_SECONDS: "${...:-}"`` — and a
+        warning on the default configuration is a warning nobody will still be reading by the
+        time one matters.
+    a positive number from :data:`MIN_USEFUL_BID_WINDOW_SECONDS` to the ceiling
+        that number, silently. This is the case the variable exists for.
+    positive, but under that floor
+        that number — **honoured**, and warned about. A window of ``0.0001`` produces exactly
+        the all-fallback market a window of ``0`` would, and accepting it in silence while
+        warning about zero was an inconsistency rather than a policy. The two branches still
+        differ, and the difference is now stated: zero is the absence of a window and is
+        indistinguishable from a typo, so it is replaced; a tiny positive number is a real
+        window an operator can mean, so it is run and announced.
+    malformed, zero, negative, or ``nan``
+        :data:`DEFAULT_BID_TIMEOUT_SECONDS` **plus a WARNING naming the variable and the value
+        it could not use**. Never an exception: this is read on a served request, and an
+        exchange that 500s every auction because someone typed ``5s`` has turned a
+        configuration typo into an outage. Zero is refused with the malformed ones rather than
+        honoured as "ask nobody" — a window of zero makes every store on every roster fall back
+        at list price, which is the exact failure this ticket exists to make visible, and
+        nobody sets it on purpose. A caller that really wants no window can still ask for one
+        per request; that is a choice about one auction, not about the deployment.
+    above the ceiling, ``inf`` included
+        clamped to :data:`MAX_BID_TIMEOUT_SECONDS` by :func:`bid_window_seconds` — the ceiling
+        bounds how long an unauthenticated request may park a worker, so it binds an operator's
+        variable exactly as it binds a caller's request body — **and warned about**.
+
+    **Every branch that does not run the stated value says so.** That is the rule, and it is
+    this ticket's own lesson applied to configuration: a deployment that reads as configured
+    and behaves as unconfigured is the failure mode, whether the silence is in a compose file,
+    a fallback reason, or a clamp. A clamped window is a real setting the exchange declined to
+    honour, and an operator who set 600 and got 10 has to be able to find that out from the log
+    rather than by timing an auction.
+    """
+    environ = os.environ if env is None else env
+    stated = str(environ.get(ENV_BID_WINDOW_SECONDS) or "").strip()
+    if not stated:
+        return DEFAULT_BID_TIMEOUT_SECONDS
+
+    try:
+        requested = float(stated)
+    except (TypeError, ValueError):
+        requested = math.nan
+    # `nan` is checked explicitly because it compares false against everything, `<= 0.0`
+    # included — the same total-order trap `bid_window_seconds` documents, and the reason a
+    # garbage value cannot be allowed to fall through to the clamp and land on 0.0.
+    if math.isnan(requested) or requested <= 0.0:
+        _warn_about_bid_window(
+            stated, "is not a positive number of seconds", DEFAULT_BID_TIMEOUT_SECONDS
+        )
+        return DEFAULT_BID_TIMEOUT_SECONDS
+
+    resolved = bid_window_seconds(requested)
+    if resolved != requested:
+        _warn_about_bid_window(
+            stated,
+            f"is above this exchange's {MAX_BID_TIMEOUT_SECONDS:.1f}s ceiling, which is not "
+            f"negotiable: the window is time a worker is parked on an unauthenticated route",
+            resolved,
+        )
+    elif resolved < MIN_USEFUL_BID_WINDOW_SECONDS:
+        # HONOURED and still announced — see `MIN_USEFUL_BID_WINDOW_SECONDS` for why a tiny
+        # positive window is a real setting where `0` is not, and why silence here was the
+        # inconsistency rather than the warning being new strictness.
+        _warn_about_bid_window(
+            stated,
+            f"is under the {MIN_USEFUL_BID_WINDOW_SECONDS:.2f}s floor a store can answer "
+            f"inside — composing one offer and putting it on the wire measures 12.7ms — so "
+            f"every store on every roster will fall back at its list price",
+            resolved,
+            honoured=True,
+        )
+    return resolved
 
 
 class NullSolicitor:
@@ -609,7 +871,18 @@ class CreateAuctionRequest(BaseModel):
     profile: dict[str, Any] | None = None
     roster: list[RosterEntry] = Field(default_factory=list, max_length=MAX_ROSTER_ENTRIES)
     #: R10's hard timeout for this auction, in seconds.
-    bid_timeout_seconds: float = DEFAULT_BID_TIMEOUT_SECONDS
+    #:
+    #: A ``default_factory`` rather than a literal, and the difference is the whole of
+    #: :data:`ENV_BID_WINDOW_SECONDS` being real: a pydantic field default is bound once, when
+    #: the class is created at import, so a literal here would freeze the window at whatever
+    #: the environment said before this module was imported — which in a test, and in any
+    #: process that reconfigures itself, is "before it said anything". The factory runs per
+    #: request, so an operator's variable is read on the auction it is meant to govern.
+    #:
+    #: Stating the field still overrides it, and is still clamped by
+    #: :func:`bid_window_seconds` at the route. The caller's control over this number is
+    #: exactly what it was.
+    bid_timeout_seconds: float = Field(default_factory=resolve_bid_window_seconds)
 
 
 class AuctionEntryOut(BaseModel):
@@ -722,6 +995,61 @@ class ExplorationOut(BaseModel):
     displaced_store_id: str
 
 
+class MarketSummaryOut(BaseModel):
+    """WHAT KIND OF MARKET THIS AUCTION ACTUALLY WAS — one object, counted once, published.
+
+    The failure this exists to end: an auction in which **every** store fell back to its list
+    price is, from outside, indistinguishable from a healthy one. The shortlist still fills,
+    every entry carries a real rankable offer, every container is green, and the exchange said
+    nothing at close. The whole market silently reverting to catalogue prices — no store's own
+    pitch, no store's own discount, the persuasion market not happening at all — was a fact
+    nobody could read without re-deriving it from ``entries`` themselves. ``scripts/
+    demo_check.sh`` did exactly that re-derivation, client-side, and it was the only thing in
+    the system that counted it.
+
+    Published on the ``201`` as well as written to the ledger and the log, because the three
+    readers are three different people: the buyer's agent holds the response, the operator
+    reads the log, and the auditor reads the chain.
+
+    Deliberately **not** called "organic" anywhere. In this codebase organic names D55's
+    graph-sourced discovery — where the roster came from — and it is the opposite half of the
+    market from this one: an auction can be fully organic in roster and fully list-price in
+    outcome, and a word that meant both would make that sentence unsayable.
+    """
+
+    #: Stores the R12 gate cleared and the fan-out was asked to reach.
+    solicited: int
+    #: Stores that came back with their OWN offer — the sponsored half of the market, the
+    #: thing the product is for. ``entries`` minus every fallback.
+    sponsored: int
+    #: Stores represented at their catalogue price instead. Includes Tier-0 stores, which have
+    #: no agent to ask and are not a failure of anything.
+    list_price: int
+    #: Of those, how many were asked and were STILL ANSWERING when the window shut. This is
+    #: the number that says "widen the window / look at store latency" rather than "go and
+    #: restart a dead agent", and until ``response_timed_out`` existed it could not be counted
+    #: at all — the exchange recorded a slow store and an absent one identically.
+    timed_out: int
+    #: And how many the exchange never dialled because its own fan-out pool had no worker
+    #: free. An exchange-side condition, kept apart from the store-side ones for the same
+    #: reason.
+    not_asked: int
+    #: Stores R12 refused before anyone was asked. Not a market failure — a gate working.
+    denied: int
+    #: The window that was actually in force, after every clamp. Published next to the counts
+    #: because a timeout count means nothing without the deadline it was measured against.
+    bid_window_seconds: float
+    #: Every fallback reason this auction recorded, by FAMILY (the word before the colon), with
+    #: its count. The families are :data:`~.collect.FALLBACK_REASONS`; the detail after a colon
+    #: is open by design and is grouped away here, so a report is not counting HTTP statuses.
+    fallback_reasons: dict[str, int] = Field(default_factory=dict)
+    #: **True when every solicited store failed to bid** — the all-fallback market. False for
+    #: an auction that solicited nobody: an empty roster served no list prices either, and
+    #: calling that a degraded market would fire the alarm on every request an unconfigured
+    #: exchange refuses.
+    all_fallback: bool
+
+
 class CreateAuctionResponse(BaseModel):
     auction_id: str
     state: str
@@ -752,6 +1080,20 @@ class CreateAuctionResponse(BaseModel):
     #: and "nobody wired a graph into this exchange" — and a buyer's agent that cannot tell
     #: them apart will retry the second one forever.
     roster_source: dict[str, Any] = Field(default_factory=dict)
+    #: WHAT KIND OF MARKET THIS WAS — see :class:`MarketSummaryOut`. A top-level field for the
+    #: same reason ``roster_source``, ``relaxed_constraints`` and ``exploration`` are: the
+    #: pinned contracts on this path (``Shortlist``, ``ShortlistSlot``) are closed shapes, and
+    #: a fact that could only reach the buyer through a schema change would not reach them.
+    #: The published ``exchange.openapi.json`` already types this ``201`` as ``auction_id`` and
+    #: ``respond_by`` alone while the served body has carried ``entries``, ``ranked``,
+    #: ``shortlist``, ``state`` and ``roster_source`` for as long as they have existed, so this
+    #: follows the door's own precedent rather than setting one.
+    #:
+    #: REQUIRED, with no default, so it is on every ``201`` this route serves. An optional
+    #: summary is a summary a reader has to check for, and a reader who has to check for it
+    #: writes the fallback path that re-derives the counts from ``entries`` — which is the
+    #: duplicate this field exists to retire.
+    market: MarketSummaryOut
 
 
 def configure_auctions(
@@ -1548,12 +1890,104 @@ def record_policy_events(
     return events
 
 
+def market_summary(result: Any, *, window: float) -> dict[str, Any]:
+    """Count what this auction's market actually was. See :class:`MarketSummaryOut`.
+
+    One computation, three readers — the ``201`` body, the ``auction_closed`` ledger payload
+    and the log line at close. Counted here rather than three times, because a summary that
+    disagrees with itself across surfaces is worse than no summary: an operator reconciling
+    the log against the response would be debugging the arithmetic instead of the market.
+
+    ``result`` is the :class:`~..orchestration.solicitation.SolicitationResult`, read through
+    ``getattr`` for the same reason :func:`auction_outcome` reads it that way — this module is
+    handed the object, not the class.
+
+    Everything here is a count of the exchange's own verdicts. Nothing is copied from a bid,
+    nothing is interpolated from a caller's string, and the reason keys are FAMILIES (the word
+    before the colon) drawn from :data:`~.collect.FALLBACK_REASONS` — so a store's own
+    ``x-proxyshop-decline-reason``, which is caller-controlled text on an unauthenticated
+    path, contributes a bounded word to a bounded vocabulary and never its detail.
+    """
+    entries = list(getattr(result, "entries", ()) or ())
+    solicited = len(list(getattr(result, "solicited", ()) or ()))
+    denied = len(list(getattr(result, "denied", ()) or ()))
+
+    reasons: dict[str, int] = {}
+    for entry in entries:
+        if not getattr(entry, "fallback", False):
+            continue
+        family = fallback_reason_family(getattr(entry, "fallback_reason", None))
+        if family is None:
+            continue
+        reasons[family] = reasons.get(family, 0) + 1
+
+    sponsored = sum(1 for entry in entries if not getattr(entry, "fallback", False))
+    return {
+        "solicited": solicited,
+        "sponsored": sponsored,
+        "list_price": len(entries) - sponsored,
+        "timed_out": reasons.get(RESPONSE_TIMED_OUT_REASON, 0),
+        "not_asked": reasons.get(FAN_OUT_CAPACITY_REASON, 0),
+        "denied": denied,
+        "bid_window_seconds": float(window),
+        "fallback_reasons": dict(sorted(reasons.items())),
+        # `solicited > 0` is what keeps this from firing on an auction that asked nobody —
+        # an unconfigured exchange denies every store (R12 fail-closed) and serves no list
+        # prices at all, which is a different condition with a different fix.
+        "all_fallback": solicited > 0 and sponsored == 0,
+    }
+
+
+def announce_market(summary: Mapping[str, Any], *, auction_id: str) -> None:
+    """Say out loud what the market did, at WARNING when it did nothing.
+
+    This is the "loud" half of the repair and the reason this module has a logger at all. An
+    all-fallback market is the product not happening: every store on the shortlist at its
+    catalogue price, no store's own offer, no store's own pitch — and until this line the
+    exchange emitted nothing whatsoever at close, so the condition was visible only to whoever
+    thought to count ``entries[].fallback`` by hand.
+
+    WARNING is reserved for exactly that condition — *solicited stores, none of which bid* —
+    because a warning that also fires on a healthy auction is a warning that gets filtered.
+    Everything else is INFO, which is still infinitely more than the nothing it replaces: the
+    counts are the same either way, so an operator grepping one line gets the same numbers on
+    a good day and a bad one.
+
+    The window is named on both, because "4 stores timed out" is not actionable without it.
+    """
+    shape = (
+        "auction=%s market=%s solicited=%d sponsored=%d list_price=%d timed_out=%d "
+        "not_asked=%d denied=%d window=%.2fs reasons=%s"
+    )
+    values = (
+        auction_id,
+        "all_fallback" if summary.get("all_fallback") else "mixed",
+        summary.get("solicited", 0),
+        summary.get("sponsored", 0),
+        summary.get("list_price", 0),
+        summary.get("timed_out", 0),
+        summary.get("not_asked", 0),
+        summary.get("denied", 0),
+        float(summary.get("bid_window_seconds", 0.0)),
+        summary.get("fallback_reasons", {}),
+    )
+    if summary.get("all_fallback"):
+        _log.warning(
+            "NO STORE BID: every solicited store fell back, so this market served LIST "
+            "PRICES ONLY — no store's own offer reached the shortlist. " + shape,
+            *values,
+        )
+    else:
+        _log.info(shape, *values)
+
+
 def auction_outcome(
     result: Any,
     ranking: Mapping[str, Any],
     *,
     roster: Sequence[Any],
     shortlist: Mapping[str, Any],
+    summary: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """What this auction DID, for the ``auction_closed`` event to carry.
 
@@ -1583,6 +2017,14 @@ def auction_outcome(
         which slots were filled and by whom. A slot names a ``bid_ref`` and no store, so the
         store is joined on from the ranked rows — the exchange's own attribution, never
         anything read off a bid.
+    ``market``
+        :func:`market_summary` — the counts, the window that was in force, and whether every
+        solicited store fell back. Reconstructible from ``answered``/``unanswered`` above by
+        anyone reading the whole chain, and written down anyway, because the question an
+        auditor asks of a run months later ("was this market real, or was it all catalogue
+        prices?") should not require them to re-derive the answer and get the definition of
+        "real" subtly wrong. Absent, not defaulted, when the caller passed no summary — the
+        rule this function already follows for every other fact it does not hold.
 
     Every value here is an identifier or a code the exchange itself minted or an eligibility
     verdict it took, and every one of them is already in the 201 body this same request
@@ -1603,7 +2045,7 @@ def auction_outcome(
 
     entries = list(getattr(result, "entries", ()) or ())
     slots = list(shortlist.get("slots") or ())
-    return {
+    outcome: dict[str, Any] = {
         "roster_size": len(roster),
         "solicited": [str(store_id) for store_id in getattr(result, "solicited", ()) or ()],
         "answered": [
@@ -1645,6 +2087,9 @@ def auction_outcome(
             for slot in slots
         ],
     }
+    if summary is not None:
+        outcome["market"] = dict(summary)
+    return outcome
 
 
 def _served_price(offer: Any, *keys: str) -> float | None:
@@ -2068,6 +2513,18 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
         machine.ledger, result.entries, auction_id=auction_id, assessments=found.assessments()
     )
 
+    # WHAT KIND OF MARKET THIS WAS, counted once and then said three ways: in the log line
+    # below, on the `auction_closed` payload, and on the 201. Computed here — after the
+    # fan-out and before the close — because `result.entries` is the auction's own record of
+    # who offered what, and the ranking that follows cannot change who bid, only who is shown.
+    #
+    # Announced here as well, rather than after `machine.close`, so the operator is told even
+    # when the ranking below raises. That path is a 500 that leaves the auction OPEN, and it is
+    # exactly the run someone will be reading the log for; a market line emitted only on the
+    # happy path is missing from every auction anybody investigates.
+    summary = market_summary(result, window=window)
+    announce_market(summary, auction_id=auction_id)
+
     # ONE clock reading, used for the close transition and for the ranking's `now`. Two
     # readings would let an offer expire between the auction closing and the ranking that
     # decides whether it was live at the close, which is not a question two instants can
@@ -2158,7 +2615,9 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
             auction_id,
             now=closed_at,
             shortlist_size=len(shortlist.get("slots") or ()),
-            outcome=auction_outcome(result, ranking, roster=roster, shortlist=shortlist),
+            outcome=auction_outcome(
+                result, ranking, roster=roster, shortlist=shortlist, summary=summary
+            ),
         )
     except UnknownAuction as exc:
         # The widest window on this door: `open` to `close` spans the whole bid window, which
@@ -2240,6 +2699,7 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
         # doors: for a graph-sourced roster ``roster is found.rows``, and for a stated one it
         # is what the caller sent. Everything else on the payload is the source's own report.
         roster_source={**found.as_payload(), "shops": len(roster)},
+        market=MarketSummaryOut(**summary),
     )
 
 

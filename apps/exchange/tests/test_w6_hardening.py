@@ -36,6 +36,7 @@ from typing import Any
 
 import pytest
 from exchange.auction import collect_bids, parallel_fan_out
+from exchange.auction.collect import NOT_ASKED_FIELD, TIMED_OUT_FIELD
 from exchange.auction.fanout import MAX_FAN_OUT_WORKERS
 from exchange.auction.routes import configure_auctions
 from exchange.checkout import (
@@ -129,8 +130,35 @@ def test_a_store_that_never_answers_does_not_leak_a_thread_per_request() -> None
 
     baseline = threading.active_count()
     try:
-        for _ in range(REQUESTS_UNDER_LOAD):
-            assert parallel_fan_out(roster, hanging, **expired) == []
+        # NARROWED, not relaxed. Each call used to be asserted `== []`, which encoded the very
+        # defect the markers repair: an abandoned future left NO trace, so `collect_bids`
+        # recorded this store as `no_response` — the same word as a container that is switched
+        # off. Measured hosted, that made an all-fallback market read as a set of dead agents.
+        # Every call now yields exactly ONE mapping for the one store on the roster, minted by
+        # the exchange, carrying no bid; what is asserted is the exact shape of it, which is
+        # what `== []` was really protecting and is checked here more precisely than it was.
+        #
+        # Which marker it carries is itself the pool's behaviour under load, and both are
+        # correct: the early calls get a worker and abandon it mid-answer (`exchange_timed_out`),
+        # and once all 32 are held by this one hung store the later calls cannot dial at all
+        # (`exchange_not_asked`). Enumerating both is the point — they are the two conditions
+        # this file's own repair introduced, and reporting either as "the store did not pick
+        # up" is the lie being ended.
+        returned = [
+            parallel_fan_out(roster, hanging, **expired) for _ in range(REQUESTS_UNDER_LOAD)
+        ]
+        assert all(
+            answer
+            in (
+                [{"store_id": "store-hung", TIMED_OUT_FIELD: True}],
+                [{"store_id": "store-hung", NOT_ASKED_FIELD: True}],
+            )
+            for answer in returned
+        ), f"a hung store produced something rankable, or something unattributed: {returned}"
+        assert [{"store_id": "store-hung", TIMED_OUT_FIELD: True}] in returned, (
+            "no call reported the store it was still waiting on; the marker this repair adds "
+            "is unreachable on the path a hung store actually takes"
+        )
 
         growth = threading.active_count() - baseline
         assert growth <= MAX_FAN_OUT_WORKERS, (
@@ -158,17 +186,32 @@ def test_a_full_pool_degrades_to_list_price_rather_than_queueing_behind_a_stragg
     hanging = HangingSolicitor()
     roster = [rostered("store-hung", 120.0), rostered("store-b", 130.0)]
     try:
-        # First call takes the only worker and never gives it back.
-        assert (
-            parallel_fan_out(roster, hanging, deadline=T_NOW, clock=lambda: T_NOW + 1.0, pool=pool)
-            == []
-        )
-        # Second call finds nothing free. It must return, not block.
+        # First call takes the only worker and never gives it back. `store-hung` was asked and
+        # is still inside the solicitor; `store-b` was never dialled at all, because admission
+        # is non-blocking and there was nothing to admit it with.
+        #
+        # NARROWED, not relaxed — both used to read `== []`. That said nothing about WHY each
+        # store got no answer, and `collect_bids` therefore called both of them `no_response`:
+        # a store the exchange was still waiting on and a store the exchange never contacted,
+        # reported as two stores that did not pick up. This ticket's whole subject is that
+        # conflation, and the test that guards the degradation path is the natural place to
+        # pin the distinction. Neither list may contain a bid, which is what the old
+        # assertions were protecting; both now say so and say who is who.
+        assert parallel_fan_out(
+            roster, hanging, deadline=T_NOW, clock=lambda: T_NOW + 1.0, pool=pool
+        ) == [
+            {"store_id": "store-hung", TIMED_OUT_FIELD: True},
+            {"store_id": "store-b", NOT_ASKED_FIELD: True},
+        ]
+        # Second call finds nothing free. It must return, not block — and both stores are now
+        # the "never dialled" case, because there was no worker even for the first of them.
         started = time.time()
-        assert (
-            parallel_fan_out(roster, hanging, deadline=T_NOW, clock=lambda: T_NOW + 1.0, pool=pool)
-            == []
-        )
+        assert parallel_fan_out(
+            roster, hanging, deadline=T_NOW, clock=lambda: T_NOW + 1.0, pool=pool
+        ) == [
+            {"store_id": "store-hung", NOT_ASKED_FIELD: True},
+            {"store_id": "store-b", NOT_ASKED_FIELD: True},
+        ]
         assert time.time() - started < 2.0, "a full pool queued the request instead of degrading"
 
         entries = {e.store_id: e for e in collect_bids(roster, [], T_NOW)}

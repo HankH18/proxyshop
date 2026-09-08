@@ -494,10 +494,14 @@ STATE_FLAG = "exchange_composition"
 
 #: How long the outbound bid client waits on one store.
 #:
-#: Shorter than the auction's own default window (``DEFAULT_BID_TIMEOUT_SECONDS``, 3.0s) is
+#: Shorter than the auction's own default window (``DEFAULT_BID_TIMEOUT_SECONDS``, 5.0s) is
 #: wrong and longer is pointless: the fan-out abandons the wait at the deadline anyway, so this
 #: exists only to stop a socket outliving the request that opened it. It is the auction's
-#: server-side ceiling, which is the longest any one solicitation can still be useful for.
+#: server-side ceiling (``MAX_BID_TIMEOUT_SECONDS``), which is the longest any one solicitation
+#: can still be useful for — so it stays correct as the default moves, because no caller and no
+#: operator can name a window above it. The default's move from 3.0 to 5.0 changed nothing here
+#: except the size of the margin; :data:`MAX_SOLICIT_WALL_CLOCK_SECONDS` (15.0) still sits above
+#: this per-store read timeout, which is what keeps the whole-roster bound the outer one.
 DEFAULT_SOLICIT_TIMEOUT_SECONDS = 10.0
 
 #: The most bytes one store's ``POST /v1/bid-requests`` reply may occupy.

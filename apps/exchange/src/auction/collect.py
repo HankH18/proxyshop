@@ -7,19 +7,32 @@ had to beat, produce **one entry per rostered store**, never more and never fewe
 
 A fallback is produced by one of these, and the entry records **which**:
 
-======================================  ===========================================
-a Tier-0 store                          has no bidding agent to answer at all
-a Tier-1 store that stayed silent       the hard timeout expired on it
-a response stamped after the deadline   a late bid is not a bid (R10)
-a reply carrying no ``bid``             the store answered with nothing to rank
-a reply with no arrival stamp           the exchange's own stamp never got applied
-a reply whose stamp will not parse      undatable, therefore uncertifiable
-======================================  ===========================================
+=========================================  =========================================
+a Tier-0 store                             has no bidding agent to answer at all
+a Tier-1 store that stayed silent          it was asked and nothing ever came back
+a store still answering at the close       the window shut on a reply in flight (R10)
+a store the fan-out had no worker for      the exchange had no capacity to ask it
+a response stamped after the deadline      a late bid is not a bid (R10)
+a reply carrying no ``bid``                the store answered with nothing to rank
+a reply with no arrival stamp              the exchange's own stamp never got applied
+a reply whose stamp will not parse         undatable, therefore uncertifiable
+=========================================  =========================================
 
 The last three are *not* lateness and must not be reported as it. They used to be: all
 four rejections shared the single label ``response_after_deadline``, so a store that
 answered well inside the window with a malformed payload was recorded — and would be
 reported back to its operator — as slow. See :data:`FALLBACK_REASONS`.
+
+Rows two through four are the same lesson applied to *absence*, and they used to be one
+label. ``no_response`` meant all three, so a store that answered in 4.5 s
+against a 3.0 s window was recorded identically to a container that was switched off, and
+identically to a store the exchange never dialled because its worker pool was full. Measured
+on a live hosted deployment: four store agents answered ``200 OK`` to every solicitation, and
+the auction recorded ``hosted bids=0  fallback reasons=['no_response']`` — the demo probe's
+own diagnostic then told the operator "no agent is running", which was false. That is why
+:data:`RESPONSE_TIMED_OUT_REASON` and :data:`FAN_OUT_CAPACITY_REASON` exist and why the
+fan-out mints them: only the fan-out knows which futures were still pending when the wait
+ended and which stores it never submitted at all, and it used to throw both facts away.
 
 The late-bid rule is the one worth being blunt about: the deadline is enforced on the
 response's ``received_at``, so a bid that arrives at any price after the deadline is
@@ -191,16 +204,21 @@ __all__ = [
     "BidEntry",
     "FALLBACK_OFFER_TTL_SECONDS",
     "FALLBACK_REASONS",
+    "FAN_OUT_CAPACITY_REASON",
+    "FAN_OUT_MINTED_REASONS",
     "ILLEGIBLE_OFFER_REASON",
     "MALFORMED_RESPONSE_REASONS",
     "MAX_REFUSAL_DETAIL_LENGTH",
     "MINIMUM_PAYABLE_AMOUNT",
+    "NOT_ASKED_FIELD",
     "PRICE_BELOW_FLOOR_REASON",
     "PRICE_FLOOR_FRACTION",
     "PROVENANCE_REASON_PREFIXES",
     "REFUSAL_FIELD",
+    "RESPONSE_TIMED_OUT_REASON",
     "STORE_DECLINED_REASON",
     "STORE_REFUSED_REASON",
+    "TIMED_OUT_FIELD",
     "UNDISCLOSED_REFUSAL_DETAIL",
     "UNPROVENANCED_CLAIM_REASON",
     "UNRECONCILABLE_PRICE_REASON",
@@ -482,9 +500,58 @@ def fallback_reason_family(reason: Any) -> str | None:
     return str(reason).split(":", 1)[0] or None
 
 
+#: **The store was solicited and was still answering when the window shut.**
+#:
+#: Distinct from ``no_response`` (asked, and nothing ever came back at all) and from
+#: ``response_after_deadline`` (a reply that DID arrive, carrying a stamp past the close). The
+#: middle case had no word, so it borrowed ``no_response``'s — and that made a slow store
+#: indistinguishable from a dead one on the one path a live auction actually runs.
+#:
+#: ``response_after_deadline`` cannot cover it, and the reason is structural rather than a
+#: matter of taste: :func:`~.fanout.parallel_fan_out` *abandons* a future that is still
+#: pending at the close (``if not future.done(): continue``), so no response object for that
+#: store ever reaches :func:`collect_bids` and there is nothing for the deadline comparison in
+#: :func:`_unusable_because` to judge. The late-stamp branch is reachable only for a reply
+#: that landed inside the wait and dated itself past the deadline. Hence a reason minted by
+#: the fan-out, from what only the fan-out knows.
+#:
+#: Measured, hosted, with a real model writing each store's pitch: 24 samples across 4 live
+#: agents answered in 1.97 s – 4.73 s against a 3.0 s window. Every agent logged ``200 OK``;
+#: every entry read ``no_response``; the market silently served list prices only.
+RESPONSE_TIMED_OUT_REASON = "response_timed_out"
+
+#: **The exchange never asked, because it had no worker free to ask with.**
+#:
+#: :class:`~.fanout.BoundedFanOutPool` admits without blocking and answers ``None`` when every
+#: worker in the process is held by a store that has not answered; the fan-out's own per-call
+#: ``max_workers`` cap ends the roster the same way. Both are R10's bounded degradation and
+#: both are the EXCHANGE's condition, not the store's — so reporting them as ``no_response``
+#: tells an operator to go and restart a healthy agent. Named separately for exactly the
+#: reason :data:`STORE_DECLINED_REASON` and :data:`STORE_REFUSED_REASON` are.
+#:
+#: It does not contradict ``solicited`` on the auction's own record: that list is what the R12
+#: gate cleared to ask (``orchestration.solicitation``), decided before the fan-out runs. This
+#: reason is what happened to one of those stores afterwards.
+FAN_OUT_CAPACITY_REASON = "fan_out_capacity_exhausted"
+
+#: Where the fan-out writes those two verdicts on a response IT mints for a store that
+#: produced none.
+#:
+#: The same rule :data:`REFUSAL_FIELD` and ``received_at`` are written under, and here it is
+#: load-bearing in a new direction: these fields are the exchange's own account of its own
+#: behaviour, and a bidder that could set one would be *labelling itself* — a store answering
+#: too late could send ``exchange_timed_out`` and have its lateness recorded as the exchange's
+#: capacity problem, or a store with a bad payload could relabel it as a timeout. So
+#: :func:`~.fanout._stamped` DELETES both from anything a store sent, and the only mappings
+#: carrying them are the ones the fan-out builds itself, keyed by the store it ASKED.
+TIMED_OUT_FIELD = "exchange_timed_out"
+NOT_ASKED_FIELD = "exchange_not_asked"
+
 FALLBACK_REASONS: tuple[str, ...] = (
     "tier_0_no_agent",
     "no_response",
+    RESPONSE_TIMED_OUT_REASON,
+    FAN_OUT_CAPACITY_REASON,
     "response_after_deadline",
     "response_carried_no_bid",
     "response_not_stamped",
@@ -493,6 +560,20 @@ FALLBACK_REASONS: tuple[str, ...] = (
     UNPROVENANCED_CLAIM_REASON,
     STORE_DECLINED_REASON,
     STORE_REFUSED_REASON,
+)
+
+#: The subset of :data:`FALLBACK_REASONS` the FAN-OUT mints — "no response object for this
+#: store exists, and the exchange's own record of the run is what says why" — as opposed to
+#: every other reason here, which is a verdict read off something a store actually sent.
+#:
+#: Named as a pair, exactly as :data:`MALFORMED_RESPONSE_REASONS` is, because the pair is the
+#: property worth pinning: these two and only these two may be produced with no reply in hand,
+#: and neither of them may ever be reachable from a store's payload. ``test_w6_hardening``
+#: asserts the same partition for the malformed set; the sibling assertion for this one lives
+#: in ``test_bid_window_and_market_summary``.
+FAN_OUT_MINTED_REASONS: tuple[str, ...] = (
+    RESPONSE_TIMED_OUT_REASON,
+    FAN_OUT_CAPACITY_REASON,
 )
 
 #: The subset of :data:`FALLBACK_REASONS` that means "a reply arrived, and we could not use
@@ -1149,7 +1230,7 @@ def _unusable_because(response: Mapping[str, Any], deadline: float) -> str | Non
     so one malformed reply took down an auction every other store was bidding in. (``nan``
     already fails the comparison; this makes the string and ``None``-ish cases agree.)
 
-    The five conditions are kept apart because they are five different faults:
+    The seven conditions are kept apart because they are seven different faults:
 
     the solicitor's refusal        the store ANSWERED and said no — a ``204`` decline or a
                                    status the exchange cannot read a bid out of. Read FIRST,
@@ -1158,17 +1239,35 @@ def _unusable_because(response: Mapping[str, Any], deadline: float) -> str | Non
                                    is ``response_carried_no_bid`` at best and, when the
                                    solicitor answered ``None``, ``no_response`` — a store
                                    that refused reported as a store that was switched off
+    ``response_timed_out``          the fan-out's own verdict: this store was asked and was
+                                    STILL ANSWERING when the window shut. Not the store's
+                                    payload and not a stamp — a mapping the exchange minted
+                                    for a future it abandoned, which is the only evidence
+                                    that survives an abandoned future
+    ``fan_out_capacity_exhausted``  the fan-out's other verdict: the exchange had no worker
+                                    free, so this store was never dialled at all
     ``response_carried_no_bid``     a reply with no ``bid`` mapping — the store answered,
                                     but with nothing to rank
     ``response_not_stamped``        no ``received_at`` at all, so the exchange's own stamp
                                     never got applied; a fan-out bug, not a store's latency
     ``arrival_stamp_unparseable``   a stamp that is not a number
-    ``response_after_deadline``     the only one of the five that is actually about time
+    ``response_after_deadline``     a reply that DID arrive and dated itself past the close
+
+    The last one and ``response_timed_out`` are both "too slow" and are still two answers,
+    because they are two different observations: one is a reply the exchange holds and can
+    quote back, the other is a reply it never received. Collapsing them (as ``no_response``
+    silently did) is what made a store answering at 4.5 s against a 3.0 s window read exactly
+    like a container nobody had started.
 
     The refusal is re-normalised through :func:`refusal_reason` rather than trusted verbatim.
     :data:`REFUSAL_FIELD` is written by the exchange's own solicitor, but this is the public
     boundary and it bounds what reaches an answer, exactly as it bounds a store's prices and
     its arrival stamp: a solicitor that wrote 64 KiB there cannot spend it in a ``201`` body.
+
+    The two fan-out markers are read as bare booleans and carry no detail for the same reason:
+    they are the exchange's own words about its own run, they are stripped off anything a
+    store sent (:func:`~.fanout._stamped`), and there is nothing a caller could add to them
+    that this function would be right to repeat.
     """
     refusal = response.get(REFUSAL_FIELD)
     if refusal is not None and str(refusal).strip():
@@ -1182,6 +1281,16 @@ def _unusable_because(response: Mapping[str, Any], deadline: float) -> str | Non
         # — a detail the exchange took out of a string it had already decided it could not
         # read, which is a worse answer than saying it could not read it.
         return refusal_reason(STORE_REFUSED_REASON, stated)
+
+    # Before the `bid` check, because a minted marker carries no bid and would otherwise be
+    # reported as `response_carried_no_bid` — "the store answered with nothing to rank", of a
+    # store that did not answer at all. After the refusal check only because the two cannot
+    # co-occur: the fan-out mints a marker exactly when no response object exists, and a
+    # refusal IS a response object.
+    if response.get(TIMED_OUT_FIELD):
+        return RESPONSE_TIMED_OUT_REASON
+    if response.get(NOT_ASKED_FIELD):
+        return FAN_OUT_CAPACITY_REASON
 
     bid = response.get("bid")
     if not isinstance(bid, Mapping):
