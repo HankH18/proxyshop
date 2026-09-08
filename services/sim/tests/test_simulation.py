@@ -350,16 +350,22 @@ def test_the_platform_derives_the_offer_integrity_attacks_from_the_event_stream_
         )
 
 
-#: The ledger kinds that are KNOWN to deviate from the body ``contracts.ledger`` publishes,
-#: each one somebody else's open ticket and outside this lane's ownership:
+#: The ledger kinds that are KNOWN to deviate from the body ``contracts.ledger`` publishes.
 #:
-#:   auction_opened   omits ``roster_size``     -- apps/exchange/src/auction/state.py
-#:   auction_closed   omits ``shortlist_size``  -- apps/exchange/src/auction/state.py
+#: **Empty, and it got here by working.** It used to hold two:
 #:
-#: ``apps/exchange/src/auction/ledger.py``'s own docstring names both and explains why they
-#: are reported rather than raised. This is an EXACT set, not an allowlist: see the guard
-#: below for why the difference is the whole point.
-KNOWN_DEVIATING_LEDGER_KINDS = frozenset({"auction_opened", "auction_closed"})
+#:   auction_opened   omitted ``roster_size``     -- apps/exchange/src/auction/state.py
+#:   auction_closed   omitted ``shortlist_size``  -- apps/exchange/src/auction/state.py
+#:
+#: T-302 closed both — the exchange records the close AFTER the ranking now, so the row can
+#: carry the size it did not know at open time — and this guard is what said so. Because it
+#: asserts an EXACT set rather than an allowlist, the repair turned it red and its own failure
+#: message named the two kinds and told the reader to delete them. That is the difference the
+#: T-265 rewrite below exists to make, demonstrated on a real repair rather than argued.
+#:
+#: Leave it empty rather than deleting the constant and its guard: a new deviation must still
+#: have somewhere to turn red.
+KNOWN_DEVIATING_LEDGER_KINDS: frozenset[str] = frozenset()
 
 
 def test_no_kind_other_than_code_created_deviates_from_its_published_payload(

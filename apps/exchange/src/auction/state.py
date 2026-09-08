@@ -88,7 +88,10 @@ from .ledger import LedgerRecorder, LedgerSink
 
 __all__ = [
     "ACCEPTED",
+    "ACCEPTED_KIND",
+    "AUCTION_CLOSED_KIND",
     "AUCTION_KEY_TEMPLATE",
+    "AUCTION_OPENED_KIND",
     "AUCTION_TTL_SECONDS",
     "CLOSED",
     "CREATED",
@@ -122,13 +125,27 @@ TRANSITIONS: Mapping[str, frozenset[str]] = {
     EXPIRED: frozenset(),
 }
 
+#: The three frozen `LedgerEventKind` values (D24) this module produces, named as values.
+#:
+#: Named rather than spelled inline in :data:`_TRANSITION_KIND`, and that is not house-keeping.
+#: The kind an emitter produces is a searchable fact — ``apps/trust/src/reconcile/engine.py``'s
+#: ``PIXEL_KIND``/``FULFILLED_KIND`` and ``apps/exchange/src/ranking/serving.py``'s ``SHOWN_KIND``
+#: are the same convention — and a mapping keyed by *state* hid all three of these behind a
+#: lookup no reader of the vocabulary could resolve to a producer. T-302 measured exactly that:
+#: a sweep of every product module for the kinds it names reported ``auction_opened`` and
+#: ``auction_closed`` as produced by nothing, while this file had been writing both on every
+#: served ``POST /auctions`` since the route existed.
+AUCTION_OPENED_KIND = "auction_opened"
+AUCTION_CLOSED_KIND = "auction_closed"
+ACCEPTED_KIND = "accepted"
+
 #: The ledger kind each transition writes. `EXPIRED` writes `auction_closed` — an auction
 #: that timed out did close; the payload's `reason` is what distinguishes the two.
 _TRANSITION_KIND: Mapping[str, str] = {
-    OPEN: "auction_opened",
-    CLOSED: "auction_closed",
-    EXPIRED: "auction_closed",
-    ACCEPTED: "accepted",
+    OPEN: AUCTION_OPENED_KIND,
+    CLOSED: AUCTION_CLOSED_KIND,
+    EXPIRED: AUCTION_CLOSED_KIND,
+    ACCEPTED: ACCEPTED_KIND,
 }
 
 #: DESIGN: `auction:{id}` in Redis, TTL 15 minutes.
@@ -411,16 +428,69 @@ class AuctionStateMachine:
         return record
 
     def open(self, auction_id: str, *, now: float | None = None) -> AuctionRecord:
-        record = self._transition(auction_id, OPEN, now=now)
-        return record
+        """Open the auction and record ``auction_opened`` with D24's published body.
+
+        ``roster_size`` is not passed in: it is ``len(record.roster)`` read off the record the
+        transition just wrote, so the number in the ledger is the roster the auction actually
+        ran and cannot disagree with it. ``roster`` — the store ids, in roster order — is the
+        extra key that makes the event reconstructible rather than merely well-formed: a
+        ``roster_size`` of 4 says four stores were on the list and names none of them, and the
+        first question a store that lost asks is whether it was on that list at all.
+
+        Ids only, never the roster ROWS. A row carries a merchant-stated ``list_price`` and a
+        ``product_ref``; the ids are bounded by ``routes.MAX_IDENTIFIER_LENGTH`` and the list by
+        ``routes.MAX_ROSTER_ENTRIES``, which is what keeps an append-only durable row O(roster)
+        in values the platform already published in its own 201 body.
+        """
+        return self._transition(auction_id, OPEN, now=now)
 
     def close(
-        self, auction_id: str, *, now: float | None = None, reason: str = "deadline"
+        self,
+        auction_id: str,
+        *,
+        now: float | None = None,
+        reason: str = "deadline",
+        shortlist_size: int | None = None,
+        outcome: Mapping[str, Any] | None = None,
     ) -> AuctionRecord:
-        return self._transition(auction_id, CLOSED, now=now, payload={"reason": reason})
+        """Close the auction and record ``auction_closed`` with D24's published body.
+
+        ``shortlist_size`` is the second published key and it is the caller's to supply,
+        because the auction does not know it: the shortlist is decided by the ranking that
+        runs after bidding stops, and this class holds no ranker. A caller that has not ranked
+        — the simulator, a test driving the machine directly, ``expire`` below — passes
+        nothing and the key is written as ``None``.
+
+        ``None`` rather than ``0``, and the difference is the whole reason this is not
+        defaulted to a number: ``0`` is a *measurement* ("the auction ranked and shortlisted
+        nobody"), which is a real and common outcome for a fail-closed exchange, and writing it
+        for an auction that never ranked would put a false measurement in an append-only log.
+        This is the convention :meth:`accept` already follows for ``checkout_token`` — the key
+        is present so the body is the published one, and its emptiness is visible in the record
+        rather than inferred from a key that is not there.
+
+        ``outcome`` carries the rest of what the close decided — who was solicited, who
+        answered, who was excluded and why, which slots were filled. Nothing here invents any
+        of it: a caller that measured none of it passes none, and the event then says only what
+        a close with no ranker behind it can say.
+        """
+        payload: dict[str, Any] = {"reason": reason, "shortlist_size": shortlist_size}
+        payload.update(dict(outcome or {}))
+        return self._transition(auction_id, CLOSED, now=now, payload=payload)
 
     def expire(self, auction_id: str, *, now: float | None = None) -> AuctionRecord:
-        return self._transition(auction_id, EXPIRED, now=now, payload={"reason": "expired"})
+        """Expire the auction, which is a close whose ``reason`` says the deadline won.
+
+        ``shortlist_size`` is ``None`` and cannot be anything else: an auction that timed out
+        never reached a ranking, so there is no shortlist to have a size — see :meth:`close`
+        for why that is not zero.
+        """
+        return self._transition(
+            auction_id,
+            EXPIRED,
+            now=now,
+            payload={"reason": "expired", "shortlist_size": None},
+        )
 
     def accept(
         self,
@@ -526,15 +596,29 @@ class AuctionStateMachine:
             self.store.release(auction_id, name, target)
             raise
 
+        # The published body (D24) for the kind this transition writes, composed from the
+        # record that was just saved rather than from anything the caller said. `intent_id`
+        # and `cluster_id` are two of `auction_opened`'s three published keys and were always
+        # here; `roster_size` is the third and was not, so every `auction_opened` this service
+        # has ever written failed `contracts.ledger.validate_ledger_payload` — a ledger row
+        # saying an auction opened and refusing to say on how many stores.
+        body: dict[str, Any] = {
+            "state": target,
+            "intent_id": record.intent_id,
+            "cluster_id": record.cluster_id,
+        }
+        if target == OPEN:
+            body["roster_size"] = len(record.roster)
+            body["roster"] = [
+                str(entry.get("store_id") or "")
+                for entry in record.roster
+                if isinstance(entry, Mapping)
+            ]
+        body.update(dict(payload or {}))
         self.ledger.record(
             _TRANSITION_KIND[target],
             auction_id=auction_id,
             store_id=store_id,
-            payload={
-                "state": target,
-                "intent_id": record.intent_id,
-                "cluster_id": record.cluster_id,
-                **dict(payload or {}),
-            },
+            payload=body,
         )
         return record

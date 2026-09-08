@@ -9,9 +9,13 @@ The sequence is the point, and it is the same sequence the unit tests drive:
 
 .. code-block:: text
 
-    create -> OPEN --(auction_opened)-->  solicit_bids   -> close --(auction_closed)-->
+    create -> OPEN --(auction_opened)-->  solicit_bids   -> rank -> CLOSED
               R12 gate on every rostered store    parallel fan-out, hard timeout
            -> rank --(R19 filters, published formula, D29 shortlist)--> answer
+
+The close is STAMPED when bidding stops and its ledger row is written once the ranking has
+decided the outcome, because ``auction_closed``'s published body carries ``shortlist_size``
+and a shortlist does not exist until then. See the comment at the ``machine.close`` call.
 
 The ranking step is the last one and it is not optional (T-310). Until it was wired, a served
 auction answered with the offers in whatever order the fan-out returned them: R19's hard
@@ -1402,6 +1406,234 @@ def record_bid_receipts(
     return events
 
 
+#: The frozen ledger kind (D24) a penalty this auction's ranking applied is announced under.
+#:
+#: ``ledger.policy_events`` is the *published source* of the ``policy_penalties`` term in D13's
+#: formula — "Σ per-kind penalties over open ``ledger.policy_events`` for that store in the
+#: scoring window" — and until this constant the exchange had it exactly backwards on the
+#: served path: ``ranking/features.py`` minted a ``contradicted_claim`` event per contradicted
+#: claim, ``ranking/scoring.py`` subtracted 0.15 for each one from that store's ``rank_score``,
+#: and the event was dropped with the request. A store was charged the one asymmetric downside
+#: in the whole design, and no row anywhere recorded that it had been charged.
+POLICY_EVENT_KIND = "policy_event"
+
+#: The ``severity`` word a policy event that is PRICED rather than fatal carries.
+#:
+#: The vocabulary is not new here: ``accept/offer.py``'s ``_refusal_event`` — the other producer
+#: of this kind — writes ``"critical"`` when a live discount was minted and then refused, and
+#: ``"warning"`` otherwise. The rule those two producers share, stated so a third one does not
+#: have to guess: **critical** when the platform withheld something the buyer would otherwise
+#: have been handed, **warning** when the event only costs the store rank. A contradicted claim
+#: costs 0.15 of a ``rank_score``; the store is still ranked, still shortlistable, and still
+#: acceptable, so it is the second of those.
+PRICED_POLICY_SEVERITY = "warning"
+
+
+def _published_penalty(weights: Any, kind: str) -> float | None:
+    """The published per-event penalty for ``kind``, or ``None`` when it cannot be read.
+
+    ``None`` rather than ``0.0``: a zero penalty is a real catalogue entry ("this kind is
+    recorded and costs nothing"), and writing it for a weight set that could not be asked
+    would put a number nobody published into an append-only row.
+    """
+    reader = getattr(weights, "penalty_for", None)
+    if not callable(reader):
+        return None
+    try:
+        return float(reader(kind))
+    except (TypeError, ValueError):
+        return None
+
+
+def _applied_penalty(weights: Any, kinds: Sequence[Any]) -> float | None:
+    """What the ranker actually subtracted for ``kinds`` — the CLAMPED sum, not the raw one.
+
+    ``RankingWeights.total_penalty`` bounds the sum at ``max_total_penalty``, so a bid carrying
+    eight contradicted claims is charged the bound rather than eight times 0.15. Recording the
+    per-event price without it would let a reader add the rows up and get a number the ranking
+    never applied.
+    """
+    reader = getattr(weights, "total_penalty", None)
+    if not callable(reader):
+        return None
+    try:
+        return float(reader(kinds))
+    except (TypeError, ValueError):
+        return None
+
+
+def record_policy_events(
+    recorder: Any,
+    candidates: Sequence[Any],
+    *,
+    auction_id: str,
+    weights: Any,
+    now: float,
+) -> list[dict[str, Any]]:
+    """Announce the policy events this auction's ranking OPENED against a store.
+
+    Read off ``ranking["projected"]`` — the feature-attached candidates — because that is the
+    only projection carrying ``policy_events``: ``rank()``'s row projection does not copy the
+    key, so a caller holding only ``ranking["candidates"]`` cannot see that any penalty was
+    applied at all.
+
+    **One event per (bid, kind), carrying ``count`` — not one per minted event.** The ranker
+    mints one ``contradicted_claim`` per contradicted claim and a bid's claims are bounded only
+    by ``composition.MAX_BID_RESPONSE_BYTES``, so a row per minted event is O(roster x claims)
+    durable writes on an unauthenticated door. Collapsing by kind makes it O(roster x published
+    penalty kinds), which is O(roster) against a catalogue of two, and loses nothing a reader
+    needs: ``count`` is the number of events, ``penalty_per_event`` is what each one is priced
+    at, and ``bid_total_penalty`` is what the ranking actually subtracted after the published
+    clamp.
+
+    Nothing here decides anything. The verdicts were reached in ``exchange.ranking`` and are
+    already spent — this function only writes down that they were, which is what makes the
+    ledger able to answer "why did this store rank where it did" rather than only "where".
+
+    Returns:
+        The events emitted, candidate order then kind order. Never raises for a weight set it
+        cannot read a penalty out of: the price is written as ``None`` and the event still
+        says a policy event was opened, which is the half a reader cannot reconstruct.
+    """
+    record = getattr(recorder, "record", None)
+    if not callable(record):
+        return []
+    events: list[dict[str, Any]] = []
+    for candidate in candidates or ():
+        if not isinstance(candidate, Mapping):
+            continue
+        kinds = candidate.get("policy_events")
+        if not isinstance(kinds, (list, tuple)) or not kinds:
+            continue
+        counted: dict[str, int] = {}
+        for kind in kinds:
+            name = str(kind)
+            counted[name] = counted.get(name, 0) + 1
+        applied = _applied_penalty(weights, list(kinds))
+        store_id = str(candidate.get("store_id") or "")
+        bid_ref = str(candidate.get("bid_id") or "")
+        for name, count in counted.items():
+            events.append(
+                record(
+                    POLICY_EVENT_KIND,
+                    auction_id=auction_id,
+                    store_id=store_id or None,
+                    payload={
+                        # The published `policy_event` body (D24).
+                        "kind": name,
+                        "severity": PRICED_POLICY_SEVERITY,
+                        "opened_at": float(now),
+                        # ...and what makes it auditable: which bid, how many, at what price,
+                        # and what the clamp left the store actually paying.
+                        "bid_ref": bid_ref,
+                        "count": count,
+                        "penalty_per_event": _published_penalty(weights, name),
+                        "bid_total_penalty": applied,
+                    },
+                )
+            )
+    return events
+
+
+def auction_outcome(
+    result: Any,
+    ranking: Mapping[str, Any],
+    *,
+    roster: Sequence[Any],
+    shortlist: Mapping[str, Any],
+) -> dict[str, Any]:
+    """What this auction DID, for the ``auction_closed`` event to carry.
+
+    The published body of that kind is ``("shortlist_size", "reason")`` — two numbers and a
+    word, from which nobody can reconstruct anything. A store that lost wants to know it was on
+    the roster, that it was asked, whether its answer arrived, and on what ground it was set
+    aside; ``shortlist_size: 3`` answers none of those. So the published keys are joined by the
+    auction's own record of the run:
+
+    ``solicited``
+        the store ids the gate actually asked, which is the roster minus everyone R12 refused.
+    ``answered`` / ``unanswered``
+        the split inside ``entries``. A ``BidEntry`` exists for every solicited store, because
+        R10 represents a silent one at its list price — so "there is an entry" is NOT "the
+        store replied", and ``fallback`` is the field that says which. ``unanswered`` carries
+        the ``fallback_reason`` the collector recorded, so a silence and a malformed reply are
+        distinguishable.
+    ``denied``
+        the R12 gate's refusals: store, enumerated status, and the condition it named.
+    ``excluded``
+        the RANKER's refusals, which are a different set for a different reason — an eligible
+        store whose offer failed a hard constraint, expired, or sat off its registered checkout
+        domain. Reasons go through :func:`_exclusion_reasons_out`, the same cap the response is
+        held to, because they are one string per unsatisfied constraint and both dimensions
+        arrive on the request body.
+    ``shortlist``
+        which slots were filled and by whom. A slot names a ``bid_ref`` and no store, so the
+        store is joined on from the ranked rows — the exchange's own attribution, never
+        anything read off a bid.
+
+    Every value here is an identifier or a code the exchange itself minted or an eligibility
+    verdict it took, and every one of them is already in the 201 body this same request
+    returns to an anonymous caller. Sizes are the roster's: bounded by
+    :data:`MAX_ROSTER_ENTRIES`, with per-candidate reasons bounded by
+    :data:`MAX_EXCLUSION_REASONS_PER_BID`.
+
+    Nothing is guessed. A fact the route does not hold at close time is absent from the result
+    rather than defaulted — see :meth:`~.state.AuctionStateMachine.close` for why an absent
+    measurement must not be written as a zero.
+    """
+    rows = [row for row in (ranking.get("candidates") or ()) if isinstance(row, Mapping)]
+    store_by_bid: dict[str, str] = {}
+    for row in rows:
+        bid_ref = str(row.get("bid_id") or "")
+        if bid_ref and bid_ref not in store_by_bid:
+            store_by_bid[bid_ref] = str(row.get("store_id") or "")
+
+    entries = list(getattr(result, "entries", ()) or ())
+    slots = list(shortlist.get("slots") or ())
+    return {
+        "roster_size": len(roster),
+        "solicited": [str(store_id) for store_id in getattr(result, "solicited", ()) or ()],
+        "answered": [
+            str(entry.store_id) for entry in entries if not getattr(entry, "fallback", False)
+        ],
+        "unanswered": [
+            {
+                "store_id": str(entry.store_id),
+                "reason": getattr(entry, "fallback_reason", None),
+            }
+            for entry in entries
+            if getattr(entry, "fallback", False)
+        ],
+        "denied": [
+            {
+                "store_id": str(denial.store_id),
+                "status": str(denial.status),
+                "reason": str(denial.reason),
+            }
+            for denial in getattr(result, "denied", ()) or ()
+        ],
+        "excluded": [
+            {
+                "bid_ref": str(row.get("bid_id") or ""),
+                "store_id": str(row.get("store_id") or ""),
+                "reasons": _exclusion_reasons_out(row),
+            }
+            for row in rows
+            if not row.get("eligible")
+        ],
+        "shortlist": [
+            {
+                "slot": slot.get("slot") if isinstance(slot, Mapping) else None,
+                "bid_ref": str(slot.get("bid_ref") or "") if isinstance(slot, Mapping) else "",
+                "store_id": store_by_bid.get(
+                    str(slot.get("bid_ref") or "") if isinstance(slot, Mapping) else ""
+                ),
+            }
+            for slot in slots
+        ],
+    }
+
+
 def _served_price(offer: Any, *keys: str) -> float | None:
     """The first readable price among ``keys``, or ``None`` when the offer states none.
 
@@ -1814,7 +2046,6 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
     # decides whether it was live at the close, which is not a question two instants can
     # answer consistently.
     closed_at = time.time()
-    record = machine.close(auction_id, now=closed_at)
 
     trust_snapshot = trust_snapshot_of(request.app)
     weights = weights_of(request.app)
@@ -1862,6 +2093,43 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
     )
     shortlist = ranking["shortlist"]
     shortlist_store(request.app).put(auction_id, shortlist, now=closed_at)
+
+    # The penalties this ranking APPLIED, written down where the formula says they come from.
+    # Before the close, because they are an input to the outcome it records rather than a
+    # consequence of it: the shortlist below is the one these penalties helped decide.
+    record_policy_events(
+        machine.ledger,
+        ranking.get("projected") or (),
+        auction_id=auction_id,
+        weights=weights,
+        now=closed_at,
+    )
+
+    # THE CLOSE, stamped at `closed_at` and recorded here rather than eight lines above where
+    # it used to sit. The transition is identical — the same instant, the same reservation, the
+    # same `record.state` — and what moved is only WHEN the ledger row for it is built, because
+    # `auction_closed`'s published body needs `shortlist_size` and the shortlist does not exist
+    # until the ranking has run. Written before the close, that key could only ever have been
+    # absent (which is the defect: every `auction_closed` this service has emitted fails
+    # `contracts.ledger.validate_ledger_payload`) or a fabricated zero.
+    #
+    # The chain therefore reads in the order the auction happened, and every step of it is now
+    # legible from the chain alone: `auction_opened` naming the roster, one `bid_placed` per
+    # collected bid, the `claim_verified` verdicts the ranking attested, one `policy_event` per
+    # penalty it applied, `auction_closed` naming who was solicited, who answered, who was set
+    # aside and why, and which slots were filled — then one `shown` per filled slot.
+    #
+    # The one behaviour that changed with the move: a ranking that raises now leaves the
+    # auction OPEN rather than CLOSED. Both are a 500 to this caller and neither is servable —
+    # a closed auction with no stored shortlist has nothing for the accept door to read — and
+    # an auction left open is the state the 15-minute TTL is designed to collect.
+    record = machine.close(
+        auction_id,
+        now=closed_at,
+        shortlist_size=len(shortlist.get("slots") or ()),
+        outcome=auction_outcome(result, ranking, roster=roster, shortlist=shortlist),
+    )
+
     # What this auction PUT IN FRONT OF THE BUYER, recorded where it is stored so the ledger
     # names the same object `GET /auctions/{auction_id}/shortlist` will serve.
     record_shown(

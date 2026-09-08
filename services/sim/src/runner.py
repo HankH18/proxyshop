@@ -427,10 +427,12 @@ def ledger_contract_problems(events: Iterable[Mapping[str, Any]]) -> list[tuple[
     events down two independent paths — ``exchange.accept`` and the ``AuctionStateMachine``'s
     own ``LedgerRecorder`` — and for a long time :func:`run_simulation` graded only the first
     (T-242). Half a ledger validated is not a validated ledger: the unvalidated half is where
-    ``auction_opened`` and ``auction_closed`` have been shipping without their published
-    ``roster_size`` / ``shortlist_size`` the whole time, unreported by the one component whose
-    job is to report exactly that. Nothing about this function chose the narrower stream; its
-    caller did, and the caller is where the fix lives.
+    ``auction_opened`` and ``auction_closed`` shipped without their published ``roster_size`` /
+    ``shortlist_size``, unreported by the one component whose job is to report exactly that.
+    Both bodies are repaired now (T-302) and this function reports zero deviating kinds on an
+    untouched run — which is how the repair was DETECTED: the sim's exact-set guard held those
+    two kinds, went red when they stopped deviating, and named them. Nothing about this
+    function chose the narrower stream; its caller did, and the caller is where the fix lived.
 
     **Graded is not the same as SEALED, and for the state machine's sink that gap is a
     different ticket.** T-303 (a) sealed the delisting stream into the hash chain because it
@@ -445,16 +447,18 @@ def ledger_contract_problems(events: Iterable[Mapping[str, Any]]) -> list[tuple[
       chain per acceptance, one of them naming nobody, and an auditor counting acceptances off
       the ledger would read 24 for 12 auctions. That is the double-count the note in
       :func:`run_simulation` refuses, not a hypothetical.
-    * the sink's ``auction_opened`` / ``auction_closed`` are the two bodies this function
-      currently REPORTS as deviating. Sealing a body the published contract rejects into a
-      tamper-evident record writes the defect in permanently instead of reporting it — the
-      opposite of what the delisting seam does, which validates at its producing boundary
-      (``trust.snapshot.delisting._event``) and raises rather than emit a malformed decision.
+    * the sink's ``auction_opened`` / ``auction_closed`` USED to be two bodies this function
+      reported as deviating, and sealing a body the published contract rejects into a
+      tamper-evident record would have written the defect in permanently instead of reporting
+      it — the opposite of what the delisting seam does, which validates at its producing
+      boundary (``trust.snapshot.delisting._event``) and raises rather than emit a malformed
+      decision. That half is closed: both bodies carry their published keys now.
 
-    So the sink is graded and not sealed on purpose. The repair is at its producer —
-    ``apps/exchange/src/auction/state.py`` writing the published keys, and one ``accepted``
-    producer rather than two — and until that lands, sealing this stream would make the
-    ledger worse, not more complete.
+    So the sink is graded and not sealed, and **the reason has narrowed to exactly one thing**
+    — the duplicate ``accepted`` producer above. The malformed-body argument no longer applies
+    and is kept only as the record of why this was not sealed sooner. Sealing this stream is
+    now a question of collapsing those two ``accepted`` producers into one, not of waiting on
+    ``apps/exchange/src/auction/state.py``, which has done its part.
     """
     from contracts.ledger import validate_ledger_payload
 

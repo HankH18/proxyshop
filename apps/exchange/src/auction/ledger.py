@@ -253,10 +253,14 @@ def build_published_event(kind: str, **fields: Any) -> dict[str, Any]:
     key is refused.
 
     This is a **separate entry point** rather than a check folded into :func:`build_event`
-    on purpose. Two of the state machine's own transitions still do not carry their published
-    bodies (``auction_opened`` omits ``roster_size``, ``auction_closed`` omits
-    ``shortlist_size``), and turning those into exceptions would fail live auctions for an
-    audit-record defect that is nobody's ticket here. They are reported, not silently swept in.
+    on purpose, and the reason has outlived the two examples it used to name. Those were
+    ``auction_opened`` without ``roster_size`` and ``auction_closed`` without
+    ``shortlist_size``; both now carry their published bodies (T-302 —
+    :meth:`~.state.AuctionStateMachine.open` reads the size off the record it just wrote, and
+    ``close`` takes the shortlist's from the caller that ranked). What remains true is the
+    rule: :meth:`LedgerRecorder.record` is the audit trail of a live auction, and an exception
+    raised there fails the auction for a bookkeeping defect. So validation is offered at a
+    separate door that a producer opts into, and every producer that can absorb a raise does.
 
     ``accepted`` used to be listed beside them and was the one that did **not** belong there,
     because its two missing keys are not an audit blemish. ``apps/trust/src/reconcile/engine.py``

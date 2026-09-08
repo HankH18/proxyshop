@@ -4993,22 +4993,39 @@ def test_t302_the_ledger_kind_emitter_sweep_is_armed() -> None:
         )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-302: FOUR frozen ledger kinds are reserved in every vocabulary and named by no "
-        "product code — auction_closed, auction_opened, checkout_redirect and policy_event. "
-        "The auction lifecycle accounts for three of them, so the "
-        "ledger cannot reconstruct an auction it ran; remove this marker with the fix"
-    ),
-)
+# FIXED (T-302). The marker is gone because the four kinds it named acquired producers, and
+# three of them acquired them in this branch rather than merely acquiring a NAME:
+#
+#   auction_opened   `apps/exchange/src/auction/state.py`'s AUCTION_OPENED_KIND. The event was
+#                    always written on `POST /auctions`; it now carries D24's third published
+#                    key, `roster_size`, plus the roster's store ids — so the row says WHO the
+#                    auction was run over instead of only that one ran.
+#   auction_closed   the same module's AUCTION_CLOSED_KIND, and the served route now records
+#                    the close AFTER the ranking so the event can carry the `shortlist_size`
+#                    the published body asks for, alongside who was solicited, who answered,
+#                    who the R12 gate denied, who the ranker excluded and on what ground, and
+#                    which slots were filled.
+#   checkout_redirect `apps/exchange/src/checkout/provider.py`'s CHECKOUT_REDIRECT_KIND. This
+#                    one really was only a naming gap — `_events` has emitted the kind on every
+#                    minting checkout, and `accept._handoff_events` on every fallback, for as
+#                    long as either existed; both spelled it as a positional string literal,
+#                    which `_t302_kinds_named_in` cannot see.
+#   policy_event     `apps/exchange/src/auction/routes.py`'s POLICY_EVENT_KIND. Also a real
+#                    gap and not a naming one: `accept._refusal_event` emitted the kind on the
+#                    refusal path, but the penalties the RANKER applied — one
+#                    `contradicted_claim` per claim the exchange's own snapshot contradicts,
+#                    0.15 off `rank_score` each — were minted per auction and dropped with the
+#                    request, so `ledger.policy_events`, which D13 names as the SOURCE of the
+#                    `policy_penalties` term, received nothing a served auction ever charged.
+#
+# Restore any one of those and this gate reports that kind as unproduced again.
 def test_t302_every_frozen_ledger_kind_has_something_that_produces_it() -> None:
     """A vocabulary entry nothing can produce is a promise the system cannot keep.
 
-    FOUR of the eighteen frozen kinds are named by nothing: ``auction_closed``,
+    FOUR of the eighteen frozen kinds were named by nothing: ``auction_closed``,
     ``auction_opened``, ``checkout_redirect`` and ``policy_event``. Three of those are the
-    auction lifecycle, so the ledger cannot reconstruct an auction the exchange actually ran
-    — it can only see the bids.
+    auction lifecycle, so the ledger could not reconstruct an auction the exchange actually ran
+    — it could only see the bids.
 
     It was SIX, and the two that left did NOT leave because they acquired emitters — the
     generosity of the sweep is what moved them, and saying so is the difference between a

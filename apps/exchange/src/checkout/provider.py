@@ -94,8 +94,25 @@ class RegisteredDomains(Protocol):
     def domain_for(self, store_id: str) -> str | None: ...
 
 
+#: C11's three frozen `LedgerEventKind` values (D24), named as values rather than only as a
+#: tuple of them.
+#:
+#: A tuple literal is not a name: a sweep of every product module for the kinds it produces read
+#: `CHECKOUT_EVENT_KINDS` and saw nothing, so `checkout_redirect` — emitted by `_events` below
+#: on every minting checkout, and by `accept._handoff_events` on every fallback — was reported
+#: as a frozen kind with no producer anywhere in the tree (T-302). It had one. What it did not
+#: have was anywhere a reader could find it. Same convention as `ranking/serving.py`'s
+#: `SHOWN_KIND` and `auction/state.py`'s `AUCTION_OPENED_KIND`.
+ACCEPTED_KIND = "accepted"
+CODE_CREATED_KIND = "code_created"
+CHECKOUT_REDIRECT_KIND = "checkout_redirect"
+
 #: C11: the ordered `LedgerEvent` kinds every checkout emits, whichever provider ran.
-CHECKOUT_EVENT_KINDS: tuple[str, str, str] = ("accepted", "code_created", "checkout_redirect")
+CHECKOUT_EVENT_KINDS: tuple[str, str, str] = (
+    ACCEPTED_KIND,
+    CODE_CREATED_KIND,
+    CHECKOUT_REDIRECT_KIND,
+)
 
 
 class PortMethodIsFinal(TypeError):
@@ -1168,7 +1185,7 @@ class CheckoutProvider:
         common = {"auction_id": request.auction_id, "store_id": request.store_id}
         bodies: tuple[tuple[str, dict[str, Any]], ...] = (
             (
-                "accepted",
+                ACCEPTED_KIND,
                 {
                     "checkout_token": checkout_token,
                     "bid_ref": request.bid_ref,
@@ -1193,7 +1210,7 @@ class CheckoutProvider:
                 },
             ),
             (
-                "code_created",
+                CODE_CREATED_KIND,
                 {
                     # The published `code_created` body (D24) — the same three keys the
                     # orphan record has always carried, so one kind is one shape whether the
@@ -1210,7 +1227,7 @@ class CheckoutProvider:
                 },
             ),
             (
-                "checkout_redirect",
+                CHECKOUT_REDIRECT_KIND,
                 {
                     "checkout_token": checkout_token,
                     "permalink_url": minted.permalink_url,
