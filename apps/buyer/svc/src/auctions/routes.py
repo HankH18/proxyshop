@@ -92,10 +92,28 @@ router = APIRouter(prefix="/buyer/auctions", tags=["buyer-auctions"])
 #: The keys read off the RECORDED answer, and the whole of what is read off it. ``shortlist``
 #: is deliberately absent: the exchange puts one in its ``POST /auctions`` body and serving it
 #: from here would be a stale shortlist wearing a live one's field name.
-RECORDED_KEYS: tuple[str, ...] = ("entries", "excluded", "denied", "ranked", "solicited")
+RECORDED_KEYS: tuple[str, ...] = (
+    "entries",
+    "excluded",
+    "denied",
+    "ranked",
+    "solicited",
+    "relaxed_constraints",
+)
 
-#: The one recorded diagnostic that is a mapping rather than an array, forwarded through
-#: :func:`_recorded_mapping`. See :attr:`AuctionView.market`.
+#: The recorded diagnostics that are mappings rather than arrays, forwarded through
+#: :func:`_recorded_mapping`. See :attr:`AuctionView.market`, :attr:`AuctionView.exploration`
+#: and :attr:`AuctionView.roster_source`.
+#:
+#: ``state`` is deliberately NOT here. It is the only field on that answer whose value can have
+#: changed since it was recorded, and this view keeps its live half and its recorded half
+#: labelled as such; a recorded ``state`` would read as a live one and be wrong exactly when a
+#: reader most needed it. The live shortlist above already answers "does the exchange still
+#: know this auction".
+RECORDED_MAPPING_KEYS: tuple[str, ...] = ("market", "exploration", "roster_source")
+
+#: Kept as the singular spelling too: it was the first mapping forwarded and
+#: ``test_auctions_shortlist.py`` names it.
 RECORDED_MAPPING_KEY = "market"
 
 
@@ -113,6 +131,14 @@ class AuctionView(BaseModel):
     denied: list[Any] = []
     ranked: list[Any] = []
     solicited: list[Any] = []
+    #: RECORDED. Which of the SHOPPER'S OWN hard constraints the exchange loosened in order to
+    #: fill the shortlist, and ``[]`` when it loosened none.
+    #:
+    #: This is the one of these that is not merely diagnostic. Serving a shopper a row that
+    #: violates something they stated, without saying so, is the thing this project's whole
+    #: credibility argument is against — and it looks identical to an honest result from the
+    #: outside.
+    relaxed_constraints: list[Any] = []
     #: RECORDED, and a MAPPING rather than one of the five arrays above, which is why it is
     #: named separately. The exchange's one-line verdict on the market it just ran --
     #: ``{"solicited", "sponsored", "list_price", "timed_out", "not_asked", "denied",
@@ -130,6 +156,24 @@ class AuctionView(BaseModel):
     #: ``market``. Never ``{}``: an exchange too old to publish one and an exchange reporting
     #: an empty market are different facts, and only one of them exists.
     market: dict[str, Any] | None = None
+    #: RECORDED. R12's exploration slice: which shortlist slot, if any, was granted to a store
+    #: the trust snapshot marks ``low_data``, and on what basis. ``None`` in the ordinary case
+    #: where no slot was explored — that is the exchange's own value, not this service's.
+    #:
+    #: Forwarded because it is the DISCLOSURE half of the one place a signal other than the
+    #: published ranking features decides who is seen. The exchange bounds that slice to a
+    #: single slot and publishes what it did on the same answer; a page that shows the slot and
+    #: not the disclosure shows the effect and hides the cause.
+    exploration: dict[str, Any] | None = None
+    #: RECORDED. Where the candidate set came from and what it cost:
+    #: ``{"source", "shops", "products_considered", "reason", "elapsed_ms"}``. ``None`` when the
+    #: recorded answer carried none.
+    #:
+    #: An empty shortlist has two very different causes — nobody was RETRIEVED, or everybody
+    #: retrieved was refused — and the five arrays only distinguish them once retrieval found
+    #: somebody. ``source`` and ``products_considered`` are what separate "the graph answered
+    #: with nothing" from "the graph answered and the gate denied them all".
+    roster_source: dict[str, Any] | None = None
     #: When THIS SERVICE recorded the answer above; ``None`` when it holds no record. Not the
     #: exchange's clock, and kept outside the recorded body for exactly that reason.
     recorded_at: str | None = None
@@ -155,9 +199,9 @@ def _bind_the_deployment(request: Request) -> None:
 def _recorded_rows(recorded: Any, key: str) -> list[Any]:
     """One diagnostic array off the recorded answer, or ``[]`` when it carried none.
 
-    ``[]`` rather than ``None`` because these five are lists in every answer the exchange
-    gives, and a screen that has to tell ``null`` from ``[]`` for them would be reading
-    meaning into this service's bookkeeping instead of into the exchange's.
+    ``[]`` rather than ``None`` because every one of :data:`RECORDED_KEYS` is a list in every
+    answer the exchange gives, and a screen that has to tell ``null`` from ``[]`` for them
+    would be reading meaning into this service's bookkeeping instead of into the exchange's.
     """
     if not isinstance(recorded, dict):
         return []
@@ -227,7 +271,7 @@ async def read_auction(auction_id: str, request: Request) -> AuctionView:
         auction_id=auction_id,
         shortlist=dict(shortlist) if shortlist is not None else None,
         recorded_at=str(recorded["recorded_at"]) if recorded is not None else None,
-        market=_recorded_mapping(recorded, RECORDED_MAPPING_KEY),
+        **{key: _recorded_mapping(recorded, key) for key in RECORDED_MAPPING_KEYS},
         **{key: _recorded_rows(recorded, key) for key in RECORDED_KEYS},
     )
 

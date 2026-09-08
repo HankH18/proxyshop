@@ -673,3 +673,110 @@ def test_an_answer_that_carried_no_market_reports_none_rather_than_an_empty_one(
     assert _recorded_mapping(
         {"response": {"market": {"all_fallback": True}}}, RECORDED_MAPPING_KEY
     ) == {"all_fallback": True}
+
+
+def test_every_diagnostic_the_exchange_publishes_once_reaches_the_shopper(buyer_client, exchange):
+    """The sweep, rather than the instance: nothing on the 201 may be silently dropped.
+
+    ``market`` was found missing by comparing the exchange's own answer with this view's keys,
+    and three more were missing beside it. A per-field test would have caught none of them,
+    because the defect is a field NOT being listed — so this compares the two key sets and
+    fails on whatever is dropped next.
+
+    ``state`` is the one deliberate exclusion, and the assertion names it rather than
+    subtracting it silently: it is the only field whose value can have changed since it was
+    recorded, and this view keeps its live half and its recorded half labelled as such.
+    """
+    import urllib.request
+
+    auction_id = open_an_auction(buyer_client)
+    view = served_view(buyer_client, auction_id)
+
+    # The exchange's own answer for the SAME roster, read off the exchange directly, so the
+    # comparison is against what it really publishes rather than against a list written here.
+    # The intent as the BUYER sends it, not the raw fixture: `INTENT` omits
+    # `hard_constraints`, and an intent the exchange cannot read excludes every store (R19),
+    # which would make this comparison one between two different auctions.
+    sweep_intent = dict(INTENT) | {"hard_constraints": [], "preferences": []}
+    payload = json.dumps(
+        {"intent": sweep_intent | {"intent_id": "sweep-1"}, "roster": ROSTER}
+    ).encode()
+    request = urllib.request.Request(
+        f"{exchange.url}/auctions", data=payload, headers={"content-type": "application/json"}
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        published = set(json.load(response))
+
+    #: Carried live rather than recorded, or deliberately excluded — each with its reason.
+    ELSEWHERE = {
+        "auction_id",  # the path parameter this view was asked about
+        "shortlist",  # read LIVE from the exchange on every request, never off the record
+        "state",  # see RECORDED_MAPPING_KEYS: a recorded state would read as a live one
+    }
+
+    dropped = published - set(view) - ELSEWHERE
+    assert dropped == set(), (
+        f"the exchange publishes {sorted(dropped)} on its POST /auctions answer and this view "
+        f"drops them. Those diagnostics are published exactly once and survive nowhere else, "
+        f"so a shopper cannot be told what they say. Add each to RECORDED_KEYS (arrays) or "
+        f"RECORDED_MAPPING_KEYS (mappings), or add it to ELSEWHERE above with the reason."
+    )
+
+    # DECLARED IS NOT FORWARDED. A field on the response model that nothing ever fills reads
+    # as `null` and satisfies the key comparison above while carrying no information at all --
+    # which is the exact defect shape this repository keeps producing. So where the exchange
+    # said something, this view must say it too. Only where it said something: `exploration`
+    # is genuinely `null` on an auction with no explored slot, and `relaxed_constraints` is
+    # genuinely `[]` when nothing was relaxed, and demanding a value for those would be
+    # demanding the service invent one.
+    with urllib.request.urlopen(
+        urllib.request.Request(
+            f"{exchange.url}/auctions",
+            data=json.dumps(
+                {"intent": sweep_intent | {"intent_id": "sweep-2"}, "roster": ROSTER}
+            ).encode(),
+            headers={"content-type": "application/json"},
+        ),
+        timeout=30,
+    ) as response:
+        answer = json.load(response)
+
+    # STRUCTURAL, and it is what the value comparison below cannot do. A field is forwarded by
+    # being listed in one of two tuples, and whether the check below bites depends on whether
+    # this fixture happens to produce a non-empty value for it -- `relaxed_constraints` is `[]`
+    # here because nothing needed relaxing, so a value comparison alone would let it be dropped
+    # silently. Classifying by the type the exchange actually published catches that.
+    from apps.buyer.svc.src.auctions.routes import (  # noqa: PLC0415
+        RECORDED_KEYS,
+        RECORDED_MAPPING_KEYS,
+    )
+
+    for key, value in answer.items():
+        if key in ELSEWHERE:
+            continue
+        if isinstance(value, list):
+            assert key in RECORDED_KEYS, (
+                f"the exchange publishes {key!r} as an array and it is not in RECORDED_KEYS, so "
+                f"this view answers a default rather than what the exchange said"
+            )
+        elif isinstance(value, dict):
+            assert key in RECORDED_MAPPING_KEYS, (
+                f"the exchange publishes {key!r} as a mapping and it is not in "
+                f"RECORDED_MAPPING_KEYS, so this view answers a default rather than what the "
+                f"exchange said"
+            )
+        # `None` and scalars are left alone: a `null` carries no type to classify by, and the
+        # only scalar on this answer is `state`, which is in ELSEWHERE with its reason.
+
+    said = {key: value for key, value in answer.items() if key not in ELSEWHERE and value}
+    assert said, "the exchange published nothing at all, so this half grades nothing"
+    empty = sorted(key for key in said if not view.get(key))
+    assert empty == [], (
+        f"the exchange published a value for {empty} and this view answers empty for them, so "
+        f"the field is declared and never filled -- which reads as 'the exchange said nothing' "
+        f"and is indistinguishable from it. Exchange said: "
+        f"{ {k: said[k] for k in empty} }"
+    )
+    # ...and the exclusions are real rather than a way of passing: each must actually be
+    # published, or this list has started hiding a field that no longer exists.
+    assert ELSEWHERE <= published, sorted(ELSEWHERE - published)

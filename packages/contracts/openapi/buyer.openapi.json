@@ -76,6 +76,12 @@
                       "title": "Solicited",
                       "default": []
                     },
+                    "relaxed_constraints": {
+                      "items": {},
+                      "type": "array",
+                      "title": "Relaxed Constraints",
+                      "default": []
+                    },
                     "market": {
                       "anyOf": [
                         {
@@ -87,6 +93,30 @@
                         }
                       ],
                       "title": "Market"
+                    },
+                    "exploration": {
+                      "anyOf": [
+                        {
+                          "additionalProperties": true,
+                          "type": "object"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Exploration"
+                    },
+                    "roster_source": {
+                      "anyOf": [
+                        {
+                          "additionalProperties": true,
+                          "type": "object"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Roster Source"
                     },
                     "recorded_at": {
                       "anyOf": [
