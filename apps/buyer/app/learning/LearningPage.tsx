@@ -102,15 +102,29 @@ export const REVIEWERS_PER_ROUND = 4
  * loop exploring, and it is the reason this page cannot let one before/after pair stand as
  * evidence on its own.
  *
- * MEASURED on the running compose stack, `gaiaherbs.com` on the default query:
+ * **These two numbers are LITERALS, and the page must not present them as a live reading.**
+ * They were measured on a compose stack on 2026-09-08, `gaiaherbs.com` on the default query,
+ * and nothing recomputes them when the page runs:
  *
  *     8 identical queries, no teaching   0.4970 – 0.5395   spread 0.0425
+ *     8 more, another batch              0.4970 – 0.5253   spread 0.0283
  *     after 16 sealed feedback events    mean shift +0.0024
  *     after 64 sealed feedback events    mean shift +0.0071
  *
- * The shift is real, positive and grows with volume — and it is smaller than the spread. The
- * three shops that never discounted moved by exactly 0.0000 in every run, which is what says
- * the spread is the sampling and not this page.
+ * The spread is itself a random variable — a batch that never samples the deepest discount
+ * rung reports a smaller one — which is why two batches are quoted rather than one. The
+ * constant below is the LARGER, because a reader sizing "is what I am looking at bigger than
+ * chance" should be given the wider bar rather than the flattering one.
+ *
+ * The shift is real, positive and grows with volume, and it is smaller than the spread either
+ * way. The three shops that never discounted moved by exactly 0.0000 in every run, which is
+ * what says the spread is the sampling and not this page.
+ *
+ * Computing them live would need the page to run each side several times, which is a real
+ * change to what the button costs in wall-clock and is deliberately not made here. What IS
+ * fixed is the wording: the paragraph that renders them no longer says "measured on this
+ * stack", because they are not measured on the reader's stack and a page whose whole argument
+ * is "check what the service actually did" cannot dress a literal as a fresh reading.
  */
 export const NO_TEACHING_SPREAD = 0.0425
 
@@ -525,9 +539,10 @@ export function LearningPage({
             <p className="learning-hint">
               <strong>Read one pair with care.</strong> The sellers Thompson-sample a discount
               rung per auction, so <code className="mono">price_value</code> moves between two
-              identical queries even with nothing taught in between. Measured on this stack:{' '}
+              identical queries even with nothing taught in between. For scale — measured on a
+              compose stack on 2026-09-08, <strong>not on yours, and not just now</strong>:{' '}
               <code className="mono">{NO_TEACHING_SPREAD.toFixed(4)}</code> of spread across
-              eight identical queries and no teaching, against a mean shift of{' '}
+              eight identical queries with nothing taught, against a mean shift of{' '}
               <code className="mono">+{MEASURED_SHIFT_AT_64_EVENTS.toFixed(4)}</code> after
               sixty-four sealed feedback events. The learning is real and it grows with volume;
               a single pair is not how you see it. Run beats one and four a few times over —

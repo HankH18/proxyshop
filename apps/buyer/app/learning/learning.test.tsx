@@ -196,6 +196,25 @@ describe('the learning page', () => {
     expect(toniiq?.querySelector('li[data-delta="flat"]')?.textContent).toMatch(/trust/)
   })
 
+  it('does not present its two reference figures as a reading of the viewer\u2019s own stack', () => {
+    // `NO_TEACHING_SPREAD` and `MEASURED_SHIFT_AT_64_EVENTS` are LITERALS. Nothing recomputes
+    // them when the page runs, and they were rendered under the words "Measured on this
+    // stack:" — which is exactly the dressing-a-constant-as-a-reading that this page exists to
+    // argue against. The figures stay (a reader sizing "is this bigger than chance" needs a
+    // bar) and the claim about where they came from is now true.
+    const { fetcher } = stack([COLD, WARM])
+    render(<LearningPage fetcher={fetcher} {...SMALL} />)
+    return click(screen.getByRole('button', { name: /run this query/i }))
+      .then(() => screen.findByText(/auction auc-1/))
+      .then(() => click(screen.getByRole('button', { name: /run the same query again/i })))
+      .then(() => screen.findByTestId('movement-table'))
+      .then(() => {
+        expect(screen.getByText(/Read one pair with care\./)).toBeInTheDocument()
+        expect(screen.queryByText(/Measured on this stack/i)).toBeNull()
+        expect(screen.getByText(/not on yours, and not just now/i)).toBeInTheDocument()
+      })
+  })
+
   it('asks for a bid window the exchange will actually grant', () => {
     // The page used to ask for 60 seconds. `exchange.auction.routes.MAX_BID_TIMEOUT_SECONDS`
     // is 10.0 and clamps silently, so the request's stated intent and its effect differed with
