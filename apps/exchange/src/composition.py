@@ -400,6 +400,7 @@ from .eligibility.trust_backed import (
 
 __all__ = [
     "ANONYMOUS_PSEUDONYM_PREFIX",
+    "AUCTION_STORE_KEY",
     "DECLINE_REASON_HEADER",
     "DEFAULT_LEDGER_TIMEOUT_SECONDS",
     "DEFAULT_MERCHANT_TIMEOUT_SECONDS",
@@ -446,6 +447,7 @@ __all__ = [
     "TRUST_DEFERRED_ELIGIBILITY",
     "TrustBackedSellerEligibility",
     "TrustLedgerPublisher",
+    "bind_auction_machine",
     "bind_code_creator",
     "bind_ledger_sink",
     "bind_seller_eligibility",
@@ -613,6 +615,23 @@ MAX_MERCHANT_TOKEN_BYTES = 4096
 REPORT_TOKENS_FILE_KEY = "report_tokens_file"
 REPORT_TOKENS_INLINE_KEY = "report_tokens"
 
+#: The document key naming WHERE THIS EXCHANGE'S AUCTIONS LIVE — ``memory`` or ``redis``.
+#:
+#: It did not exist, and its absence was the defect rather than a gap in the vocabulary.
+#: ``exchange.auction.state`` has shipped two stores since T-158 and documents the Redis one as
+#: the DESIGN-pinned choice ("a deployment that cares runs ``RedisAuctionStore``"), but no
+#: deployment could: :func:`configure_exchange` built ``AuctionStateMachine`` without naming a
+#: store, this record had no field to name one, and ``auction/routes.py``'s lazy default is the
+#: same in-memory store. So every served exchange ran the process-local one, while
+#: ``apps/exchange/compose.yaml``'s readiness note told the operator ``--redis`` was "the
+#: MEASURED dependency" of this state machine. It was not; with this key stated it is.
+#:
+#: A WORD, not a URL: ``redis`` resolves through ``proxyshop_support.redis_client.worker_redis``
+#: (``REDIS_URL`` plus ``PROXYSHOP_WORKER``), which is the one place D39 permits a client to be
+#: built. A second spelling of the connection here would be a second source of truth for the
+#: per-worker logical DB and the ``w{N}:`` prefix, which is exactly what D39 forbids.
+AUCTION_STORE_KEY = "auction_store"
+
 #: The most bytes the report token file may occupy. Read once per process, so this is the same
 #: "a path pointing at something else" guard :data:`MAX_KEYRING_BYTES` is, sized for one short
 #: token per store rather than for a keyring of rotating secrets.
@@ -754,6 +773,15 @@ class Deployment:
     #: never the tokens, and read at bind time rather than here, for the reasons the two
     #: attributes above are.
     report_tokens_file: str | None = None
+    #: Which :class:`~exchange.auction.state.AuctionStore` this deployment holds its auctions
+    #: in — ``"memory"``, ``"redis"``, or ``None`` when the document states neither and the
+    #: environment's :data:`~exchange.auction.state.ENV_AUCTION_STORE` decides instead.
+    #:
+    #: ``None`` is genuinely "unstated" and not "memory", so the two sources compose rather
+    #: than fight: a document that says nothing lets ``EXCHANGE_AUCTION_STORE`` choose, and a
+    #: document that says ``"memory"`` is an operator deliberately overriding it. The same
+    #: distinction :attr:`intent_clusters` and :attr:`catalog` draw between ``None`` and empty.
+    auction_store: str | None = None
 
     @property
     def eligibility_rows(self) -> dict[str, str]:
@@ -1028,7 +1056,32 @@ def parse_deployment(document: Any, *, source: str) -> Deployment:
         merchant_admin_token_file=_merchant_token_file(body, source),
         external_bid_keyring_file=_keyring_file(body, source),
         report_tokens_file=_report_tokens_file(body, source),
+        auction_store=_auction_store_word(body, source),
     )
+
+
+def _auction_store_word(body: Mapping[str, Any], source: str) -> str | None:
+    """The store this document names its auctions live in, or ``None``.
+
+    Refused at PARSE time rather than at bind time, exactly as ``checkout_mode`` is and for the
+    same reason: a word with no implementation is a deployment that cannot hold an auction, and
+    discovering that on the first ``POST /auctions`` turns a typo into a 503 per request.
+    """
+    from .auction.state import AUCTION_STORE_WORDS  # noqa: PLC0415 — sibling feature
+
+    stated = body.get(AUCTION_STORE_KEY)
+    if stated is None:
+        return None
+    word = str(stated).strip().lower()
+    if word not in AUCTION_STORE_WORDS:
+        raise DeploymentConfigurationError(
+            f"{source}: {AUCTION_STORE_KEY} {stated!r} is not one of "
+            f"{list(AUCTION_STORE_WORDS)}. This key says where an auction LIVES, so an "
+            f"unrecognised word cannot be defaulted through: guessing 'memory' would give a "
+            f"deployment that asked for durability a process-local store that forgets "
+            f"everything on restart and constrains nothing across replicas"
+        )
+    return word
 
 
 def _report_tokens_file(body: Mapping[str, Any], source: str) -> str | None:
@@ -2507,6 +2560,92 @@ _MERCHANT_SOURCES: Mapping[str, str] = {
 # =====================================================================================
 # Binding
 # =====================================================================================
+def bind_auction_machine(
+    app: Any, deployment: Deployment | None, env: Mapping[str, str] | None = None
+) -> bool:
+    """Bind this app's auction state machine unless it has one. Returns whether it bound.
+
+    Two things are decided here, and until this function existed only the first of them was.
+
+    **The ledger sink (T-150).** Bound with NO key required, unlike almost every other branch
+    in :func:`configure_exchange`, for two reasons. The document states only WHERE —
+    ``trust_url``, falling back to the environment and then to :data:`DEFAULT_TRUST_URL` —
+    because an exchange that has to be told to keep an audit trail is an exchange that ships
+    without one. And binding it here rather than leaving it to ``auction/routes.py::_machine``
+    closes a narrower hole than it looks: ``accept/routes.py`` has its own ``_machine``
+    accessor with its own bare ``AuctionStateMachine()`` default, so an app whose FIRST auction
+    request is an accept — an auction another process created against a shared store — would
+    otherwise install a sink that goes nowhere and drop its ``accepted`` event. The composition
+    hook runs before both accessors in both routes.
+
+    **The STORE**, which is new, and whose absence was the defect. The comment this docstring
+    replaces read "the store is the same ``InMemoryAuctionStore`` either lazy default builds,
+    so nothing else moves" — accurate, and it described an exchange in which the operator had
+    no way to move it. ``exchange.auction.state`` documents ``RedisAuctionStore`` as the
+    DESIGN-pinned store and says "a deployment that cares runs" it; no deployment could, so
+    every served exchange kept every auction it had ever opened in a process-local ``dict``.
+
+    The order is document, then environment, then neither:
+
+    * ``deployment.auction_store`` (the document's :data:`AUCTION_STORE_KEY`) wins where it is
+      stated, because a document is a deliberate statement about one deployment while an
+      environment variable is inherited by every process that happens to have it set.
+    * :data:`~exchange.auction.state.ENV_AUCTION_STORE` otherwise. It exists BESIDE the
+      document key rather than instead of it because the two reach different operators:
+      ``apps/exchange/compose.yaml`` forwards named variables into a container whose deployment
+      document is generated by ``scripts/build_demo_deployment.py``, so a compose operator has
+      no document to edit and a document author has no compose file to edit.
+    * Neither: ``None``, and :class:`~exchange.auction.state.AuctionStateMachine` builds its
+      own bounded :class:`~exchange.auction.state.InMemoryAuctionStore`. That default is safe
+      to leave in place NOW in a way it was not before — it holds
+      :data:`~exchange.auction.state.DEFAULT_AUCTION_CAPACITY` auctions and evicts, so an
+      unconfigured exchange no longer grows without limit under an unauthenticated caller.
+
+    A store that is named and cannot be built is a :class:`DeploymentConfigurationError` — a
+    503 naming the store, through both routes' hooks — and never a silent fall back to the
+    in-memory one. An operator who wrote ``redis`` asked for auctions that outlive one process
+    and reservations that constrain every replica; handing them neither, quietly, on the money
+    path, is the failure this whole seam exists to make impossible.
+    """
+    from .auction.routes import configure_auctions  # noqa: PLC0415
+    from .auction.state import (  # noqa: PLC0415
+        ENV_AUCTION_STORE,
+        AuctionStateMachine,
+        AuctionStore,
+        AuctionStoreUnavailable,
+        auction_store_from_env,
+        build_auction_store,
+    )
+
+    if getattr(app.state, "auction_machine", None) is not None:
+        return False
+
+    source = deployment.source if deployment is not None else "the environment"
+    stated = deployment.auction_store if deployment is not None else None
+    store: AuctionStore | None
+    try:
+        if stated is not None:
+            store = build_auction_store(stated, env=env)
+            named = f"the deployment document's {AUCTION_STORE_KEY}"
+        else:
+            store = auction_store_from_env(env)
+            named = f"the {ENV_AUCTION_STORE} environment variable"
+    except AuctionStoreUnavailable as exc:
+        raise DeploymentConfigurationError(f"{source}: {exc}") from exc
+
+    if store is not None:
+        # Logged, because "which store is this exchange holding auctions in" is the one fact
+        # about this binding an operator cannot read back off any route: both stores answer
+        # `POST /auctions` identically until the process restarts or a second replica appears.
+        _log.info("auction store: %s, from %s", type(store).__name__, named)
+
+    trust_url = deployment.trust_url if deployment is not None else None
+    configure_auctions(
+        app, machine=AuctionStateMachine(store=store, ledger=bind_ledger_sink(trust_url))
+    )
+    return True
+
+
 def bind_eligibility(
     app: Any, deployment: Deployment | None, env: Mapping[str, str] | None = None
 ) -> bool:
@@ -2658,7 +2797,6 @@ def configure_exchange(
     """
     from .accept.routes import InMemoryAuctionBids, configure_accept  # noqa: PLC0415
     from .auction.routes import configure_auctions  # noqa: PLC0415
-    from .auction.state import AuctionStateMachine  # noqa: PLC0415
     from .external_bids.routes import configure_external_bids  # noqa: PLC0415
     from .ranking.serving import configure_ranking  # noqa: PLC0415
 
@@ -2667,24 +2805,7 @@ def configure_exchange(
     def unset(name: str) -> bool:
         return getattr(app.state, name, None) is None
 
-    if unset("auction_machine"):
-        # The ledger seam (T-150). Bound with NO key required, unlike every other branch here,
-        # for two reasons. The document states only WHERE — `trust_url`, falling back to the
-        # environment and then to `DEFAULT_TRUST_URL` — because an exchange that has to be told
-        # to keep an audit trail is an exchange that ships without one.
-        #
-        # And binding it here rather than leaving it to `auction/routes.py::_machine` closes a
-        # narrower hole than it looks: `accept/routes.py` has its own `_machine` accessor with
-        # its own bare `AuctionStateMachine()` default, so an app whose FIRST auction request
-        # is an accept — an auction another process created against a shared store — would
-        # otherwise install a sink that goes nowhere and drop its `accepted` event. This hook
-        # runs before both accessors in both routes.
-        #
-        # It is a whole machine because `configure_auctions` takes one; the store is the same
-        # `InMemoryAuctionStore` either lazy default builds, so nothing else moves.
-        configure_auctions(
-            app, machine=AuctionStateMachine(ledger=bind_ledger_sink(deployment.trust_url))
-        )
+    if bind_auction_machine(app, deployment, env):
         bound.append("auction_machine")
 
     if bind_eligibility(app, deployment, env):
@@ -2894,6 +3015,21 @@ def ensure_configured(app: Any, env: Mapping[str, str] | None = None) -> tuple[s
         # idempotent and returns immediately once something is bound, so this costs one bind
         # and not one per request.
         bind_code_creator(app, None, env)
+        # And an exchange nobody configured still HOLDS ITS AUCTIONS SOMEWHERE. This is the
+        # branch the shipped container can actually land in: `apps/exchange/compose.yaml`
+        # forwards named variables into an image whose deployment document is generated by a
+        # script, so `EXCHANGE_AUCTION_STORE` has to work with no document at all or the seam
+        # is unreachable from compose — the `EXCHANGE_SHOP_ROSTER` trap, which that file's own
+        # comment records as "⚠️ IT DOES NOTHING ON ITS OWN".
+        #
+        # It also binds the LEDGER SINK, which this branch did not do at all: an exchange with
+        # no document previously left `auction/routes.py::_machine` to install one on the first
+        # write, and that accessor's own docstring records the door it cannot cover —
+        # `GET /auctions/{id}` reaches it with no composition hook in front of it, so a read
+        # arriving first installed the fallback for the life of the process. `bind_ledger_sink`
+        # falls back to `ENV_TRUST_URL` and then `DEFAULT_TRUST_URL` exactly as that accessor
+        # does, so the sink is the same one and only its timing moves.
+        bind_auction_machine(app, None, env)
         # Deliberately NOT cached. "No deployment configured" is two `os.environ` lookups to
         # re-establish, and caching it meant a document that appeared after the first request
         # was ignored for the life of the process — a real trap for an operator who starts the

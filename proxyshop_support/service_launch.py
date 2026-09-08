@@ -232,34 +232,58 @@ def check_redis() -> None:
 
 
 def check_neo4j() -> None:
-    """The bolt endpoint answers and accepts these credentials.
+    """The bolt endpoint answers and accepts THE CREDENTIAL THE SERVED CODE WILL OFFER.
 
     ``verify_connectivity`` opens a real session against the configured URI rather than
     TCP-probing the port: a Neo4j that is listening but still recovering its store answers a
     socket connect and refuses a session, and the difference is exactly the window in which
     an ingest container would report healthy and fail every write.
 
-    Only ``services/ingest`` declares this check, because only the ingest image installs the
-    ``neo4j`` driver -- ``apps/exchange`` ships ``ingest.graph`` but not its lazily-imported
-    driver, so an exchange probe naming ``--neo4j`` would fail on the import, not on the
-    datastore.
+    **The credential comes from** :func:`proxyshop_support.neo4j_auth.graph_credentials`,
+    which is the one resolver in the tree, and that is the substance of this function rather
+    than a tidier import. It used to read the three variables itself and default the password
+    to ``""``, against ``proxyshop_dev_pw`` in ``exchange.retrieval.roster`` and in
+    ``ingest.graph.reembed`` — the two SERVED readers this probe exists to vouch for. Three
+    defaults for one credential means this check was not a weaker or stronger version of the
+    served path's authentication, it was authentication of something else: against a server
+    with auth disabled the empty password succeeds and the served path's does not, and
+    against a server seeded with the dev pair the empty one is refused while every served
+    read works. Either way the health signal and the service disagree, silently, and the
+    container's own logs contain no line connecting them.
+
+    ``.env.example``, ``docker-compose.yml``'s ``NEO4J_AUTH`` and both compose fragments all
+    carry the same dev pair, so on the shipped stack this changes nothing; what it changes is
+    a deployment that sets ``NEO4J_PASSWORD`` for the service and not for the probe, or the
+    reverse. Neither is now expressible.
+
+    Both ``services/ingest`` and ``apps/exchange`` declare this check. The old note here said
+    only ingest could, because only the ingest image installed the ``neo4j`` driver — both
+    halves have since moved: ``apps/exchange/Dockerfile`` installs ``neo4j==5.28.5`` and
+    ``EXCHANGE_SHOP_ROSTER`` defaults to ``graph``, so the catalogue graph is on the served
+    path of every roster-less auction.
     """
     from neo4j import GraphDatabase
 
-    uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
-    user = os.environ.get("NEO4J_USER", "neo4j")
-    password = os.environ.get("NEO4J_PASSWORD", "")
+    from proxyshop_support.neo4j_auth import graph_credentials
+
+    credentials = graph_credentials()
     driver = None
     try:
         driver = GraphDatabase.driver(
-            uri,
-            auth=(user, password),
+            credentials.uri,
+            auth=credentials.auth,
             connection_timeout=CHECK_TIMEOUT,
             connection_acquisition_timeout=CHECK_TIMEOUT,
         )
         driver.verify_connectivity()
     except Exception as exc:  # noqa: BLE001 - every neo4j failure is "not ready"
-        raise NotReady(f"neo4j at {uri} did not accept a session: {exc}") from exc
+        # `describe()` and never the password: an operator reading a stuck container's health
+        # log needs to know WHICH credential was offered and where it came from — the two
+        # answers are "NEO4J_PASSWORD" and "the development default, because NEO4J_PASSWORD is
+        # unset", and the second is the one that explains an `Unauthorized` in production.
+        raise NotReady(
+            f"neo4j at {credentials.describe()} did not accept a session: {exc}"
+        ) from exc
     finally:
         if driver is not None:
             with contextlib.suppress(Exception):

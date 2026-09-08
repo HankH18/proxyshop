@@ -95,6 +95,8 @@ from ingest.graph import (
     candidate_shops,
 )
 
+from proxyshop_support.neo4j_auth import graph_credentials
+
 from .criteria import MalformedIntent, UndecidableCriterion, build_query
 from .fit import FitAssessment
 from .service import CandidateRetrieval
@@ -510,14 +512,18 @@ def graph_sessions_from_env(env: Mapping[str, str] | None = None) -> Callable[[]
         A callable returning an open session. Whether the graph is reachable is not known
         until it is called.
     """
-    import os  # noqa: PLC0415 — read at call time so a test can drive `env`
-
-    source = dict(os.environ if env is None else env)
-    key = (
-        source.get("NEO4J_URI", "bolt://localhost:7687"),
-        source.get("NEO4J_USER", "neo4j"),
-        source.get("NEO4J_PASSWORD", "proxyshop_dev_pw"),
-    )
+    # THE CREDENTIAL IS NOT RESOLVED HERE. `proxyshop_support.neo4j_auth` is the one place in
+    # the tree that reads NEO4J_URI/USER/PASSWORD, and this line is what makes that true for
+    # the exchange's served path. It used to spell its own three defaults, one of which —
+    # `NEO4J_PASSWORD` -> "proxyshop_dev_pw" — disagreed with the readiness probe's `""`
+    # (`proxyshop_support/service_launch.py::check_neo4j`). A probe that offers a different
+    # credential from the code it vouches for is not a stricter or looser check, it is a check
+    # of something else: it can report a container healthy while every solicitation here is
+    # refused `Neo.ClientError.Security.Unauthorized`, with nothing in the logs connecting the
+    # two. The resolver also says WHERE the password came from, which is what turns that
+    # refusal into a diagnosis — see `GraphCredentials.describe`.
+    credentials = graph_credentials(env)
+    key = credentials.cache_key
 
     def sessions() -> Any:
         driver = _DRIVERS.get(key)
@@ -531,8 +537,9 @@ def graph_sessions_from_env(env: Mapping[str, str] | None = None) -> Callable[[]
                 if driver is None:
                     from neo4j import GraphDatabase  # noqa: PLC0415 — see the docstring
 
-                    uri, user, password = key
-                    driver = GraphDatabase.driver(uri, auth=(user, password), connection_timeout=5)
+                    driver = GraphDatabase.driver(
+                        credentials.uri, auth=credentials.auth, connection_timeout=5
+                    )
                     _DRIVERS[key] = driver
         return driver.session()
 

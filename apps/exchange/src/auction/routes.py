@@ -816,14 +816,26 @@ def _machine(request: Request) -> AuctionStateMachine:
     in ``POST /auctions/{auction_id}/accept``, so on both write paths the document wins over
     this fallback rather than racing it.
 
-    Stated exactly, because it is one door short of "always", and this is the ONE lazy default
-    in this module of which that is true: every other one (``_solicitor``, ``_eligibility``,
-    ``_bid_book``) is reached only from inside a handler the hook has already run in, while
-    ``GET /auctions/{auction_id}`` below reaches this function with **no** composition hook in
-    front of it. So a read arriving before this app's first write installs the fallback, and a
-    document's ``trust_url`` is then never applied for the life of the process. The failure is
-    bounded and in the safe direction — the seam degrades to
-    :data:`~..composition.DEFAULT_TRUST_URL`, never to a sink that goes nowhere.
+    Every door is now covered, and this paragraph used to say otherwise. It read "it is one
+    door short of always" and named ``GET /auctions/{auction_id}``, which reached this function
+    with no composition hook in front of it — so a process whose FIRST request was a read
+    installed the fallback for its whole life and a document's ``trust_url`` was never applied.
+    That door takes the hook now (see :func:`read_auction`), and closing it was not tidying:
+    once ``exchange.composition`` learned to select the auction STORE, the same first-read
+    would have discarded an operator's ``auction_store: "redis"`` and left a money path on a
+    process-local store nobody chose.
+
+    So what remains here is a genuine default rather than a race: it is reached only by an app
+    with no deployment configured at all, where :func:`~..composition.ensure_configured`'s own
+    no-document branch has already bound a machine anyway. It is kept because an app assembled
+    by hand — every test in this repository — must still get a working machine, and because a
+    default that goes to :data:`~..composition.DEFAULT_TRUST_URL` is the safe direction to fail
+    in; a sink that goes nowhere is not.
+
+    The store follows the same environment the composition root reads, so a hand-assembled app
+    in a process that states ``EXCHANGE_AUCTION_STORE`` gets the store it stated rather than a
+    silent process-local one. ``None`` — nothing stated — leaves ``AuctionStateMachine`` to
+    build its own bounded :class:`~.state.InMemoryAuctionStore`.
 
     The import is deferred for the reason ``_bind_the_deployment``'s is: ``composition``
     imports the route modules, so a module-scope import here would be a cycle.
@@ -831,8 +843,9 @@ def _machine(request: Request) -> AuctionStateMachine:
     machine = getattr(request.app.state, "auction_machine", None)
     if machine is None:
         from ..composition import default_ledger_sink  # noqa: PLC0415 — see the docstring
+        from .state import auction_store_from_env  # noqa: PLC0415 — sibling module
 
-        machine = AuctionStateMachine(ledger=default_ledger_sink())
+        machine = AuctionStateMachine(store=auction_store_from_env(), ledger=default_ledger_sink())
         request.app.state.auction_machine = machine
     return machine
 
@@ -2003,14 +2016,28 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
     window = bid_window_seconds(body.bid_timeout_seconds)
     deadline = opened_at + window
 
-    machine.create(
-        auction_id,
-        intent_id=str(intent.get("intent_id", "")),
-        cluster_id=str(intent.get("cluster_id", "")),
-        roster=roster,
-        deadline=deadline,
-    )
-    machine.open(auction_id, now=opened_at)
+    # `UnknownAuction` is caught on every write, not only on the read below, and that is a
+    # consequence of the store having a CAP. Before it had one, an id that `create` had just
+    # written could not stop existing, so `open` and `close` could not fail this way and
+    # nothing here guarded it — an evicted record would have surfaced as an unhandled
+    # `KeyError`, i.e. an unauthenticated 500, on a door that had just answered `201`.
+    #
+    # 503 and not 404: the auction did exist, this process could not keep it, and the caller
+    # did nothing wrong. That is a statement about the deployment — raise
+    # `DEFAULT_AUCTION_CAPACITY`, or move to the Redis store, both of which the store's own
+    # message names — and the status that says "try again, this is ours" rather than "there is
+    # no such thing".
+    try:
+        machine.create(
+            auction_id,
+            intent_id=str(intent.get("intent_id", "")),
+            cluster_id=str(intent.get("cluster_id", "")),
+            roster=roster,
+            deadline=deadline,
+        )
+        machine.open(auction_id, now=opened_at)
+    except UnknownAuction as exc:
+        raise HTTPException(status_code=503, detail=redact_addresses(exc)) from exc
 
     result = solicit_bids(
         roster=roster,
@@ -2126,12 +2153,18 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
     # auction OPEN rather than CLOSED. Both are a 500 to this caller and neither is servable —
     # a closed auction with no stored shortlist has nothing for the accept door to read — and
     # an auction left open is the state the 15-minute TTL is designed to collect.
-    record = machine.close(
-        auction_id,
-        now=closed_at,
-        shortlist_size=len(shortlist.get("slots") or ()),
-        outcome=auction_outcome(result, ranking, roster=roster, shortlist=shortlist),
-    )
+    try:
+        record = machine.close(
+            auction_id,
+            now=closed_at,
+            shortlist_size=len(shortlist.get("slots") or ()),
+            outcome=auction_outcome(result, ranking, roster=roster, shortlist=shortlist),
+        )
+    except UnknownAuction as exc:
+        # The widest window on this door: `open` to `close` spans the whole bid window, which
+        # is seconds of solicitation I/O. See the note above `machine.create` for why this is
+        # a 503.
+        raise HTTPException(status_code=503, detail=redact_addresses(exc)) from exc
 
     # What this auction PUT IN FRONT OF THE BUYER, recorded where it is stored so the ledger
     # names the same object `GET /auctions/{auction_id}/shortlist` will serve.
@@ -2212,7 +2245,38 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
 
 @router.get("/auctions/{auction_id}")
 async def read_auction(auction_id: str, request: Request) -> dict[str, Any]:
-    """The auction's current state — 404 once its 15-minute TTL has taken it away."""
+    """The auction's current state — 404 once the store has let it go.
+
+    ``_bind_the_deployment`` runs here too, and this line is the reason :func:`_machine`'s
+    docstring no longer has to describe itself as "one door short of always". This was the ONE
+    door that reached the lazy default with no composition hook in front of it, so a process
+    whose first request was a read installed the fallback machine for its whole life and every
+    later write inherited it: the document's ``trust_url`` was silently discarded, and once the
+    store became configurable (``auction_store`` / ``EXCHANGE_AUCTION_STORE``) so was an
+    operator's choice of Redis. A deployment that asked for a durable store and got the
+    process-local one because a health check read an auction id first is precisely the silent
+    downgrade that seam exists to prevent.
+
+    A malformed document is therefore a 503 on this door as well, exactly as it already is on
+    both write doors. That is the intended trade: the alternative is a read that answers 200
+    off a machine the deployment never sanctioned.
+
+    ``auction_id`` is length-checked here for the reason every caller-chosen identifier in the
+    request BODY already is (:data:`MAX_IDENTIFIER_LENGTH`, and see
+    ``test_auction.py``'s over-long-identifier suite): the 404 body quotes the id back, so an
+    unchecked path parameter is a refusal that grows with what it refused. Measured: a
+    4,000-character id came back verbatim in a 4,611-character detail. Refused rather than
+    truncated, so the bound reads the same way on both doors.
+    """
+    _bind_the_deployment(request)
+    if len(auction_id) > MAX_IDENTIFIER_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"auction_id is {len(auction_id)} characters; this exchange reads at most "
+                f"{MAX_IDENTIFIER_LENGTH}. An auction id is a name, not a document"
+            ),
+        )
     try:
         record = _machine(request).get(auction_id)
     except UnknownAuction as exc:

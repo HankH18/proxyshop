@@ -22,7 +22,7 @@ products with similar names outrank the right product with the right attributes.
 from __future__ import annotations
 
 import argparse
-import os
+import logging
 import sys
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -43,6 +43,10 @@ from .schema import (
     schema_report,
 )
 from .upsert import EmbeddingDimensionMismatch, clear_product_embedding, set_product_embedding
+
+#: This module's logger. Named ``ingest.graph.reembed``, which is what an operator greps when
+#: a refresh or a re-embed run cannot open a session.
+_log = logging.getLogger(__name__)
 
 #: How many products to pull per round trip.
 DEFAULT_BATCH_SIZE = 200
@@ -533,25 +537,46 @@ def reembed_products(
 def graph_driver() -> Iterator[Any]:
     """Open a ``neo4j.Driver`` from ``NEO4J_URI`` / ``NEO4J_USER`` / ``NEO4J_PASSWORD``.
 
-    D41: the connection details are environment-supplied, never literals in a test. The
-    fallbacks here match ``.env.example`` and exist so the CLI is runnable from a shell that
-    has sourced nothing; test code takes the ``neo4j_driver`` fixture instead.
+    D41: the connection details are environment-supplied, never literals in a test. Resolved
+    through :func:`proxyshop_support.neo4j_auth.graph_credentials`, which is the ONLY place in
+    the tree that reads those three names and supplies a fallback.
+
+    The three defaults used to be spelled here, and the docstring claimed "the fallbacks here
+    match ``.env.example``" — true of this function and false of the tree, because
+    ``proxyshop_support/service_launch.py``'s readiness probe defaulted the password to ``""``
+    while this one and ``exchange.retrieval.roster``'s used ``proxyshop_dev_pw``. Two of the
+    three were on served paths (``scheduler.catalog.graph_session`` is this function's caller
+    behind ``POST /refresh/{store_id}``), so "which password does this deployment use" had no
+    single answer. It has one now, and a failure says which — see
+    :meth:`~proxyshop_support.neo4j_auth.GraphCredentials.describe`.
 
     Yields:
         A connected driver, closed on exit.
+
+    Raises:
+        Exception: whatever the driver raises when the server refuses the credential — the
+            type is left alone so a caller catching ``neo4j.exceptions.AuthError`` still
+            does — with :meth:`~proxyshop_support.neo4j_auth.GraphCredentials.describe`'s
+            account of WHERE that credential came from logged beside it. The password itself
+            never reaches a log or a message.
     """
     from neo4j import GraphDatabase
 
-    driver = GraphDatabase.driver(
-        os.environ.get("NEO4J_URI", "bolt://localhost:7687"),
-        auth=(
-            os.environ.get("NEO4J_USER", "neo4j"),
-            os.environ.get("NEO4J_PASSWORD", "proxyshop_dev_pw"),
-        ),
-        connection_timeout=5,
-    )
+    from proxyshop_support.neo4j_auth import graph_credentials
+
+    credentials = graph_credentials()
+    driver = GraphDatabase.driver(credentials.uri, auth=credentials.auth, connection_timeout=5)
     try:
-        driver.verify_connectivity()
+        try:
+            driver.verify_connectivity()
+        except Exception:
+            # The driver's own message names the server's complaint and NOT the credential
+            # this process offered, which is the difference between "authentication failed"
+            # and a diagnosis. Logged rather than wrapped: re-raising a different exception
+            # type here would break every caller that catches `neo4j.exceptions.AuthError`,
+            # and the operator needs both halves anyway.
+            _log.error("neo4j refused a session: %s", credentials.describe())
+            raise
         yield driver
     finally:
         driver.close()

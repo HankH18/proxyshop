@@ -28,6 +28,13 @@ belongs to no feature package:
     every INFO call site in the product was dropped before a record was built. Importing
     this module changes nothing; a service calls ``configure_logging()`` on its startup
     path. Also carries the per-request correlation id (``RequestIdMiddleware``).
+``neo4j_auth``
+    The one resolution of ``NEO4J_URI``/``NEO4J_USER``/``NEO4J_PASSWORD``. It is here rather
+    than in a feature package because the READINESS PROBE (``service_launch``) and the two
+    served readers (``exchange.retrieval.roster``, ``ingest.graph.reembed``) all need it, and
+    while they each spelled their own defaults the probe authenticated with ``""`` and the
+    served paths with ``proxyshop_dev_pw`` — a health signal vouching for a credential the
+    service does not use.
 ``neo4j_lock``
     D37's cross-worker ``flock`` on ``/tmp/proxyshop-neo4j.lock``.
 ``reachability``
@@ -47,6 +54,7 @@ __all__ = [
     "fixture_loader",
     "llm_double",
     "logging_config",
+    "neo4j_auth",
     "neo4j_lock",
     "reachability",
     "redis_client",
