@@ -97,6 +97,40 @@ DEFAULT_DSN_ENV: tuple[str, ...] = (
     "PROXYSHOP_PG_DSN_APP",
 )
 
+#: Which ROLE each of :data:`DEFAULT_DSN_ENV` names, for resolving the password the variable
+#: itself does not carry. ``PROXYSHOP_LEDGER_DSN`` is deliberately absent: it is the explicit
+#: operator override, it names no role in its own spelling, and an operator who writes one
+#: writes the whole thing.
+_DSN_ENV_ROLES: dict[str, str] = {
+    "PROXYSHOP_PG_DSN_TRUST_RW": "trust_rw",
+    "PROXYSHOP_PG_DSN_APP": "app",
+}
+
+
+def _with_resolved_password(env_name: str, dsn: str) -> str:
+    """``dsn`` with the password for whichever role ``env_name`` names.
+
+    EVERY DSN this repository ships is password-free by design (T-112) --
+    ``apps/trust/compose.yaml`` forwards
+    ``postgresql://trust_rw@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}`` and
+    ``.env.example`` documents the same shape -- so reading the variable raw handed libpq an
+    EXPLICITLY EMPTY password, which it refuses with ``fe_sendauth: no password supplied``
+    before the request reaches the server. Measured against a live cluster; the ledger writer
+    and, through :func:`trust.claims.routes.connection_for`, the claims connection with it,
+    could not open in any deployment using the shipped configuration.
+
+    A DSN that already carries a password is returned untouched --
+    :func:`proxyshop_support.postgres.role_password` says so -- and so is one under an env var
+    naming no role, because that is the explicit override.
+    """
+    role = _DSN_ENV_ROLES.get(env_name)
+    if role is None:
+        return dsn
+    from proxyshop_support.postgres import with_role_password
+
+    return with_role_password(role, dsn)
+
+
 #: Constraints that mean "somebody else is already at this position in the chain". Both are
 #: forks, not duplicates: the incoming event is fine and its predecessor moved.
 _FORK_CONSTRAINTS = frozenset({"commerce_events_prev_hash_key", "commerce_events_event_hash_key"})
@@ -257,7 +291,7 @@ class PostgresEventStore:
         for name in DEFAULT_DSN_ENV:
             value = os.environ.get(name)
             if value:
-                return value
+                return _with_resolved_password(name, value)
         raise StoreUnavailable(
             f"the ledger writer has no database to write to: no DSN was passed and none of "
             f"{list(DEFAULT_DSN_ENV)} is set. Set one, or inject a store on "

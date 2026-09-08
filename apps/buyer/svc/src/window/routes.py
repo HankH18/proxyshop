@@ -238,7 +238,13 @@ def _connection() -> Any | None:
         return None
     import psycopg  # noqa: PLC0415 - a database-less boot must not need the driver
 
-    fresh = psycopg.connect(dsn, autocommit=True)
+    from proxyshop_support.postgres import with_role_password  # noqa: PLC0415 - same reason
+
+    # The password is resolved here, not assumed to be in the variable: every DSN this
+    # repository ships is password-free (T-112), so a raw read reached libpq as an explicitly
+    # empty password and died with `fe_sendauth: no password supplied`. See
+    # :func:`buyer_svc.auth.routes._vault_from_env`, which had the same defect.
+    fresh = psycopg.connect(with_role_password("app", dsn), autocommit=True)
     with _slot:
         winner = _held["connection"]
         if winner is None or getattr(winner, "closed", False):

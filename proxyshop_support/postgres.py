@@ -188,6 +188,47 @@ def role_dsn(role: str, worker: int | None = None, *, database: str | None = Non
     return _with_database(base, database or database_name(worker))
 
 
+def with_role_password(role: str, dsn: str) -> str:
+    """``dsn``, with ``role``'s password filled in when ``dsn`` carries none of its own.
+
+    :func:`role_dsn` is the call for anything that wants *a* DSN. This is for the handful of
+    callers that read a ``PROXYSHOP_PG_DSN_*`` variable DIRECTLY, because for them an UNSET
+    variable means "no database at all" -- a meaning ``role_dsn`` cannot express, since it
+    always answers with the compose default. Those callers still need the credential resolved
+    the same way, and **every DSN this repository ships is password-free on purpose** (T-112:
+    a literal in a file every worktree copies stops agreeing with the cluster the moment the
+    credential changes).
+
+    MEASURED, before this existed, against a live cluster::
+
+        PROXYSHOP_PG_DSN_VAULT=postgresql://buyer_vault@localhost:5432/proxyshop_w5
+        psycopg.connect(...) -> OperationalError: connection to server at "127.0.0.1",
+                                port 5432 failed: fe_sendauth: no password supplied
+
+    That is the exact value ``.env.example`` documents AND the exact shape
+    ``apps/buyer/compose.yaml`` and ``apps/trust/compose.yaml`` forward, so the login vault,
+    the profile publisher and the trust ledger writer were unreachable in every deployment
+    that used the shipped configuration, while ``role_dsn``'s callers next door were fine.
+
+    The DATABASE component is left exactly as given, unlike :func:`role_dsn`'s: a caller handed
+    a DSN that names a database means that database, and rewriting it to
+    ``proxyshop_w<worker>`` would repoint a container at a database that does not exist.
+
+    Args:
+        role: one of :data:`ROLES`. Anything else raises ``KeyError``, rather than silently
+            connecting with some other principal's password.
+        dsn: the DSN as the environment gave it.
+
+    Returns:
+        ``dsn`` unchanged when it already carries a password of its own (an operator who wrote
+        one means it), otherwise the same DSN with the resolved password percent-encoded in.
+    """
+    if role not in ROLES:
+        raise KeyError(f"unknown role {role!r}; expected one of {sorted(ROLES)}")
+    password = role_password(role, dsn)
+    return dsn if password is None else _with_password(dsn, password)
+
+
 def maintenance_dsn(worker: int | None = None) -> str:
     """Admin DSN pointed at the maintenance database, for ``CREATE DATABASE``."""
     return role_dsn("admin", worker, database=MAINTENANCE_DATABASE)

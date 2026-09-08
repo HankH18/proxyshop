@@ -26,6 +26,7 @@ import subprocess
 import sys
 import textwrap
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -519,10 +520,16 @@ def test_every_pair_of_ledger_dsn_variables_resolves_to_the_earlier_one(
             monkeypatch.setenv(later, f"postgresql://{later.lower()}@db.example:5432/w0")
 
             resolved = PostgresEventStore()._resolve_dsn()
-            assert resolved == f"postgresql://{earlier.lower()}@db.example:5432/w0", (
+            # The PRINCIPAL, not the raw string: `_resolve_dsn` fills in the role password the
+            # variable does not carry (every DSN this repo ships is password-free by design),
+            # so a byte-for-byte comparison would grade the credential rather than the ORDER
+            # this loop exists to grade — and would go red on a change that moved no order at
+            # all. The username IS the question "which principal did the writer resolve".
+            assert urlsplit(resolved).username == earlier.lower(), (
                 f"with {earlier} and {later} both set the writer resolved {resolved!r}; "
                 f"{earlier} is listed first in DEFAULT_DSN_ENV and must win"
             )
+            assert urlsplit(resolved).hostname == "db.example"
 
     granted = _granted_ledger_dsn_precedence()
     assert set(granted) <= set(DEFAULT_DSN_ENV), (
@@ -537,7 +544,9 @@ def test_every_pair_of_ledger_dsn_variables_resolves_to_the_earlier_one(
             monkeypatch.setenv(later, f"postgresql://{later.lower()}@db.example:5432/w0")
 
             resolved = PostgresEventStore()._resolve_dsn()
-            assert resolved == f"postgresql://{earlier.lower()}@db.example:5432/w0", (
+            # The principal again, for the reason the first walk states: the credential is
+            # supplied by `_resolve_dsn`, and it is not what this walk is about.
+            assert urlsplit(resolved).username == earlier.lower(), (
                 f"with {earlier} and {later} both set the ledger writer resolved {resolved!r}. "
                 f"{earlier} must win, and that expectation is NOT read off DEFAULT_DSN_ENV — "
                 f"it comes from proxyshop_support.postgres.ROLES and D5's grant, so it does "
@@ -4454,7 +4463,10 @@ def test_t289_the_dsn_reordering_sabotage_is_armed() -> None:
         patch.setenv("PROXYSHOP_PG_DSN_APP", "postgresql://app@db.example:5432/w0")
         resolved = pg.PostgresEventStore()._resolve_dsn()
 
-    assert resolved == "postgresql://app@db.example:5432/w0", (
+    # The principal, for the reason the pairwise loop above states: `_resolve_dsn` supplies the
+    # password the variable omits, so the raw string carries a credential this assertion is not
+    # about.
+    assert urlsplit(resolved).username == "app", (
         f"the reordered tuple did not change what the writer resolves ({resolved!r}), so the "
         f"S3a sabotage is not a sabotage and the repro below has nothing to demand"
     )

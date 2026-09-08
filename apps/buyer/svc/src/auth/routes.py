@@ -621,7 +621,20 @@ def _vault_from_env() -> PseudonymVault | None:
         return None
     import psycopg
 
-    return PseudonymVault(PostgresPseudonymStore(psycopg.connect(dsn, autocommit=True)))
+    from proxyshop_support.postgres import with_role_password
+
+    # The credential is resolved here rather than assumed to be in the variable, because every
+    # DSN this repository ships is password-free (T-112) -- `.env.example`'s and
+    # `apps/buyer/compose.yaml`'s alike. Reading the variable raw meant libpq saw an EXPLICITLY
+    # EMPTY password and refused with `fe_sendauth: no password supplied` before the request
+    # ever reached the server, so this vault could not open in ANY deployment using the shipped
+    # configuration. `role_dsn` is not the call here: an unset variable has to keep meaning
+    # "no database at all", which `role_dsn` cannot say.
+    return PseudonymVault(
+        PostgresPseudonymStore(
+            psycopg.connect(with_role_password("buyer_vault", dsn), autocommit=True)
+        )
+    )
 
 
 def build_account_directory() -> AccountDirectory:
@@ -694,7 +707,11 @@ def _app_connection_from_env() -> Any | None:
         return None
     import psycopg
 
-    return psycopg.connect(dsn, autocommit=True)
+    from proxyshop_support.postgres import with_role_password
+
+    # Same resolution as the vault's, and for the same measured reason -- see
+    # :func:`_vault_from_env`.
+    return psycopg.connect(with_role_password("app", dsn), autocommit=True)
 
 
 def build_profile_publisher() -> Callable[[BuyerProfile], None] | None:

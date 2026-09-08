@@ -5,11 +5,11 @@ Orchestrator-owned (T-000), frozen. Run from ``make check`` and ``make verify``.
 
 Fatal checks
 ------------
-1. **D35 — exactly one pytest configuration.** Only the root ``pyproject.toml`` may carry
+1. **D36 — exactly one pytest configuration.** Only the root ``pyproject.toml`` may carry
    ``[tool.pytest.ini_options]``; no ``pytest.ini``, ``tox.ini [pytest]`` or
    ``setup.cfg [tool:pytest]`` may exist anywhere. A second configuration silently changes
    ``rootdir`` and with it ``pythonpath``, ``testpaths`` and the import mode.
-2. **D36 — no "pixel" outside ``pixel/``.** The pixel ticket's verify is
+2. **D37 — no "pixel" outside ``pixel/``.** The pixel ticket's verify is
    ``npx vitest run pixel``, which vitest treats as a *case-insensitive path substring*
    filter applied across every project rather than as a project selector. Any
    ``*.test.``/``*.spec.`` file with a ts/tsx/js/jsx extension elsewhere whose path contains
@@ -183,12 +183,12 @@ def check_single_pytest_config(failures: list[str]) -> None:
         if path.endswith("pyproject.toml") and path != "pyproject.toml":
             if "[tool.pytest.ini_options]" in (ROOT / path).read_text():
                 failures.append(
-                    f"D35: {path} contains [tool.pytest.ini_options]; the root "
+                    f"D36: {path} contains [tool.pytest.ini_options]; the root "
                     f"pyproject.toml is the only pytest configuration in this repo."
                 )
         if Path(path).name == "pytest.ini":
             failures.append(
-                f"D35: {path} exists; pytest configuration lives only in the root manifest."
+                f"D36: {path} exists; pytest configuration lives only in the root manifest."
             )
         if Path(path).name in {"tox.ini", "setup.cfg"}:
             parser = configparser.ConfigParser()
@@ -198,7 +198,7 @@ def check_single_pytest_config(failures: list[str]) -> None:
                 continue
             section = "pytest" if Path(path).name == "tox.ini" else "tool:pytest"
             if parser.has_section(section):
-                failures.append(f"D35: {path} carries a [{section}] section.")
+                failures.append(f"D36: {path} carries a [{section}] section.")
 
 
 # ---------------------------------------------------------------------------- check 2
@@ -236,7 +236,7 @@ def check_pixel_path_filter(failures: list[str]) -> None:
             continue
         if needle in path.lower():
             failures.append(
-                f"D36: test file {path} has '{needle}' in its path but lives outside "
+                f"D37: test file {path} has '{needle}' in its path but lives outside "
                 f"{needle}/. `npx vitest run {needle}` filters by case-insensitive path "
                 f"substring, so this file would silently join that ticket's run."
             )

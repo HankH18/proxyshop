@@ -57,6 +57,7 @@ from proxyshop_support.postgres import (
     ROLES,
     SEEDED_ROLES,
     role_dsn,
+    with_role_password,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -650,3 +651,146 @@ def test_a_fresh_volume_with_no_variable_still_connects_on_the_dev_default(
                 with conn.cursor() as cur:
                     cur.execute("select current_user")
                     assert cur.fetchone() == (role,)
+
+
+# =====================================================================================
+# The THIRD side: the callers that read a PROXYSHOP_PG_DSN_* variable directly
+#
+# The two sides above -- seed and connect -- are both about `role_dsn`. A handful of callers
+# never go through it, because for them an UNSET variable has to keep meaning "no database at
+# all", which `role_dsn` cannot express: it always answers with the compose default. Those
+# callers read the raw variable and handed it straight to `psycopg.connect`.
+#
+# Every DSN this repository ships is PASSWORD-FREE by design (that is what T-112 decided), so
+# a raw read reached libpq as an EXPLICITLY EMPTY password and was refused with `fe_sendauth:
+# no password supplied` before the request left the process. MEASURED against a live cluster,
+# before `with_role_password` existed:
+#
+#     PROXYSHOP_PG_DSN_VAULT=postgresql://buyer_vault@localhost:5432/proxyshop_w5
+#     buyer_vault  RAW      -> OperationalError: fe_sendauth: no password supplied
+#     buyer_vault  RESOLVED -> OK
+#
+# so the login vault, the profile publisher, the store-window read and the trust ledger writer
+# could not open a connection in ANY deployment using the configuration this repository ships
+# -- the "wired but switched off in every deployment" shape, four times over.
+#
+# It is graded here, beside the other two sides, because `with_role_password` is
+# `proxyshop_support`'s and this file is what the lane gate runs.
+# =====================================================================================
+
+#: The four (role, env var) pairs a service reads directly, with the exact DSN shape the
+#: compose fragments forward. Spelled out rather than derived from ``ROLES`` so that a change
+#: to either side has to be made here too.
+SHIPPED_DIRECT_READS = (
+    ("buyer_vault", "PROXYSHOP_PG_DSN_VAULT", "postgresql://buyer_vault@{host}:{port}/{db}"),
+    ("app", "PROXYSHOP_PG_DSN_APP", "postgresql://app@{host}:{port}/{db}"),
+    ("trust_rw", "PROXYSHOP_PG_DSN_TRUST_RW", "postgresql://trust_rw@{host}:{port}/{db}"),
+)
+
+
+@pytest.mark.parametrize("role,_env,shape", SHIPPED_DIRECT_READS)
+def test_the_dsn_shapes_this_repo_ships_carry_no_password_of_their_own(
+    role: str, _env: str, shape: str
+) -> None:
+    """The premise of everything below: if these ever gain a password, the gate is vacuous."""
+    dsn = shape.format(host="postgres", port=5432, db="proxyshop_w1")
+    assert urlsplit(dsn).password is None
+    assert with_role_password(role, dsn) != dsn, (
+        f"{role}'s shipped DSN carries no password and with_role_password supplied none "
+        f"either, so a direct reader still cannot connect: {dsn}"
+    )
+
+
+@pytest.mark.parametrize("role,_env,shape", SHIPPED_DIRECT_READS)
+def test_a_dsn_that_states_its_own_password_is_returned_byte_for_byte(
+    role: str, _env: str, shape: str
+) -> None:
+    """The honest-operator direction. An explicit credential must never be overwritten."""
+    stated = shape.format(host="db.example", port=5432, db="proxyshop").replace(
+        "@", ":deliberately-chosen@", 1
+    )
+    assert with_role_password(role, stated) == stated
+
+
+def test_with_role_password_refuses_a_role_it_does_not_know() -> None:
+    """A typo must not silently authenticate as some other principal."""
+    with pytest.raises(KeyError):
+        with_role_password("postgres", "postgresql://postgres@localhost:5432/proxyshop_w1")
+
+
+@pytest.mark.docker("postgres")  # T-172: declares Postgres; a Redis/Neo4j outage must not skip it
+@pytest.mark.parametrize("role,env_var,shape", SHIPPED_DIRECT_READS)
+def test_the_shipped_password_free_dsn_opens_a_connection_after_resolution(
+    role: str, env_var: str, shape: str, worker_index: int
+) -> None:
+    """Against the shared cluster, both directions: raw is refused, resolved connects.
+
+    The raw half is what makes this a gate rather than a smoke test. A connection that opens
+    for some other reason -- a ``.pgpass``, a ``PGPASSWORD`` in the environment, ``trust``
+    auth -- would let the resolution be deleted and this test stay green, so the refusal is
+    asserted first and its MESSAGE is checked: ``fe_sendauth`` and nothing else.
+    """
+    import psycopg
+
+    dsn = shape.format(host="localhost", port=5432, db=f"proxyshop_w{worker_index}")
+
+    with pytest.raises(psycopg.OperationalError) as refused:
+        psycopg.connect(dsn, connect_timeout=10)
+    assert "fe_sendauth" in str(refused.value), (
+        f"{role} was refused for some reason other than the missing password, so this test "
+        f"is not evidence that the resolution below is doing anything: {refused.value}"
+    )
+
+    with psycopg.connect(with_role_password(role, dsn), connect_timeout=10) as conn:
+        with conn.cursor() as cur:
+            cur.execute("select current_user")
+            assert cur.fetchone() == (role,)
+
+
+@pytest.mark.docker("postgres")  # T-172: declares Postgres; a Redis/Neo4j outage must not skip it
+def test_every_direct_reader_seam_opens_the_connection_it_promises(
+    worker_index: int, monkeypatch
+) -> None:
+    """The four SEAMS, driven -- not the helper they happen to call.
+
+    Each of these reads its own variable and connects; a fix applied to three of them and
+    missed on the fourth is exactly the shape this repository keeps producing, so all four are
+    driven here rather than trusting a grep.
+    """
+    database = f"proxyshop_w{worker_index}"
+    monkeypatch.setenv(
+        "PROXYSHOP_PG_DSN_VAULT", f"postgresql://buyer_vault@localhost:5432/{database}"
+    )
+    monkeypatch.setenv("PROXYSHOP_PG_DSN_APP", f"postgresql://app@localhost:5432/{database}")
+    monkeypatch.setenv(
+        "PROXYSHOP_PG_DSN_TRUST_RW", f"postgresql://trust_rw@localhost:5432/{database}"
+    )
+    monkeypatch.delenv("PROXYSHOP_LEDGER_DSN", raising=False)
+
+    from buyer_svc.auth.routes import _app_connection_from_env, _vault_from_env
+    from buyer_svc.window import routes as window_routes
+    from trust.events.pg import PostgresEventStore
+
+    vault = _vault_from_env()
+    assert vault is not None, "the vault seam returned None with its variable set"
+
+    app_connection = _app_connection_from_env()
+    assert app_connection is not None
+    app_connection.close()
+
+    window_routes.set_window_connection(None)
+    window_connection = window_routes._connection()
+    assert window_connection is not None
+    window_routes.set_window_connection(None)
+
+    import psycopg
+
+    ledger_dsn = PostgresEventStore()._resolve_dsn()
+    assert urlsplit(ledger_dsn).password, (
+        "the trust ledger writer resolved a DSN with no password, so it would be refused "
+        f"with fe_sendauth before reaching the server: {ledger_dsn}"
+    )
+    with psycopg.connect(ledger_dsn, connect_timeout=10) as conn:
+        with conn.cursor() as cur:
+            cur.execute("select current_user")
+            assert cur.fetchone() == ("trust_rw",)

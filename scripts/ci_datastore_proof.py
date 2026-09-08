@@ -61,12 +61,19 @@ It also pins two things measured the hard way while this pipeline was being buil
   A stock ``redis:7-alpine`` reports ``databases 16`` — measured, this host — so an index of
   16 or more turns every Redis test into an error the moment someone drops the ``--databases
   64`` override out of a service definition.
-* **A CI file must not set the four role DSN variables.** ``PROXYSHOP_PG_DSN_APP`` set to the
-  password-free shape ``.env.example`` ships breaks two buyer-service tests outright —
-  measured, and reported separately: ``buyer_svc.auth.routes`` reads that variable directly
-  instead of through ``proxyshop_support.postgres.role_dsn``, so the password ``role_dsn``
-  would have supplied never arrives and the connection dies with ``fe_sendauth: no password
-  supplied``. Only ``PROXYSHOP_PG_DSN_ADMIN`` may be set, and only because
+* **A CI file must not set the four role DSN variables.** The ORIGINAL reason is fixed and
+  this rule is not. What was measured: ``PROXYSHOP_PG_DSN_APP``, set to the password-free
+  shape ``.env.example`` ships, broke two buyer-service tests outright, because
+  ``buyer_svc.auth.routes`` reads that variable directly rather than through
+  ``proxyshop_support.postgres.role_dsn`` and so never got the password —
+  ``fe_sendauth: no password supplied``. Every direct reader now resolves the credential
+  through ``proxyshop_support.postgres.with_role_password``, graded by the direct-reader
+  section of ``proxyshop_support/tests/test_role_password_end_to_end.py``, so that particular
+  failure is gone. What remains is the DATABASE: unlike ``role_dsn``, a direct reader keeps
+  whatever database the variable names, so a CI file that sets one pins those services to it
+  while the rest of the job runs against ``proxyshop_w$PROXYSHOP_WORKER`` — two halves of one
+  test against two databases, which surfaces as flakiness rather than as a configuration
+  error. Only ``PROXYSHOP_PG_DSN_ADMIN`` may be set, and only because
   ``proxyshop_support.reachability`` reads host and port from it and from nowhere else — it
   does not consult ``PGHOST``/``PG_PORT``, so without it the coverage gate probes
   ``localhost:5432`` on a job whose Postgres is at ``postgres:5432``.
