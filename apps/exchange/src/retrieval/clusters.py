@@ -131,6 +131,7 @@ __all__ = [
     "SOURCE_ASSIGNED",
     "SOURCE_STATED",
     "SOURCE_UNASSIGNED",
+    "TERM_PHRASE_WORD_CAP",
     "TERM_WEIGHT",
     "ClusterAssignment",
     "ClusterRow",
@@ -152,9 +153,39 @@ CATEGORY_WEIGHT = 3.0
 #: comparators, not a word that happened to appear in a sentence.
 CONSTRAINT_WEIGHT = 2.0
 
-#: What one matched term contributes. The lightest, because free text is the weakest evidence
+#: What one matched term contributes, PER WORD in the term, up to
+#: :data:`TERM_PHRASE_WORD_CAP`. The lightest signal, because free text is the weakest evidence
 #: this module has and DESIGN forbids retrieval by product name alone.
 TERM_WEIGHT = 1.0
+
+#: How many of a term's words may be counted. Two, so a term of two or more words carries the
+#: same weight as two independent single-word hits and no more.
+#:
+#: **Per word rather than per term, and this is the bar's own rule applied to phrases rather
+#: than a loosening of it.** :data:`MIN_ASSIGNMENT_SCORE` refuses "a single incidental WORD";
+#: it was never a rule about a single incidental PHRASE, and a phrase is not the thing it was
+#: written against. Its own counter-example is a one-word term: the row ``{"cluster_id":
+#: "cluster-coffee"}`` and the query *"a walnut coffee table for the lounge"*, which must stay
+#: unassigned — ``coffee`` is one word, still weighs 1.0, and still fails to clear the bar
+#: alone. Two adjacent words in order are not that: ``" milk thistle "`` cannot fall out of a
+#: sentence about furniture, because :func:`_term_hits` matches a phrase as a whole word
+#: SEQUENCE.
+#:
+#: MEASURED on the served buyer path against the demo catalogue, whose ``cluster-liver-support``
+#: row lists ``milk thistle`` among its terms::
+#:
+#:     query                                        before        after
+#:     "milk thistle"                               unassigned    cluster-liver-support
+#:     "milk thistle capsules"                      unassigned    cluster-liver-support
+#:     "liver support supplement"                   assigned      assigned    (two 1-word hits)
+#:     "milk thistle silymarin liver support ..."   assigned      assigned
+#:
+#: An unassigned intent keeps the content-hash cluster the buyer service minted for it, which
+#: no merchant's approval record can name, so every solicited store declined
+#: ``cluster_not_pursued`` and the shortlist carried catalogue prices only. A shopper typing the
+#: product's NAME is the most likely thing a shopper does, and it was the one phrasing that
+#: reached no store agent.
+TERM_PHRASE_WORD_CAP = 2
 
 #: The least evidence that may address an auction to a cluster. One :data:`TERM_WEIGHT` is
 #: deliberately BELOW it, so a single incidental word cannot authorise a store to bid.
@@ -576,7 +607,10 @@ def _weigh(
             evidence.append(f"{name}={row.attributes[name]}")
 
     for term in _term_hits(haystack, row.terms):
-        score += TERM_WEIGHT
+        # Per WORD, capped — see TERM_PHRASE_WORD_CAP. The evidence string is deliberately
+        # unchanged: `score` already carries the arithmetic, and three tests pin this format
+        # against a field no served path reads, so annotating it would cost more than it buys.
+        score += TERM_WEIGHT * min(len(term.split()), TERM_PHRASE_WORD_CAP)
         evidence.append(f"term:{term}")
 
     return score, tuple(evidence)
