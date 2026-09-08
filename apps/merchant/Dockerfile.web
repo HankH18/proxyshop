@@ -1,14 +1,16 @@
 # The proxyshop-merchant-web container — the merchant svc API *with its dashboard baked in*.
 #
-# WHAT IS BROKEN WITHOUT THIS FILE. `apps/merchant/svc/src/dashboard/routes.py:167` mounts the
-# operator dashboard at `/dashboard`, and `DashboardBundle.__call__` resolves the bundle per
-# request from `MERCHANT_UI_DIST` (`dashboard/config.py:167`). That variable is set in NO
-# compose fragment, NO .env.example, NO Dockerfile and NO script, and `apps/merchant/app/dist`
-# is both gitignored and excluded by `.dockerignore`, so it cannot be COPYd from a host either.
-# Every deployment therefore answers every `/dashboard/*` request with a 503 whose body is a
-# page telling the reader to run a build the image has no way to run. A merchant cannot see a
-# loss, edit an envelope, answer the onboarding interview or approve an activation — the whole
-# supply-side surface — in any container-based deployment, from a container reporting healthy.
+# WHAT IS BROKEN WITHOUT THIS FILE. `merchant_svc.dashboard.routes` mounts the operator
+# dashboard at `/dashboard`, and `DashboardBundle.__call__` resolves the bundle per request
+# from `MERCHANT_UI_DIST` (`merchant_svc.dashboard.config.ui_dist`). Until this file, that
+# variable was set in no compose fragment, no .env.example, no Dockerfile and no script — the
+# `ENV` line at the bottom of THIS file is the only thing in the repository that sets it — and
+# `apps/merchant/app/dist` is both gitignored and excluded by `.dockerignore`, so it could not
+# be COPYd from a host either. Every deployment therefore answered every `/dashboard/*` request
+# with a 503 whose body is a page telling the reader to run a build the image has no way to
+# run. A merchant could not see a loss, edit an envelope, answer the onboarding interview or
+# approve an activation — the whole supply-side surface — in any container-based deployment,
+# from a container reporting healthy.
 #
 # WHY IT IS A SEPARATE FILE FROM THE SIBLING `Dockerfile`, which is the question a reader will
 # ask first. The bundle can only be produced by a node build stage and brought over with
@@ -22,7 +24,8 @@
 #
 # WHY IT SERVES THE API TOO, rather than being nginx + a proxy like `buyer-web`. The merchant
 # SPA fetches ROOT-LEVEL paths — `/stores/{id}/dashboard`, `/stores/{id}/envelope`,
-# `/stores/{id}/kill`, `/stores/{id}/bids/solicit` (`app/dashboard/api.ts:272-376`) — on bare
+# `/stores/{id}/kill`, `/stores/{id}/bids/solicit` (`app/dashboard/api.ts`: `readDashboard`,
+# `saveEnvelope`, `killStore`, `reviveStore`, `solicitBid` and the rest) — on bare
 # relative `fetch`, and `merchant_svc.main.create_app` installs no CORS. The buyer's SPA is
 # namespaced under `/buyer/`, so one nginx `location` block proxies it; the merchant's is not,
 # so the equivalent would be a hostname-shaped rule over `/stores|/install|/webhooks` that goes
@@ -31,11 +34,15 @@
 # `base: '/dashboard/'` to match `DASHBOARD_MOUNT`, so the bundle's own asset URLs land on the
 # same mount, and every API call is same-origin by construction.
 #
-# WHAT COMPOSE MUST DO (owned by another lane, reported not changed): point `merchant-svc`'s
-# `build.dockerfile` at this file instead of `apps/merchant/Dockerfile`, or add a second
-# service from it. No new environment variable is needed — `MERCHANT_UI_DIST` is set BY THIS
-# IMAGE, below, because a path that only exists inside the image has no business being stated
-# outside it.
+# WHAT COMPOSE DOES, which this comment used to state as work still owed to another lane:
+# `apps/merchant/compose.yaml` points `merchant-svc`'s `build.dockerfile` at this file, and no
+# second service was added. No new environment variable was needed either — `MERCHANT_UI_DIST`
+# is set BY THIS IMAGE, below, because a path that only exists inside the image has no business
+# being stated outside it. Confirmed with `docker compose config`:
+#
+#     merchant-svc:
+#       build:
+#         dockerfile: apps/merchant/Dockerfile.web
 #
 # Build context is the REPO ROOT (as for the sibling): the flat src layout (D42) means a
 # service image reaches across member directories, and this is an npm workspace whose lockfile

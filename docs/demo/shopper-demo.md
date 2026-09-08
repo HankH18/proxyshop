@@ -105,7 +105,7 @@ profile is what turns four real merchants on. The stack it brings up:
 |---|---|---|
 | `buyer-web` | 8080 | nginx: the shopper page, and the same-origin proxy in front of the API |
 | `buyer-svc` | 8081 | the buyer's own service — clarify, confirm, shortlist, accept |
-| `merchant-svc` | 8082 | the merchant app: collector, webhooks, dashboard |
+| `merchant-svc` | 8082 | the merchant app: collector, webhooks, and the console at `/dashboard/` (§6) |
 | `exchange` | 8083 | the auction, the ranker, the checkout port |
 | `trust` | 8084 | the hash-chained ledger and the trust projection |
 | `ingest` | 8085 | entity resolution and claim extraction |
@@ -250,6 +250,78 @@ with no reachable MTA is a boot failure rather than a silent 503 at the first lo
 until this stack landed, written when buyer-svc was the only thing that could conceivably
 serve one; a link built on the API's origin 404s before the page loads, holding a credential
 that is now spent.
+
+## 6. The merchant console in a browser
+
+The supply side has a page too, and this runbook used to leave it out entirely — §3's table
+named `merchant-svc`'s dashboard and no line on this page said where to point a browser.
+
+Open **http://localhost:8082/dashboard/?store=gaiaherbs.com**.
+
+It is the same container as the API: `apps/merchant/Dockerfile.web` builds the vite bundle in
+a node stage and copies it into the python image, and one uvicorn serves both, so there is no
+second port and nothing to start. The `?store=` parameter just pre-fills the sign-in field.
+
+Sign in with the store id and the admin bearer — `dev-merchant-admin-token`, which is what
+`.env.example` ships as `MERCHANT_ADMIN_TOKEN`. The token is held for the tab only. Any of the
+four hosted stores works: `gaiaherbs.com`, `toniiq.com`, `paradiseherbs.com`,
+`oregonswildharvest.com`.
+
+**Two of the six cards carry real data on this stack, and the rest say why they cannot.** That
+is the console working, not the console broken — a card with nothing to show routes through the
+same notice component and names the variable an operator would have to set, because a blank
+region reads as "no losses" and that is a claim this deployment cannot make. Measured after §4,
+against `GET /stores/gaiaherbs.com/dashboard`:
+
+| card | what you see here |
+|---|---|
+| Onboarding | the real interview, question by question, answerable in the page. The pursue question offers `liver support`: `apps/merchant/compose.yaml` now states `NETWORK_INTENT_CLUSTERS=cluster-liver-support`, the one cluster `deploy/demo/exchange-deployment.json` actually runs auctions in, and `onboarding.script.cluster_options` puts a configured cluster ahead of anything the store's own envelope or loss report names. Unset — which it was in every deployment until that line — the panel reports `missing: ["NETWORK_INTENT_CLUSTERS"]` and a brand-new store, having no envelope and no losses, is offered nothing, so its answer is stored as `pursue_clusters: []` and its agent declines every auction `cluster_not_pursued` |
+| Trust | event payloads from the auctions §4 and §5 just ran — `bid_placed` and the rest, straight off the chained ledger, narrowed to this store. The score above them is deliberately blank: the trust service holds no observations for a store nobody has bought from yet, and a neutral low-confidence prior (R12) is said in words rather than drawn as a zero |
+| Economic envelope | `absent` — no envelope has ever been recorded for this store id. The store agents bid from `deploy/demo/store-contexts/<host>.json`, which is the agent's own file, not the merchant service's record |
+| Kill switch | `shadow`, not bidding, *"no envelope has ever been recorded for this store"*. It is armed by typing the store id, and it is live: it posts the real `POST /stores/{id}/kill` |
+| Where you lost | `not_configured`: set `EXCHANGE_URL` and `MERCHANT_REPORT_TOKENS`. The bearer is how the exchange resolves which store is asking, so it is one token per store and the merchant service holds it — the browser never sees it. Nothing in this repository ships one yet |
+| Bid activity | `not_configured`: set `STORE_AGENT_URL`. `merchant-svc` is one service and the four agents are four containers, so a single address cannot serve all four; the demo fragment states none rather than pick one |
+
+To watch the interview turn into an envelope, answer the questions and press the button. It
+writes version 1 in **shadow**, and the store still bids nothing until you type your name into
+the approval form that then appears. That is R6 and R7 end to end in the product, without a
+transcript file or a `python -m` on anyone's laptop. Driven against this stack, over the same
+routes the buttons call:
+
+```http
+PUT /stores/<id>/envelope   {"turns":[…], "completed_at":…}
+→ 200   version: 1   activation: shadow
+
+GET /stores/<id>/dashboard
+→ step: approval   envelope: ok   may_bid: False   approval offered for v1, sha256:b06332d3d2a8f…
+
+PUT /stores/<id>/envelope   {"activation":"active"}   X-Envelope-Approval: {…}
+→ 200   activation: active
+
+GET /stores/<id>/dashboard
+→ step: active   activation: active   may_bid: True   "the store's current envelope is active"
+```
+
+**Those are HTTP requests the buttons make, not shell commands** — `→` is the response. They
+carried a `$` shell prompt in an earlier draft, which is a promise that they can be typed into
+a terminal, and everything else prompted in this runbook can be. The read half you *can* type,
+with the same bearer the page signs in with:
+
+```bash
+curl -sS localhost:8082/stores/gaiaherbs.com/dashboard -H 'authorization: Bearer dev-merchant-admin-token'
+```
+
+Two things worth knowing before you try it on a store of your own invention. The store id in
+the URL has to equal the shop domain **minus** `.myshopify.com` — answer the first question
+`acme.myshopify.com` and the envelope belongs to `acme`, so `/stores/acme.com/envelope`
+answers `409 wrong-store`. (The four hosted stores are already consistent: `gaiaherbs.com` is
+what `gaiaherbs.com.myshopify.com` reduces to.) And an answer the service cannot parse is
+refused rather than filed as blank — `400 unreadable-interview`, naming the sentence — which
+is the console's own copy being literally true.
+
+Envelopes live in the merchant service's in-memory store, because `merchant-svc` is deployed
+with no `PROXYSHOP_PG_DSN_*` at all. Restarting the container forgets what you approved, which
+can only ever *stop* a store bidding, never start one.
 
 ## What can go wrong, and what each thing means
 

@@ -105,8 +105,8 @@ MAX_DISCOUNT_APPLICATIONS = 32
 #: nothing bounded the entry SIZE, and the product was a ceiling outside the box: four join
 #: keys of 200,000 characters ride comfortably under the 1 MiB body cap (800,072 bytes
 #: encoded) and retain 800,970 bytes, so a full ring held **391.10 MiB** against
-#: ``apps/merchant/compose.yaml:66  mem_limit: 256m``. The process OOMs at roughly 330
-#: anonymous requests and never reaches its own limit. A bound whose ceiling is larger than
+#: ``apps/merchant/compose.yaml``'s ``merchant-svc.mem_limit: 256m``. The process OOMs at
+#: roughly 330 anonymous requests and never reaches its own limit. A bound whose ceiling is
 #: the container is the appearance of a bound.
 #:
 #: **Where 512 comes from.** The longest join key a real beacon carries is a discount code,

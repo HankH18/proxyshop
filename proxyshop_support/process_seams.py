@@ -8,10 +8,10 @@ deliberate T-169 decision and not a defect: a call site that forgets to pass
 ``registered_domains=`` silently falls back to ``bid["store_domain"]`` — a field the *bidding
 store* wrote — so the seam exists so that wiring an app binds every call site in the process.
 
-``configure_accept`` (``apps/exchange/src/accept/routes.py:509``) therefore writes that global
-whenever an app is configured, and ``composition.py:2796`` reaches the same call. In a
-pytest session that is not one app, it is hundreds — and nothing put the global back. Measured
-at ``5ded118``::
+``exchange.accept.routes.configure_accept`` therefore calls ``use_registered_domains`` — and so
+writes that global — whenever an app is configured, and ``composition.py``'s
+``configure_exchange`` reaches the same call. In a pytest session that is not one app, it is hundreds — and nothing put the global
+back. Measured at ``5ded118``::
 
     pytest .swarm-loop/acceptance                                  -> 120 passed
     pytest apps/exchange packages/contracts packages/store-agent   -> 3157 passed, 2 xfailed
@@ -26,7 +26,7 @@ named ``store-a``/``store-b``, the leaked registry answers ``None`` for those, a
 fail-closed branch refuses every accept: *"the platform holds no registered domain for
 'store-a'; the bid's claim 'store-a.example.com' is not evidence of one"*.
 
-``apps/exchange/src/accept/claims.py:97`` predicted this in prose ("call
+``apps/exchange/src/accept/claims.py``'s module docstring predicted this in prose ("call
 ``use_registered_domains(<real registry>)`` in the same process and five frozen goals go red")
 and ``pyproject.toml``'s ``norecursedirs`` note describes the symptom ("the frozen suite
 produces phantom failures when it shares one pytest session"). Neither named the writer.

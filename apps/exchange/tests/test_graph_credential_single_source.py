@@ -3,9 +3,9 @@
 The defect this file pins, measured on this tree before the repair. ``NEO4J_PASSWORD`` had
 three code-side defaults and they disagreed::
 
-    apps/exchange/src/retrieval/roster.py:519   os.environ.get("NEO4J_PASSWORD", "proxyshop_dev_pw")
-    services/ingest/src/graph/reembed.py:549    os.environ.get("NEO4J_PASSWORD", "proxyshop_dev_pw")
-    proxyshop_support/service_launch.py:251     os.environ.get("NEO4J_PASSWORD", "")
+    exchange.retrieval.roster::graph_sessions_from_env  ("NEO4J_PASSWORD", "proxyshop_dev_pw")
+    ingest.graph.reembed::graph_driver                  ("NEO4J_PASSWORD", "proxyshop_dev_pw")
+    proxyshop_support.service_launch::check_neo4j       ("NEO4J_PASSWORD", "")
 
 The first two are SERVED. ``graph_sessions_from_env`` is bound by ``exchange.composition`` for
 both the graph roster and the catalogue snapshots, and ``apps/exchange/compose.yaml`` defaults

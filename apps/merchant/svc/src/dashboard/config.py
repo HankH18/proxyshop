@@ -143,8 +143,8 @@ def _table(raw: str, *, source: str) -> dict[str, str]:
             f"{source} must hold a JSON object of {{store_id: token}}, got {type(loaded).__name__}"
         )
     # Empty keys and empty tokens are dropped rather than stored, so no store can ever be
-    # resolved by presenting nothing — the rule `exchange.reports.configure_reports` applies
-    # to the far end of this same table.
+    # resolved by presenting nothing — the rule `exchange.reports.routes.configure_reports`
+    # applies to the far end of this same table.
     return {str(k): str(v) for k, v in loaded.items() if str(k).strip() and str(v).strip()}
 
 

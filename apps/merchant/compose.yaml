@@ -69,8 +69,9 @@ services:
       # The bearer token the administrative routes require. It appeared in NO compose
       # fragment and in NO .env.example until now, so discount-code minting and every
       # `/install/shops`, `/stores/{id}/envelope` and `/stores/{id}/kill` call was
-      # unreachable in the deployment — `install/routes.py:63` reads it with no default and
-      # no fallback, on purpose, so an unset value makes the route refuse every caller:
+      # unreachable in the deployment — `install/routes.py`'s `_refuse_unless_admin` reads it
+      # with no default and no fallback, on purpose, so an unset value makes the route refuse
+      # every caller:
       #
       #     $ curl -s localhost:8082/install/shops
       #     {"error":"admin-api-not-configured","missing":["MERCHANT_ADMIN_TOKEN"], ...}   503
@@ -80,6 +81,28 @@ services:
       # deployment whose admin surface is actually reachable. It is a DEV token: change it
       # anywhere the merchant API is exposed beyond a laptop.
       MERCHANT_ADMIN_TOKEN: "${MERCHANT_ADMIN_TOKEN:-}"
+      # THE NETWORK'S INTENT-CLUSTER TAXONOMY — the clusters the onboarding interview offers a
+      # merchant as the ones their agent may pursue. `onboarding.script._configured_clusters`
+      # reads it and `cluster_options` puts it FIRST, ahead of the store's own history.
+      #
+      # It appeared in NO compose fragment, NO Dockerfile and NO .env.example until this line:
+      # read correctly and set by nobody, the same shape as MERCHANT_ADMIN_TOKEN above and with
+      # a worse ending, because unset is not a refusal here. Measured on the shipped stack
+      # before this line, over the served routes: a store onboarded in the console answers the
+      # pursue question with a cluster, `PUT /stores/{id}/envelope` returns 200, and the stored
+      # envelope carries `pursue_clusters: []`. The answer is dropped because the only options
+      # offered were clusters this store's own envelope or loss report already named, and a
+      # brand-new store has neither. `store_agent.runtime.context.StoreContext.pursues` is
+      # fail-closed on an empty list — deliberately — so `runtime.bidding` then answers every
+      # auction `cluster_not_pursued`. A store that completed onboarding and can never bid.
+      #
+      # The value is the one cluster this stack actually runs auctions in:
+      # `deploy/demo/exchange-deployment.json`'s `intent_clusters` names exactly
+      # `cluster-liver-support`. Written in the comma-separated spelling because compose's
+      # `${VAR:-default}` cannot carry a `}`, so the JSON spelling cannot be a default here;
+      # the label a merchant reads is then `_humanize`d to "liver support". Set the JSON
+      # spelling — `[{"cluster_id": ..., "label": ...}]` — in `.env` to state your own labels.
+      NETWORK_INTENT_CLUSTERS: "${NETWORK_INTENT_CLUSTERS:-cluster-liver-support}"
     # READINESS, not liveness — see the long note in apps/trust/compose.yaml. There is no
     # datastore check here because there is no datastore (measured above); what there IS, is
     # a setting whose absence turns every administrative route into a 503 while the container

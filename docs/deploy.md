@@ -60,7 +60,7 @@ pinned in the root file so a worktree cannot spawn its own stack):
 | `neo4j`            | 7474/7687 (`NEO4J_*`)       | `neo4j:5.26-community`         | —                       |
 | `redis`            | 6379 (`REDIS_PORT`)         | `redis:7-alpine`               | —                       |
 | `buyer-svc`        | 8081 (`BUYER_SVC_PORT`)     | `apps/buyer/Dockerfile`        | `buyer_svc.main:app`    |
-| `merchant-svc`     | 8082 (`MERCHANT_SVC_PORT`)  | `apps/merchant/Dockerfile`     | `merchant_svc.main:app` |
+| `merchant-svc`     | 8082 (`MERCHANT_SVC_PORT`)  | `apps/merchant/Dockerfile.web` | `merchant_svc.main:app` |
 | `exchange`         | 8083 (`EXCHANGE_PORT`)      | `apps/exchange/Dockerfile`     | `exchange.main:app`     |
 | `trust`            | 8084 (`TRUST_PORT`)         | `apps/trust/Dockerfile`        | `trust.main:app`        |
 | `ingest`           | 8085 (`INGEST_PORT`)        | `services/ingest/Dockerfile`   | `ingest.main:app`       |
@@ -125,8 +125,8 @@ once, so setting it later changes nothing.
 
 ### A `.env` in the worktree re-points `make verify`, not just compose
 
-Worth knowing before you relocate anything in it. `scripts/verify.sh:19-24` sources `.env`
-**itself**, on every run, with `set -a`:
+Worth knowing before you relocate anything in it. `scripts/verify.sh`'s `if [ -f "$ROOT/.env" ]`
+block sources `.env` **itself**, on every run, with `set -a`:
 
 ```sh
 if [ -f "$ROOT/.env" ]; then
@@ -488,9 +488,13 @@ and this is the record of what each one reads:
 
 | service       | reads                                                                        | how the fragment leaves it |
 |---------------|------------------------------------------------------------------------------|----------------------------|
-| `exchange`    | `EXCHANGE_DEPLOYMENT` (path) / `EXCHANGE_DEPLOYMENT_JSON` (inline)            | **populated and mounted** — `apps/exchange/compose.yaml:146` defaults the path to `/srv/deploy/exchange-deployment.json`, and `:157` bind-mounts `deploy/demo` read-only |
-| `buyer-svc`   | `BUYER_DEPLOYMENT` (path) / `BUYER_DEPLOYMENT_JSON` (inline), else `EXCHANGE_URL` | **populated and mounted** — `apps/buyer/compose.yaml:90` and `:128`; `EXCHANGE_URL` (`:56`) is the lowest rung and is populated too |
-| `store-agent` | `STORE_AGENT_CONTEXT` (path)                                                  | declared and **empty** on the unprofiled template — `packages/store-agent/compose.yaml:126`. The four hosted demo agents each name a real context file (`:172`, `:191`, `:210`, `:229`) |
+| `exchange`    | `EXCHANGE_DEPLOYMENT` (path) / `EXCHANGE_DEPLOYMENT_JSON` (inline)            | **populated and mounted** — in `apps/exchange/compose.yaml`, service `exchange` defaults `EXCHANGE_DEPLOYMENT` to `/srv/deploy/exchange-deployment.json` and bind-mounts `../../deploy/demo` at `/srv/deploy:ro` |
+| `buyer-svc`   | `BUYER_DEPLOYMENT` (path) / `BUYER_DEPLOYMENT_JSON` (inline), else `EXCHANGE_URL` | **populated and mounted** — in `apps/buyer/compose.yaml`, service `buyer-svc` defaults `BUYER_DEPLOYMENT` to `/srv/deploy/buyer-deployment.json` against the same `../../deploy/demo:/srv/deploy:ro` mount; `EXCHANGE_URL` is the lowest rung and is populated too |
+| `store-agent` | `STORE_AGENT_CONTEXT` (path)                                                  | declared and **empty** (`${STORE_AGENT_CONTEXT:-}`) on the unprofiled `store-agent` template in `packages/store-agent/compose.yaml`. The four hosted demo agents — `store-agent-gaiaherbs`, `store-agent-toniiq`, `store-agent-paradiseherbs`, `store-agent-oregonswildharvest` — each name a real `/srv/store-contexts/<host>.json` |
+
+Every pointer above names a **service and a key**, never a line number: this table cited nine
+line numbers until they all rotted at once, and a `file.yaml:NN` in prose is wrong on the next
+edit to that file while still looking checked.
 
 The two rows above used to read "declared and **empty**": the compose fragments shipped no
 deployment document and a stack brought up from them refused every request. Both ship one now.
@@ -518,7 +522,7 @@ $ curl -X POST :50277/buyer/intent/confirm -d '{"intent":{...},"confirmed":true}
 
 That is still the answer for a buyer service nobody has configured, deliberately. What
 changed is that there is now something to configure. **The compose stack needs no change**:
-`apps/buyer/compose.yaml:47` already carries
+the `buyer-svc` service's `environment:` block in `apps/buyer/compose.yaml` already carries
 
 ```yaml
       # The exchange is reached by service name inside the network, never by localhost.
@@ -693,24 +697,30 @@ one command written twice, and
 `test_deploy_readiness.py::test_the_compose_command_mirrors_the_image_cmd` pins the copies
 together. What that test does not know is *why* the number is `1`.
 
-**What a second worker costs.** The T-158 guard — one accept per auction, one discount code
-per purchase — is a claim held in a store, so it is exactly as wide as that store.
-`apps/exchange/src/accept/routes.py::_claims` derives the acceptance-claim table from the
-auction machine's own store, and **the document exposes no key for `auction_machine` and none
-for `acceptance_claims`**. `configure_exchange` in `apps/exchange/src/composition.py` reads
-`sellers`, `trust_url`, `trust_snapshot`, `intent_clusters`, `catalog`, `registered_domains`
-and `checkout_mode` — and none of those names a store. It does now bind a machine
-unconditionally, with no key required, but only to fix *where the audit trail goes*: the
-branch at `composition.py:1909` hands `AuctionStateMachine` a ledger sink built from
-`trust_url` and leaves the store exactly as it was, the same `InMemoryAuctionStore` the lazy
-default builds. So the claim table is still process-local, and this paragraph's conclusion is
-unchanged: two workers are two processes, two stores, two claim tables — both accepts win
-their own copy of the guard, both mint, and one purchase leaves **two live discount codes** in
-the merchant's account.
+**What a second worker costs, and the one thing it depends on.** The T-158 guard — one accept
+per auction, one discount code per purchase — is a claim held in a store, so it is exactly as
+wide as that store. `apps/exchange/src/accept/routes.py::_claims` derives the acceptance-claim
+table from the auction machine's own store, and **that store is configuration**:
+`bind_auction_machine` in `apps/exchange/src/composition.py` resolves it from the deployment
+document's `auction_store` key, then from `EXCHANGE_AUCTION_STORE`, then from neither. So the
+answer is conditional, and the condition is which store this exchange is holding auctions in:
 
-That last part is a *reported* measurement and not this lane's: an independent verifier
-reproduced the double mint 6-of-6 across a real process boundary and reported it dead only
-once the single-worker pin was in place. It was **not** re-run here, and nothing in this
+* **`EXCHANGE_AUCTION_STORE=redis` — the shipped default in both `apps/exchange/compose.yaml`
+  and `.env.example`.** `RedisAuctionStore` is shared, so the claim table is shared by every
+  process pointed at the same Redis, and `_claims`'s own docstring says so in as many words.
+  A Redis this cannot reach is a `503` naming the store, never a silent downgrade — so there
+  is no path where this case quietly becomes the next one.
+* **The variable unset or empty**, which is what a bare `uvicorn exchange.main:app` outside
+  compose gets. The store is the process-local `InMemoryAuctionStore`, so two workers are two
+  processes, two stores, two claim tables — both accepts win their own copy of the guard, both
+  mint, and one purchase leaves **two live discount codes** in the merchant's account.
+
+The `--workers 1` pin is what makes the second case unreachable in the image, and it is pinned
+in two files because the worker count is not configuration while the store is.
+
+The double mint is a *reported* measurement and not this lane's: an independent verifier
+reproduced it 6-of-6 across a real process boundary on the in-memory store and reported it dead
+only once the single-worker pin was in place. It was **not** re-run here, and nothing in this
 repository reaches a second uvicorn worker — the same blind spot the last bullet of "Still not
 done" records for running containers generally.
 
@@ -776,6 +786,15 @@ is a code change with a review, not a capacity decision.
 * **Deployment documents ship.** `deploy/demo/`, generated from the recorded real catalogues
   by `scripts/build_demo_deployment.py`, and mounted read-only into the exchange and the
   buyer. `EXCHANGE_DEPLOYMENT` and `BUYER_DEPLOYMENT` default to them.
+* **The merchant console is served.** This page used to say `apps/merchant/app/` was not
+  containerised and owed the stack a second service called `merchant-web`. It got neither:
+  `apps/merchant/Dockerfile.web` builds the vite bundle in a node stage, copies it into the
+  same python image and sets `MERCHANT_UI_DIST` there, so one uvicorn serves the API and the
+  console together and the fragment's only change was which `dockerfile:` it points at. The
+  SPA fetches root-level paths (`/stores/{id}/dashboard`, `…/envelope`, `…/kill`) with no CORS
+  middleware anywhere, which is why it is one origin rather than nginx plus a proxy.
+  Measured against the running stack: `GET http://localhost:8082/dashboard/` answers `200`
+  with `<script src="/dashboard/assets/index-*.js">`.
 
 ## Still not done
 
@@ -785,11 +804,6 @@ is a code change with a review, not a capacity decision.
   probe proves, so it is not currently lying — but the moment that service reaches a
   datastore, its probe needs the same treatment. Same for `services/shopify-stub`, which
   already probes its own real `/healthz`.
-* **`apps/merchant/app/` is not containerised.** When it grows an entrypoint it becomes a
-  second service in the same fragment (`merchant-web`), the way `buyer-web` now is in
-  `apps/buyer/compose.yaml`.
-* **`apps/merchant/app/`'s bullet above is itself half stale**: `apps/merchant/package.json`
-  does now declare a `build:ui`. What is still missing there is the compose service.
 * **Images have never been pushed anywhere**; `docker compose` builds them locally by name.
 * **No test reaches a running container.** The readiness logic is covered by
   `proxyshop_support/tests/test_deploy_readiness.py` — static checks over the compose

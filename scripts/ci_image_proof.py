@@ -105,7 +105,7 @@ def _declares_ports(definition: dict[str, Any]) -> bool:
     long `{target:, published:}` form and a bare `"8080"` (which is a RANDOM host port, not
     port 8080) each parsed to nothing or to a lie, silently.
 
-    The running daemon knows the answer. :func:`_running_ports` asks it.
+    The running daemon knows the answer. :func:`_compose_ps` asks it.
     """
     return bool(definition.get("ports"))
 

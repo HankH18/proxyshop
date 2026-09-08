@@ -70,8 +70,10 @@ export function assertPseudonymOnly<T>(payload: T, where: string): T {
 export type Fetcher = (input: string, init?: RequestInit) => Promise<Response>
 
 /**
- * The four paths `buyer_svc/auth/routes.py` serves, exported so a test asserts on the
- * spelling rather than on a guess — the same reason `wire.ts` exports `auctionPath`.
+ * The three paths `buyer_svc/auth/routes.py` serves — five routes, because
+ * `/buyer/auth/session` answers POST (redeem), GET (read) and DELETE (sign out). Exported so
+ * a test asserts on the spelling rather than on a guess, the same reason `wire.ts` exports
+ * `auctionPath`.
  */
 export const MAGIC_LINK_PATH = '/buyer/auth/magic-link'
 export const SESSION_PATH = '/buyer/auth/session'

@@ -193,7 +193,8 @@ async def test_reverse_flips_the_order(stub: StubClient) -> None:
 # A malformed cursor is an error, not a silent empty page
 # ---------------------------------------------------------------------------------------
 
-#: The two ways a cursor actually arrives broken in the field.
+#: How a cursor actually arrives broken in the field, in two families: an id where a cursor
+#: belongs, and a cursor mangled in transit.
 MALFORMED_CURSORS = {
     # The single most common Relay paging mistake: node.id where edge.cursor belongs.
     "an order gid": "gid://shopify/Order/5500000000001",

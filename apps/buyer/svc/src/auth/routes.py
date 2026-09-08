@@ -2,12 +2,13 @@
 
 Discovered and mounted by the frozen :func:`buyer_svc.main.create_app`.
 
-Four routes, and the shape of their responses is the ticket::
+Five routes on three paths, and the shape of their responses is the ticket::
 
-    POST /buyer/auth/magic-link   {"email": ...}   -> 202 {"expires_at": ...}
-    POST /buyer/auth/session      {"token": ...}   -> 201 {"session_id", "pseudonym", ...}
-    GET  /buyer/auth/session      X-Buyer-Session  -> 200 {"session_id", "pseudonym", ...}
-    GET  /buyer/profile           X-Buyer-Session  -> 200 {"pseudonym", "buckets"}
+    POST   /buyer/auth/magic-link   {"email": ...}   -> 202 {"expires_at": ...}
+    POST   /buyer/auth/session      {"token": ...}   -> 201 {"session_id", "pseudonym", ...}
+    GET    /buyer/auth/session      X-Buyer-Session  -> 200 {"session_id", "pseudonym", ...}
+    DELETE /buyer/auth/session      X-Buyer-Session  -> 204 (the pseudonym stays retired)
+    GET    /buyer/profile           X-Buyer-Session  -> 200 {"pseudonym", "buckets"}
 
 Every response model below is explicit and none of them has a field that could hold an
 email, a name or an address. That is deliberate: FastAPI serializes through

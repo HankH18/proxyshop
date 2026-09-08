@@ -154,8 +154,8 @@ def cmd_wait(args: argparse.Namespace) -> int:
             "  unreachable: " + ", ".join(str(e) for e in down),
             "",
             "  These addresses are read from PROXYSHOP_PG_DSN_ADMIN, NEO4J_URI and",
-            "  REDIS_URL (proxyshop_support/reachability.py:61). A job whose services are",
-            "  healthy but whose variables name somewhere else looks exactly like a job",
+            "  REDIS_URL, by proxyshop_support.reachability.compose_endpoints. A job whose",
+            "  services are healthy but whose variables name somewhere else looks like a job",
             "  with no services at all, so this refuses rather than proceeding into a run",
             "  that would report several hundred skips nobody reads.",
         )

@@ -753,17 +753,35 @@ def test_pinning_the_retries_is_additive_and_changes_no_other_role(
 # =============================================================================================
 
 
-def test_every_copywriter_outcome_has_a_word_for_the_pitch_the_bid_carries() -> None:
-    """A new outcome with no entry in the route's table would log ``source=unknown`` in prod.
+def test_every_copywriter_outcome_has_a_word_for_what_the_call_did() -> None:
+    """A new outcome with no entry in the route's table would log ``pitch_call=unknown`` in prod.
 
     The mapping and the vocabulary live in different modules on purpose — the copywriter owns
     what happened, the route owns how it is said — so this is the seam where they can drift
     apart silently, and a log line an operator cannot interpret is the failure being repaired.
-    """
-    from store_agent.solicitation.routes import _PITCH_SOURCE  # noqa: PLC0415
 
-    assert set(_PITCH_SOURCE) == set(PITCH_OUTCOMES)
-    assert set(_PITCH_SOURCE.values()) == {"model", "fallback", "unattempted"}
+    **The words are about the CALL, and this test is where that is pinned.** They used to be
+    about the shipped prose (`source=model` for the outcome `ok`), which the route cannot know:
+    `compose_pitch` screens the model's reply and ships the deterministic template when it
+    fails the content rule, in a pure function whose only return value is the string. Measured
+    on the deployed demo, three of four agents served the byte-identical template while logging
+    `outcome=ok source=model`, and the one agent that served real prose logged the same line.
+    """
+    from store_agent.solicitation.routes import _PITCH_CALL  # noqa: PLC0415
+
+    assert set(_PITCH_CALL) == set(PITCH_OUTCOMES)
+    assert set(_PITCH_CALL.values()) == {
+        "answered",
+        "budget_missed",
+        "errored",
+        "not_called",
+        "unarmed",
+    }
+    # ...and no word here may name a PROVENANCE, which is the claim that was wrong.
+    assert not {"model", "fallback"} & set(_PITCH_CALL.values()), (
+        "a word in this table names where the shipped pitch came from, which this route cannot "
+        "know — see the table's own comment for the measurement"
+    )
 
 
 def test_the_store_logs_a_warning_when_the_pitch_misses_its_budget(
@@ -789,7 +807,7 @@ def test_the_store_logs_a_warning_when_the_pitch_misses_its_budget(
     assert line.levelno == logging.WARNING
     message = line.getMessage()
     assert "outcome=timed_out" in message
-    assert "source=fallback" in message
+    assert "pitch_call=budget_missed" in message
     assert "budget=0." in message, f"the budget it was given must be in the line: {message}"
     assert "elapsed=0." in message, f"what the copywriter spent must be in the line: {message}"
     assert STORE_ID in message
@@ -804,7 +822,7 @@ def test_the_store_logs_a_warning_when_it_had_no_budget_to_spend(
     (line,) = [r for r in caplog.records if r.name == ROUTE_LOGGER]
     assert line.levelno == logging.WARNING
     assert "outcome=skipped" in line.getMessage()
-    assert "source=fallback" in line.getMessage()
+    assert "pitch_call=not_called" in line.getMessage()
 
 
 def test_the_store_logs_at_info_when_the_copywriter_makes_its_budget(
@@ -820,7 +838,9 @@ def test_the_store_logs_at_info_when_the_copywriter_makes_its_budget(
     (line,) = [r for r in caplog.records if r.name == ROUTE_LOGGER]
     assert line.levelno == logging.INFO
     assert "outcome=ok" in line.getMessage()
-    assert "source=model" in line.getMessage()
+    # `answered`, not `model`: the model replied inside its budget, which is what this line
+    # can attest. Whether its words were used is decided later, by `screen`, out of sight.
+    assert "pitch_call=answered" in line.getMessage()
 
 
 def test_the_line_still_carries_what_it_always_carried(
@@ -853,7 +873,7 @@ def test_a_store_with_no_copywriter_logs_at_info_and_claims_nothing(
     (line,) = [r for r in caplog.records if r.name == ROUTE_LOGGER]
     assert line.levelno == logging.INFO
     assert "outcome=not_attempted" in line.getMessage()
-    assert "source=unattempted" in line.getMessage()
+    assert "pitch_call=unarmed" in line.getMessage()
     assert "budget=-" in line.getMessage() and "elapsed=-" in line.getMessage()
     hosted = advocate(app)
     assert hosted is not None and hosted.pitch is None
@@ -928,7 +948,7 @@ def test_a_broken_copywriter_is_not_reported_as_a_missed_deadline(
     assert line.levelno == logging.WARNING, "a broken copywriter is still an operator's problem"
     message = line.getMessage()
     assert "outcome=failed" in message
-    assert "source=fallback" in message
+    assert "pitch_call=errored" in message
     assert "outcome=timed_out" not in message
 
 

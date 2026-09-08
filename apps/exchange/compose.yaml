@@ -52,7 +52,7 @@ services:
       EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-}"
       # D55'S ORGANIC HALF — the graph retrieval that is the FIRST step of this product.
       #
-      # `EXCHANGE_SHOP_ROSTER=graph` is the only value `retrieval/roster.py:499` accepts, and
+      # `EXCHANGE_SHOP_ROSTER=graph` is the only value `retrieval.roster.graph_sessions_from_env` accepts, and
       # until this line existed the string appeared in NO compose file, NO env file and NO
       # runbook anywhere in the repository: measured, the four occurrences were the reader
       # itself, the composition branch that calls it, and a comment in

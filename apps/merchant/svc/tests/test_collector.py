@@ -16,9 +16,9 @@ COUNT and nothing bounded the entry SIZE, so the true ceiling was::
 
     800,970 B retained per observation x 512 entries = 391.10 MiB
 
-against ``apps/merchant/compose.yaml:66  mem_limit: 256m``. **The ceiling was larger than
-the container**, which means the process OOMs at roughly 330 anonymous requests and never
-reaches its own limit. A bound whose ceiling is outside the box is not a bound.
+against ``apps/merchant/compose.yaml``'s ``merchant-svc.mem_limit: 256m``. **The ceiling was
+larger than the container**, which means the process OOMs at roughly 330 anonymous requests
+and never reaches its own limit. A bound whose ceiling is outside the box is not a bound.
 
 **The log.** The accept path wrote ``observation.checkout_token`` verbatim into an
 ``_log.info`` for every beacon with a gap. Measured: a 900,000-char token produced a
@@ -83,8 +83,9 @@ from merchant_svc.install.config import COLLECTOR_PATH
 
 from proxyshop_support.asgi_server import serve
 
-#: The container the collector runs in — ``apps/merchant/compose.yaml:66  mem_limit: 256m``.
-#: The number the retention ceiling has to be *smaller* than for the ring to mean anything.
+#: The container the collector runs in — ``apps/merchant/compose.yaml``'s
+#: ``merchant-svc.mem_limit: 256m``. The number the retention ceiling has to be *smaller*
+#: than for the ring to mean anything.
 CONTAINER_MEMORY_LIMIT_BYTES = 256 * 1024 * 1024
 
 #: The share of that container the pixel inbox may claim. One eighth: the ring is one buffer
@@ -216,7 +217,7 @@ def test_the_full_ring_of_hostile_beacons_fits_inside_the_container() -> None:
         f"one accepted beacon retains {per_entry:,} bytes, so a full {PixelInbox().capacity}"
         f"-entry ring holds {ceiling / (1 << 20):.2f} MiB — against a "
         f"{CONTAINER_MEMORY_LIMIT_BYTES / (1 << 20):.0f} MiB container "
-        f"(apps/merchant/compose.yaml:66) and a "
+        f"(apps/merchant/compose.yaml, merchant-svc.mem_limit) and a "
         f"{INBOX_RETENTION_BUDGET_BYTES / (1 << 20):.0f} MiB budget for this buffer. "
         "The ring bounds the entry COUNT; nothing bounds the entry SIZE."
     )

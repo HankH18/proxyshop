@@ -37,11 +37,11 @@
 /* ---- the three faces, self-hosted ------------------------------------ [buyer lane] ----
  *
  * SELF-HOSTED rather than linked from fonts.googleapis.com, and the reason is this page's
- * own copy rather than performance. Step 1 tells a signed-out visitor, in so many words,
- * that "what you type here goes to this origin's own buyer service and no further" — and a
- * stylesheet `<link>` to a third party would hand that visitor's IP and User-Agent to
- * Google on page load, before they have typed anything, to render the sentence making the
- * claim. The demo runbook also promises this stack runs offline, and a CDN font fails by
+ * own copy rather than performance. The sign-in gate tells a signed-out visitor, in so many
+ * words, that "nothing you type after signing in leaves this origin's own buyer service
+ * until you confirm" — and a stylesheet `<link>` to a third party would hand that visitor's
+ * IP and User-Agent to Google on page load, before they have typed anything, to render the
+ * sentence making the claim. The demo runbook also promises this stack runs offline, and a CDN font fails by
  * falling back silently: the page still renders, in the wrong faces, with every test green.
  * That is the exact defect class this file's third rule exists to prevent.
  *

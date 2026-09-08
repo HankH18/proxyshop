@@ -441,7 +441,7 @@ class LabelledSlot:
     #: ``""``, which reads identically to a domain that is present and blank, and that is
     #: precisely how the anti-spoofing cross-check came to be skipped on every slot of every
     #: deployment without anything saying so. ``""`` on the way in is normalised to ``None``
-    #: here (:func:`_domain`) so the two spellings cannot both exist downstream, and
+    #: by :func:`slot_store_domain` so the two spellings cannot both exist downstream, and
     #: ``protocol.schema.json`` now declares ``minLength: 1`` so a producer cannot emit one.
     store_domain: str | None = None
     #: WHICH catalogue thing (:func:`slot_product`), or ``None``. A reference, not a title.

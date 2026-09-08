@@ -327,7 +327,7 @@ def test_the_python_door_enforces_the_date_time_format_the_typescript_door_enfor
     ``packages/contracts/src/ts/schemas.ts`` builds its validator as
     ``addFormats(new Ajv2020(...))``, so every ``format: date-time`` in the bundle is checked.
     The Python door's first step is ``model.model_validate(...)`` against
-    ``packages/contracts/generated/python/protocol.py``, where all eight of those fields are
+    ``packages/contracts/generated/python/protocol.py``, where all nine of those fields are
     typed as a bare ``str`` — pydantic never sees the ``format`` keyword, because
     datamodel-code-generator does not carry it into the annotation. Measured on the same
     payload::

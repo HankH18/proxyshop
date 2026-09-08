@@ -169,7 +169,7 @@ Four things to notice.
 2. **The last row is not the shop's voice, whatever the column header says.** *"Free returns: 30
    return window. Also: in stock: yes; units left: 12."* is `fallback_pitch` output — the store
    agent's deterministic slot-filling, served because the screen refused the model's reply on a
-   content rule. The agent logged that solicitation `outcome=ok source=model` anyway. Two of the
+   content rule. The agent logged that solicitation `outcome=ok source=model` anyway — the log now says `pitch_call=answered`, which is what the route can actually attest. Two of the
    three bidding rows here are model prose and one is not, and nothing on the wire says so; see
    [About the model, precisely](#about-the-model-precisely).
 3. **The product name is the platform's, not the shop's.** It comes from
@@ -745,18 +745,26 @@ for the model's own voice
 being exact about what that proves.** Measured: `LLM_PROVIDER=anthropic` with a key present,
 every store agent booting
 `LIVE: provider=anthropic model=claude-sonnet-5 sdk=installed api_key=present`, and the
-per-solicitation line reading `outcome=ok source=model` with `elapsed` between 1.4 s and 4.5 s
-against a 4.6 s budget. So a real model is being called and is answering inside the window.
+per-solicitation line reading `outcome=ok pitch_call=answered` with `elapsed` between 1.4 s and
+4.5 s against a 4.6 s budget. So a real model is being called and is answering inside the window.
 
-What that line does **not** prove is that the model's bytes are the bytes on the wire, and this
-is measured rather than suspected. `_PITCH_SOURCE` maps the outcome `ok` to `source=model`, but
+What that line does **not** prove is that the model's bytes are the bytes on the wire. It used to
+claim exactly that: the route's table mapped the outcome `ok` to `source=model`, while
 `compose_pitch` calls `screen(llm.complete(...))` and, when `screen` returns `None` on a content
 rule, falls through to `screen(fallback_pitch(material), material)` without the outcome changing.
-So a bid can carry the deterministic template under a log line that says `source=model`. Caught
+So a bid could carry the deterministic template under a log line that said `source=model`. Caught
 on a running deployment: `paradiseherbs.com` logged `pitch budget=4.618s elapsed=2.724s
 outcome=ok source=model` — the model answered in 2.7 s of a 4.6 s budget — while the message the
 buyer received was verbatim `fallback_pitch` output, *"Free returns: 30 return window. Also: in
 stock: yes; units left: 12."* Three of eight hosted slots across two auctions did this.
+
+The label is fixed: it is `pitch_call=` now and its words are about the CALL — `answered`,
+`budget_missed`, `errored`, `not_called`, `unarmed` — none of which names a provenance, with a
+test asserting none ever does. `answered` means the model replied in time and **not** that its
+words were used. The provenance itself is still not reported, and that is a real limit rather
+than an oversight: the screening happens inside a pure function whose only return value is the
+string, so the route never sees which of the two it got. Reporting it honestly means changing
+`compose_pitch` to say which one it returned.
 
 **Which of the two a bid carries is not visible from outside the process**, and neither is why.
 `screen_reasons` returns the rules that fired and its docstring says it is separated from

@@ -308,16 +308,35 @@ def answer_bid_request(bid_request: BidRequest, request: Request) -> Any:
     return answer
 
 
-#: What :func:`log_solicitation` calls the pitch a bid ended up carrying, per outcome. The
-#: copywriter's own record is the only honest source for this: the route never sees the two
-#: candidate strings, and `screen` can still refuse a reply that arrived on time — which is a
-#: content decision, not a missed deadline, and is deliberately not reported as one.
-_PITCH_SOURCE = {
-    "ok": "model",
-    "timed_out": "fallback",
-    "failed": "fallback",
-    "skipped": "fallback",
-    "not_attempted": "unattempted",
+#: What :func:`log_solicitation` says the copywriter's CALL did, per outcome.
+#:
+#: It used to be spelled `source=` and to answer `model` for the outcome `ok`, which was a
+#: claim about the shipped prose that this route cannot make. MEASURED on the deployed demo:
+#: three of four agents shipped the byte-identical deterministic template —
+#:
+#:     Free returns: 30 return window. Also: in stock: yes; units left: 12.
+#:
+#: — while each logged `outcome=ok source=model`, and the one agent that shipped genuine prose
+#: logged the identical line. An operator could not tell them apart from the log, which is the
+#: one job the log has.
+#:
+#: The cause is a real limit rather than an oversight. `ok` means the model answered INSIDE its
+#: budget; `runtime.pitch.compose_pitch` then screens that answer, and a reply that arrives on
+#: time and fails the content rule is discarded — `return screen(fallback_pitch(material),
+#: material)` — with the template shipping instead. That screening happens in a pure function
+#: whose only return value is the string, and the client that builds :class:`PitchAttempt`
+#: never sees it. So the route genuinely cannot report the shipped text's provenance.
+#:
+#: What it CAN report is what the call did, and now that is all it says. `pitch_call=answered`
+#: means the model replied in time and NOT that its words were used. Reporting the provenance
+#: honestly needs `compose_pitch` to say which of its two strings it returned; that is a change
+#: to a function on the bid path and is deliberately not made from here.
+_PITCH_CALL = {
+    "ok": "answered",
+    "timed_out": "budget_missed",
+    "failed": "errored",
+    "skipped": "not_called",
+    "not_attempted": "unarmed",
 }
 
 
@@ -351,14 +370,14 @@ def log_solicitation(hosted: Advocate, entry: Any, attempt: PitchAttempt) -> Non
     _log.log(
         logging.WARNING if attempt.degraded else logging.INFO,
         "%s: answered a solicitation in mode %s (submitting=%s); "
-        "pitch budget=%s elapsed=%s outcome=%s source=%s; %d entr(y|ies) in the bid log",
+        "pitch budget=%s elapsed=%s outcome=%s pitch_call=%s; %d entr(y|ies) in the bid log",
         hosted.runner.store_id or "an unidentified store",
         entry.mode,
         entry.submitting,
         "-" if attempt.budget is None else f"{attempt.budget:.3f}s",
         "-" if attempt.elapsed is None else f"{attempt.elapsed:.3f}s",
         attempt.outcome,
-        _PITCH_SOURCE.get(attempt.outcome, "unknown"),
+        _PITCH_CALL.get(attempt.outcome, "unknown"),
         len(hosted.log) if hosted.log is not None else -1,
     )
 

@@ -12,8 +12,9 @@ Measured on this worktree, before this module existed::
 
 For this package that is not cosmetic. Two consequences, both silent:
 
-* :data:`~buyer_svc.feedback.submission.SUBMITTED` — the process-local record of which orders
-  have already had their one piece of R14 feedback recorded — would exist **twice**, so "one
+* the ledger behind :func:`~buyer_svc.feedback.submission.submitted` — the process-local
+  record of which orders have already had their one piece of R14 feedback recorded — would
+  exist **twice**, so "one
   routed order, one feedback event" would hold *per spelling*. A pytest session that runs the
   frozen acceptance suite (which imports ``apps.buyer.svc.src.feedback``) beside the service's
   own route tests (which import ``buyer_svc.feedback`` through ``create_app``) is exactly such
@@ -23,12 +24,17 @@ For this package that is not cosmetic. Two consequences, both silent:
   ``FeedbackAlreadySubmitted`` the other spelling raises. Same file, same line, two classes —
   so the route handler's 409 branch would miss the refusal and answer 500.
 
-This is a deliberate, ownership-forced fourth copy of the same fix. The others live in
-``apps/buyer/svc/src/intent/_spellings.py`` (T-071, which documents the trap at length),
-``apps/buyer/svc/src/accept/_spellings.py`` (T-072) and ``packages/llm/__init__.py``. The
-right home is ``apps/buyer/svc/src/_spellings.py``, a file no feature ticket owns; that move
-is reported in this ticket's NEEDS rather than made here, because this ticket's scope is
-``apps/buyer/svc/src/feedback/**`` and moving it would edit a path it does not own.
+This is a deliberate, ownership-forced copy of the same fix, and it is one of SEVEN live
+copies — listed rather than numbered, because an ordinal cannot tell whoever migrates them
+which ones are left behind. ``find apps packages services -name _spellings.py`` prints six:
+``apps/buyer/svc/src/intent`` (T-071, which documents the trap at length),
+``apps/buyer/svc/src/accept`` (T-072), this file (T-073), ``apps/exchange/src/accept``
+(T-169), ``apps/merchant/svc/src/codes`` (T-052) and ``apps/merchant/svc/src/envelope``
+(T-243). The seventh is ``packages/llm/__init__.py``'s ``_bind_submodules``, which does the
+same ``sys.modules.setdefault`` binding with no module of its own. The right home for the
+buyer service's three is ``apps/buyer/svc/src/_spellings.py``, a file no feature ticket owns;
+that move is reported in this ticket's NEEDS rather than made here, because this ticket's
+scope is ``apps/buyer/svc/src/feedback/**`` and moving it would edit a path it does not own.
 
 Binding is ``setdefault``-shaped throughout: whichever spelling loads first wins and a module
 already registered under a name is never replaced. Only the two spellings of *this* directory,

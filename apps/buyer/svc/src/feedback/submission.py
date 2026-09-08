@@ -18,12 +18,14 @@ D24's "one shape per kind" in the only form an append-only ledger can hold it �
 ``LedgerEvent`` itself, so a producer that does not call it is not checked at all.
 
 This module calls it, on every event, before the event leaves. That is not defensive
-programming for its own sake: there is a live defect of exactly this shape elsewhere in this
-repo (T-235, HIGH), where ``apps/exchange/src/checkout/provider.py:983`` emits a
-``code_created`` event carrying none of its three published keys while another path emits the
-same kind correctly — one kind, two bodies, because nothing on that path validates. A ledger
-whose rows of one kind have two shapes cannot be replayed, and the reader that discovers this
-is downstream, later, and reading history that can no longer be fixed.
+programming for its own sake: a defect of exactly this shape was live elsewhere in this repo
+(T-235), where the exchange's successful checkout path emitted a ``code_created`` event
+carrying none of its three published keys while its orphan path emitted the same kind
+correctly — one kind, two bodies, because nothing on that path validated. It is closed:
+``exchange.checkout.provider.CheckoutProvider._events`` now builds all three C11 bodies
+through ``build_published_event``. A ledger whose rows of one kind have two shapes cannot be
+replayed, and the reader that discovers this is downstream, later, and reading history that
+can no longer be fixed.
 
 Once per order
 --------------

@@ -191,13 +191,18 @@ CLAIM_VALUE_MAX_DEPTH = 64
 CLAIM_VALUE_MAX_ENTRIES = 65536
 
 #: The `format: date-time` positions of `packages/contracts/schemas/protocol.schema.json` that
-#: are REACHABLE FROM A BID, by the object that declares them. The bundle declares eight in
-#: all; the other five hang off `Intent`, `BidRequest`, `LedgerEvent`, `TrustDimensionState`
-#: and the bare `SigningEnvelope`, none of which a `Bid` contains, so this door never sees
-#: them. Listed rather than derived for the same reason `HOOK_PROVENANCE_SOURCES` is: the
-#: bundle is the source of truth and the test reads it as its own positive control, so a
-#: field added to the schema and not to this tuple shows up as a red gate rather than as
-#: silence.
+#: are REACHABLE FROM A BID, by the object that declares them. The bundle declares nine in
+#: all; the other six hang off `Intent`, `BidRequest`, `LedgerEvent`, `TrustDimensionState`,
+#: `ShortlistPrice` and the bare `SigningEnvelope`, none of which a `Bid` contains, so this
+#: door never sees them. Listed rather than derived for the same reason
+#: `HOOK_PROVENANCE_SOURCES` is: the bundle is the source of truth.
+#:
+#: NOTHING WALKS THE BUNDLE AND COMPARES IT WITH THESE TUPLES, so a `format: date-time` added
+#: to a Bid-reachable object arrives here as silence rather than as a red gate — this comment
+#: claimed the opposite until it was measured. The T-194 test reads exactly one position,
+#: `Provenance.observed_at`, as its positive control. The ninth position
+#: (`ShortlistPrice.expires_at`) landed with the whole suite green, and the count above said
+#: EIGHT until someone counted.
 PROVENANCE_DATE_TIME_FIELDS: tuple[str, ...] = ("observed_at",)
 OFFER_DATE_TIME_FIELDS: tuple[str, ...] = ("expires_at",)
 SUBMISSION_DATE_TIME_FIELDS: tuple[str, ...] = ("issued_at",)
@@ -1119,7 +1124,7 @@ def _date_time_format_reasons(
     The two doors were not running the same schema check. `packages/contracts/src/ts/schemas.ts`
     builds its validator as `addFormats(new Ajv2020(...))`, so every `format: date-time` in
     `schemas/protocol.schema.json` is checked there. This door's schema step is
-    `model.model_validate(...)` against `generated/python/protocol.py`, where all eight of those
+    `model.model_validate(...)` against `generated/python/protocol.py`, where all nine of those
     fields are typed as a bare `str` — datamodel-code-generator does not carry the `format`
     keyword into the annotation, so pydantic never sees it. Measured on one payload:
 
@@ -1945,7 +1950,7 @@ def validate_bid(
         reasons.append(REASON_SCHEMA_INVALID)
 
     #    ...and the half of the schema the generated model cannot express. `format: date-time`
-    #    is declared on eight fields of the published bundle and enforced by the TypeScript door;
+    #    is declared on nine fields of the published bundle and enforced by the TypeScript door;
     #    the generated pydantic models type every one of them as a bare `str`, so it was enforced
     #    on one door only (T-194). Path-insensitive, like every other schema question.
     offer = _get(bid, "offer")

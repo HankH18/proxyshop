@@ -569,9 +569,10 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
         <p className="lede">
           Say what you need. Your agent asks the exchange, the exchange asks the stores, and
           the stores answer for themselves. Every value below arrived in an HTTP response from
-          the service on this origin during this session, with exactly one exception, named
-          where it appears and listed under &ldquo;What is not wired yet&rdquo;: the grey text
-          inside the box is a hint rather than an answer.
+          the service on this origin during this session, except in the two places that say so
+          where they appear: the grey text inside the box is a hint rather than an answer, and
+          step 5&rsquo;s order is manufactured &mdash; badged SEEDED on the panel itself and
+          listed under &ldquo;What is not wired yet&rdquo;.
         </p>
       </header>
 

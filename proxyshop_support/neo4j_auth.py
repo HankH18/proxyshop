@@ -5,9 +5,9 @@ Why this module exists
 ``NEO4J_PASSWORD`` had **three disagreeing code-side defaults**, two of them on served
 paths::
 
-    apps/exchange/src/retrieval/roster.py:519      os.environ.get("NEO4J_PASSWORD", "proxyshop_dev_pw")
-    services/ingest/src/graph/reembed.py:549       os.environ.get("NEO4J_PASSWORD", "proxyshop_dev_pw")
-    proxyshop_support/service_launch.py:251        os.environ.get("NEO4J_PASSWORD", "")
+    exchange.retrieval.roster::graph_sessions_from_env  ("NEO4J_PASSWORD", "proxyshop_dev_pw")
+    ingest.graph.reembed::graph_driver                  ("NEO4J_PASSWORD", "proxyshop_dev_pw")
+    proxyshop_support.service_launch::check_neo4j       ("NEO4J_PASSWORD", "")
 
 The third one is the readiness probe — the check that decides whether a container is
 reported healthy — and it is the disagreement that matters. A probe that authenticates with

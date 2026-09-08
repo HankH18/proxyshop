@@ -399,7 +399,7 @@ ul.tight li { font-size: 0.82rem; }
    inside it has to sit on the mono baseline instead of raising the line. */
 .masthead__stamp { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
 
-/* A one-way consequence, said before it is pressed rather than after.
+/* A consequential control, said before it is pressed rather than discovered after.
    `.notice--final` is NOT a sixth panel state — the five above describe a panel that could
    not be filled, and this describes a control that works and takes the store off the network
    the moment it is pressed. It borrows the `bad` tone and the killed pill's ground because

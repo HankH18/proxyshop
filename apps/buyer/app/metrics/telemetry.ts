@@ -31,10 +31,11 @@
  * =======================================================================================
  * A BLANK IS NOT A ZERO
  *
- * Every reading is a {@link Reading}, a tagged union with six states, and NONE of them is a
+ * Every reading is a {@link Reading}, a tagged union with seven states, and NONE of them is a
  * number that stands in for an absent one. `ok` carries a value. `unauthorized`, `absent`,
  * `failed` and `unreachable` carry a sentence about why there is no value. `idle` means
- * nobody has asked yet. The page renders each state differently on purpose: "0 stores
+ * nobody has asked yet and `loading` means somebody has and the answer is not back. The page
+ * renders each state differently on purpose: "0 stores
  * answered" and "this page could not find out how many stores answered" are different
  * claims, and only the first is ever the market's.
  *

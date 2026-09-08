@@ -16,17 +16,23 @@ For this package that is not cosmetic. Two consequences, both silent:
   ``OffDomainPermalink`` the other spelling raises. Same file, same line, two classes — so
   a route handler that imported ``buyer_svc.accept`` would let a refusal raised by
   ``apps.buyer.svc.src.accept`` escape as an unhandled 500 instead of a 502.
-* :data:`~buyer_svc.accept.handoff.ACCEPTED` — the process-local record of which auctions
-  this buyer has already accepted — would exist **twice**, so "one accept per auction"
+* the ledger behind :func:`~buyer_svc.accept.handoff.accepted` — the process-local record of
+  which auctions this buyer has already accepted — would exist **twice**, so "one accept per auction"
   would hold *per spelling*. A process that reaches :func:`accept` both ways (a pytest
   session running the frozen acceptance suite beside the FastAPI app is exactly such a
   process) would follow two permalinks for one auction with every assertion still green.
 
-This is a deliberate, ownership-forced second copy of
-``apps/buyer/svc/src/intent/_spellings.py`` (T-071), which documents the trap at length and
-which this ticket may read but not edit. ``packages/llm/__init__.py`` carries a third copy
-of the same fix. The right home for it is ``apps/buyer/svc/src/_spellings.py``, a file no
-feature ticket owns; that move is reported in this ticket's NEEDS rather than made here.
+This is a deliberate, ownership-forced copy of the fix
+``apps/buyer/svc/src/intent/_spellings.py`` (T-071) documents at length and which this ticket
+may read but not edit. It is one of SEVEN live copies, listed rather than numbered because an
+ordinal cannot tell whoever migrates them which ones are left behind:
+``find apps packages services -name _spellings.py`` prints six — ``intent`` (T-071), this file
+(T-072) and ``feedback`` (T-073) under ``apps/buyer/svc/src``; ``apps/exchange/src/accept``
+(T-169); ``apps/merchant/svc/src/codes`` (T-052); ``apps/merchant/svc/src/envelope`` (T-243) —
+and the seventh is ``packages/llm/__init__.py``'s ``_bind_submodules``, which does the same
+``sys.modules.setdefault`` binding with no module of its own. The right home for the buyer
+service's three is ``apps/buyer/svc/src/_spellings.py``, a file no feature ticket owns; that
+move is reported in this ticket's NEEDS rather than made here.
 
 Binding is ``setdefault``-shaped throughout: whichever spelling loads first wins and a
 module already registered under a name is never replaced. Only the two spellings of *this*

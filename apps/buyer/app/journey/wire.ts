@@ -177,7 +177,8 @@ export const PSEUDONYM_PREFIX = 'psn-'
  * So this field is no longer what makes the request legal, and the page is no longer choosing
  * between sending it and getting an empty shortlist blamed on the market. It is here because
  * R5's handle is the buyer's to state: `anon-{auction_id}` is a name the exchange gives this
- * shopper, and `mintPseudonym` is one the shopper arrives with.
+ * shopper, and the vault's pseudonym — minted by `POST /buyer/auth/session` and read back
+ * from `GET /buyer/profile` — is one the shopper arrives with.
  */
 export interface BuyerProfile {
   readonly pseudonym: string

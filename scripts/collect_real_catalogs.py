@@ -97,10 +97,11 @@ USER_AGENT = "ProxyShopBot/0.1 (catalog research; contact: hank.holcomb@challeng
 
 CORPUS_VERSION = "2.0.0"
 
-# The roster. The last two are DELIBERATE NEGATIVES for a liver-support query: measured, they
-# answer a milk-thistle search with protein stacks and whey. They are ordinary stores in every
-# other respect, and for a *protein* query the roles invert — which is the point of collecting
-# whole catalogues rather than one category.
+# The roster. The DELIBERATE NEGATIVES for a liver-support query are named below, in
+# `NEGATIVE_CONTROL_HOSTS`, rather than pointed at by position here: measured, they answer a
+# milk-thistle search with protein stacks and whey. They are ordinary stores in every other
+# respect, and for a *protein* query the roles invert — which is the point of collecting whole
+# catalogues rather than one category.
 RELEVANT_HOSTS = (
     "gaiaherbs.com",
     "bulksupplements.com",

@@ -35,14 +35,17 @@ both halves of the buyer↔exchange seam learns one convention:
     file. ``BUYER_DEPLOYMENT`` wins if both are set.
 ``EXCHANGE_URL``
     Just the exchange's origin, lowest precedence of the three, and it is here because the
-    repository's own deployment **already sets it**. ``apps/buyer/compose.yaml:47`` carries::
+    repository's own deployment **already sets it**. The ``buyer-svc`` service in
+    ``apps/buyer/compose.yaml`` carries::
 
         EXCHANGE_URL: "${EXCHANGE_URL:-http://exchange:8083}"
         # The exchange is reached by service name inside the network, never by localhost.
 
-    while ``grep -rn EXCHANGE_URL --include='*.py'`` over this repo returns **nothing**. The
-    deploy lane declared the address and said what it was for; no line of code had ever read
-    it. Reading it is the difference between a correct composition root and one the shipped
+    and before this module existed, ``grep -rn EXCHANGE_URL --include='*.py'`` over this repo
+    returned **nothing**: the deploy lane declared the address and said what it was for, and
+    no line of code had ever read it. :func:`_stated_deployment`, under
+    :func:`read_deployment`, is what reads it now, and reading it is the difference between a
+    correct composition root and one the shipped
     ``docker compose up`` cannot reach: with it, the stack in ``docs/deploy.md`` carries a
     confirmed intent to the exchange with no operator action at all.
 ``BUYER_ROSTER``
@@ -1006,16 +1009,17 @@ def _stated_deployment(environ: Mapping[str, str]) -> Deployment | None:
         inline = str(environ.get(ENV_DEPLOYMENT_JSON) or "").strip()
         if not inline:
             # LAST, and lowest precedence: the bare origin the compose fragment ALREADY hands
-            # this service. `apps/buyer/compose.yaml:47` sets
+            # this service. The `buyer-svc` service in `apps/buyer/compose.yaml` sets
             #
             #     EXCHANGE_URL: "${EXCHANGE_URL:-http://exchange:8083}"
             #     # The exchange is reached by service name inside the network, never by localhost.
             #
-            # and `grep -rn EXCHANGE_URL --include='*.py'` over this repo returns **nothing**:
-            # the deploy lane declared the address, said what it was for, and no line of code
-            # has ever read it. Reading it here is what makes the shipped `docker compose up`
-            # stack carry a confirmed intent with no operator action at all — the alternative
-            # is a correct composition root that the repository's own deployment cannot reach.
+            # and before this branch existed, `grep -rn EXCHANGE_URL --include='*.py'` over the
+            # repo returned **nothing**: the deploy lane declared the address, said what it was
+            # for, and no line of code had ever read it. The `environ.get` below is the read.
+            # It is what makes the shipped `docker compose up` stack carry a confirmed intent
+            # with no operator action at all — the alternative is a correct composition root
+            # that the repository's own deployment cannot reach.
             #
             # It is a bare origin rather than a document, so it goes through the SAME
             # `_exchange_url` validation: `EXCHANGE_URL=exchange:8083` is a 503 naming the

@@ -1,5 +1,8 @@
 /**
- * The five regions R9 names, one component each.
+ * The six regions the console draws, one component each: onboarding (R6 · R7), the economic
+ * envelope, the kill switch, where the store lost, trust, and bid activity. R9 names five of
+ * them; onboarding is R6's and R7's and is here because a store that has not joined yet has
+ * nothing else on this page it can act on.
  *
  * Two things in here are the product rather than the presentation, and both are commented at
  * their site:

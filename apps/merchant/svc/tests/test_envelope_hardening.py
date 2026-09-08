@@ -13,6 +13,7 @@ only, never written, for the same reason the reproduction file gives.
 from __future__ import annotations
 
 import importlib
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pytest
@@ -167,6 +168,14 @@ def test_a_kill_through_one_spelling_is_visible_through_the_other() -> None:
 # ======================================================================================
 # T-239 — the history crosses the persistence boundary with its invariants intact
 # ======================================================================================
+#: A row as this fake replays it. BOTH shapes, because the repository reads both:
+#: `_document_from_row` branches on `isinstance(row, Mapping)`, so a connection opened with
+#: psycopg's `dict_row` factory and one opened with the default tuple factory are the same
+#: repository. Annotating this as tuples alone made the dict-row test a type error while the
+#: code it exercises was correct.
+_Row = tuple[Any, ...] | Mapping[str, Any]
+
+
 class _FakeCursor:
     """Enough of a DB-API cursor to capture what the Postgres repository actually sends."""
 
@@ -182,7 +191,7 @@ class _FakeCursor:
     def execute(self, statement: str, parameters: tuple[Any, ...] = ()) -> None:
         self._connection.statements.append((statement, parameters))
 
-    def fetchall(self) -> list[tuple[Any, ...]]:
+    def fetchall(self) -> list[_Row]:
         return list(self._connection.rows)
 
 
@@ -195,8 +204,8 @@ class _FakeConnection:
     coverage of ``PostgresEnvelopeRepository`` is honestly zero and is reported as such.
     """
 
-    def __init__(self, rows: list[tuple[Any, ...]] | None = None) -> None:
-        self.rows = rows or []
+    def __init__(self, rows: Sequence[_Row] | None = None) -> None:
+        self.rows: list[_Row] = list(rows or ())
         self.statements: list[tuple[str, tuple[Any, ...]]] = []
         self.commits = 0
         self.rollbacks = 0

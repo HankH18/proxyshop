@@ -617,8 +617,8 @@ export function ShortlistView({
       {accepted !== undefined ? (
         <p data-testid="checkout-destination">
           Your checkout is at {new URL(accepted.permalink_url).hostname}. We did not choose that
-          address — the exchange minted this permalink when it accepted the offer, and it is
-          pinned to the store&apos;s own registered domain.
+          address — it came back with the store&apos;s accepted offer, and the exchange checked it
+          against the store&apos;s own registered domain before showing it to you.
         </p>
       ) : null}
 

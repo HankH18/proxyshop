@@ -62,7 +62,7 @@ def test_graph_schema_session_yields_an_empty_graph_with_the_schema_applied(
 @pytest.mark.docker
 @pytest.mark.graph
 def test_a_seeded_graph_is_gone_by_the_next_test(neo4j_session: Any) -> None:
-    """Seed a node here; :func:`test_zz_the_seed_from_the_previous_test_is_gone` checks it.
+    """Seed a node here; :func:`test_the_seed_from_the_previous_test_is_gone` checks it.
 
     Two halves of one assertion about *hand-off* rather than about a single test, which is
     the thing a per-test reset actually has to guarantee and the thing the duplicate wipe

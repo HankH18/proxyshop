@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import pytest
 from shopify_stub.permalink import (
+    MAX_HOST_LENGTH,
     PERMALINK_TEMPLATE,
     CartPermalink,
     PermalinkError,
@@ -26,6 +27,7 @@ from shopify_stub.permalink import (
     host_matches,
     parse_permalink,
 )
+from shopify_stub.testing import NON_BARE_HOSTS
 
 SELLER_DOMAIN = "store-a.example.com"
 RIVAL_DOMAIN = "rival.example.com"
@@ -145,22 +147,53 @@ def test_empty_seller_domain_never_matches() -> None:
 # The builder's host validation, and the port the parser used to swallow
 # ---------------------------------------------------------------------------------------
 
-#: Every delimiter the original two-substring check (``"://"`` and ``"/"``) let through.
-#: The first two are the ones that matter: they render a *live* checkout link whose real host
-#: is ``attacker.tld`` while the builder reports success, contradicting its own docstring.
-NON_BARE_HOSTS = {
-    "userinfo": "good.example.com@attacker.tld",
-    "escaped userinfo": "store-a.example.com\\@attacker.tld",
-    "explicit port": "store-a.example.com:8443",
-    "query": "store-a.example.com?x",
-    "fragment": "store-a.example.com#f",
-    "space": "store-a.example.com evil.tld",
-    "leading dot": ".store-a.example.com",
-    "empty label": "store-a..example.com",
-    "trailing hyphen label": "store-a-.example.com",
-    "underscore": "store_a.example.com",
-    "ipv6 brackets": "[::1]",
-}
+# The host table below is :data:`shopify_stub.testing.NON_BARE_HOSTS`, imported rather than
+# copied. This file used to hold its own eleven-row copy while that module's comment said two
+# test modules shared its table; only ``test_stub_domain_guard.py`` did. The seven rows the
+# copy was missing — ``scheme``, ``path``, ``empty`` and the four named
+# :data:`~shopify_stub.testing.RESPONSE_SPLITTING_HOSTS` — were never put to
+# :func:`~shopify_stub.permalink.build_permalink` at all. Measured before unifying: the builder
+# already refuses all eighteen, so this closed a coverage gap rather than a bug, and a
+# nineteenth row added for the guard is put to the builder too.
+#
+# The two ``userinfo`` rows are the ones that cost something: they render a *live* checkout
+# link whose real host is ``attacker.tld`` while a two-substring check (``"://"`` and ``"/"``)
+# reports success, contradicting the builder's own docstring.
+#
+# These are plain ``#`` comments, not ``#:`` ones, deliberately. They documented a dict this
+# file used to define; that dict is gone, so as ``#:`` they documented the NEXT assignment
+# instead, and the only thing between them and :data:`REFUSALS` was one blank line a formatter
+# is free to remove. A comment about a table has no assignment to attach to — a plain ``#``
+# says so, and cannot be silently re-attached.
+
+#: Every message :func:`~shopify_stub.permalink._assert_bare_host` can refuse with, in the
+#: order its three guards run: emptiness, the
+#: :data:`~shopify_stub.permalink.MAX_HOST_LENGTH` ceiling, then the DNS allow-list. Held as a
+#: tuple so a row can be checked to have reached exactly ONE of them — a match fragment shared
+#: by two of these would pass every row while distinguishing none.
+REFUSALS: tuple[str, ...] = (
+    "shop_domain must not be empty",
+    f"shop_domain must be at most {MAX_HOST_LENGTH} characters",
+    "shop_domain must be a bare host",
+)
+
+
+def expected_refusal(domain: str) -> str:
+    """Which of :data:`REFUSALS` ``build_permalink`` owes ``domain``, from the guard ORDER.
+
+    Two rules run BEFORE the bare-host rule, so ``match="bare host"`` for every row was wrong
+    for any row that cannot reach it, and loosening the match to accept either message would
+    have graded neither. Restating the order here is what lets each row be graded against the
+    guard it actually reaches: add ``"overlong": "a" * 254 + ".com"`` to
+    :data:`~shopify_stub.testing.NON_BARE_HOSTS` — the natural row for
+    ``test_stub_domain_guard.py``, which shares this table — and it is graded against the
+    length ceiling here instead of failing on a ``bare host`` it never reaches.
+    """
+    if not domain:
+        return REFUSALS[0]
+    if len(domain) > MAX_HOST_LENGTH:
+        return REFUSALS[1]
+    return REFUSALS[2]
 
 
 @pytest.mark.parametrize(("label", "domain"), sorted(NON_BARE_HOSTS.items()))
@@ -171,9 +204,17 @@ def test_build_refuses_a_shop_domain_that_is_not_a_bare_dns_name(label: str, dom
     ``:``, ``?`` and ``#``. ``?`` was the tell: it did eventually fail, but as *"permalink
     path must start with /cart/"* — a host bug reported as a path bug, in a different
     function, one call later.
+
+    Every row of the shared table is driven, ``empty`` included, and each is held to the ONE
+    refusal :func:`expected_refusal` says it is owed.
     """
-    with pytest.raises(PermalinkError, match="bare host"):
+    expected = expected_refusal(domain)
+    with pytest.raises(PermalinkError) as raised:
         build_permalink(shop_domain=domain, variant_id=1, code=CODE)
+    message = str(raised.value)
+    assert [refusal for refusal in REFUSALS if refusal in message] == [expected], (
+        f"{label!r} must be refused by exactly one guard, and by {expected!r}; got {message!r}"
+    )
 
 
 def test_build_never_emits_a_link_whose_real_host_is_somebody_else() -> None:

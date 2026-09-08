@@ -1080,7 +1080,7 @@ def _render_string(node: ast.expr, constants: dict[str, str]) -> str | None:
     """A test file's URL expression, rendered with its own module constants folded in.
 
     ``{}`` stands in for anything that is only known at run time, which is exactly the shape
-    :func:`_path_regex` expects a path parameter to have.
+    :func:`route_path_regex` expects a path parameter to have.
     """
     if isinstance(node, ast.Constant):
         return node.value if isinstance(node.value, str) else "{}"

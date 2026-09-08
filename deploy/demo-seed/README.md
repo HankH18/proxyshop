@@ -124,21 +124,30 @@ pitched, and which is being undercut anyway.
 
 ## What is NOT on this page, and why
 
-**There is no `store_killed` row in `bids`.** R9's kill switch works and is observable, but in
-this build it is **terminal**, so a page demonstrating it could only be the page of a permanently
-dead store. Measured on `merchant_svc.envelope.store.EnvelopeVersions`:
+**There is no `store_killed` row in `bids`.** R9's kill switch works and is observable, and a
+page demonstrating it would be the page of a stopped store — which is a state this seed is not
+about, not a state it could never leave. Measured on
+`merchant_svc.envelope.store.EnvelopeVersions`:
 
     v.kill(store)                      -> v1 filed as `killed`
-    v.activate(store, approval)        -> ApprovalRejected: "envelope v1 has been killed; it is
-                                          not reactivated by an approval — publish a new version
-                                          and approve that"
+    v.activate(store, approval)        -> ApprovalRejected: "envelope v1 has been killed; a
+                                          killed envelope is never reactivated by an approval,
+                                          however well bound — restart the store first
+                                          (POST /stores/{store_id}/revive), which brings it
+                                          back in shadow, and approve these terms then"
     v.put(store, new_terms)            -> v2 … also `killed`
-    v.activate(store, approval)        -> refused in the same words
+    v.revive(store)                    -> v2 back in `shadow`, approval dropped
+    v.activate(store, approval)        -> `active` again, under a fresh signature
 
-`put` reaches the new version through `edit_envelope`, which carries the head's activation
-forward, so the service's own stated remedy is unreachable. That is a defect in `apps/merchant`
-and it is named here rather than papered over by shipping a dead store as the demo's resting
-state. The row it would produce looks like every other decline in `bids`, with
+This paragraph used to call the kill **terminal** and the refusal's advice unreachable, and both
+were true of the service it described: the refusal then read "publish a new version and approve
+that", and `put` reaches the new version through `edit_envelope`, which carries the head's
+activation forward — so a merchant who followed the advice arrived back at the same refusal one
+version later. `revive_envelope` is the door that was missing. `edit_envelope` still carries
+`killed` forward, deliberately, so saving new terms is not a way to un-stop a store; the restart
+is its own act and the approval that follows it is the ordinary one.
+
+The row a killed store produces looks like every other decline in `bids`, with
 `"decline_reason": "store_killed"`, `"activation": "killed"` and `"may_bid": false`.
 
 The related row a merchant must never scroll past — `"contradiction": true`, a store the merchant

@@ -678,9 +678,21 @@ def test_a_fresh_volume_with_no_variable_still_connects_on_the_dev_default(
 # `proxyshop_support`'s and this file is what the lane gate runs.
 # =====================================================================================
 
-#: The four (role, env var) pairs a service reads directly, with the exact DSN shape the
-#: compose fragments forward. Spelled out rather than derived from ``ROLES`` so that a change
-#: to either side has to be made here too.
+#: The three (role, env var) pairs a service reads directly, with the exact DSN shape the
+#: compose fragments forward. THREE pairs, four call sites — and ``app`` is reachable at
+#: three of them, not two:
+#:
+#: * ``buyer_svc.auth.routes`` resolves ``buyer_vault`` for the login vault, and ``app`` for
+#:   the profile publisher;
+#: * ``buyer_svc.window.routes`` resolves ``app`` for the store-window read;
+#: * ``trust.events.pg._with_resolved_password`` resolves whichever role supplied the ledger
+#:   DSN, looked up in its own ``_DSN_ENV_ROLES`` — ``trust_rw`` on the shipped stack, because
+#:   ``apps/trust/compose.yaml`` sets ``PROXYSHOP_PG_DSN_TRUST_RW`` and ``DEFAULT_DSN_ENV``
+#:   consults it before ``PROXYSHOP_PG_DSN_APP``; but ``app`` on any deployment that forwards
+#:   only the app DSN, which is the case this comment used to say could not happen.
+#:
+#: Spelled out rather than derived from ``ROLES`` so that a change to either side has to be
+#: made here too.
 SHIPPED_DIRECT_READS = (
     ("buyer_vault", "PROXYSHOP_PG_DSN_VAULT", "postgresql://buyer_vault@{host}:{port}/{db}"),
     ("app", "PROXYSHOP_PG_DSN_APP", "postgresql://app@{host}:{port}/{db}"),

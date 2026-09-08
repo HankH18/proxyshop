@@ -33,8 +33,8 @@ EXPECTATION_FILE = PAGES_DIR / "expected_claims.json"
 
 POLICY_ROBOTS = "User-agent: *\nDisallow: /admin\nAllow: /\n"
 
-#: Served path -> fixture file. The two Shopify-shaped paths the production fetcher tries
-#: first are the ones wired up, so a default crawl finds real pages.
+#: Served path -> fixture file. The two Shopify-shaped policy paths the production fetcher
+#: tries first are wired, and so is the warranty page, so a default crawl finds real pages.
 DEFAULT_ROUTES: dict[str, str] = {
     "/policies/shipping-policy": "shipping.html",
     "/policies/refund-policy": "returns.html",
