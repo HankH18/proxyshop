@@ -40,6 +40,7 @@ which hands this function an already-eligible roster. Putting a gate here would 
 function deny whenever no port was injected, which is the wrong default for a pure helper
 and the wrong layer for a system guarantee.
 
+
 The discount wall (T-177)
 -------------------------
 
@@ -957,18 +958,86 @@ def _tier(rostered: Mapping[str, Any]) -> int:
     return 0 if number is None else int(number)
 
 
+def _answers_about_another_product(offer: Any, rostered: Mapping[str, Any]) -> bool:
+    """Does this offer name a product that is NOT the one this row prices? (D58)
+
+    The sixth thing the exchange holds a statement about, and it was the quiet hole. A store
+    answering about a different product finds no row in :func:`_price_refusal`'s one-row
+    catalogue and is therefore refused — but only if something ELSE had already made the bid
+    judgeable. Measured on the served route before this clause existed, one honest hosted agent,
+    same bid, same price, differing only in whether the roster row happened to state a
+    ``max_discount_pct``::
+
+        roster max_discount_pct: 20  -> refused, bid_price_unreconcilable, represented at 78.00
+        roster states none           -> ADMITTED at 39.00, and price_value read 0.15
+
+    The graph-backed roster (:meth:`exchange.retrieval.roster.SolicitedShop.as_roster_row`)
+    states no ``max_discount_pct`` at all, so the second row is the one the organic half of the
+    market actually gets: a price against a product the exchange never priced, admitted, and
+    then credited a full ``price_value`` for a discount nobody gave — ``(78 − 39)/78``, a
+    comparison between two different products' prices.
+
+    So the mismatch is judged on its own and the two answers stop depending on an unrelated
+    field. The verdict is a REFUSAL
+    (:data:`contracts.boundary.ROSTER_LIST_PRICE_UNAVAILABLE`), and the store is represented at
+    its rostered list price (R10) — the fail-closed direction, and the one this module has
+    always taken for a price it cannot read.
+
+    **What this deliberately does NOT do, because it was built and withdrawn (D58).** It does
+    not reach for the exchange's catalogue to price the offered product and admit the bid. That
+    hands the BIDDER the ``price_value`` denominator: measured, a store charging 44.00 moved the
+    term from 0.0079 to its saturated 0.15 — last place to first, same money — by naming a
+    sibling the crawl lists at 5000. Since ``price_value`` is what a counter-proposal would need
+    in order to be ranked at all, and the exchange cannot bind ``offer.product_ref`` to what the
+    checkout actually sells, a counter-proposal is represented rather than ranked. D58 carries
+    the argument and the condition under which that changes.
+
+    Both sides are read for PRESENCE, not readability, and only a row that names a product can
+    disagree with an offer: a roster row naming none makes no statement for the offer to
+    contradict, and an offer naming none is not "about another product" — it is the unreadable
+    offer :func:`_price_is_unreadable` already answers.
+
+    **Both refs are trimmed before they are compared**, and it is not cosmetic:
+    ``RosterEntry.product_ref`` has no trim, the exchange solicits with the trimmed ref
+    (``composition._solicited_product_ref``) and the agent matches its catalog key with the
+    trimmed ref (``store_agent.runtime.context._solicited_ref``) — so comparing the padded
+    roster spelling here would refuse a store for answering EXACTLY the question it was asked.
+    Measured before this trim existed: roster ``'beanie-merino-01 '``, offer
+    ``'beanie-merino-01'``, verdict ``bid_price_unreconcilable``. Whitespace is the only
+    normalisation applied; case, unicode form and every other spelling are compared as written,
+    because those are different keys to the catalogue too.
+
+    Wrapped, for the reason :func:`_states_an_authorized_depth` is wrapped: this is a read that
+    TURNS THE WALL ON, the roster arrives on an unauthenticated request body, and a row whose
+    ``get`` or whose ``__str__`` raises would take the exception out through ``collect_bids``
+    and end an auction every other store was bidding in. A row nobody can read states nothing,
+    so it disagrees with nothing.
+    """
+    try:
+        listed = rostered.get("product_ref")
+        if listed is None:
+            return False
+        offered = offer.get("product_ref") if isinstance(offer, Mapping) else None
+        if offered is None:
+            return False
+        return str(offered).strip() != str(listed).strip()
+    except Exception:  # noqa: BLE001 - an unreadable row makes no statement about a product
+        return False
+
+
 def _is_judged(offer: Any, rostered: Mapping[str, Any]) -> bool:
     """Does the exchange hold a statement this offer's price can be reconciled against?
 
-    Five ways it does, and the module docstring's "Silence is not an exemption" section carries
+    Six ways it does, and the module docstring's "Silence is not an exemption" section carries
     the argument for each. In one line: a declared discount is a claim, a rostered
-    ``max_discount_pct`` is an authorization, and a free item, a price under the floor and a price
-    that is not a number need none of it.
+    ``max_discount_pct`` is an authorization, an offer about another product is a price the row
+    does not cover, and a free item, a price under the floor and a price that is not a number
+    need none of it.
 
-    The last two do not consult ``max_discount_pct`` at all and that is the point of them: every
-    other relation in the price walk is an inequality against the authorized depth, and the depth
-    arrives on an unauthenticated request body, so a wall built only out of those has a setting
-    that turns it off.
+    The last three do not consult ``max_discount_pct`` at all and that is the point of them:
+    every other relation in the price walk is an inequality against the authorized depth, and
+    the depth arrives on an unauthenticated request body, so a wall built only out of those has
+    a setting that turns it off.
     """
     return (
         _declares_a_discount(offer)
@@ -976,6 +1045,7 @@ def _is_judged(offer: Any, rostered: Mapping[str, Any]) -> bool:
         or _priced_at_nothing(offer, rostered)
         or _price_is_unreadable(offer)
         or _below_the_price_floor(offer, rostered)
+        or _answers_about_another_product(offer, rostered)
     )
 
 
@@ -1236,9 +1306,15 @@ def collect_bids(
         # charges, and a fallback is a real rankable offer that has to be comparable too (R10).
         # It reads 0.0 there rather than being absent — an entry priced AT its list price
         # demonstrates no saving, which is the honest answer for a store that never bid.
+        #
+        # **The denominator is the roster's and stays the roster's (D58).** Feeding it the
+        # platform's price for whatever product the BID named was implemented and withdrawn:
+        # measured on the served route, a store charging 44.00 moved `price_value` from
+        # 0.0079 to its saturated 0.15 — last place to first, same money — by naming a
+        # sibling product the crawl lists at 5000. An entry admitted here is always about the
+        # rostered product, because `_answers_about_another_product` refuses every other kind.
         listed = _number(rostered.get("list_price"))
         listed = listed if listed is not None and listed > 0.0 else None
-
         if reason is None and answer is not None:
             bid = dict(answer["bid"])
             entries.append(

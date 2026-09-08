@@ -24,6 +24,21 @@ claim and the evidence would be marking its own homework — which is the same f
 ``checkout/sellers.py`` records for ``bid["store_domain"]``, where a store supplying both
 halves of the C10/D22 check passed its own check.
 
+**The bidder does not choose the SUBJECT either, and D58 is the entry that measured why.** It
+is tempting to let ``offer.product_ref`` decide which of the platform's rows a store's claims
+are graded against, because a shop counter-proposing a better-fitting product is behaviour the
+market wants and grading it against the product it did NOT bid manufactures a false
+``contradicted``. That was implemented, driven through ``POST /auctions``, and withdrawn: on the
+hosted path an offer is arbitrary third-party JSON, and ``product_ref``, ``variant_ref`` and
+``checkout_url`` are three independent store-written strings that nothing joins — the checkout
+permalink is minted from ``variant_ref`` (``checkout/provider.py``), never from ``product_ref``.
+Measured: a store changing ONE field, ``offer.product_ref``, to a sibling product the platform
+really did crawl turned its false stock claim from ``contradicted`` (``-0.15``) into
+``verified``, while still selling the original variant at the original price. Which product a
+bid's claims resolve against therefore stays the AUCTION's fact until the exchange can bind that
+ref to what is actually sold. See D58 for the full argument and for the condition under which
+the inversion becomes safe.
+
 An exchange nobody has wired a catalog into holds no snapshot for anybody, so every claim
 comes back ``unsupported``, no hard constraint is satisfied, and a hard-constrained auction
 shortlists nobody. That is the direction to fail in and it is the same one
@@ -914,6 +929,11 @@ def attest_candidates(
     The offer's own ``product_ref`` remains the fallback, because a caller that named none
     leaves nothing else to resolve against, and a claim that resolves against nothing comes
     back ``unsupported`` rather than verified.
+
+    **D58 tried to invert this and withdrew it on the measurement** — see the module docstring.
+    What D58 did change is upstream of here: ``BidRequest`` now NAMES this product, so a
+    solicited agent bids the product the exchange asked about instead of guessing, which is
+    what made the roster's answer and the offer's answer disagree in the first place.
 
     ``messages`` is ``{store_id: pitch}`` and is the same kind of statement: the pitch a caller
     holding the auction's bid entries knows this store sent, which outranks the

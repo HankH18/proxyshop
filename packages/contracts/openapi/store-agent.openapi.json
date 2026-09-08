@@ -29,8 +29,9 @@
                   "currency": "USD",
                   "budget_band": "40-80",
                   "created_at": "2026-01-01T00:00:00Z",
-                  "schema_version": "1.0.0"
+                  "schema_version": "2.0.0"
                 },
+                "product_ref": "sku-serum-15",
                 "profile": {
                   "pseudonym": "psn-0001",
                   "buckets": {
@@ -91,7 +92,7 @@
                   "message": null,
                   "agent_version": "store-agent/1.0.0",
                   "signature": null,
-                  "schema_version": "1.0.0"
+                  "schema_version": "2.0.0"
                 },
                 "x-example-schema": "Bid"
               }

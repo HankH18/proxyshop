@@ -53,7 +53,7 @@ All cross-service schemas live in `packages/contracts` (JSON Schema source → g
 ### Core protocol objects (JSON Schema names)
 - `Intent` (partner schema adopted, extended) — `{intent_id, cluster_id, query, category, hard_constraints: [{field, op: enum[eq|lte|gte|in|contains], value, unit?}], preferences: [{field, direction: enum[maximize|minimize|prefer], weight}], ship_to, currency, budget_band, created_at, schema_version}`. Hard constraints are filters (R19).
 - `BuyerProfile` — `{pseudonym, buckets: {budget_band, category_affinity[], frequency_tier, region, first_time: bool}}` — no identity fields; pseudonym rotates per session.
-- `BidRequest` — `{auction_id, intent: Intent, profile: BuyerProfile, respond_by: ts}`
+- `BidRequest` — `{auction_id, intent: Intent, product_ref: str?, profile: BuyerProfile, respond_by: ts}`. `product_ref` (D58) is the product the exchange rostered this store for, so a solicitation says what it is soliciting a bid **on**; absent when the exchange rostered the store without naming one. It states what was asked, not what may be answered — a shop may counter-propose, and a bid about any other product is represented at the rostered list price rather than ranked.
 - `Claim` — `{key, value, provenance: Provenance}`
 - `Provenance` — `{source: enum[scraped|pixel_feed|owner_statement|envelope_rule|learned_policy|network|seller_asserted], ref: str, observed_at: ts, authority_rank: int}`
 - `Offer` — `{product_ref, unit_price, discount: {type, value, provenance}, commitments: [Claim], total_price}`

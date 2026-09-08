@@ -256,6 +256,21 @@ class AuctionContext:
     #: Pitches already served for this store, keyed by `bid_offer_id`. See
     #: :data:`SERVED_PITCHES_KEY`; read through :meth:`replayed_pitch`, never directly.
     served_pitches: Mapping[str, Any] = field(default_factory=dict)
+    #: The product the exchange ASKED this store about — `BidRequest.product_ref`, the catalogue
+    #: entry the platform's own retrieval rostered for this buyer's intent.
+    #:
+    #: It is a QUESTION, never a constraint on the answer. D55 buys an in-network store the right
+    #: to make its own case, and that includes counter-proposing a different product; nothing on
+    #: this dataclass or downstream of it refuses a bid that names something else. What it does
+    #: is stop the advocate from answering about a product nobody asked about when it *can* answer
+    #: the question put to it — see :func:`~store_agent.runtime.bidding._chosen`.
+    #:
+    #: `None` when the exchange named no product, which is every solicitation minted before the
+    #: field existed: `product_ref` is optional and nullable on the wire (D58), so a pre-D58
+    #: request is not malformed, it simply asked nothing in particular and the advocate picks for
+    #: itself exactly as it always did. Defaulted, like :attr:`store_domain`, so that adding it
+    #: broke no caller that built an `AuctionContext` positionally.
+    solicited_product_ref: str | None = None
 
     @property
     def cluster_id(self) -> str:
@@ -432,6 +447,21 @@ def _catalog(raw: Any) -> dict[str, dict[str, Any]]:
     }
 
 
+def _solicited_ref(value: Any) -> str | None:
+    """`BidRequest.product_ref` as a usable catalog key, or `None` when it is not one.
+
+    Defensive for the same reason :func:`~store_agent.runtime.bidding._variant_ref` is: the
+    request is whatever crossed the wire, and this value is about to be compared against catalog
+    keys. Only a non-empty `str` counts. An int, a mapping or a `True` that became ``"123"`` or
+    ``"{'a': 1}"`` or ``"True"`` would be a ref naming nothing, and a ref naming nothing is
+    indistinguishable downstream from a store that cannot sell what was asked for — it would
+    silently look like a legitimate counter-proposal instead of the malformed input it is.
+    """
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
+
+
 def assemble_context(request: Any, context: Any) -> AuctionContext:
     """Join a `BidRequest` to a store context. Pure, clock-free, and shape-tolerant.
 
@@ -472,6 +502,7 @@ def assemble_context(request: Any, context: Any) -> AuctionContext:
         stated_offer_expiry=str(stated_expiry) if stated_expiry else None,
         store_domain=domain,
         served_pitches=as_mapping(ctx.get(SERVED_PITCHES_KEY), "served pitches"),
+        solicited_product_ref=_solicited_ref(req.get("product_ref")),
     )
 
 

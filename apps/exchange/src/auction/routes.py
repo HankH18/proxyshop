@@ -2067,7 +2067,10 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
         # Which product each store is bidding on is the ROSTER's answer, never the reply's:
         # a store that named a different product on its bid would otherwise choose which of
         # its own catalogue entries its claims are graded against (ESC-020). On a graph-sourced
-        # roster the answer is the PLATFORM's own crawl, which is stronger still.
+        # roster the answer is the PLATFORM's own crawl, which is stronger still. D58 tried
+        # inverting this and withdrew it on the measurement — see `ranking.verification`'s
+        # module docstring — and what it changed instead is that `BidRequest` now NAMES this
+        # product, so a solicited agent answers about it rather than guessing.
         product_refs=product_refs,
         # The ranker's own audit trail. Every verdict it mints for this auction is announced
         # as `claim_verified` on the way through, instead of being consumed by the filters and

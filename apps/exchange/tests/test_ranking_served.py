@@ -52,6 +52,8 @@ import pytest
 from contracts.ranking import DEFAULT_RANKING_WEIGHTS, RANK_FEATURES
 from exchange.auction.collect import (
     FALLBACK_OFFER_TTL_SECONDS,
+    UNPROVENANCED_CLAIM_REASON,
+    UNRECONCILABLE_PRICE_REASON,
     BidEntry,
     collect_bids,
     fallback_expires_at,
@@ -1024,15 +1026,24 @@ def test_a_fallback_slot_shows_the_roster_list_price_and_commits_to_nothing():
 
 
 @pytest.mark.parametrize(
-    ("label", "overrides", "admitted"),
+    ("label", "overrides", "refused_by"),
     [
-        ("a product_ref that is not a string", {"product_ref": 7}, True),
-        ("no product_ref at all", {"product_ref": None}, True),
-        ("a variant_ref that is not a string", {"variant_ref": 9}, True),
-        ("a currency that is not a string", {"currency": 5}, True),
-        ("commitments that are a string", {"commitments": "free returns, honest"}, True),
-        ("commitments that are not claims", {"commitments": [1, "x", None, {"key": "k"}]}, False),
-        ("a commitment with no provenance", {"commitments": [{"key": "k", "value": "v"}]}, False),
+        # D58, and this row is the one that MOVED. See the `refused_by` note in the docstring.
+        ("a product_ref that is not a string", {"product_ref": 7}, UNRECONCILABLE_PRICE_REASON),
+        ("no product_ref at all", {"product_ref": None}, None),
+        ("a variant_ref that is not a string", {"variant_ref": 9}, None),
+        ("a currency that is not a string", {"currency": 5}, None),
+        ("commitments that are a string", {"commitments": "free returns, honest"}, None),
+        (
+            "commitments that are not claims",
+            {"commitments": [1, "x", None, {"key": "k"}]},
+            UNPROVENANCED_CLAIM_REASON,
+        ),
+        (
+            "a commitment with no provenance",
+            {"commitments": [{"key": "k", "value": "v"}]},
+            UNPROVENANCED_CLAIM_REASON,
+        ),
         (
             "a commitment whose source is invented",
             {
@@ -1049,12 +1060,12 @@ def test_a_fallback_slot_shows_the_roster_list_price_and_commits_to_nothing():
                     }
                 ]
             },
-            False,
+            UNPROVENANCED_CLAIM_REASON,
         ),
     ],
 )
 def test_no_offer_a_store_can_write_turns_the_published_shortlist_into_a_500(
-    label, overrides, admitted
+    label, overrides, refused_by
 ):
     """The failure mode that made the obvious version of this change unshippable.
 
@@ -1067,24 +1078,42 @@ def test_no_offer_a_store_can_write_turns_the_published_shortlist_into_a_500(
     whose ``provenance.source`` is not in the closed ``ProvenanceSource`` enum. A closed enum is
     exactly what a store gets wrong by accident.
 
-    ``admitted`` — and why an earlier version of this docstring is now wrong
-    ----------------------------------------------------------------------
-    It used to say "NOTHING on the auction path validates a bid against the schema —
-    ``validate_bid`` has no call site in ``apps/exchange/src``". That was a true measurement and
-    it is no longer true: ``auction/collect.py`` now runs the shared boundary's R8/S5a
-    provenance walk on every hosted reply, at ``bid.claims``, ``offer.commitments`` AND
-    ``offer.discount``. The three shapes flagged ``admitted=False`` write a claim into
-    ``offer.commitments`` with no provenance, or with a source no tool hook mints, so they are
-    refused at the door and the store is represented by its R10 list-price fallback — which
-    satisfies no hard constraint (``test_a_fallback_still_satisfies_no_hard_constraint_and_is_
-    excluded_on_that_alone``) and therefore fills no slot.
+    ``refused_by`` — which door decided this shape, asserted BY NAME
+    ----------------------------------------------------------------
+    This used to be a bare ``admitted`` boolean, and before that the docstring said "NOTHING on
+    the auction path validates a bid against the schema — ``validate_bid`` has no call site in
+    ``apps/exchange/src``". Both are superseded, in that order, by two changes that each wired
+    one more clause onto this path; the flag exists precisely so that happening is visible here
+    rather than silent.
 
-    The rest of ``offer`` is still arbitrary store-written JSON — provenance is the only clause
-    wired, and ``schema_invalid`` is explicitly NOT (see
-    ``exchange.auction.collect.BOUNDARY_REASONS_ANSWERED_ELSEWHERE``) — so the five
-    ``admitted=True`` shapes reach the slot builder exactly as they did, and the assertions on
-    them are unchanged. The flag is asserted rather than assumed: a shape whose treatment
-    silently flips turns this red instead of skipping its own tail.
+    ``auction/collect.py`` runs the shared boundary's R8/S5a provenance walk on every hosted
+    reply, at ``bid.claims``, ``offer.commitments`` AND ``offer.discount``. The three
+    ``commitments`` shapes below write a claim with no provenance, or with a source no tool hook
+    mints, so they are refused there and the store is represented by its R10 list-price fallback
+    — which satisfies no hard constraint (``test_a_fallback_still_satisfies_no_hard_constraint_
+    and_is_excluded_on_that_alone``) and therefore fills no slot.
+
+    **``a product_ref that is not a string`` moved from admitted to refused, deliberately, under
+    D58**, and the reason is recorded here rather than left to be rediscovered. The roster row
+    prices ``product-1``; this offer names ``7``. ``auction/collect.py``'s
+    ``_answers_about_another_product`` now makes that mismatch one of the things the price wall
+    is entitled to judge, and the wall then finds no row for the product the offer named and
+    refuses it — ``price_unreconcilable:offer.unit_price:list_price_unavailable``, the exchange
+    saying it holds no price for what it was offered. That is the same verdict a legible
+    ``product_ref: "prod-q"`` gets, and it has to be: reading past an illegible ref would make
+    one pair of quotes decide the outcome, which is the exact defect ``_tier``'s docstring
+    records having already had to fix once on the same wall. Nothing about the shape being
+    ill-typed makes it safe to rank a price against a listing it may not belong to — before
+    this, that bid was admitted and ``price_value`` divided what it charged by the ROSTER's
+    100.00, a ratio between two products.
+
+    The rest of ``offer`` is still arbitrary store-written JSON — ``schema_invalid`` is
+    explicitly NOT wired (see
+    ``exchange.auction.collect.BOUNDARY_REASONS_ANSWERED_ELSEWHERE``) — so the four
+    ``refused_by=None`` shapes reach the slot builder exactly as they did, and the assertions on
+    them are unchanged. Note ``no product_ref at all`` is among them and stays admitted: an
+    offer naming no product is not an offer about ANOTHER product, and D58 widened nothing
+    there.
     """
     app = _wired_app(
         bidders=Bidders({STORE_A: _bid_with_offer(STORE_A, **overrides)}), stores=(STORE_A,)
@@ -1101,14 +1130,15 @@ def test_no_offer_a_store_can_write_turns_the_published_shortlist_into_a_500(
     assert read_back.json() == body["shortlist"], label
 
     (entry,) = body["entries"]
-    assert (not entry["fallback"]) is admitted, (
+    assert entry["fallback"] is (refused_by is not None), (
         f"{label}: the boundary's treatment of this shape changed — entry={entry}"
     )
+    # Stronger than the boolean this replaced: it is not enough that a shape is refused, it has
+    # to be refused by the door that has a reason for it. A shape silently changing WHICH wall
+    # catches it is the same class of drift the flag exists to surface.
+    assert entry.get("fallback_reason") == refused_by, f"{label}: {entry}"
 
-    if not admitted:
-        from exchange.auction.collect import UNPROVENANCED_CLAIM_REASON  # noqa: PLC0415
-
-        assert entry["fallback_reason"] == UNPROVENANCED_CLAIM_REASON, f"{label}: {entry}"
+    if refused_by is not None:
         assert body["shortlist"]["slots"] == [], (
             f"{label}: a boundary-refused bid became a slot; its fallback satisfies no hard "
             f"constraint and must fill none: {body['shortlist']['slots']}"

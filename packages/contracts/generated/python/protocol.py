@@ -553,7 +553,7 @@ class BuyerProfile(BaseModel):
 
 class BidRequest(BaseModel):
     """
-    DESIGN §Interfaces `BidRequest` — the SOLICITATION body of `POST /v1/bid-requests`.
+    DESIGN §Interfaces `BidRequest` — the SOLICITATION body of `POST /v1/bid-requests`. `product_ref` names the product the exchange rostered this store for, so a solicitation says what it is soliciting a bid ON; absent or `null` when the exchange rostered the store without naming one. It is what was ASKED about and not a constraint on what may be ANSWERED — a shop may counter-propose — but a bid about any other product is REPRESENTED at the rostered list price rather than ranked, because the exchange cannot price or grade a product it did not solicit against an offer whose `product_ref` nothing binds to what the checkout sells. D58 carries the measurement. Adding this field was a MAJOR wire change: this object is `additionalProperties: false`, so a reader pinned to the previous generation refuses a body carrying it — deploy store agents before the exchange.
     """
 
     model_config = ConfigDict(
@@ -561,6 +561,7 @@ class BidRequest(BaseModel):
     )
     auction_id: str = Field(..., min_length=1)
     intent: Intent
+    product_ref: str | None = None
     profile: BuyerProfile
     respond_by: str = Field(..., min_length=1)
 

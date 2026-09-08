@@ -1517,6 +1517,24 @@ class HttpBidSolicitor:
             return None
 
         payload = dict(self._context) or {"auction_id": "", "intent": {}, "profile": {}}
+        # D58: say what is being solicited a bid ON. `BidRequest.product_ref` is the roster
+        # row's, so it is bound per STORE and cannot ride on `self._context`, which is bound
+        # per auction by `for_auction`. Until this line existed the published `BidRequest` named
+        # no product at all, so a solicited agent picked one out of its own catalogue and the
+        # exchange then graded its claims against a product it had never been told about.
+        #
+        # **Written only when there IS one, and that is a compatibility decision rather than a
+        # style one.** Every object in `protocol.schema.json` is `additionalProperties: false`
+        # and the generated pydantic model is `extra="forbid"`, so a store agent pinned to the
+        # previous schema generation answers `422` to a body carrying this key — measured, on a
+        # real socket, against the verbatim previous `BidRequest` model. That degrades safely
+        # (the refusal below turns it into an R10 list-price fallback, `store_refused:422`) but
+        # it degrades SILENTLY, and an auction that names no product has nothing to gain by
+        # breaking a stale agent. Omitting the key is what a `str | None = None` reader reads as
+        # `null` anyway. See `contracts.SCHEMA_VERSION` for why this is a MAJOR bump.
+        solicited = _solicited_product_ref(store)
+        if solicited is not None:
+            payload["product_ref"] = solicited
         deadline = time.monotonic() + MAX_SOLICIT_WALL_CLOCK_SECONDS
         try:
             with self._http_client().stream(
@@ -1600,6 +1618,32 @@ class HttpBidSolicitor:
 
             self._client = httpx.Client(timeout=self._timeout)
         return self._client
+
+
+def _solicited_product_ref(store: Mapping[str, Any]) -> str | None:
+    """This roster row's ``product_ref`` as ``BidRequest.product_ref`` publishes it.
+
+    ``str | None``, never anything else. The roster reaches the exchange on an unauthenticated
+    request body or out of the graph, and ``BidRequest.product_ref`` is typed
+    ``["string", "null"]`` — a row carrying an int, a list or a mapping there would build a body
+    the receiving agent's own pydantic door refuses, which turns one malformed roster row into a
+    store that reads as silent. An unusable value is therefore ``None``: the exchange named no
+    product, which is a legal solicitation.
+
+    **Stripped, and that is load-bearing rather than tidy.** ``RosterEntry.product_ref`` has no
+    ``min_length`` and no trim, so ``" prod-cap "`` arrives intact on an unauthenticated body.
+    The receiving agent trims before matching it against a catalog key
+    (``store_agent.runtime.context._solicited_ref``), so an exchange that ASKED with the padding
+    and then COMPARED with the padding would refuse the agent's answer as being about another
+    product — the exchange asking about X, the store answering exactly X, and the exchange's own
+    price wall rejecting it. So every reader D58 added trims: this one, ``collect.
+    _answers_about_another_product`` and ``ranking.verification.graded_product_ref``. Trimming
+    only here would move the disagreement rather than close it.
+    """
+    stated = store.get("product_ref")
+    if not isinstance(stated, str) or not stated.strip():
+        return None
+    return stated.strip()
 
 
 def _rfc3339(moment: float | None) -> str:

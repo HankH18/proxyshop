@@ -242,6 +242,40 @@ def _variant_ref(listing: Any) -> str | None:
     return None
 
 
+def _chosen(candidates: Sequence[_Candidate], solicited: str | None) -> _Candidate:
+    """Which admissible candidate carries the bid: the solicited product, else the agent's own.
+
+    `candidates` is non-empty and already in :attr:`_Candidate.order` — cheapest first, ties
+    broken lexicographically — so ``candidates[0]`` is the advocate's own pick and stays the
+    answer whenever the exchange named no product.
+
+    **Why the solicited product wins when it is admissible.** The exchange rostered this store
+    for a product because the PLATFORM'S retrieval measured that product as the best fit for
+    *this* buyer's intent, and under D55 the buyer is the customer being served. The shop's own
+    key here is cheapest-first with a lexicographic tie-break — a determinism device, chosen so
+    that two runs on one catalog produce one bid. It is not an argument about fit, and it is not
+    a better answer to the buyer's question than the platform's retrieval was. Before this rule
+    existed the tie-break silently overrode it: the exchange rostered store X for product P,
+    solicited X, and X answered about its own cheapest product Q, whose claims the platform then
+    graded against its snapshot of P — a contradiction manufactured against an honest store.
+
+    **Admissibility is `_gather`'s verdict and nothing more.** Being in `candidates` already
+    means priced, hard-constraints satisfied and not reported out of stock. A solicited product
+    that is none of those is simply absent here, and the agent's own pick stands — the shop
+    counter-proposes rather than declining, because "I cannot sell that right now, but here is
+    what I do have" is informative and a silence is not. This function adds no gate of its own;
+    it can only reorder a choice among products already cleared to carry the bid.
+
+    Counter-proposal is not punished for being one: D58 rules that the platform grades and prices
+    the product the OFFER names, so an answer about Q is judged on Q's merits.
+    """
+    if solicited:
+        for candidate in candidates:
+            if candidate.product_ref == solicited:
+                return candidate
+    return candidates[0]
+
+
 def _no_candidate_reason(
     ctx: AuctionContext, rejected: dict[str, tuple[str, str]]
 ) -> DeclineReason:
@@ -508,7 +542,7 @@ def _assemble(
             "readable instant, and an offer with no readable expiry is one the exchange refuses",
         )
 
-    chosen = candidates[0]
+    chosen = _chosen(candidates, ctx.solicited_product_ref)
     commitments = hooks.get_owner_commitments(ctx.cluster_id)
     action = hooks.choose_policy_action(
         {"cluster_id": ctx.cluster_id, "product_ref": chosen.product_ref}

@@ -427,6 +427,40 @@ def test_the_served_door_is_the_same_answer_as_the_library_call() -> None:
     assert served == in_process.model_dump(mode="json")
 
 
+def test_the_served_door_bids_the_product_the_solicitation_named() -> None:
+    """D58 through the real door, not merely through a library call.
+
+    `BidRequest` sets ``extra="forbid"``, so a `product_ref` that were not a declared field would
+    be a 422 here rather than a field the agent quietly ignored — which is exactly why this has
+    to be driven through pydantic on the served route and not only through `assemble_context`.
+
+    The fixture's two products both list at 100.00, so ``prod-cap`` wins the advocate's own
+    lexicographic tie-break; ``prod-floor`` is reachable only because the exchange asked about
+    it. The intent's `material` hard constraint is dropped for the same reason: it admits only
+    ``prod-cap``, and R19 admissibility is not something a solicitation may override.
+    """
+    body = request_body(product_ref="prod-floor")
+    body["intent"] = {**body["intent"], "hard_constraints": []}
+
+    response = client_for(context()).post("/v1/bid-requests", json=body)
+
+    assert response.status_code == 200, response.text
+    offer = response.json()["offer"]
+    assert offer["product_ref"] == "prod-floor", (
+        "the exchange rostered this store for prod-floor and the served bid answers about it; "
+        "before D58 the door had no way to say so and the agent answered about prod-cap"
+    )
+    assert_completable(offer, domain=STORE_DOMAIN)
+    assert offer["checkout_url"] == f"https://{STORE_DOMAIN}/cart/prod-floor:1"
+
+    unasked = client_for(context()).post(
+        "/v1/bid-requests", json={k: v for k, v in body.items() if k != "product_ref"}
+    )
+    assert unasked.json()["offer"]["product_ref"] == "prod-cap", (
+        "control: the same request without a product_ref is the pre-D58 answer"
+    )
+
+
 def test_a_decline_is_a_204_that_names_its_reason() -> None:
     """204 is the contract's word for a decline, so the reason travels in a header."""
     response = client_for(context()).post(

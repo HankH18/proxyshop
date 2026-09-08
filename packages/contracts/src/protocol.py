@@ -83,7 +83,32 @@ PINNED_PROTOCOL_OBJECTS: tuple[str, ...] = (
 )
 
 #: The wire version every protocol object is currently emitted at.
-SCHEMA_VERSION = "1.0.0"
+#:
+#: ``2.0.0`` (was ``1.0.0``) for D58's ``BidRequest.product_ref`` — the exchange now names the
+#: product it is soliciting a bid on.
+#:
+#: **MAJOR, and an earlier draft of this constant called it minor on an argument that was
+#: measured false.** That draft said "the field is nullable and unrequired: every
+#: ``BidRequest`` valid under ``1.0.0`` is still valid, and a store agent that ignores the
+#: field answers exactly as it did before." The first clause is true and irrelevant. The
+#: second is wrong, because **the compatibility that decides a wire bump is the READER's, not
+#: the writer's**, and both published readers here are closed: every object in
+#: ``protocol.schema.json`` is ``additionalProperties: false``, and the generated model is
+#: ``ConfigDict(extra="forbid")``. A store agent pinned to the previous generation cannot
+#: ignore the field — it refuses the request. Measured, on a real socket, against the verbatim
+#: previous ``BidRequest`` model::
+#:
+#:     body WITH product_ref -> HTTP 422 extra_forbidden ['body', 'product_ref']
+#:     body WITHOUT it       -> HTTP 204
+#:
+#: So a field added to a closed request body is a breaking change for every counterparty, and
+#: the rollout order is: **store agents first, exchange second.** Reached the wrong way round
+#: it degrades rather than erroring — ``HttpBidSolicitor`` maps any non-200 to a refusal and
+#: R10 represents the store at its list price — but it degrades SILENTLY, and what goes quiet
+#: is the whole sponsored half of the market (D55). ``HttpBidSolicitor.solicit`` therefore
+#: omits the key entirely when the auction names no product, so only the solicitations that
+#: actually need it can break a stale agent.
+SCHEMA_VERSION = "2.0.0"
 
 __all__ = [
     "PINNED_PROTOCOL_OBJECTS",

@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from contracts import SCHEMA_VERSION
 from contracts.signing import canonical_json
 from store_agent.hooks import (
     Denied,
@@ -899,6 +900,163 @@ def test_a_constraint_on_an_attribute_the_catalog_lacks_disqualifies_the_product
 
 
 # ---------------------------------------------------------------------------------------------
+# 6a. The product the exchange ASKED about (D58).
+#
+# `BidRequest` used to publish exactly `auction_id`, `intent`, `profile`, `respond_by` — it
+# never named a product. So the exchange rostered store X for product P, solicited X without
+# saying so, X answered with its own cheapest-first pick Q, and the platform graded X's claims
+# about Q against its snapshot of P. That is a contradiction manufactured against an honest
+# store, and it was measured on the served route: `policy_penalties: -0.15`.
+#
+# The rule these grade is: the solicited product wins when it is admissible, and otherwise the
+# advocate's own pick stands. Counter-proposal survives — D55 buys a store the right to argue
+# its own case — but the tie-break no longer silently outvotes the platform's retrieval.
+# ---------------------------------------------------------------------------------------------
+
+STORE_DOMAIN = "store-alpha.example.com"
+
+
+def _solicited(product_ref: Any, **intent_overrides: Any) -> dict[str, Any]:
+    """A `BidRequest` that names the product the exchange rostered this store for."""
+    return {**_request(**intent_overrides), "product_ref": product_ref}
+
+
+def _policy_action(answer: Any) -> dict[str, Any]:
+    """The `policy_action` claim's value — the action the bid says it acted under."""
+    actions = [claim for claim in answer.claims if str(claim.key) == "policy_action"]
+    assert len(actions) == 1, f"expected exactly one policy_action claim, got {actions}"
+    return dict(actions[0].value)
+
+
+def test_the_solicited_product_outranks_the_advocates_own_cheapest_first_pick() -> None:
+    """The platform's retrieval measured fit; the shop's tie-break only measured price."""
+    context = _context()
+    context["catalog"] = dict(
+        context["catalog"],
+        **{
+            "prod-cheap": {
+                "product_ref": "prod-cheap",
+                "list_price": 60.0,
+                "material": "merino wool",
+            }
+        },
+    )
+    context["live_state"] = dict(context["live_state"], **{"prod-cheap": {"in_stock": True}})
+
+    unasked = _bid(context=context)
+    assert unasked.offer.product_ref == "prod-cheap", (
+        "control: left to itself the advocate takes the cheapest admissible product"
+    )
+
+    answer = _bid(_solicited("prod-cap"), context)
+    assert answer.offer.product_ref == "prod-cap"
+    assert answer.offer.unit_price == LIST_PRICE, (
+        "the solicited product is priced from ITS OWN list price, not the cheaper pick's"
+    )
+
+
+def test_everything_downstream_of_the_choice_names_the_solicited_product() -> None:
+    """Not just `Offer.product_ref`: the offer id, the permalink and the acted-on policy action.
+
+    The fixture's two products both list at 100.00, so `prod-cap` wins the lexicographic
+    tie-break and `prod-floor` is the one the advocate would never reach on its own.
+    """
+    context = _context(store_domain=STORE_DOMAIN)
+    answer = _bid(_solicited("prod-floor", hard_constraints=[]), context)
+
+    assert answer.offer.product_ref == "prod-floor"
+    assert answer.offer.bid_offer_id == offer_id("auc-0001", STORE_ID, "prod-floor"), (
+        "an offer id minted over the unasked-for product would not join to this offer"
+    )
+    assert answer.offer.checkout_url == f"https://{STORE_DOMAIN}/cart/prod-floor:1", (
+        "the buyer must be sent to a cart for the product this bid is actually about"
+    )
+    assert _policy_action(answer)["product_ref"] == "prod-floor", (
+        "the policy action is asked about the product the offer names, so a discount is "
+        "authorized against that product's own floor"
+    )
+    refs = {str(claim.provenance.ref) for claim in answer.claims}
+    assert f"catalog:{STORE_ID}:prod-floor#list_price" in refs, (
+        "the evidence carried by the bid is prod-floor's, not the tie-break winner's"
+    )
+    assert not any(":prod-cap#" in ref for ref in refs), (
+        "nothing about the unasked-for product may ride along as evidence for this offer"
+    )
+
+
+def test_a_solicitation_naming_no_product_leaves_the_cheapest_first_pick_untouched() -> None:
+    """The pre-D58 request shape. `product_ref` is optional and nullable, and absent means absent."""
+    without = _bid(_request(hard_constraints=[]))
+    explicit_null = _bid(_solicited(None, hard_constraints=[]))
+
+    assert without.offer.product_ref == "prod-cap"
+    assert _canon(explicit_null) == _canon(without), (
+        "an explicit null must be byte-identical to the field never having existed"
+    )
+
+
+def test_a_solicited_product_the_pixel_reports_out_of_stock_is_counter_proposed() -> None:
+    """A shop that cannot sell what was asked for answers with what it has, and does not go quiet."""
+    context = _context(
+        live_state={"prod-cap": {"in_stock": True}, "prod-floor": {"in_stock": False}}
+    )
+    answer = _bid(_solicited("prod-floor", hard_constraints=[]), context)
+
+    assert not is_decline(answer), "an inadmissible solicitation is not a reason to decline"
+    assert answer.offer.product_ref == "prod-cap", (
+        "the advocate's own pick stands; D58 has the platform grade the product the OFFER names"
+    )
+
+
+def test_a_solicited_product_the_catalog_does_not_carry_is_counter_proposed() -> None:
+    """The exchange naming a product this store never listed adds no gate of its own."""
+    answer = _bid(_solicited("prod-nobody-has-this", hard_constraints=[]))
+    assert answer.offer.product_ref == "prod-cap"
+
+
+def test_a_solicited_product_the_hard_constraints_disqualify_is_counter_proposed() -> None:
+    """R19 still decides admissibility. Being asked about `prod-floor` cannot smuggle it past."""
+    answer = _bid(_solicited("prod-floor"))
+    assert answer.offer.product_ref == "prod-cap", (
+        "prod-floor is alpaca and the intent hard-constrains material to merino wool; the "
+        "solicitation reorders a choice among admissible products, it does not widen the set"
+    )
+
+
+def test_the_solicited_product_reaches_the_context_through_assemble_context() -> None:
+    """The pass-through itself, since everything above would also pass if it were hard-coded."""
+    ctx = assemble_context(_solicited("prod-floor"), _context())
+    assert ctx.solicited_product_ref == "prod-floor"
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, "", "   ", 17, 0, True, ["prod-cap"], {"product_ref": "prod-cap"}],
+    ids=["null", "empty", "blank", "int", "zero", "bool", "list", "mapping"],
+)
+def test_a_product_ref_that_is_not_a_usable_ref_lands_on_none(value: Any) -> None:
+    """A bogus ref must read as "the exchange named none", never as a ref naming nothing.
+
+    ``str(17)`` or ``str(True)`` would be a catalog key no catalog has, which downstream is
+    indistinguishable from a legitimate counter-proposal — the malformed input would be
+    invisible. Only a non-empty string after stripping is a question this agent can answer.
+    """
+    ctx = assemble_context(_solicited(value), _context())
+    assert ctx.solicited_product_ref is None
+
+
+def test_a_solicited_ref_is_stripped_so_it_can_match_a_catalog_key() -> None:
+    ctx = assemble_context(_solicited("  prod-floor  "), _context())
+    assert ctx.solicited_product_ref == "prod-floor"
+
+
+def test_the_solicited_product_does_not_make_the_bid_less_reproducible() -> None:
+    """S4 is not negotiable: the choice is a pure function of the request and the context."""
+    request, context = _solicited("prod-floor", hard_constraints=[]), _context()
+    assert _canon(_bid(request, context)) == _canon(_bid(request, context))
+
+
+# ---------------------------------------------------------------------------------------------
 # 6b. What an independent adversarial review found. Each of these crashed or was ungraded.
 # ---------------------------------------------------------------------------------------------
 
@@ -1171,7 +1329,16 @@ def test_a_decline_is_a_complete_json_serializable_answer() -> None:
         "reason": "cluster_not_pursued",
         "detail": payload["detail"],
         "agent_version": AGENT_VERSION,
-        "schema_version": "1.0.0",
+        # Was the literal `"1.0.0"`. This test's subject is that a decline is COMPLETE and
+        # JSON-serializable, not that the protocol is pinned at one version — and `agent_version`
+        # on the line above was already read through the constant rather than retyped, which is
+        # the same field's own author saying so. The literal was a copy of `contracts.
+        # SCHEMA_VERSION` taken when this was written (14dc739, T-041) and it went stale when
+        # D58 added `BidRequest.product_ref` and bumped the constant to "1.1.0"
+        # (packages/contracts/src/protocol.py:91). Nothing about declines changed; a retyped
+        # version literal simply turned a legitimate minor bump into a false red. Read it from
+        # the one source of truth, which is also what `bidding.py` stamps it from.
+        "schema_version": SCHEMA_VERSION,
     }
     assert payload["detail"], "a decline without a reason detail explains nothing"
     assert DeclineReason(payload["reason"]) is answer.reason
