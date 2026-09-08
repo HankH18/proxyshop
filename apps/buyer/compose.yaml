@@ -115,23 +115,64 @@ services:
       # token off its own `?token=` query string, there is no server-side callback route,
       # and the static mount has no SPA fallback — so a sub-path base URL 404s before the
       # page ever loads and the mailed link is dead.
+      #
+      # ⚠️ WHICH TRANSPORT, AND WHAT THE WRONG ONE COSTS. This line did not exist, so the
+      # variable was NOT FORWARDED INTO THE CONTAINER AT ALL: an operator following
+      # `docs/demo/shopper-demo.md`, which tells them to
+      # `export PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT=console`, had that export silently
+      # dropped at the container boundary and got the fail-closed 503 with nothing saying why.
+      # The same drop applied to `smtp`. Forwarding it is what makes either choice reachable
+      # from a compose deployment.
+      #
+      #   smtp     mail the link. Set _SMTP_URL, _SENDER and the credential below.
+      #   console  PRINT the link, TOKEN AND ALL, to this container's stdout — i.e. into
+      #            `docker compose logs buyer-svc`. The token is a live single-use bearer
+      #            credential, so ANYONE WHO CAN READ THIS SERVICE'S LOG CAN SIGN IN AS ANY
+      #            ADDRESS THEY TYPE: they request a link for someone else's address, read
+      #            the token out of the log and redeem it. On a laptop that log is one
+      #            terminal belonging to the person who is also the buyer. On a hosted
+      #            droplet it is a complete authentication bypass for every shopper account,
+      #            and it stays one for as long as the log is retained. Local demo only.
+      #
+      # Blank is neither: the deliberate 503. The service prints a banner at boot when
+      # `console` is set, so `docker compose logs buyer-svc | head` says which one is running.
+      PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT: "${PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT:-}"
       PROXYSHOP_BUYER_MAGIC_LINK_SMTP_URL: "${PROXYSHOP_BUYER_MAGIC_LINK_SMTP_URL:-}"
       PROXYSHOP_BUYER_MAGIC_LINK_SENDER: "${PROXYSHOP_BUYER_MAGIC_LINK_SENDER:-}"
+      # The SMTP credential, forwarded from the host environment and NEVER written here — a
+      # compose file is tracked, and a password in it is a password in the repository. Export
+      # them in the shell that runs `docker compose up`, or hand them in through a secret.
+      # Both or neither: half a credential is a boot failure rather than a 535 nobody can
+      # read. The password is used byte for byte, so a trailing newline is a real character.
+      PROXYSHOP_BUYER_MAGIC_LINK_SMTP_USERNAME: "${PROXYSHOP_BUYER_MAGIC_LINK_SMTP_USERNAME:-}"
+      PROXYSHOP_BUYER_MAGIC_LINK_SMTP_PASSWORD: "${PROXYSHOP_BUYER_MAGIC_LINK_SMTP_PASSWORD:-}"
+      # `required` (the default when blank) or `disabled`. Blank gets you TLS: it is turning
+      # encryption OFF that has to be named, and a near miss like `off` is a boot failure.
+      # `disabled` is for a sink on the same host; against anything else it puts every
+      # sign-in token on the wire in the clear and the service says so at boot in a banner.
+      PROXYSHOP_BUYER_MAGIC_LINK_SMTP_STARTTLS: "${PROXYSHOP_BUYER_MAGIC_LINK_SMTP_STARTTLS:-}"
+      # Extra CAs for an MTA no public CA issued for, as a path INSIDE the container — so a
+      # PEM on the host has to be bind-mounted before this can name it. Added to the system
+      # trust store, never replacing it. Blank for every hosted provider.
+      PROXYSHOP_BUYER_MAGIC_LINK_SMTP_CA_BUNDLE: "${PROXYSHOP_BUYER_MAGIC_LINK_SMTP_CA_BUNDLE:-}"
       # The origin root of the page a shopper opens, which under this stack is `buyer-web`
       # below and not this service: `buyer-svc` serves the API and never mounts the bundle
       # (see the BUYER_UI_DIST note above), so a link pointing here lands on a 404 and the
       # sign-in dies before the SPA loads. Still the ORIGIN ROOT, never a sub-path.
       #
       # ⚠️ THE DEFAULT BELOW IS EASILY OVERRIDDEN, AND ON THE DOCUMENTED PATH IT IS.
-      # `.env.example` sets `PROXYSHOP_BUYER_MAGIC_LINK_BASE_URL=http://localhost:8081/`
-      # outright -- written when buyer-svc was the only thing that could conceivably serve a
-      # page -- so an operator who follows `cp .env.example .env` and sources it gets 8081 in
-      # this container no matter what this line says. Measured: `docker exec
-      # proxyshop-buyer-svc-1 env` reports `http://localhost:8081/` on that path. Nothing here
-      # can fix that (`.env.example` belongs to another lane); until it moves, a demo that
-      # needs a working mailed link must export
-      # `PROXYSHOP_BUYER_MAGIC_LINK_BASE_URL=http://localhost:8080/` after sourcing `.env`.
-      # `docs/demo/shopper-demo.md` says so where an operator will hit it.
+      # `.env.example` sets this variable outright, so an operator who follows
+      # `cp .env.example .env` and sources it gets THAT value in this container no matter
+      # what this line says. It now ships `http://localhost:8080/`, which agrees with the
+      # default here, and the two must be kept in step -- this note used to say `.env.example`
+      # carried 8081 (buyer-svc's port, from before a separate web container existed) and
+      # that an operator therefore had to re-export the variable by hand after sourcing
+      # `.env`. That is no longer true and the workaround is no longer needed.
+      #
+      # It is still worth checking rather than assuming: an operator's OWN `.env`, copied
+      # before the fix, may still carry 8081, and a link pointing at 8081 reaches the API,
+      # which serves no page. `docker exec proxyshop-buyer-svc-1 env | grep MAGIC_LINK` is
+      # what settles it, and `docs/demo/shopper-demo.md` says so where an operator will hit it.
       PROXYSHOP_BUYER_MAGIC_LINK_BASE_URL: "${PROXYSHOP_BUYER_MAGIC_LINK_BASE_URL:-http://localhost:${BUYER_WEB_PORT:-8080}/}"
     volumes:
       # `../../`: a relative bind source in an included fragment resolves against THIS

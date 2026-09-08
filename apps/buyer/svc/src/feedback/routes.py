@@ -2,11 +2,21 @@
 
 Discovered and mounted by the frozen :func:`buyer_svc.main.create_app`.
 
-Two routes, and the split between them is "may I ask?" on one side and "this is the answer" on
-the other::
+Three routes — "which order was this?", then "may I ask?", then "this is the answer"::
 
+    POST /buyer/feedback/order    {"auction_id": …, "bid_ref": …}  -> 200 {found, order|null}
     POST /buyer/feedback/prompt   {"order": {...}}                 -> 200 {offered, prompt|null}
     POST /buyer/feedback          {"order": {...}, "response": {}} -> 201 {event_id, ...}
+
+``/order`` is the one that makes the other two reachable for a real purchase, and it exists
+because of what the buyer does NOT hold. R14's prompt is post-purchase; the buyer leaves the
+checkout handoff holding ``auction_id``, ``bid_ref`` and a permalink, and none of those is an
+order. Minting an "order reference" at accept would be the wrong repair — a reference issued
+before a purchase is issued identically to a shopper who closed the tab — so the reference is
+obtained LATER, from the network, at the only moment an order becomes real: the merchant's
+HMAC-signed ``orders/paid`` webhook, joined to this network's own offer by
+``trust.reconcile``. See :mod:`buyer_svc.feedback.orders` for the whole provenance chain, and
+:func:`_network_order` for why resolving it adds no second decider.
 
 ``/prompt`` answers **200 with ``offered: false``** for an order the network did not route,
 rather than 404. "Is there a feedback prompt for this order?" is a question with two correct
@@ -98,6 +108,7 @@ from .errors import (
     UnknownFeedbackQuestion,
     UnusableOrder,
 )
+from .orders import routed_orders_for
 from .prompt import feedback_prompt
 from .routing import routing
 from .submission import event_view, submit_feedback, submitted
@@ -116,9 +127,12 @@ __all__ = [
     "REFERENCE_PATTERN",
     "FeedbackEventView",
     "OrderBody",
+    "OrderLookupBody",
+    "OrderLookupResponse",
     "PromptBody",
     "PromptResponse",
     "PromptView",
+    "RoutedOrderView",
     "SubmitBody",
     "router",
 ]
@@ -249,6 +263,135 @@ class FeedbackEventView(BaseModel):
     reason: str
 
 
+class OrderLookupBody(BaseModel):
+    """The accept handle a buyer already holds, and nothing else.
+
+    Both fields are values ``POST /buyer/shortlist/accept`` already hands back — they are
+    published, required fields of that response today — so a buyer that accepted a slot can
+    ask this question with what it walked away with and nothing minted for the purpose.
+
+    There is deliberately no ``order_ref`` here. This is the route a caller reaches BECAUSE it
+    does not have one; a lookup that took the answer as an argument would be the manufactured
+    reference this whole path exists to avoid.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    auction_id: str = Field(min_length=1, max_length=MAX_REFERENCE, pattern=REFERENCE_PATTERN)
+    #: Optional because ``bid_ref`` is ``f"{auction_id}:{store_id}"`` and therefore narrows an
+    #: auction that already names one accepted slot. Supplied, it is applied as a further
+    #: filter, never as an alternative one — see
+    #: :func:`~buyer_svc.feedback.orders.find_routed_order`.
+    bid_ref: str = Field(default="", max_length=MAX_REFERENCE, pattern=rf"{REFERENCE_PATTERN}|^$")
+
+
+class RoutedOrderView(BaseModel):
+    """The order the network says it routed this checkout to. Every field is the network's.
+
+    ``routed`` is always ``True`` on a body that exists at all: this view is built only from a
+    ``reconciled`` ledger record, and ``trust.reconcile.engine.reconcile`` emits none for an
+    order it could not pair with the exchange's ``accepted`` promise. It is published rather
+    than implied because it is the field ``POST /buyer/feedback/prompt`` and
+    ``POST /buyer/feedback`` read, and a caller should be able to hand this object straight
+    back as its ``order``.
+    """
+
+    order_ref: str
+    store_id: str
+    auction_id: str
+    bid_ref: str
+    routed: bool
+
+
+class OrderLookupResponse(BaseModel):
+    """Whether the network vouches for an order behind this accept handle, and if not, why not.
+
+    200 with ``found: false`` rather than 404, for the same reason ``/prompt`` answers 200 with
+    ``offered: false``: "has my order come through yet?" is a question with two correct
+    answers, and the ordinary one — the webhook has not landed, or the fold has not seen it —
+    is not an error the buyer did anything to cause.
+    """
+
+    found: bool
+    reason: str = ""
+    order: RoutedOrderView | None = None
+
+
+#: Said to a caller whose accept handle the network cannot yet match to a paid order. It names
+#: the two ordinary causes before the alarming one, because they are the ordinary ones: the
+#: shopper may not have bought anything, and a purchase becomes visible to this network only
+#: when the merchant's signed ``orders/paid`` webhook has landed and been reconciled.
+NO_ROUTED_ORDER = (
+    "the network has no paid order reconciled to this checkout yet, so there is nothing to "
+    "ask about. An order becomes visible here only after the store's signed orders/paid "
+    "webhook has landed and been reconciled against the offer this network made."
+)
+
+#: Said when this deployment has no trust service to ask. Distinguished from the answer above
+#: on purpose: "we asked and there is nothing" and "we could not ask" are different facts, and
+#: collapsing them would let a misconfigured deployment look like an unbought basket forever.
+NO_TRUST_SERVICE = (
+    "this deployment is not connected to a trust service, so it cannot tell whether an order "
+    "was reconciled to this checkout. Set TRUST_URL, or wire a resolver on app.state."
+)
+
+
+def _network_order(request: Request, order: dict[str, Any]) -> dict[str, Any]:
+    """``order``, with the network's own record folded over it where the network has one.
+
+    **This adds no second decider, and the shape of the function is the argument.** It reaches
+    :func:`~buyer_svc.feedback.routing.routing` exactly once, to ask a question of fact — *did
+    the caller already assert routing?* — and it returns a RECORD. Whether that record earns a
+    prompt or a ledger write is still decided in one place, by ``routing`` itself, from
+    ``submit_feedback`` and ``feedback_prompt``.
+
+    Two branches, and neither of them can admit anything that is refused today:
+
+    * the caller's record already claims routing — the pre-existing path, left byte for byte
+      as it was, network never consulted. That is what makes this change unable to alter a
+      single request that succeeds today, whoever sent it;
+    * the caller's record does NOT claim routing — refused outright today — and the network is
+      asked. It answers with a ``reconciled`` record or with nothing, and nothing leaves the
+      refusal exactly where it was. So this is strictly a new way to be ADMITTED, and the only
+      thing that can admit is trust's own fold over a chain of HMAC-verified webhooks.
+
+    What the network's answer overwrites, and what it does not: ``order_ref``, ``store_id``,
+    ``auction_id``, ``bid_ref`` and ``routed`` come from the reconciled record, because those
+    are the fields the gate reads and the whole point is that the caller stops supplying them.
+    ``buyer_pseudonym`` and ``status`` are the caller's and stay the caller's — the first is
+    the session's own claim that ``_guard_owner`` checks, and the second is a lifecycle the
+    reconciled record does not carry.
+
+    Never raises. An unusable order is the caller's own refusal to receive, with its own
+    message, from the route that was already going to give it.
+    """
+    try:
+        if routing(order).routed:
+            return order
+    except FeedbackError:
+        return order
+    resolver = routed_orders_for(request.app)
+    if resolver is None:
+        return order
+    try:
+        found = resolver.order_for(
+            order_ref=str(order.get("order_ref") or ""),
+            auction_id=str(order.get("auction_id") or ""),
+            bid_ref=str(order.get("bid_ref") or ""),
+        )
+    except Exception as exc:  # noqa: BLE001 - a resolver that fails is one that vouches for nothing
+        _log.warning(
+            "could not ask the network whether an order was routed (%s: %s); the caller's own "
+            "record stands, and R14's gate judges it unchanged",
+            type(exc).__name__,
+            exc,
+        )
+        return order
+    if not found:
+        return order
+    return {**order, **found}
+
+
 def _pseudonym_for(session_id: str | None) -> str:
     """The pseudonym behind an ``X-Buyer-Session`` header, or ``""`` when there is no header.
 
@@ -316,13 +459,51 @@ def _re_attempt_id(order: Any, offered: str) -> str | None:
     return held if held is not None and held == wanted else None
 
 
+@router.post("/order", response_model=OrderLookupResponse)
+async def order_route(body: OrderLookupBody, request: Request) -> OrderLookupResponse:
+    """The order the network routed this buyer to for one accepted slot, if there is one yet.
+
+    This is the route that makes R14's prompt reachable for a real purchase, and what it does
+    NOT do is the reason it exists. It mints nothing, records nothing, and reaches no ledger
+    sink. It reads trust's published ``GET /reconcile`` — the fold whose own summary is
+    "appends nothing" — and reports what that fold already says about a checkout this network
+    made.
+
+    The order reference it hands back originated at the merchant's HMAC-signed ``orders/paid``
+    webhook and was joined to this buyer's offer by ``trust.reconcile``, which emits nothing
+    for an order it cannot pair with the exchange's ``accepted`` event. So a reference from
+    here is evidence a purchase happened; a reference minted at accept would only ever have
+    been evidence that a tab was open.
+
+    Writes nothing, and 200 is the answer for both outcomes — see :class:`OrderLookupResponse`.
+    """
+    resolver = routed_orders_for(request.app)
+    if resolver is None:
+        return OrderLookupResponse(found=False, reason=NO_TRUST_SERVICE, order=None)
+    try:
+        found = resolver.order_for(auction_id=body.auction_id, bid_ref=body.bid_ref)
+    except Exception as exc:  # noqa: BLE001 - an audit service that is down is not a 500 here
+        _log.warning(
+            "could not read the network's reconciled orders (%s: %s)", type(exc).__name__, exc
+        )
+        found = None
+    if not found:
+        return OrderLookupResponse(found=False, reason=NO_ROUTED_ORDER, order=None)
+    return OrderLookupResponse(found=True, reason="", order=RoutedOrderView(**found))
+
+
 @router.post("/prompt", response_model=PromptResponse)
-async def prompt_route(body: PromptBody) -> PromptResponse:
+async def prompt_route(body: PromptBody, request: Request) -> PromptResponse:
     """The one structured prompt for an order, or a reason there is none (R14).
 
     Writes nothing and can reach no ledger sink.
+
+    The order record is resolved against the network first (:func:`_network_order`), so a
+    buyer holding a reference obtained from ``POST /buyer/feedback/order`` gets a prompt
+    without having to assert its own routing — and an order the network never routed is
+    refused by the same single gate that refused it before.
     """
-    order = body.order.model_dump()
+    order = _network_order(request, body.order.model_dump())
     try:
         prompt = feedback_prompt(order)
     except UnusableOrder as exc:
@@ -346,7 +527,10 @@ async def submit_route(
     ensure_ledger_sink(request.app)
     sink = getattr(request.app.state, LEDGER_SINK_ATTR, None)
     pseudonym = _pseudonym_for(x_buyer_session)
-    order = body.order.model_dump()
+    # Resolved against the network BEFORE the gate reads it, so that the evidence R14's gate
+    # judges is the network's own reconciled record rather than a flag the caller set about
+    # itself. `submit_feedback` is still the one place that decides; see `_network_order`.
+    order = _network_order(request, body.order.model_dump())
     try:
         event = submit_feedback(
             order,

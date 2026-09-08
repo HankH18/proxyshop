@@ -120,12 +120,18 @@ SOURCE_DEV_DEFAULT = f"the development default, because {ENV_PASSWORD} is unset"
 #: table has no business growing without a ceiling, and past it the module simply warns every
 #: time, which is the loud direction to degrade in.
 MAX_REMEMBERED_CONNECTIONS = 64
+
+#: What stands in for userinfo that could not be parsed out of a URI — see
+#: :func:`_without_userinfo`'s second pass. Visible in the message on purpose: an operator
+#: reading "bolt://<redacted>@host:7687" learns both that their URI carries a credential and
+#: that this process did not print it.
+_REDACTED_USERINFO = "<redacted>"
 _WARNED: set[tuple[str, str]] = set()
 _WARNING_LOCK = threading.Lock()
 
 
 def _without_userinfo(uri: str) -> str:
-    """``uri`` with any ``user:password@`` stripped from its authority.
+    """``uri`` with any ``user:password@`` stripped before it can reach a log.
 
     Operators put credentials in a DSN — it is the normal shape for Postgres and Mongo, and
     ``bolt://neo4j:s3cr3t@host:7687`` parses. :meth:`GraphCredentials.describe` is the whole
@@ -133,18 +139,52 @@ def _without_userinfo(uri: str) -> str:
     header promises nothing here formats a password; without this that promise held only for
     the password *this module resolved*, not for one the operator embedded in ``NEO4J_URI``.
 
-    Done with :func:`urllib.parse.urlsplit` rather than a regex so a password containing ``@``
-    or ``/`` cannot walk the split — the same reason
-    :func:`proxyshop_support.postgres._with_password` parses instead of formatting.
+    Two passes, and the second one is not belt-and-braces. :func:`~urllib.parse.urlsplit` is
+    right for a LEGAL URI — a password containing ``@``, or percent-encoded, cannot walk the
+    split. It is not right for an illegal one, and an operator who types a password with a raw
+    ``/`` in it writes exactly that: in ``bolt://neo4j:p/ss@host:7687`` the authority ends at
+    the ``/``, so ``urlsplit`` reports a netloc of ``neo4j:p`` with no ``@`` at all and the
+    first pass hands the string back **verbatim, password included**. Measured, and it is the
+    likelier mistake of the two, because a password with a ``/`` looks fine to the person
+    typing it.
+
+    So an ``@`` anywhere after the scheme is treated as userinfo that failed to parse and the
+    whole run up to the LAST one is replaced. That can over-redact — a genuine ``@`` in a path
+    would take the host with it — and over-redacting a diagnostic is the acceptable half of
+    this trade, where printing a credential is not. Bolt URIs carry no path in practice.
     """
     try:
         parts = urlsplit(uri)
     except ValueError:  # pragma: no cover - urlsplit is total for str in practice
         return "<unparseable NEO4J_URI>"
-    if "@" not in parts.netloc:
+    if "@" in parts.netloc:
+        _, _, hostport = parts.netloc.rpartition("@")
+        return urlunsplit((parts.scheme, hostport, parts.path, parts.query, parts.fragment))
+    scheme, separator, rest = uri.partition("://")
+    if separator:
+        if "@" not in rest:
+            return uri
+        _, _, tail = rest.rpartition("@")
+        return f"{scheme}://{_REDACTED_USERINFO}@{tail}"
+
+    # THIRD PASS, and it is the one the first two missed. A URI with no `//` at all —
+    # `neo4j:s3cr3t@host:7687` — leaks VERBATIM through both of the passes above, and an
+    # adversarial reader found it after this function shipped promising the opposite.
+    # `urlsplit` reads `neo4j:` as the scheme and everything after it as a PATH, so there is
+    # no netloc for the first pass to find an `@` in; and the second pass partitions on
+    # `://`, which is not there, so it hands the string straight back.
+    #
+    # Measured before the fix: `neo4j:LEAKME@host:7687` came out of `describe()` intact,
+    # under a docstring that says "Never contains a password."
+    #
+    # Same trade as above, applied to the same shape: an `@` after the scheme is userinfo
+    # that did not parse, everything up to the LAST one goes, and over-redacting a
+    # diagnostic is the acceptable half.
+    scheme, colon, rest = uri.partition(":")
+    if not colon or "@" not in rest:
         return uri
-    _, _, hostport = parts.netloc.rpartition("@")
-    return urlunsplit((parts.scheme, hostport, parts.path, parts.query, parts.fragment))
+    _, _, tail = rest.rpartition("@")
+    return f"{scheme}:{_REDACTED_USERINFO}@{tail}"
 
 
 @dataclass(frozen=True)

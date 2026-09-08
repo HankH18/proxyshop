@@ -127,8 +127,11 @@ UNDRIVEN_ALLOWLIST: dict[tuple[str, str, str], str] = {}
 #: can tell a real drift from a deliberate addition.
 EXPECTED_COUNTS: dict[str, int] = {
     "exchange": 7,
-    "buyer": 15,  # +1: GET /buyer/store-window, the store's read of the buyer window (T-142)
-    "merchant": 12,  # 11 routes + the /dashboard SPA mount
+    "buyer": 16,  # 14 at first census; +GET /buyer/store-window (T-142, the store's read of
+    # the buyer window), +POST /buyer/feedback/order (the order reference R14's
+    # post-purchase prompt needs, fetched from the network's own reconciled record)
+    "merchant": 13,  # +1: POST /stores/{id}/revive, the kill switch's other half
+    # (12 was 11 routes + the /dashboard SPA mount)
     "trust": 10,
     "ingest": 9,
     "store-agent": 2,

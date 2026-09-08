@@ -331,6 +331,9 @@ def test_the_shortlist_body_is_unchanged_by_the_check_being_wired(client: Any) -
         "product",
         "price",
         "commitments",
+        # D55: whose price this is, and why the exchange stood in if it did.
+        "fallback",
+        "fallback_reason",
         "pitch",
     }
 

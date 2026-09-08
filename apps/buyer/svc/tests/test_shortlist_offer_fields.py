@@ -95,7 +95,11 @@ def _render(client: TestClient, *slots: dict[str, Any]) -> list[dict[str, Any]]:
 def test_the_served_slot_carries_the_product_the_exchange_named(client) -> None:
     """WHICH catalogue thing this slot offers survives the buyer hop."""
     [slot] = _render(client, _slot())
-    assert slot["product"] == {"product_ref": "prod-merino-crew", "variant_ref": "var-m-navy"}
+    assert slot["product"]["product_ref"] == "prod-merino-crew"
+    assert slot["product"]["variant_ref"] == "var-m-navy"
+    # `null`, and that is the honest answer rather than a gap: this slot fixture carries no
+    # `identity`, so the exchange named no crawled title for it and the buyer invents none.
+    assert slot["product"]["identity"] is None
 
 
 def test_the_served_slot_carries_the_price_the_store_is_asking(client) -> None:

@@ -37,7 +37,12 @@ from pydantic import BaseModel, EmailStr, Field
 
 from ..profile import BuyerProfile, IdentityLeak, publish_profile
 from ..vault import PostgresPseudonymStore, PseudonymVault, normalise_buyer_key
-from .delivery import MagicLinkUndeliverable, build_magic_link_delivery
+from .delivery import (
+    MagicLinkDeliveryFailed,
+    MagicLinkTransportMisconfigured,
+    MagicLinkUndeliverable,
+    build_magic_link_delivery,
+)
 from .magic_link import (
     DEFAULT_LINK_TTL,
     DEFAULT_MAX_PENDING,
@@ -906,8 +911,34 @@ def set_auth_service(service: MagicLinkAuth | None) -> None:
 
 
 def get_auth_service() -> MagicLinkAuth:
-    """FastAPI dependency. Override this in tests, not the module global."""
-    return auth_service()
+    """FastAPI dependency. Override this in tests, not the module global.
+
+    Translates :class:`~buyer_svc.auth.delivery.MagicLinkTransportMisconfigured` into the same
+    ``503`` "this deployment cannot deliver a login link" that an unconfigured transport gets.
+    It has to happen HERE and not in a handler body: FastAPI resolves dependencies before it
+    calls the handler, so a ``try`` around ``service.request_login`` never sees this one.
+
+    MEASURED: a half-configured transport does NOT stop the process. ``create_app()`` returns,
+    the ASGI lifespan completes and the container healthcheck passes, because nothing builds
+    the login stack at start-up — :func:`auth_service` builds it lazily on first use. So the
+    refusal lands on the first sign-in request, and before this it landed there as an
+    unhandled ``500``: a traceback in the log and a buyer told the service is broken.
+
+    The refusal is not softened. No login is accepted and nothing is delivered; ``str(exc)``
+    names the variable that is wrong and reaches the LOG, never the response, which stays the
+    same non-oracle answer every caller gets.
+    """
+    try:
+        return auth_service()
+    except MagicLinkTransportMisconfigured as exc:
+        _log.error("magic-link transport is misconfigured: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "no login link was sent: this deployment's magic-link mail transport is not usable"
+            ),
+            headers={"Retry-After": str(int(DEFAULT_LINK_TTL.total_seconds()))},
+        ) from exc
 
 
 def _positive_int_from_env(name: str) -> int | None:
@@ -1305,6 +1336,40 @@ def request_magic_link(
             detail=(
                 "no login link was sent: this deployment has no magic-link mail transport "
                 "configured"
+            ),
+            headers={"Retry-After": str(int(DEFAULT_LINK_TTL.total_seconds()))},
+        ) from exc
+    except MagicLinkDeliveryFailed as exc:
+        # A transport IS configured and the conversation with the MTA did not complete: it
+        # refused the connection, the certificate did not verify, the credential was rejected,
+        # or it timed out. Before this the exception escaped the handler entirely and FastAPI
+        # answered a bare `500 Internal Server Error` with a traceback in the log and nothing
+        # in it an operator could act on — MEASURED against a sink that would not offer
+        # STARTTLS. It is a different answer from the 503 above on purpose: that one says this
+        # deployment has no transport, which is a standing configuration fact, and this one
+        # says the transport it has could not be reached right now.
+        #
+        # `502` and not `503`: the dependency that failed is upstream of this service and the
+        # service itself is healthy. Retry-After is the link TTL, matching the two refusals
+        # above, because nothing here knows when the MTA comes back.
+        #
+        # `str(exc)` is logged and NOT put on the response. It names the MTA's host, its port
+        # and its own words — exactly what an operator needs and exactly what an
+        # unauthenticated caller must not be handed, because "535 authentication failed"
+        # against "connection refused" is a description of this deployment's plumbing. It
+        # carries no password, no token and no address; see `MagicLinkDeliveryFailed`.
+        #
+        # The admission is NOT refunded, for the reason spelled out at the `MagicLinkThrottled`
+        # clause: SMTP is at-least-once, so an MTA that took the message and then broke reading
+        # the `250` has put a live link in the mailbox AND raised. Refunding on the path that
+        # cannot tell those apart is what turns a flaky MTA into an unbounded mailbomb against
+        # any chosen address.
+        _log.error("magic-link delivery failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "no login link was sent: this deployment's mail transport could not be "
+                "reached. It may still arrive; try again in a few minutes"
             ),
             headers={"Retry-After": str(int(DEFAULT_LINK_TTL.total_seconds()))},
         ) from exc

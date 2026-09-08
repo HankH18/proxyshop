@@ -404,7 +404,12 @@ def test_the_product_price_and_commitments_are_this_stores_own_bid_not_a_placeho
 
     assert set(shown) == set(STORES), shown
     for store, slot in shown.items():
-        assert slot["product"] == {"product_ref": PRODUCTS[store], "variant_ref": None}, slot
+        assert slot["product"]["product_ref"] == PRODUCTS[store], slot
+        assert slot["product"]["variant_ref"] is None, slot
+        # D55: the exchange also publishes the PLATFORM's own crawled name for the product, so
+        # the shopper compares two products rather than two opaque refs.
+        assert slot["product"]["identity"]["title"], slot
+        assert slot["fallback"] is False, "this store bid; the slot must not read as a stand-in"
         price = slot["price"]
         assert price["unit_price"] == pytest.approx(BID_PRICES[store]), slot
         assert price["total_price"] == pytest.approx(BID_PRICES[store]), slot
@@ -504,7 +509,12 @@ def test_a_silent_store_still_reaches_a_slot_on_its_list_price(monkeypatch):
     assert silent in slots, sorted(slots)
 
     slot = slots[silent]
-    assert slot["product"] == {"product_ref": PRODUCTS[silent], "variant_ref": None}, slot
+    assert slot["product"]["product_ref"] == PRODUCTS[silent], slot
+    assert slot["product"]["variant_ref"] is None, slot
+    # R10's whole point, now sayable on the slot itself: the price below is the EXCHANGE's, and
+    # a card that could not tell it from a quote had to refuse to say anything about either.
+    assert slot["fallback"] is True, slot
+    assert slot["fallback_reason"] == "no_response", slot
     assert slot["price"]["unit_price"] == pytest.approx(LIST_PRICES[silent]), slot
     assert slot["price"]["total_price"] == pytest.approx(LIST_PRICES[silent]), slot
     assert slot["price"]["unit_price"] != pytest.approx(BID_PRICES[silent]), (

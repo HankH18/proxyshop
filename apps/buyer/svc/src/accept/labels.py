@@ -95,6 +95,8 @@ __all__ = [
     "provenance_label",
     "render_shortlist",
     "slot_commitments",
+    "slot_fallback",
+    "slot_fallback_reason",
     "slot_labels",
     "slot_price",
     "slot_product",
@@ -245,14 +247,51 @@ def slot_store_domain(slot: Any) -> str | None:
     return domain or None
 
 
+def _slot_identity(product: Any) -> dict[str, Any] | None:
+    """The PLATFORM's own crawled name for this product, or ``None`` (D55).
+
+    Forwarded, never invented, and that distinction is the whole reason this function is allowed
+    to exist beside a docstring that says *nothing here invents a title*. This package still
+    owns no catalogue and still resolves no reference. What it renders is a name the EXCHANGE
+    published, out of the platform's own crawl, under a key that names the snapshot it came from
+    — and the ``source`` is carried through precisely so a screen can say whose name it is
+    showing rather than presenting it as the shop's.
+
+    ``None`` unless BOTH required fields read as non-empty strings. ``title`` alone would be a
+    name with no provenance, which is the thing this package refuses to display; ``source``
+    alone is not a name at all. A title that arrives blank or as a non-string is absent, not
+    ``""`` — the same rule :func:`slot_store_domain` keeps, for the same reason: an empty string
+    is what a template renders as a present-but-blank value.
+    """
+    identity = read(product, "identity", None)
+    if identity is None:
+        return None
+    title = text(read(identity, "title", None))
+    source = text(read(identity, "source", None))
+    if not title or not source:
+        return None
+    return {
+        "title": title,
+        "brand": text(read(identity, "brand", None)) or None,
+        "source": source,
+        "observed_at": text(read(identity, "observed_at", None)) or None,
+    }
+
+
 def slot_product(slot: Any) -> dict[str, Any] | None:
     """R2's PRODUCT for one slot: WHICH catalogue thing this slot is offering.
 
-    A reference, never a rendered name — the exchange does not own the catalogue and neither
-    does this package, so nothing here invents a title. ``None`` when the slot names no
-    readable ``product_ref``: an R10 fallback minted from a roster row that named none
-    carries ``{"product_ref": None}``, and publishing that would put the word ``null`` on a
-    screen where the product goes.
+    ``product_ref`` and ``variant_ref`` are references and this package invents no title of its
+    own for them — it owns no catalogue and resolves nothing. What changed is that it is no
+    longer handed only references: ``identity`` is a name the PLATFORM crawled and the exchange
+    published, forwarded here with the snapshot it came from attached (:func:`_slot_identity`).
+    Before it existed, a shopper was shown two opaque refs and asked to choose between them.
+
+    ``None`` when the slot names no readable ``product_ref``: an R10 fallback minted from a
+    roster row that named none carries ``{"product_ref": None}``, and publishing that would put
+    the word ``null`` on a screen where the product goes. A slot with a ref but no identity is
+    still published — the ref is what the accept path resolves against, and losing it because
+    the platform has not crawled the product would be the worse failure.
     """
     product = read(slot, "product", None)
     if product is None:
@@ -263,6 +302,7 @@ def slot_product(slot: Any) -> dict[str, Any] | None:
     rendered: dict[str, Any] = {"product_ref": product_ref}
     variant_ref = text(read(product, "variant_ref", None))
     rendered["variant_ref"] = variant_ref or None
+    rendered["identity"] = _slot_identity(product)
     return rendered
 
 
@@ -305,6 +345,37 @@ def slot_price(slot: Any) -> dict[str, Any] | None:
     rendered["discount"] = _slot_discount(price)
     rendered["expires_at"] = text(read(price, "expires_at", None)) or None
     return rendered
+
+
+def slot_fallback(slot: Any) -> bool | None:
+    """WHOSE PRICE this slot is showing: ``False`` a store's bid, ``True`` the exchange's
+    stand-in, ``None`` a producer that did not say (R10/D55).
+
+    Three states and not two, deliberately. ``ShortlistSlot.fallback`` is optional and nullable,
+    so a shortlist written before the field existed carries no answer at all — and a screen that
+    read that as ``False`` would present a price nobody quoted as a quote, which is the exact
+    defect the field was added to close. ``None`` must render as *unknown provenance*.
+
+    Anything that is not a real ``bool`` is ``None`` rather than coerced. ``bool("false")`` is
+    ``True``, and a slot arriving with a string here is a producer this package cannot identify;
+    guessing which way it meant is how a stand-in becomes a quote.
+    """
+    value = read(slot, "fallback", None)
+    return value if isinstance(value, bool) else None
+
+
+def slot_fallback_reason(slot: Any) -> str | None:
+    """WHY the exchange stood in, or ``None``.
+
+    ``None`` whenever :func:`slot_fallback` is not ``True``: there is no reason to give for a bid
+    that arrived, and a reason carried beside a real quote would be read as one. The vocabulary
+    is the exchange's own (``exchange.auction.collect.FALLBACK_REASONS``) and is forwarded as the
+    token it is — the sentence a shopper reads belongs to the screen, which is the only layer
+    that knows how much of it to say.
+    """
+    if slot_fallback(slot) is not True:
+        return None
+    return text(read(slot, "fallback_reason", None)) or None
 
 
 def slot_commitments(slot: Any) -> list[LabelledCommitment] | None:
@@ -379,6 +450,11 @@ class LabelledSlot:
     price: dict[str, Any] | None = None
     #: What it promises beside the price (:func:`slot_commitments`), or ``None`` — not ``[]``.
     commitments: tuple[LabelledCommitment, ...] | None = None
+    #: WHOSE PRICE this is (:func:`slot_fallback`). ``False`` a bid, ``True`` a stand-in,
+    #: ``None`` a producer that did not say — three states, and a screen must not collapse them.
+    fallback: bool | None = None
+    #: WHY the exchange stood in (:func:`slot_fallback_reason`), or ``None``.
+    fallback_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """The published, buyer-facing projection of this slot."""
@@ -400,6 +476,8 @@ class LabelledSlot:
                 if self.commitments is not None
                 else None
             ),
+            "fallback": self.fallback,
+            "fallback_reason": self.fallback_reason,
         }
 
     def __getitem__(self, key: str) -> Any:
@@ -456,6 +534,8 @@ def label_slot(slot: Any, *, auction_id: str = "", derive: bool = True) -> Label
         product=slot_product(slot),
         price=slot_price(slot),
         commitments=None if commitments is None else tuple(commitments),
+        fallback=slot_fallback(slot),
+        fallback_reason=slot_fallback_reason(slot),
     )
 
 

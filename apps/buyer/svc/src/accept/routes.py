@@ -191,16 +191,44 @@ class RenderedSlot(BaseModel):
     #: said so. ``null`` is loud in the one way that matters: it is not a domain, and no
     #: comparison against it can silently succeed.
     store_domain: str | None = None
-    #: R2's PRODUCT: ``{"product_ref": ..., "variant_ref": ... | null}``, or ``null``.
+    #: R2's PRODUCT: ``{"product_ref", "variant_ref", "identity"}``, or ``null``.
+    #:
+    #: ``identity`` is the PLATFORM's own crawled name for this product — ``{"title", "brand",
+    #: "source", "observed_at"}`` — or ``null`` where the exchange holds no crawled snapshot for
+    #: it (D55). It is the organic half of the market: a name the platform observed itself,
+    #: carried with the snapshot id that produced it so a screen can say whose name it is showing
+    #: rather than letting it read as the shop's. Before it existed, a card printed a
+    #: ``product_ref`` and a shopper was asked to compare two opaque references.
     product: dict[str, Any] | None = None
     #: R2's PRICE: both prices, the currency, the stated discount and the expiry, or ``null``.
     price: dict[str, Any] | None = None
     #: R2's COMMITMENTS. ``null`` means the exchange sent none — never an empty list, which
     #: would read to a shopper as a store that promised nothing.
     commitments: list[RenderedCommitment] | None = None
+    #: WHOSE PRICE the ``price`` above is: ``false`` a bid this store actually sent, ``true`` a
+    #: stand-in the exchange wrote for it at the roster's list price (R10), ``null`` a producer
+    #: that did not say.
+    #:
+    #: **Three states, and a screen must not collapse them.** ``null`` is a shortlist written
+    #: before the exchange published this fact, and rendering it as ``false`` would present a
+    #: price nobody quoted as a quote — the exact thing the field exists to prevent. ``true`` is
+    #: not a verdict about the store: it is reachable by silence, by having no agent at all, by
+    #: a late reply and by an explicit decline alike.
+    fallback: bool | None = None
+    #: WHY the exchange stood in, from the exchange's own vocabulary, or ``null``. Always
+    #: ``null`` when ``fallback`` is not ``true``. The token is forwarded rather than turned into
+    #: a sentence, because how much of it to say is the screen's decision.
+    fallback_reason: str | None = None
     #: The case for this slot (D55). ``null`` when the platform holds nothing sayable about
     #: this candidate and the shop sent no message of its own — saying less, rather than
     #: inventing a reason to buy.
+    #:
+    #: ``pitch.store_pitch`` is where the SHOP's own words arrive, and until
+    #: ``ShortlistSlot.message`` existed it was ``null`` on every slot of every deployment: the
+    #: store agents wrote a pitch, the exchange graded it, and the published slot contract had
+    #: nowhere to put it. Nothing in this service changed to fix that — ``slot_rows`` was already
+    #: handing the raw slot to ``pitch.writing.store_pitch_of``, which was already reading
+    #: ``message`` off it. The contract was the whole of the gap.
     pitch: RenderedPitch | None = None
 
 
