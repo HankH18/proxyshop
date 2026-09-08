@@ -2,7 +2,7 @@
 # GNU Make 3.81-safe: one line per recipe. `.ONESHELL` and `.SHELLFLAGS` are silently
 # ignored by the make on this host, so never rely on them.
 SHELL := /bin/bash
-.PHONY: bootstrap preflight deps-up deps-down db-init db-migrate check verify lint types test-py test-ts demo-seed demo-corpus demo-up demo-check demo-down e2e-live clean
+.PHONY: bootstrap preflight deps-up deps-down db-init db-migrate check verify lint types test-py test-ts demo-seed demo-corpus demo-up demo-trust demo-check demo-down e2e-live clean
 
 bootstrap:  ; @./scripts/bootstrap.sh
 preflight:  ; @./scripts/preflight.sh
@@ -46,6 +46,20 @@ demo-corpus: ; @docker compose --profile corpus run --rm corpus-loader
 # an operator a red exit on a working stack is how a runbook trains people to ignore exit
 # codes. Their datastore dependencies come up with them through `depends_on`.
 demo-up:    ; @docker compose --profile demo up -d --wait buyer-web buyer-svc merchant-svc exchange trust ingest store-agent-gaiaherbs store-agent-toniiq store-agent-paradiseherbs store-agent-oregonswildharvest
+# Put the ten demo sellers into the LIVE trust service. RUN THIS AFTER `demo-up`, ONCE.
+#
+# It is a separate target from `demo-seed` (which seeds the Shopify STUB with products) and
+# from `demo-corpus` (which loads Neo4j) because it seeds a third thing entirely and needs a
+# different stack to be up: it talks to the running trust service over HTTP and to the
+# database that service is using. Folding it into either would make one target depend on two
+# stacks.
+#
+# It is NOT optional. `deploy/demo/exchange-deployment.json` states no `trust_snapshot`, so
+# the exchange's ranking gate reads `GET /snapshot` and R12 excludes any store the snapshot
+# holds no row for — on an unseeded stack that is EVERY store, and the shortlist is empty.
+# `demo-check` names this target when it sees that. Idempotent: `event_id` is the ledger's
+# idempotency key, so a second run appends nothing.
+demo-trust: ; @[ -x ./.venv/bin/python ] || { echo "FATAL: run 'make bootstrap' first" >&2; exit 2; }; ./.venv/bin/python scripts/seed_demo_trust.py
 # The after-deploy probe. Drives a real roster-less auction over HTTP, because every container
 # in this stack can report healthy while the demo is dead.
 demo-check: ; @bash scripts/demo_check.sh

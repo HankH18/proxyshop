@@ -1,5 +1,6 @@
 {
   "store_id": "paradiseherbs.com",
+  "offer_valid_for_seconds": 600,
   "store_domain": "paradiseherbs.com",
   "envelope": {
     "store_id": "paradiseherbs.com",

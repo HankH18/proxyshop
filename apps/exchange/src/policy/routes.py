@@ -35,13 +35,28 @@ verdict*, computed by the service that owns the question; reading its sign is th
 deferring to it, while re-deriving a verdict from ``kind`` would be the exchange having a second
 opinion about trust — which D53 puts inside one trust system on purpose.
 
-**An outcome with no cluster is refused, not bucketed.** ``PseudonymousContext.cluster_id`` is
-optional in the protocol, and the bandit's whole routing rule is that "an outcome in
-``cluster-1`` cannot move ``cluster-2``'s exposure". Inventing a shared bucket — the way
-:data:`~exchange.ranking.FALLBACK_AUCTION_ID` invents an auction id — would pool unrelated
-clusters into one posterior, which is worse than refusing: an auction id is cosmetic, a cluster
-id is the key the model is indexed by. So a schema-valid payload carrying no cluster is a 400,
-and it says so.
+**An outcome with no cluster is RESOLVED where it can be, and refused where it cannot — never
+bucketed.** ``PseudonymousContext.cluster_id`` is optional in the protocol, and the bandit's
+whole routing rule is that "an outcome in ``cluster-1`` cannot move ``cluster-2``'s exposure".
+Inventing a shared bucket — the way :data:`~exchange.ranking.FALLBACK_AUCTION_ID` invents an
+auction id — would pool unrelated clusters into one posterior, which is worse than refusing: an
+auction id is cosmetic, a cluster id is the key the model is indexed by.
+
+This paragraph used to end "so a schema-valid payload carrying no cluster is a 400, and it says
+so", and that sentence closed the loop it was meant to protect. **Nothing upstream of this door
+holds a cluster to put in that field**, so every outcome the trust service ever computed was
+refused here and the bandit learned from none of them: 536 lost, 0 delivered, measured off
+``GET /events/verify`` on the shipped stack. The producer could not fix it either — the only
+field spelled ``cluster_id`` anywhere upstream is ``buyer_svc.intent.clarifier``'s content hash
+over the shopper's words, which is a different fact with the same name and which
+:func:`~..retrieval.clusters.assign_cluster` already declines to believe.
+
+The fact lives here, so it is read here. :func:`_cluster_of_the_auction` resolves the cluster
+from ``event.auction_id`` against this exchange's own auction record, which is *definitionally*
+the key the read half uses — see that function for why. **The refusal survives for the case it
+was written for**: an outcome naming no auction, naming one this exchange no longer holds, or
+naming one that ran in no cluster is still a 400 under :data:`REASON_NO_CLUSTER`, and the detail
+now says which of those it was.
 
 **What is persisted, and by whom.** This paragraph used to open "What is persisted, said
 plainly: nothing", and that was true of every deployment that had ever run. The posteriors lived
@@ -341,6 +356,93 @@ def _bind_the_deployment(request: Request) -> None:
         ensure_configured(request.app)
     except DeploymentConfigurationError as exc:
         raise HTTPException(status_code=503, detail=redact_addresses(exc)) from exc
+
+
+def _cluster_of_the_auction(request: Request, payload: TrustEventPayload) -> tuple[str, str]:
+    """The cluster this outcome's auction ran in, read off the exchange's OWN record.
+
+    Returns ``(cluster_id, unresolved)``: exactly one of the two is ever non-empty. The second
+    is a clause naming *which* of the four ways the lookup came back empty, so the 400 the
+    caller gets — and the reason the trust service parks on its undelivered ring — says what
+    is actually missing instead of restating that a cluster is.
+
+    **Why the exchange answers this and not the producer.** A ``TrustEventPayload`` reaches this
+    door with ``pseudonymous_context.cluster_id`` empty for every observation the trust service
+    computes from a buyer-side event, because no producer upstream of here holds the fact. The
+    buyer service does mint a field spelled ``cluster_id`` — ``buyer_svc.intent.clarifier``
+    derives it as a content hash over the query, budget band and constraints — but that is a
+    different fact wearing the same name: it groups equivalent *intents*, while a posterior is
+    keyed by a *catalogue* cluster this exchange's deployment document names.
+    :func:`~..retrieval.clusters.assign_cluster` says as much by construction — it keeps a
+    stated cluster only when the catalogue already knows it, and otherwise assigns its own — so
+    a cluster sealed into the ledger by the buyer is a name this exchange has already decided
+    not to believe.
+
+    **What makes the record the right answer rather than merely an available one.** It is the
+    SAME value the read half of the loop uses. ``ranking.serving`` asks for exposure with
+    ``cluster_id=str(read(intent, "cluster_id", ""))`` — the intent's cluster *after*
+    ``assign_cluster`` has applied its own — and ``auction.routes`` writes that same
+    post-assignment value into ``machine.create(..., cluster_id=...)``. So
+    :attr:`AuctionRecord.cluster_id` is definitionally the key
+    :func:`~.bandit.exposure` will later read for this auction. Folding under it makes the write
+    half and the read half agree by construction; folding under anything else would move a
+    posterior no shortlist consults.
+
+    **It reads and never creates.** ``auction_machine`` is fetched with a default of ``None``
+    rather than through ``auction.routes._machine``, which builds a machine on demand: an
+    outcome arriving at a process that never served an auction must not cause that process to
+    mint an empty auction book as a side effect of asking a question.
+
+    Raises:
+        HTTPException: 503 when the auction store itself could not be asked — Redis unreachable,
+            say. That is a transient condition and the trust service retries a 5xx, so it must
+            not be flattened into the 400 that says "this outcome is not routable", which is
+            permanent and is not retried.
+    """
+    auction_id = str(getattr(payload.event, "auction_id", "") or "").strip()
+    if not auction_id:
+        return "", "the event it was computed from names no auction to resolve one from"
+
+    machine = getattr(request.app.state, "auction_machine", None)
+    store = getattr(machine, "store", None)
+    if store is None or not callable(getattr(store, "load", None)):
+        return "", "this exchange has no auction store bound to resolve one from"
+
+    try:
+        record = store.load(auction_id)
+    except Exception as exc:  # noqa: BLE001 - a store that cannot answer is not a verdict
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "the exchange could not read the auction this outcome names, so it does not "
+                f"know which cluster to fold it into ({describe_exception(exc)}); the outcome "
+                "is not recorded and this is worth retrying"
+            ),
+        ) from exc
+
+    if record is None:
+        # Bounded on purpose — `AUCTION_TTL_SECONDS` and `DEFAULT_AUCTION_CAPACITY` — so an
+        # outcome that arrives long after its auction has a genuinely unanswerable question.
+        # It is refused rather than bucketed, which is the case the refusal was written for.
+        return "", (
+            "the auction it names is no longer held by this exchange (records expire and the "
+            "book is bounded), so the cluster it ran in cannot be established"
+        )
+
+    cluster = str(getattr(record, "cluster_id", "") or "").strip()
+    if not cluster:
+        # The auction itself ran in no cluster — `assign_cluster` matched nothing and the
+        # intent stated nothing. The READ half does nothing for such an auction either
+        # (`exposure_shares` returns `{}` on an empty cluster), so there is no posterior this
+        # outcome could move even in principle.
+        return "", "the auction it names ran in no cluster, so no posterior covers it"
+
+    if len(cluster) > identifier_ceiling():
+        # The auction door bounds this on the way in; the store is external state, so the
+        # ceiling is re-checked rather than assumed on the way back out.
+        return "", "the auction it names carries a cluster longer than an identifier may be"
+
+    return cluster, ""
 
 
 # =====================================================================================
@@ -696,14 +798,17 @@ async def _record_outcome(request: Request) -> Response:
     _bounded_identifiers(payload)
 
     cluster_id = (payload.pseudonymous_context.cluster_id or "").strip()
+    unresolved = ""
+    if not cluster_id:
+        cluster_id, unresolved = _cluster_of_the_auction(request, payload)
     if not cluster_id:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"{REASON_NO_CLUSTER}: pseudonymous_context.cluster_id is absent, and exposure "
-                "is decided WITHIN a cluster — an outcome that names none cannot be routed to a "
-                "posterior, and pooling it into a shared bucket would move clusters it never "
-                "happened in"
+                f"{REASON_NO_CLUSTER}: pseudonymous_context.cluster_id is absent and "
+                f"{unresolved}. Exposure is decided WITHIN a cluster — an outcome that names "
+                "none cannot be routed to a posterior, and pooling it into a shared bucket "
+                "would move clusters it never happened in"
             ),
         )
 

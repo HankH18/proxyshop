@@ -51,6 +51,7 @@ from typing import Any
 
 from ..ledger.replay import observations_from_events
 from ..scoring.engine import score
+from .attribution import impression_for
 
 __all__ = [
     "MAX_DELTA_HISTORY_EVENTS",
@@ -147,7 +148,14 @@ def delta_for_event(
     if observation is None:
         return None
 
-    prior = observations_from_events(history)
+    # Materialised ONCE, and read twice: the scorer projects it into observations, and
+    # `impression_for` walks the same rows to find the impression this movement came from.
+    # `history` is documented as an iterable and `notify.store_history_reader` already returns a
+    # bounded list, so this neither re-reads the ledger nor lets a generator be consumed by the
+    # first reader and arrive empty at the second.
+    rows = list(history)
+
+    prior = observations_from_events(rows)
     reference = event.get("ts") if as_of is None else as_of
     dim = str(observation["dim"])
 
@@ -158,6 +166,9 @@ def delta_for_event(
         "store_id": str(observation["store_id"]),
         "dim": dim,
         "delta": dimension_mean(after, dim) - dimension_mean(before, dim),
+        # WHICH of this store's own decisions earned the movement. Computed from `rows`, so it
+        # costs no query; `None` when the chain does not say. See `feedback/attribution.py`.
+        "attribution": impression_for(event, rows),
         "event": event,
         "reason_code": str(observation["type"]),
     }

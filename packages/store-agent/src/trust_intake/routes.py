@@ -7,13 +7,27 @@ a test. ``main.create_app()`` mounts every ``<feature>/routes.py`` beside itself
 module is the entire transport; it validates nothing the runner validates and decides nothing
 the runner decides.
 
-WHAT COMES BACK, AND WHY IT IS THE POSTURE
---------------------------------------------
+WHAT COMES BACK, AND WHY IT IS THE POSTURE **AND THE ARM**
+------------------------------------------------------------
 The response carries the runner's posture *after* the event: the stance, and every dimension
 with its net delta and the number of signals behind it. A 200 with an empty body would make an
 ingested event indistinguishable from a discarded one to the only party who can see this door
 — the trust service — and R13's whole complaint is about work that happens and cannot be
 observed. It is also what a merchant's operator reads to confirm a push landed.
+
+It carries a second thing now, under ``learning``, and it is the same argument one layer down.
+A pushed event may ride with ``trust_attribution`` — the impression
+``trust.feedback.attribution.impression_for`` joined this movement to — and that record exists
+to tell the store WHICH of its own decisions earned the movement. The agent answered ``200`` to
+attributions it never read, and a posture-only body could not have told anyone: "credited the
+15% rung a conversion", "ignored: that rung is past this merchant's cap" and "no attribution
+rode along" were one indistinguishable success. ``learning`` is
+:class:`~store_agent.modes.ArmCredit` rendered — the reason, what the record itself turned out
+to say, the cluster and rung credited, and the state's own observation count afterwards.
+
+It publishes nothing new about the store. Every field is either this store's own decision echoed
+back to the store that made it, or a word from a closed vocabulary this package defines; no
+counterparty and no rival appears, because a runner holds no other store's anything.
 
 THREE REFUSALS, AND THE STATUS EACH GETS
 ------------------------------------------
@@ -82,7 +96,12 @@ UNCONFIGURED_STATUS = 503
     summary="Take one pushed trust delta into this store's posture.",
     response_model=None,
     responses={
-        200: {"description": "Ingested. The body is this agent's posture after the event."},
+        200: {
+            "description": (
+                "Ingested. The body is this agent's posture after the event, and what the "
+                "event did to its learned policy."
+            )
+        },
         409: {"description": "The event names a store this agent does not advocate for."},
         503: {"description": "This process has no store context, so it has no posture."},
     },
@@ -117,7 +136,9 @@ def ingest_trust_event(event: TrustEventPayload, request: Request) -> dict[str, 
         )
 
     try:
-        accepted = runner.ingest_trust_event(event)
+        # `ingest`, not `ingest_trust_event`: the same intake, with the learned-policy half of
+        # the answer attached. See the module docstring for why the posture alone was not enough.
+        report = runner.ingest(event)
     except ValueError as exc:
         # The runner has already decided to refuse; this only chooses the status. The
         # comparison below reads the two values the runner itself compared rather than
@@ -132,6 +153,8 @@ def ingest_trust_event(event: TrustEventPayload, request: Request) -> dict[str, 
             },
         ) from exc
 
+    accepted = report.payload
+    credit = report.credit
     posture = runner.trust_posture
     return {
         "store_id": str(accepted.store_id),
@@ -148,5 +171,16 @@ def ingest_trust_event(event: TrustEventPayload, request: Request) -> dict[str, 
                 }
                 for signal in posture.signals
             ],
+        },
+        "learning": {
+            "reason": credit.reason,
+            "attribution": credit.attribution,
+            "credited": credit.credited,
+            "auction_id": credit.auction_id,
+            "cluster_id": credit.cluster_id,
+            "discount_depth": credit.discount_depth,
+            "won": credit.won,
+            "source": credit.source or None,
+            "observations": credit.observations,
         },
     }

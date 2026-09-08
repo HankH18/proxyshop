@@ -86,14 +86,17 @@ crawl path:
 ```json
 "roster_source": {"source": "neo4j", "shops": 7, "products_considered": 25,
                   "reason": null, "elapsed_ms": 24.349}
-"market": {"solicited": 7, "sponsored": 4, "list_price": 3,
-           "timed_out": 0, "not_asked": 0, "denied": 0, "bid_window_seconds": 5.0,
-           "fallback_reasons": {"no_response": 3}, "all_fallback": false}
+"market": {"solicited": 4, "sponsored": 4, "list_price": 3,
+           "timed_out": 0, "not_asked": 0, "no_endpoint": 3, "denied": 0,
+           "bid_window_seconds": 5.0, "fallback_reasons": {"tier_0_no_agent": 3},
+           "shortlisted": 4, "shortlisted_sponsored": 3, "all_fallback": false}
 ```
 
 **How many shops the graph finds depends on how much of the corpus is actually loaded, and it
 moves.** Re-driving the same stack on 2026-09-08 the graph's roster was **six** shops, not seven,
-and `purebulk.com` was not among them — `sponsored: 4, list_price: 2, no_response: 2`. The four
+and `purebulk.com` was not among them — `sponsored: 4, list_price: 2`, the two organic entries
+falling back (that reading predates commit `a22c63a` and recorded them under the old
+`no_response` label; the counts are what matter here, not the word). The four
 sponsored stores are fixed by the deployment document and do not move; the organic tail is
 whatever the graph holds at that moment, and a partially-loaded graph is the ordinary outcome of
 the content-hash trap [documented below](#2-the-whole-deployment-in-containers). Read the shape
@@ -105,52 +108,80 @@ catalogue list price**. That split is not a coincidence of this run — it is th
 document: exactly four of the ten sellers carry a `bid_endpoint` and six do not. Both halves of
 the market are in one response.
 
-Read `solicited: 7` and `no_response: 3` with a correction, though, because those two fields are
-wrong about the three: **nobody asked them.** `HttpBidSolicitor.solicit`
+**`solicited: 4`, not 7, and that number is the one this block used to get wrong.** The three
+organic shops are not counted as asked, because they were not: `HttpBidSolicitor.solicit`
 (`apps/exchange/src/composition.py`) returns `None` without opening a socket for a store the
-deployment document holds no `bid_endpoint` for, and `collect_bids`
-(`apps/exchange/src/auction/collect.py`) then labels a `None` answer `no_response` for any store
-whose roster tier is above 0 — which is every store the graph rosters. The right label exists in
-the same file and is unreachable on this path. It is written up under
-[What is not built](#an-organic-shop-nobody-asked-is-reported-silent). Measured: across the whole
-life of the exchange container, `docker logs proxyshop-exchange-1 | grep -ci 'bulksupplements\|nutricost'`
-returns **0** — those two names have never appeared in an outbound solicitation.
+deployment document holds no `bid_endpoint` for, and `solicit_bids`
+(`apps/exchange/src/orchestration/solicitation.py`) now subtracts `stores_with_no_agent` from the
+eligible set before it dials, so `result.solicited` is the list of doors actually knocked on.
+`market_summary` (`apps/exchange/src/auction/routes.py`) counts them, and adds `no_endpoint: 3`
+keyed on the whole reason string rather than its family, so an operator can tell a catalogue-only
+merchant apart from a store this deployment forgot to wire. The three entries carry
+`tier_0_no_agent:no_bid_endpoint` — the exchange saying *there is no agent here to ask* — and
+`_unusable_because` reaches `no_response` only for a store that really was dialled and really
+said nothing. Measured: across the whole life of the exchange container,
+`docker logs proxyshop-exchange-1 | grep -ci 'bulksupplements\|nutricost'` returns **0**, so
+those two names have never appeared in an outbound solicitation, and now nothing claims they did.
+
+**One half of that is still wrong, and it is the half a shopper sees.** The wire is accurate; the
+screen is not. `priceProvenanceLine` in `apps/buyer/app/shortlist/ShortlistView.tsx` branches only
+on whether the entry fell back and whether it has a price, so an organic row still reads *"The
+shop did not answer this auction."* — word for word what a genuinely silent shop gets. It is
+written up under [What is not built](#an-organic-shop-nobody-asked-is-reported-silent).
 
 **How they ranked.** The published formula, term by term, summing exactly to the score:
 
 | store | `intent_match` | `verified_claim_ratio` | `trust` | `price_value` | `delivery_fit` | **`rank_score`** |
 |---|---|---|---|---|---|---|
-| `gaiaherbs.com` | 0.20525 | 0.100 | 0.172 | 0.000 | 0.050 | **0.52725** |
-| `paradiseherbs.com` | 0.20999 | 0.100 | 0.162 | 0.000 | 0.050 | **0.52199** |
-| `purebulk.com` | 0.23981 | 0.100 | 0.132 | 0.000 | 0.050 | **0.52181** |
-| `oregonswildharvest.com` | 0.21333 | 0.100 | 0.156 | 0.000 | 0.050 | **0.51933** |
-| `bulksupplements.com` | 0.22147 | 0.100 | 0.138 | 0.000 | 0.050 | **0.50947** |
-| `nutricost.com` | 0.21512 | 0.100 | 0.144 | 0.000 | 0.050 | **0.50912** |
-| `toniiq.com` | 0.20678 | 0.100 | 0.148 | 0.000 | 0.050 | **0.50478** |
+| `gaiaherbs.com` | 0.20525 | 0.100 | 0.15460 | 0.000 | 0.050 | **0.50985** |
+| `purebulk.com` | 0.23981 | 0.100 | 0.12000 | 0.000 | 0.050 | **0.50981** |
+| `oregonswildharvest.com` | 0.21333 | 0.100 | 0.14197 | 0.000 | 0.050 | **0.50530** |
+| `paradiseherbs.com` | 0.20999 | 0.100 | 0.14118 | 0.000 | 0.050 | **0.50117** |
+| `bulksupplements.com` | 0.22147 | 0.100 | 0.12375 | 0.000 | 0.050 | **0.49522** |
+| `toniiq.com` | 0.20678 | 0.100 | 0.13661 | 0.000 | 0.050 | **0.49339** |
+| `nutricost.com` | 0.21512 | 0.100 | 0.12749 | 0.000 | 0.050 | **0.49262** |
+
+**Your `trust` column will not be these digits, and that is the point.** This was measured on a
+stack that had already taken several presses of the learning page's button, so the four stores
+that run agents read above what a stack freshly seeded by `make demo-trust` serves — those
+starting values, and what one press does to them, are in
+[`deploy/demo/README.md`](deploy/demo/README.md). The three with no agent (`purebulk.com`,
+`bulksupplements.com`, `nutricost.com`) have had no feedback at all and are exactly at their
+seeded values. What is reproducible is the arithmetic: every row's five terms sum to its
+`rank_score`, and `trust` is 0.20 × the `score` that `curl localhost:8084/snapshot` answers with
+for that store at the same moment.
 
 Read the columns before the ranking. `verified_claim_ratio` and `delivery_fit` are at their
 published neutral for every candidate (0.20 × 0.5 and 0.10 × 0.5), and `price_value` is 0.000
 because every agent was cold and bid its own list price. That leaves two columns that differ
-between stores, and only one of them is a live reading.
+between stores, and **both are live readings.**
 
-`intent_match` is measured on this request, by the platform's own retrieval, per store.
-**`trust` is a constant on this deployment.** Every value in that column is 0.20 × a `score`
-typed into the `trust_snapshot` key of `deploy/demo/exchange-deployment.json` — fixed
-alpha/beta per store, `decayed_at` frozen at `2026-09-01T00:00:00+00:00`. It is not read back
-from the trust service, and by design: `_bind_live_ranking_snapshot` in
-`apps/exchange/src/composition.py` returns without binding a live reader whenever the document
-states that key, because "that key is a person's statement and this function does not overrule
-one". So it separates the stores, and nothing that happens during a demo moves it.
+`intent_match` is measured on this request, by the platform's own retrieval, per store. `trust`
+is 0.20 × the `score` the trust service answers with on `GET /snapshot`, read at rank time.
+`deploy/demo/exchange-deployment.json` states no `trust_snapshot` key, and that absence is what
+makes the read happen: `_bind_live_ranking_snapshot` (`apps/exchange/src/composition.py`) returns
+without binding a live reader whenever a document DOES state one — "that key is a person's
+statement and this function does not overrule one" — so a deployment that typed its trust column
+out could not consult the trust service at all. Absent, the ranking gate binds `LiveTrustSnapshot`
+against the document's `trust_url`.
 
-It is worth being blunt about how little the exchange is giving up by doing that here. `GET
-/snapshot` on the running trust service holds **one** store — `store-breaker`, the simulation's
-dishonest merchant — and no record at all for any of the ten demo sellers. So the exchange is not
-preferring a stale reading over a fresh one; there is no fresh one. The frozen key is what makes
-the demo's `trust` column exist.
+That is a change from what this section used to say, and the previous shape is worth knowing
+because it is the failure the current one avoids. The document used to carry a `trust_snapshot` of
+ten hand-written stores with fixed alpha/beta and `decayed_at` frozen at
+`2026-09-01T00:00:00+00:00`. Every `trust` value was 0.20 × a number a person typed, byte-identical
+on every run, and no feedback anyone gave moved any of them — the shortlist's order was a sorted
+copy of a hand-written column. It also carried no `confidence` field, and `_prior` in
+`apps/exchange/src/policy/bandit.py` multiplies its prior weight by exactly that: absent reads
+`0.0`, so the trust-seeded bandit prior collapsed to the uninformative `Posterior(1.0, 1.0)` and
+the feature was, in effect, switched off. The live rows carry `confidence` between 0.88 and 0.94.
 
-**One term did the work here**, not two. That is thin, and this page would rather say so than
-let five decimal places imply five live signals.
-[Which terms can move, and when](#what-actually-moves-a-score) says why.
+**Two terms did the work here**, not one, and one of the two moves during a demo: `intent_match`
+is fixed by the catalogue for a given query, while `trust` is re-read per auction and a shopper's
+feedback shifts it. What that costs is a step — the trust service has to have heard of these ten
+storefronts before it can answer for them, which is
+[`make demo-trust`](#2-the-whole-deployment-in-containers), and without it the shortlist is empty.
+[Which terms can move, and when](#what-actually-moves-a-score) says which of the five can shift
+during a demo and which cannot.
 
 **What the shopper is shown.** Four differentiated slots, and this is where sponsored and
 organic separate on the wire:
@@ -158,16 +189,26 @@ organic separate on the wire:
 | slot | store | price | crawled product name | bid? | the shop's own words |
 |---|---|---|---|---|---|
 | `value` | gaiaherbs.com | 25.49 | *Milk Thistle Gummies* (Gaia Herbs) | yes | "Currently in stock and available now, backed by a 30-day return window for peace of mind on your first order." |
-| `reliability` | paradiseherbs.com | 11.99 | *Milk Thistle* (Paradise Herbs) | yes | "…backed by a 30-day return window—good peace of mind if this is your first time trying milk thistle extract from us. Only 12 units remain available." |
+| `reliability` | oregonswildharvest.com | 18.95 | *Milk Thistle, Organic Extract* | yes | "Free returns: 30 return window. Also: in stock: yes; units left: 12." |
 | `fit` | purebulk.com | 5.75 | — | **no** | **`null`** |
-| `specialist` | oregonswildharvest.com | 18.95 | *Milk Thistle, Organic Extract* | yes | "Free returns: 30 return window. Also: in stock: yes; units left: 12." |
+| `specialist` | paradiseherbs.com | 11.99 | *Milk Thistle* (Paradise Herbs) | yes | "…backed by a 30-day return window—good peace of mind if this is your first time trying milk thistle extract from us. Only 12 units remain available." |
+
+**Which store holds which slot NAME is not a stable fact about this market, and nothing on this
+page should be read as though it were.** These four stores fill these four slots on every run
+measured here — five identical queries back to back gave one slot assignment, not five — but
+`oregonswildharvest.com` and `paradiseherbs.com` traded the `reliability` and `specialist` labels
+between the run this table was first written from and the run above, because feedback moved one
+store past the other. A press of the learning page's button can also move them for a reason that
+has nothing to do with trust; the caveat is spelled out under
+[the learning page](#3-the-shopper-page-and-the-learning-demo). The trust number on a card is the
+noise-free readout. The slot label is not.
 
 Four things to notice.
 
-1. **`purebulk.com` never answered and still took the `fit` slot.** A shop that runs no agent
+1. **`purebulk.com` was never asked and still took the `fit` slot.** A shop that runs no agent
    loses its ability to discount and to speak. It does not lose its place.
-2. **The last row is not the shop's voice, whatever the column header says.** *"Free returns: 30
-   return window. Also: in stock: yes; units left: 12."* is `fallback_pitch` output — the store
+2. **`oregonswildharvest.com`'s row is not that shop's voice, whatever the column header says.**
+   *"Free returns: 30 return window. Also: in stock: yes; units left: 12."* is `fallback_pitch` output — the store
    agent's deterministic slot-filling, served because the screen refused the model's reply on a
    content rule. The agent logged that solicitation `outcome=ok source=model` anyway — the log now says `pitch_call=answered`, which is what the route can actually attest. Two of the
    three bidding rows here are model prose and one is not, and nothing on the wire says so; see
@@ -208,22 +249,30 @@ though with its own fixed roster rather than the ad-hoc one below
 ([why](#3-the-shopper-page-and-the-learning-demo)). Measured, same stack, minutes later:
 
 ```
-gaiaherbs.com           intent_match=0.175  trust=0.172  price_value=0.09962   rank_score=0.59662
-oregonswildharvest.com  intent_match=0.175  trust=0.156  price_value=0.08681   rank_score=0.56781
-toniiq.com              intent_match=0.175  trust=0.148  price_value=0.06912   rank_score=0.54212
-paradiseherbs.com       intent_match=0.175  trust=0.162  price_value=0.03833   rank_score=0.52533
-purebulk.com            intent_match=0.175  trust=0.132  price_value=0.00000   rank_score=0.45700
+gaiaherbs.com           intent_match=0.175  trust=0.1545988  price_value=0.01937  rank_score=0.49897
+oregonswildharvest.com  intent_match=0.175  trust=0.1419696  price_value=0.00000  rank_score=0.46697
+paradiseherbs.com       intent_match=0.175  trust=0.1411747  price_value=0.00000  rank_score=0.46617
+toniiq.com              intent_match=0.175  trust=0.1366076  price_value=0.00000  rank_score=0.46161
+purebulk.com            intent_match=0.175  trust=0.1199957  price_value=0.00000  rank_score=0.44500
 ```
 
 `intent_match` is **0.175 for everybody** — 0.35 × the published neutral 0.5. It is the one
 feature the exchange cannot compute: a served auction handed a roster queries no index, so
 there is no retrieval measurement to carry, and the term reads its neutral rather than a
-plausible invented number. `price_value` came alive instead, because the caller's roster
-asserted list prices the agents then bid under.
+plausible invented number. `price_value` came alive instead, because the caller's roster asserted
+list prices the agents could bid under — though only one of the four did on this run, which is the
+agents' discount sampler and not a property of the path.
 
-Compare the `trust` column with the one in the table above: `0.172`, `0.162`, `0.156`, `0.148`,
-`0.132`, digit for digit, on a different request minutes later. That is what a constant looks
-like from the outside, and it is the cheapest way to check the claim in the previous section.
+Now compare the `trust` column against the graph-path table above, which was a different request
+on the same stack a few minutes earlier: `gaiaherbs.com` read `0.1545992` there and `0.1545988`
+here. Six decimal places identical, the seventh moved, and it moved DOWN — that is
+`decayed_at` advancing on a live posterior, not noise and not a constant. Five identical queries
+fired back to back give the same value to every digit, because they read one snapshot; readings
+minutes apart do not. Feedback moves the same column by four orders of magnitude more: one press
+of the learning page's button moved `oregonswildharvest.com`'s underlying score by 0.0389, which
+is what [`deploy/demo/README.md`](deploy/demo/README.md) measures. That is the cheapest way to
+check the claim in the previous section — and it is the check that used to prove the opposite,
+back when this column was a constant.
 
 This is worth understanding before you read any score: **the exchange is honest about not
 knowing.** A feature it cannot compute is *removed from the candidate*, not written as 0.0.
@@ -289,6 +338,7 @@ cp .env.example .env
 make deps-up        # Postgres + Neo4j + Redis, then this worker's database and its migrations
 make demo-corpus    # replay ten recorded storefronts into the Neo4j catalogue graph
 make demo-up        # ten named services, plus the datastores they depend on
+make demo-trust     # register those ten sellers with the LIVE trust service — not optional
 make demo-check     # drive a real auction over HTTP and fail loudly if the market is dead
 ```
 
@@ -316,17 +366,39 @@ sample: two of the ten stores carry no liver-support inventory at all and answer
 query with protein stacks. They are there deliberately. A graph in which everything matches
 proves nothing about matching.
 
+`make demo-trust` is the short one and the easy one to skip, and skipping it produces the most
+confusing failure in this repository: every container `(healthy)`, the graph finding its shops,
+every store collected — and an **empty shortlist**, with nothing in the auction response saying
+the word "trust". The cause is that `deploy/demo/exchange-deployment.json` states no
+`trust_snapshot`, so `exchange.ranking.filters.blacklist_reason` reads the live snapshot and fails
+closed on a store it holds no row for: `blacklist_unreadable: no trust snapshot row for
+'gaiaherbs.com', so its blacklist status could not be established; failing closed (R12)`, once per
+candidate. Eligibility is untouched — the deployment document states every seller's status itself,
+so `entries` is its normal count and only the ranking empties out. `scripts/seed_demo_trust.py`
+puts the ten sellers into `app.sellers` and appends their opening posture as sealed ledger events
+through the trust service's own `POST /events`, every one marked `sim-fb-` in `order_ref`.
+Run it once after `make demo-up`; `--check` re-verifies without writing.
+
 `make demo-check` is the step the container healthchecks cannot be. It opens an auction with no
-`roster` key, which is the one request only the catalogue graph can answer. Measured after a
-fresh corpus load:
+`roster` key, which is the one request only the catalogue graph can answer, and it reads
+`GET /snapshot` itself so an empty shortlist is diagnosed rather than merely reported. Measured
+after a fresh corpus load and `make demo-trust`:
 
 ```
-roster_source: source='neo4j' shops=7 products_considered=25 reason=None elapsed_ms=25.061
+roster_source: source='neo4j' shops=7 products_considered=25 reason=None elapsed_ms=32.58
 entries=7  ranked=7  shortlist slots=4
-hosted bids=4  fallback reasons=['no_response']
+trust snapshot: 11 store(s); 10/10 rostered sellers present
+hosted bids=4  fallback reasons=['tier_0_no_agent:no_bid_endpoint']
 
 OK: the graph found the candidate set, stores were collected, and the shortlist is non-empty.
 ```
+
+`hosted bids=4` is the common reading rather than the invariant one. Over six consecutive probes
+on one stack, four looked exactly like that and two came back `hosted bids=3` with one agent's
+entry reading `bid_price_unreconcilable` — the exchange refusing a well-formed, on-time bid whose
+declared discount it cannot reconcile against the roster row. The probe passes either way and the
+shortlist still fills; a run reporting `hosted bids=0`, or an empty shortlist, is a different
+animal and the probe fails on it.
 
 **What that probe does not cover, and it is the case a real shopper produces.** `demo_check.sh`
 sends one body with `"hard_constraints": []` hardcoded; `DEMO_QUERY` changes the words and
@@ -384,7 +456,7 @@ service's `BUYER_ROSTER`, which `apps/buyer/compose.yaml` defaults to
 `/srv/deploy/buyer-roster.json` — a fixed six rows, one `product_ref` and one `list_price` each,
 the same six whatever the shopper types. That is the roster path described under
 [Now change one thing](#now-change-one-thing): `intent_match` reads its neutral 0.175 for every
-store, so what separates two stores on that page is the frozen `trust` constant and whatever
+store, so what separates two stores on that page is the live `trust` reading and whatever
 discount their agents bid. The graph path — the one at the top of this page, where retrieval
 actually picks the shops — is reached by `make demo-check` and by any `POST /auctions` with no
 `roster` key, not by the browser. `roster_source` on the response says which happened every time.
@@ -421,6 +493,22 @@ It also says, on screen, that its orders are manufactured, what marks them (`sim
 verbatim onto the sealed ledger event, so a seeded answer cannot later be mistaken for an
 earned one), what that mark does *not* prove, and which of the five ranking terms can move in
 this deployment and which cannot.
+
+**Watch the trust number, not the slot names, and this is the part to say out loud before anyone
+presses the button.** One press — 6 rounds × 4 reviewers, 96 events — moved
+`oregonswildharvest.com` from 0.670997 to 0.709885 and `toniiq.com` from 0.642748 to 0.681636,
+while `nutricost.com`, which neither bid nor received feedback, moved 0.637498 to 0.637497. That
+control is the whole argument: the stores that got feedback moved by 0.039 and the store that did
+not moved by one part in a million. What the same press does *not* reliably do is change which
+store holds which slot label, because it also wakes every store agent's discount sampler and
+`price_value` then swings by up to 0.042 of `rank_score` — four distinct slot assignments across
+five identical queries after a press, against one before it. Both measurements are in
+[`deploy/demo/README.md`](deploy/demo/README.md).
+
+**And presses get weaker.** `gaiaherbs.com` moved only +0.0025 on that same press, because it was
+the one store already carrying feedback and a dimension with evidence on it is harder to shift.
+That is R14 working as specified rather than the demo running out; `make deps-down && make deps-up
+&& make demo-up && make demo-trust` winds the stack back and restores the full range.
 
 There is also a browser demo that needs no datastore at all —
 `PROXYSHOP_WORKER=1 npm run demo --workspace @proxyshop/buyer` — which builds the SPA and boots
@@ -540,7 +628,7 @@ change independently and a replay needs both.
 |---|---|
 | `intent_match` | The **platform's own retrieval measurement** for this store, handed in by the caller that ran the retrieval. The exchange cannot compute it — a served auction handed a roster queries no index — so on the roster path it is absent and reads its neutral. Anything not a finite number is treated as absent rather than coerced. |
 | `verified_claim_ratio` | `1 − Π(1 − gain)` over the claims the exchange graded `verified` **whose subject this buyer asked about**, weighted by how hard they asked. Claim-stuffing pays exactly nothing: a verified claim about something nobody asked contributes 0.0, worth precisely what silence is worth. This is the term that pays for a per-shopper pitch, and the only one both movable at bid time and dependent on this buyer. |
-| `trust` | The store's own posterior over six dimensions: `price_honored`, `discount_honored`, `shipped_on_time`, `not_returned`, `feedback_match`, `catalog_claim_accuracy`. Verification outcomes and transaction outcomes update the same Betas, so a store has trust signal before it has ever sold anything. **On the demo deployment the exchange reads none of that**: the deployment document states a `trust_snapshot` and the composition root leaves it alone, so this term is a frozen per-store number. See [How they ranked](#one-query-end-to-end). |
+| `trust` | The store's own posterior over six dimensions: `price_honored`, `discount_honored`, `shipped_on_time`, `not_returned`, `feedback_match`, `catalog_claim_accuracy`. Verification outcomes and transaction outcomes update the same Betas, so a store has trust signal before it has ever sold anything. **On the demo deployment the exchange reads all of it, live**: the deployment document states no `trust_snapshot`, so `_bind_live_ranking_snapshot` binds `LiveTrustSnapshot` against its `trust_url` and the ranker reads `GET /snapshot` at rank time. It is the deployment's own `make demo-trust` step that gives the trust service anything to answer with. See [How they ranked](#one-query-end-to-end). |
 | `price_value` | The discount term. It **saturates at the auction's own price band** — no marginal return past clearing it. This is the mechanical reason winning on price wins one slot of four rather than the shortlist. |
 | `delivery_fit` | **Not the store's promise.** A quoted dispatch time is divided by the store's own `shipped_on_time` posterior before the auction normalises it, and a store with too little shipping history is **not admitted to the term at all** — the feature reads absent, which scores the neutral 0.5. A store with no record can neither win this term nor be punished by it. A promise costs nothing to make; this is the correction for having paid one out before anyone found out whether it was kept. |
 
@@ -576,14 +664,17 @@ buyer, customization would return exactly zero, and the store agents' learning l
 measure that correctly and converge every shop onto one generic pitch.
 
 That table is about the formula. **Which of those terms is actually live in the demo deployment
-is a shorter list**, and the two should not be confused. `trust` is a per-store constant typed
-into the deployment document, so it separates stores but never changes. `intent_match` is a real
-measurement only on the graph path; on the roster path — which is the path the shopper page takes,
-see [The shopper page](#3-the-shopper-page-and-the-learning-demo) — it reads its neutral for
+is a shorter list**, and the two should not be confused. `trust` is live — the ranker reads
+`GET /snapshot` per auction, so buyer feedback moves it within a demo — but it is live only on a
+stack where `make demo-trust` has been run, and it is the one term a *store* cannot move at bid
+time no matter what it does. `intent_match` is a real measurement only on the graph path; on the
+roster path — which is the path the shopper page takes, see
+[The shopper page](#3-the-shopper-page-and-the-learning-demo) — it reads its neutral for
 everybody. `delivery_fit` reads its neutral for a store with too little shipping history, which
 is every store here. That leaves `price_value` and `verified_claim_ratio` as the two terms a
 store can move during a demo, and `verified_claim_ratio` only moves if a verified claim lands on
-something this shopper actually asked about.
+something this shopper actually asked about. `trust` is the third thing that moves during a demo
+and the only one the shopper moves rather than the store.
 
 ## How a shop cannot buy rank
 
@@ -614,26 +705,40 @@ it tells a shopper something untrue, which is why it is first. An organic shop �
 holds no `bid_endpoint` for and therefore deliberately never contacts — is disclosed to the
 shopper as a shop that was asked and stayed quiet.
 
-The chain is short and every link is deliberate on its own. `HttpBidSolicitor.solicit`
-(`apps/exchange/src/composition.py`) returns `None` for a store with no endpoint rather than
-opening a socket — "represented at list price rather than asked a question nobody is home to
-hear". `collect_bids` (`apps/exchange/src/auction/collect.py`) turns a `None` answer into
-`no_response` for any store whose roster tier is above 0, and mints the correct label,
-`tier_0_no_agent`, only at tier 0. No store the graph rosters is ever tier 0: the corpus writes
-`tier` explicitly and the demo's Store nodes carry 1, and where a node states none the roster
-query supplies `coalesce(s.tier, 2)` (`services/ingest/src/graph/query.py`). So
-`tier_0_no_agent` is unreachable on the served path, and `no_response`'s own definition in
-`collect.py` — "asked, and nothing ever came back at all" — is not what happened.
+**The wire has been fixed; the screen has not, and this entry is now only about the screen.** It
+is worth recording what moved, because the half that remains is easy to mistake for the half that
+went. `HttpBidSolicitor.solicit` (`apps/exchange/src/composition.py`) has always returned `None`
+for a store with no endpoint rather than opening a socket. What used to happen next was that
+`collect_bids` (`apps/exchange/src/auction/collect.py`) turned that `None` into `no_response` —
+whose own definition in that file is "asked, and nothing ever came back at all" — because the
+right label, `tier_0_no_agent`, was minted only at roster tier 0 and no store the graph rosters is
+ever tier 0 (`coalesce(s.tier, 2)` in `services/ingest/src/graph/query.py`). Commit `a22c63a`
+closed that: `solicit_bids` (`apps/exchange/src/orchestration/solicitation.py`) now subtracts
+`stores_with_no_agent` from the eligible set before dialling and marks those responses
+`NO_AGENT_FIELD`, `_unusable_because` turns the marker into `NO_AGENT_REASON` —
+`tier_0_no_agent:no_bid_endpoint` — and `market_summary` counts `solicited` off the list of doors
+actually knocked on. Measured on the live stack: three organic entries reading
+`tier_0_no_agent:no_bid_endpoint`, `"solicited": 4`, `"no_endpoint": 3`, `"not_asked": 0`.
 
-What the shopper then reads, from `ShortlistView.tsx`, is: *"This price is Proxyshop's, not this
-shop's. The shop did not answer this auction, so the exchange stood in for it at the list price
-on its own roster row."* The first sentence is true. The second is about a solicitation that was
-never sent. The auction's `market.solicited` count has the same problem — it counts stores the
-eligibility gate cleared to ask, not stores that were asked.
+What still tells a shopper something untrue is the shortlist card. `priceProvenanceLine` in
+`apps/buyer/app/shortlist/ShortlistView.tsx` branches on whether the entry fell back and whether it
+has a price, and on nothing else — the reason token is passed through untranslated. So an organic
+row renders, word for word: *"This price is Proxyshop's, not this shop's. The shop did not answer
+this auction, so the exchange stood in for it at the list price on its own roster row — nobody at
+this shop quoted the number above. The exchange gives its reason as
+tier_0_no_agent:no_bid_endpoint."* Byte-identical prose to what a genuinely silent shop gets; the
+only thing separating them is a machine token at the end that no shopper is expected to decode.
+
+The sentence that would fix it already exists, on the wrong screen. `explainFallbackReason` in
+`apps/buyer/app/journey/WhyEmpty.tsx` glosses the `tier_0_no_agent` family as *"means that store
+has no bidding agent for the exchange to ask. It is on the roster from its catalogue alone, so the
+exchange represented it at its list price without anybody having declined anything."* `WhyEmpty`
+is mounted only when the shortlist comes back empty, and `ShortlistView.tsx` imports nothing from
+`journey/`, so a shopper looking at four filled slots never sees it.
 
 Nothing here loses a shop its slot or misstates a price, and an organic result is *supposed* to
 be carried at list price with no store voice; that part works. What is wrong is the account of
-why the voice is missing.
+why the voice is missing, and it is now wrong in exactly one component.
 
 ## Reconciliation returns no verdict over the chain the narrated demo writes
 
@@ -711,6 +816,14 @@ let go.
   merchant has ever looked at this page, and not one auction it reports was ever run."*
   **No served route reads it back** — one test uses it as a prose corpus and that is all — so
   opening the console shows you that stack, not the seeded page.
+- **Every demo store's trust score starts from a manufactured posture, and it is marked.**
+  `make demo-trust` appends 568 observations for the ten sellers — an opening posture a person
+  chose, because no storefront publishes one — through the trust service's own `POST /events`,
+  never a direct table write, so replay still reproduces the number the ranker served. Each one
+  carries `sim-fb-` in `order_ref`, a top-level column inside the event digest, so a manufactured
+  observation cannot be un-marked without breaking `GET /events/verify`. It deliberately leaves
+  `feedback_match` at its prior, which is the dimension `POST /buyer/feedback` moves: what the
+  learning page changes is earned, on top of a seed that says what it is.
 - **The buyer page's feedback step is seeded and says so.** It is gated on an order reference
   carrying a `sim-fb-` marker, and submitting it hits the genuine `POST /buyer/feedback`, which
   can and does refuse it honestly. There is **no boolean that flips feedback from seeded to
@@ -898,7 +1011,7 @@ Narrower targets, all real in the `Makefile`:
 | `make types` | mypy + `tsc -b` |
 | `make test-py` / `make test-ts` | Python or TypeScript tests only |
 | `make deps-up` / `make deps-down` | Bring the datastores up (then init and migrate) or tear them down |
-| `make demo-corpus` / `make demo-up` / `make demo-check` / `make demo-down` | The compose shopper demo — see [`docs/demo/shopper-demo.md`](docs/demo/shopper-demo.md) |
+| `make demo-corpus` / `make demo-up` / `make demo-trust` / `make demo-check` / `make demo-down` | The compose shopper demo, in that order — see [`docs/demo/shopper-demo.md`](docs/demo/shopper-demo.md). `demo-trust` is the one nobody expects and the one an empty shortlist means you skipped |
 | `make e2e-live` | The live development-store preflight. Needs `PROXYSHOP_WORKER` like everything else, and always exits non-zero; see above. |
 
 Two more worth running directly:

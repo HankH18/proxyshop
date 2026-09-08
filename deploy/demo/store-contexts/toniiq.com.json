@@ -1,5 +1,6 @@
 {
   "store_id": "toniiq.com",
+  "offer_valid_for_seconds": 600,
   "store_domain": "toniiq.com",
   "envelope": {
     "store_id": "toniiq.com",

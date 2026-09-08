@@ -20,6 +20,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 EXCHANGE="${EXCHANGE_PROBE_URL:-http://localhost:${EXCHANGE_PORT:-8083}}"
+# The trust service is probed too, and not for its health. `deploy/demo/exchange-deployment.json`
+# states no `trust_snapshot`, so the exchange's ranking gate reads `GET /snapshot` live and R12
+# EXCLUDES every store that snapshot holds no row for. On a stack where `make demo-trust` has not
+# been run that is all ten of them, and the only symptom at the auction is `shortlist: []` — a
+# message that points at ranking and says nothing about trust. This probe reads the snapshot
+# itself so the operator is told which step is missing rather than left to guess.
+TRUST="${TRUST_PROBE_URL:-http://localhost:${TRUST_PORT:-8084}}"
 QUERY="${DEMO_QUERY:-milk thistle silymarin liver support extract}"
 
 if ! command -v python3 >/dev/null 2>&1; then
@@ -31,7 +38,7 @@ echo "opening an auction on ${EXCHANGE}/auctions with NO roster in the body ..."
 echo "  intent query: ${QUERY}"
 echo
 
-EXCHANGE="$EXCHANGE" QUERY="$QUERY" python3 - <<'PY'
+EXCHANGE="$EXCHANGE" TRUST="$TRUST" QUERY="$QUERY" python3 - <<'PY'
 import json
 import os
 import sys
@@ -123,6 +130,75 @@ if not entries:
     )
 if not slots:
     problems.append("the shortlist is empty: nothing survived ranking.")
+
+# WHY the shortlist is empty, when the reason is trust. R12 fails closed on a store the live
+# snapshot holds no row for, so an unseeded trust service excludes every candidate and the
+# auction above reports only the symptom. `exclusion_reasons` names it per store, and this reads
+# the snapshot directly so the answer does not depend on the exchange choosing to publish them.
+try:
+    with open("deploy/demo/exchange-deployment.json", encoding="utf-8") as handle:
+        rostered = [str(row["store_id"]) for row in (json.load(handle).get("sellers") or [])]
+except (OSError, ValueError, KeyError, TypeError) as exc:
+    # Not `except OSError` alone, and not a silent `rostered = []`. A malformed document raises
+    # a ValueError, a renamed key raises a KeyError, and under `set -euo pipefail` either one
+    # was a raw traceback; an ABSENT document set the list empty and skipped the whole trust
+    # probe below -- which removed the diagnosis in one of the cases it exists for.
+    rostered = []
+    problems.append(
+        f"cannot read deploy/demo/exchange-deployment.json ({exc}). That document IS the "
+        f"exchange's seller registry and its trust_url, so nothing below can be checked and "
+        f"the exchange itself is reading the same file."
+    )
+if rostered:
+    snapshot_url = os.environ["TRUST"].rstrip("/") + "/snapshot"
+    try:
+        with urllib.request.urlopen(snapshot_url, timeout=30) as response:
+            snapshot = json.loads(response.read().decode("utf-8"))
+    except (urllib.error.HTTPError, OSError, ValueError) as exc:
+        snapshot = None
+        unreadable = (
+            f"cannot read the trust snapshot at {snapshot_url}: {exc}. The exchange reads that "
+            f"same route for R12 and denies EVERY store when it cannot, so this alone empties "
+            f"the shortlist."
+        )
+        # A problem only when the shortlist really is empty, for the reason spelled out below:
+        # this probe reaches trust over the host port and the exchange reaches it over the
+        # compose network, so the two can legitimately disagree about reachability, and a full
+        # shortlist is direct evidence that the exchange's own read is working.
+        if slots:
+            print(f"NOTE: {unreadable}")
+        else:
+            problems.append(unreadable)
+    if isinstance(snapshot, dict):
+        unknown = [store for store in rostered if store not in snapshot]
+        blacklisted = [
+            store
+            for store in rostered
+            if isinstance(snapshot.get(store), dict) and snapshot[store].get("blacklisted")
+        ]
+        print(f"trust snapshot: {len(snapshot)} store(s); {len(rostered) - len(unknown)}/"
+              f"{len(rostered)} rostered sellers present")
+        # A DIAGNOSIS attached to the shortlist failure, not a failure of its own -- and the
+        # distinction is the difference between a probe and a tripwire. R12 excluding SOME
+        # stores narrows the field; the demo is only dead when nothing survives, which the
+        # `not slots` check above already decides. A store trust has legitimately delisted is
+        # the blacklist beat working, and failing the probe for it would make the demo's own
+        # feature look like an outage.
+        if unknown and not slots:
+            problems.append(
+                f"...and the live trust snapshot holds no row for {len(unknown)} of the "
+                f"{len(rostered)} rostered sellers ({', '.join(unknown[:4])}"
+                f"{', ...' if len(unknown) > 4 else ''}). R12 fails closed, so every one of them "
+                f"is EXCLUDED from ranking, which is why the shortlist is empty. "
+                f"Run `make demo-trust`."
+            )
+        elif unknown:
+            print(
+                f"NOTE: {len(unknown)} rostered seller(s) have no trust row and cannot be "
+                f"shortlisted ({', '.join(unknown[:4])}); `make demo-trust` registers them"
+            )
+        if blacklisted:
+            print(f"NOTE: trust reports these sellers blacklisted: {', '.join(blacklisted)}")
 
 # EVERY entry being a fallback is the failure this probe exists to catch a second time.
 # The graph can find seven shops, the auction can answer 201, and not one hosted agent can

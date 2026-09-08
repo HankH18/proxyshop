@@ -743,13 +743,26 @@ class ExchangeOutcomeSink(StoreAgentSink):
     exchange is the platform, and it already knows which store was in which auction), and the
     pre-flight below.
 
-    **The pre-flight, and why it is not left to the receiver.** ``POST /internal/outcomes``
-    refuses an outcome whose ``pseudonymous_context.cluster_id`` is absent, with
-    ``outcome_carries_no_cluster``: exposure is decided WITHIN a cluster and an outcome that
-    names none cannot be routed to a posterior. A delta computed from an event that carries no
-    cluster is therefore a guaranteed ``400``, and posting it anyway would fill the ring with a
-    receiver's refusal where the honest entry is that this trust event was never routable. So
-    the condition is named here, once, and the socket is not opened.
+    **The pre-flight, and what it may no longer decide.** ``POST /internal/outcomes`` refuses an
+    outcome it cannot route to a posterior, under ``outcome_carries_no_cluster``: exposure is
+    decided WITHIN a cluster, and pooling an unroutable outcome into a shared bucket would move
+    clusters it never happened in.
+
+    This pre-flight used to refuse, here, every delta whose ``pseudonymous_context.cluster_id``
+    was empty, on the reasoning that such a post was "a guaranteed 400". It was — and since
+    NOTHING in this system ever populated that field, the guarantee held for every outcome
+    without exception: ``delivered: 0``, ``lost: 536``, read off this service's own
+    ``GET /events/verify``. The pre-flight was not saving a wasted socket; it was the near end of
+    a loop that had never once closed.
+
+    The cluster is the exchange's own fact — it is assigned there, from a catalogue only the
+    exchange holds, and stamped on the auction record — so the exchange now resolves it from
+    ``event.auction_id`` (``exchange.policy.routes._cluster_of_the_auction``). What this
+    pre-flight decides is therefore narrowed to the one case no receiver could ever answer
+    either: a delta naming **neither** a cluster nor an auction. That is still refused here,
+    still counted, still on the ring with its reason, and the socket is still not opened for it.
+    Everything else is posted, and a 400 that comes back is the exchange saying the auction is
+    gone or ran in no cluster — a receiver's verdict this service is not entitled to predict.
     """
 
     peer = "exchange"
@@ -781,18 +794,21 @@ class ExchangeOutcomeSink(StoreAgentSink):
         cluster = ""
         if isinstance(context, Mapping):
             cluster = str(context.get("cluster_id") or "").strip()
-        if not cluster:
-            event_id = str((payload.get("event") or {}).get("event_id", "")) or "unknown"
-            # NOT an outage. R14 buyer feedback carries no cluster and never will — the buyer
-            # service does not know one — so filing this as "the exchange stopped answering"
-            # made every ordinary healthy feedback append print an ERROR and leave
+        event = payload.get("event")
+        event = event if isinstance(event, Mapping) else {}
+        auction_id = str(event.get("auction_id") or "").strip()
+        if not cluster and not auction_id:
+            event_id = str(event.get("event_id", "")) or "unknown"
+            # NOT an outage. This is a delta about an event that names neither a cluster nor an
+            # auction, so no party in this system holds the fact — filing it as "the exchange
+            # stopped answering" made an ordinary healthy append print an ERROR and leave
             # `delivering: false` on the health surface with nothing wrong.
             self._failed(
                 str(store_id),
                 event_id,
-                "the delta names no cluster, and exposure is decided within a cluster — the "
-                "exchange cannot route this outcome to a posterior, and pooling it into a "
-                "shared bucket would move clusters it never happened in",
+                "the delta names no cluster, and no auction to resolve one from, and exposure "
+                "is decided within a cluster — nothing can route this outcome to a posterior, "
+                "and pooling it into a shared bucket would move clusters it never happened in",
                 outage=False,
             )
             return False

@@ -4957,10 +4957,10 @@ def test_t302_the_ledger_kind_emitter_sweep_is_armed() -> None:
     wrong reason; a sweep that found something for every kind would make it green while the
     unemitted kinds stayed unemitted.
 
-    Every control kind below is produced OUTSIDE ``apps/trust`` — ``bid_placed`` in
-    ``apps/exchange/src/auction/routes.py``, ``code_created`` in
-    ``apps/exchange/src/accept/offer.py``, ``shown`` in
-    ``apps/exchange/src/ranking/serving.py`` — so this control is not grading a file this
+    Every control kind below is produced OUTSIDE ``apps/trust`` — ``code_created`` in
+    ``apps/exchange/src/accept/offer.py``, ``auction_opened`` in
+    ``apps/exchange/src/auction/state.py``, ``checkout_redirect`` in
+    ``apps/exchange/src/checkout/provider.py`` — so this control is not grading a file this
     lane can edit. Three kinds, three files, and the second assertion is what keeps that
     true rather than assumed.
 
@@ -4972,7 +4972,7 @@ def test_t302_the_ledger_kind_emitter_sweep_is_armed() -> None:
     indistinguishable here from an in-lane producer, and a control that graded a file this
     lane can edit could be satisfied by editing it.
 
-    Three kinds have left so far, each for that reason and each recorded here rather than
+    Five kinds have left so far, each for that reason and each recorded here rather than
     quietly dropped:
 
     * ``reconciled`` — its only producer is ``apps/trust/src/reconcile/engine.py``.
@@ -4983,11 +4983,25 @@ def test_t302_the_ledger_kind_emitter_sweep_is_armed() -> None:
       EMITS either kind (the emitters are still ``apps/buyer`` and
       ``services/shopify-stub``); they consume them, and the sweep cannot tell the
       difference by design.
+    * ``bid_placed`` and ``shown`` — ``apps/trust/src/feedback/attribution.py`` now names
+      both, because the impression join is a function of exactly those two kinds plus
+      ``accepted`` (which was already off this list, named by
+      ``apps/trust/src/reconcile/engine.py``): a trust delta has to say WHICH of a store's
+      own decisions earned it, and that is the arm it played (``bid_placed``) and the slot
+      it occupied (``shown``). That module EMITS nothing at all — it is a read model over
+      rows the delta path already holds, and the emitters are still
+      ``apps/exchange/src/auction/routes.py`` and ``apps/exchange/src/ranking/serving.py``.
+      Same reason as ``feedback``/``refund``, same by-design blindness in the sweep.
+
+      Their replacements were not chosen by eye: they are what :func:`_t302_emitters`
+      itself reports as having producers with none under ``apps/trust/``, which at the time
+      of writing is ``auction_opened``, ``auction_closed``, ``checkout_redirect``,
+      ``code_created`` and ``policy_event``.
 
     The rule for a replacement is the assertion below, not this prose: any kind the sweep
     finds producers for, none of them under ``apps/trust/``.
     """
-    for kind in ("bid_placed", "code_created", "shown"):
+    for kind in ("auction_opened", "checkout_redirect", "code_created"):
         producers = _t302_emitters(kind)
         assert producers, f"the sweep finds no producer for {kind!r}, which has one"
         assert not any(path.startswith("apps/trust/") for path in producers), (

@@ -20,9 +20,20 @@ that prior object deliberately — it is frozen too — and there is no mutable 
 for one store's update to reach the other through. This module holds no registry, no cache and
 no global; per-store state lives in the value the caller holds.
 
+**Where the outcome rows come from.** Two observables, and
+:mod:`~store_agent.learning.outcomes` is the honest account of both. The signed `delta` on a
+pushed trust event says which way a store's REPUTATION moved; the `trust_attribution` riding in
+that event's payload says which impression moved it — the rung actually quoted, whether the offer
+was shown, whether it converted. :func:`~store_agent.learning.attribution.read_impression` is the
+reader for the second, and it is what makes ``shown and not converted`` a loss the posterior can
+see rather than an event the sign never fires on.
+
 **Units.** Depth is a FRACTION here and in outcome records (`0.2`); it is a PERCENT in the
-envelope and in `learned_policy` (`20.0`). :func:`~store_agent.learning.grid.as_percent` is the
-only crossing, and :func:`~store_agent.learning.state.to_learned_policy` is the only caller.
+envelope, in `learned_policy` (`20.0`) and on a `Discount` read back off the wire.
+:mod:`~store_agent.learning.grid` holds both crossings and is the only place either happens:
+:func:`~store_agent.learning.grid.as_percent` outward, and
+:func:`~store_agent.learning.grid.percent_as_fraction` inward — which never guesses a unit,
+because every field it is pointed at states one.
 
 Offline and clock-free: `sample_depth` derives its generator from `(cluster_id, seed)` by hash,
 so it reproduces across processes (S4), and nothing here touches a network, an LLM or a clock.
@@ -41,6 +52,23 @@ from .arms import (
     commitment_keys,
     is_variant,
     variant_or_default,
+)
+from .attribution import (
+    ATTRIBUTION_KEY,
+    ATTRIBUTION_SOURCE,
+    AUCTION_MISMATCH,
+    MISSING_ATTRIBUTION,
+    NO_ARM,
+    NOT_SHOWN,
+    READING_REASONS,
+    SUPPORTED_SCHEMA_VERSIONS,
+    UNAUTHORIZED_DEPTH,
+    UNREADABLE_DISCOUNT,
+    UNRECOGNISED_SCHEMA_VERSION,
+    USABLE,
+    ImpressionOutcome,
+    ImpressionReading,
+    read_impression,
 )
 from .grid import (
     DEFAULT_DEPTH_BUCKETS,
@@ -96,6 +124,9 @@ from .state import (
 )
 
 __all__ = [
+    "ATTRIBUTION_KEY",
+    "ATTRIBUTION_SOURCE",
+    "AUCTION_MISMATCH",
     "COMMITMENT_SALT",
     "CONTEXT_PRIOR_FIELDS",
     "DEFAULT_DEPTH_BUCKETS",
@@ -104,6 +135,9 @@ __all__ = [
     "DEPTH_PERCENT_FIELDS",
     "DISCOUNT_MARKER",
     "FRACTION_CEILING",
+    "MISSING_ATTRIBUTION",
+    "NOT_SHOWN",
+    "NO_ARM",
     "OUTCOME_DEPTH_FIELDS",
     "OUTCOME_SOURCE",
     "OUTCOME_VARIANT_FIELDS",
@@ -113,12 +147,20 @@ __all__ = [
     "PRIOR_LOSSES",
     "PRIOR_RECORD_FIELDS",
     "PRIOR_WINS",
+    "READING_REASONS",
+    "SUPPORTED_SCHEMA_VERSIONS",
+    "UNAUTHORIZED_DEPTH",
+    "UNREADABLE_DISCOUNT",
+    "UNRECOGNISED_SCHEMA_VERSION",
+    "USABLE",
     "VARIANT_KIND",
     "VARIANT_SALT",
     "Arm",
     "ClusterLearning",
     "ClusterPrior",
     "DepthTally",
+    "ImpressionOutcome",
+    "ImpressionReading",
     "NetworkPrior",
     "StoreLearningState",
     "Tally",
@@ -142,6 +184,7 @@ __all__ = [
     "percent_as_fraction",
     "policy_for_auction",
     "prior_view",
+    "read_impression",
     "reject_discount_fields",
     "sample_arm",
     "sample_commitment_set",

@@ -29,10 +29,22 @@ bid this way" is not part of it. :class:`BidLogEntry` is the wrapper: it holds t
 verbatim, the mode that decided its fate, the trust posture behind it, and the rationale.
 
 **What a trust event may and may not move.** An injected `TrustEventPayload` changes the
-POSTURE this runner states — nothing else. It never re-prices an offer. The cold bid is the
-catalog list price moved only by a depth `authorize_discount` granted; a trust signal that
-quietly shaded a price would be exactly the improvisation the hook boundary exists to forbid,
-and would do it in the one place the boundary cannot see, since the runner sits outside it.
+POSTURE this runner states, and — through the learned state it holds — the arm it will PLAY
+next. It never re-prices *this* offer. The cold bid is the catalog list price moved only by a
+depth `authorize_discount` granted; a trust signal that quietly shaded a price would be exactly
+the improvisation the hook boundary exists to forbid, and would do it in the one place the
+boundary cannot see, since the runner sits outside it. What the loop learns still goes through
+that wall on the next auction: :meth:`AgentRunner._select_arm` renders it as `learned_policy`
+and hook 5 re-asks the envelope about the depth before it can reach a bid.
+
+**Which of its own decisions earned a movement.** A pushed event may carry the impression the
+trust service attributed the movement to, under `trust_attribution` inside the event's payload.
+That record names the terms actually quoted and whether the buyer converted, which is the
+Bernoulli outcome the loop's posterior is over; the signed `delta` is a statement about the
+store's REPUTATION and only correlates with it. So where the record is present and usable it
+supersedes the delta's sign for crediting the arm — and where it is absent, unversioned or
+unauthorised, the sign is still what credits, exactly as it always did. See
+:mod:`store_agent.learning.attribution` and :meth:`AgentRunner._credit`.
 
 No clock, no RNG, no set iteration on this path — two runs on identical inputs are
 byte-identical (S4), which is why the per-dimension posture is rendered in sorted dimension
@@ -44,18 +56,24 @@ from __future__ import annotations
 import copy
 import math
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from contracts import Bid, EnvelopeActivation, TrustDimension, TrustEventPayload
 
 from ..learning import (
+    ATTRIBUTION_SOURCE,
+    DEFAULT_DEPTH_BUCKETS,
+    MISSING_ATTRIBUTION,
+    OUTCOME_SOURCE,
     Arm,
     StoreLearningState,
     available_commitments,
     cold_arm,
     outcome_row,
+    percent_as_fraction,
     policy_for_auction,
+    read_impression,
     sample_arm,
     update,
     verdict,
@@ -83,6 +101,40 @@ NEUTRAL = "neutral"
 #: older than this window is ingested into the posture and credited to nothing — which is the
 #: honest outcome, since the runner genuinely no longer knows what it played there.
 MAX_REMEMBERED_ARMS = 512
+
+# -- what one ingested event did to the learned policy, in one word ---------------------------
+#
+# The vocabulary :class:`ArmCredit` answers with. It rides back out of `POST /v1/trust-events`
+# so that "the agent read the attribution" and "the agent quietly ignored it" are distinguishable
+# from OUTSIDE this process — which is the whole complaint the attribution itself was built to
+# answer, one layer down.
+
+#: This runner keeps no learned state, so there is no policy for an outcome to move. Every
+#: library caller that predates R17's loop is here, and none of them is broken.
+CREDIT_NO_STATE = "no_learning_state"
+
+#: The event names an auction this runner did not answer, or answered longer ago than
+#: :data:`MAX_REMEMBERED_ARMS`. The posture still moves; there is simply no arm to credit.
+CREDIT_UNREMEMBERED = "unremembered_auction"
+
+#: Credited from the impression the trust service attributed the movement to: the rung actually
+#: quoted, and `converted` as the outcome. This is the reading that makes a LOSS learnable.
+CREDIT_IMPRESSION = "impression"
+
+#: This auction's impression has already been folded. One impression is ONE Bernoulli trial, and
+#: a converted auction goes on to produce several trust events — an `order_paid`, an
+#: `order_fulfilled`, a `feedback` — each re-reporting the same `converted: true`. Booking each
+#: would turn one sale into four wins, which is the "posterior that only ever rises" this reader
+#: exists to avoid.
+CREDIT_ALREADY = "already_credited"
+
+#: Credited by the SIGN of the delta, which is what happened before an attribution rode along and
+#: what still happens for every event that carries none.
+CREDIT_DELTA_SIGN = "delta_sign"
+
+#: Nothing to credit: no usable attribution, and a delta of exactly zero moved no dimension, so
+#: it is silence about the arm rather than evidence against it.
+CREDIT_NONE = "no_evidence"
 
 
 def _field(source: Any, name: str, default: Any = None) -> Any:
@@ -273,6 +325,54 @@ class TrustPosture:
 
 
 @dataclass(frozen=True, slots=True)
+class ArmCredit:
+    """What ONE ingested trust event did to this store's learned policy.
+
+    Returned rather than logged, because the whole defect class this closes is work that happens
+    and cannot be observed: the trust service delivered an attribution for weeks and got a `200`
+    back that said only what the POSTURE had become. A caller — the served door, a test, an
+    operator with curl — can now tell "credited the 15% rung a win" from "ignored: that rung is
+    past the merchant's cap" without reading this process's logs or its private state.
+    """
+
+    #: One of the ``CREDIT_*`` words above: what happened to the ARM.
+    reason: str
+    #: One of :data:`store_agent.learning.attribution.READING_REASONS`: what the pushed event's
+    #: `trust_attribution` record turned out to say. `absent` is the ordinary case for an event
+    #: from a trust build that predates the join.
+    attribution: str = MISSING_ATTRIBUTION
+    #: The auction the event named, verbatim.
+    auction_id: str = ""
+    #: The cluster the credited arm was played in — read off the arm this runner remembers, which
+    #: is the only place it exists. It is NOT on the attribution: `cluster_id` lives on
+    #: `auction_opened`, whose `store_id` is null, so it is not in the store's own ledger history
+    #: and the trust service cannot supply it. See :meth:`AgentRunner.arm_for`.
+    cluster_id: str | None = None
+    #: The rung credited, as a FRACTION, or `None` when nothing was credited.
+    discount_depth: float | None = None
+    #: The Bernoulli outcome folded, or `None` when nothing was folded.
+    won: bool | None = None
+    #: Which observable produced the row — :data:`~store_agent.learning.OUTCOME_SOURCE` or
+    #: :data:`~store_agent.learning.ATTRIBUTION_SOURCE` — and ``""`` when no row was produced.
+    source: str = ""
+    #: How many of this store's own outcomes the state has folded, AFTER this event. The served
+    #: number that proves a push moved the policy rather than only the posture.
+    observations: int = 0
+
+    @property
+    def credited(self) -> bool:
+        return self.source != ""
+
+
+@dataclass(frozen=True, slots=True)
+class IntakeReport:
+    """One ingested event: what was taken in, and what it did to the learned policy."""
+
+    payload: TrustEventPayload
+    credit: ArmCredit
+
+
+@dataclass(frozen=True, slots=True)
 class BidLogEntry:
     """One auction's worth of audit trail: the answer, the posture, and the reason for both.
 
@@ -303,7 +403,8 @@ class BidLogEntry:
     #: The arm this store's own policy played (R17: pitch variant x commitment set x depth), or
     #: `None` when this runner keeps no learning state. It is on the LOG and not only inside the
     #: bid because a merchant reading a shadow run needs to see which policy produced which
-    #: answer, and because it is the half of the loop's join key the trust door cannot supply.
+    #: answer, and because its `cluster_id` is the half of the loop's join key the trust door
+    #: cannot supply — see :meth:`AgentRunner.arm_for`.
     arm: Arm | None = None
 
 
@@ -377,6 +478,7 @@ class AgentRunner:
 
     __slots__ = (
         "_context",
+        "_credited",
         "_deltas",
         "_learning",
         "_llm",
@@ -421,6 +523,12 @@ class AgentRunner:
         # the R17 sense, and `store_agent.solicitation.advocate` gives every SERVED process one.
         self._learning = learning
         self._played: dict[str, Arm] = {}
+        # Which auctions' impressions have already been folded, and what they said. A second ring
+        # rather than a flag on the arm, because `Arm` is frozen and shared with the log entry the
+        # sink already holds; see `CREDIT_ALREADY` for what it prevents. Bounded exactly as
+        # `_played` is — an auction that has fallen out of `_played` can never be credited again
+        # anyway, so this ring can only ever be the same size or smaller in practice.
+        self._credited: dict[str, bool] = {}
         # Through the setter, so construction and a later flip enforce the same rules.
         self.mode = _envelope_states(context) if mode is None else mode
 
@@ -482,10 +590,15 @@ class AgentRunner:
     def arm_for(self, auction_id: str) -> Arm | None:
         """The arm this runner played in `auction_id`, if it still remembers that auction.
 
-        The loop's join key. `AgentRunner` is the only object in the system that holds both
-        halves — the arm it chose when it answered, and the trust verdict that names that auction
-        later — because the exchange never tells a store which arm it saw and the trust service
-        never learns there was one.
+        The loop's join key, and the ONE coordinate that exists nowhere else. The exchange never
+        tells a store which arm it saw. The trust service now reconstructs part of one —
+        `trust.feedback.attribution.impression_for` reads the terms back off the store's own
+        `bid_placed` row, which is where the rung a verdict credits comes from — but it cannot
+        reach the CLUSTER: `cluster_id` lives on `auction_opened`, whose `store_id` is null, so
+        it is not in the store's own history and recovering it would mean reading rows that are
+        not this store's. That half is here, taken off the `BidRequest` this runner answered, and
+        it is why an auction that has fallen out of this ring can be ingested into the posture
+        and credited to nothing.
         """
         return self._played.get(str(auction_id))
 
@@ -539,31 +652,112 @@ class AgentRunner:
         while len(self._played) > MAX_REMEMBERED_ARMS:
             self._played.pop(next(iter(self._played)))
 
-    def _credit(self, payload: TrustEventPayload) -> None:
-        """Fold ONE trust verdict into the arm that earned it. Silent when there is nothing to do.
+    @property
+    def authorized_depth(self) -> float | None:
+        """The deepest discount this store's approved envelope authorises, as a FRACTION.
 
-        Three ways this legitimately does nothing, and none of them is a failure:
+        `None` when the context states none this runner can read, which is NOT "anything goes":
+        :func:`store_agent.learning.attribution.read_impression` still walls a wire-borne rung
+        against the top of the depth grid, so an unreadable envelope costs the loop the tighter
+        of the two walls and never all of them.
 
-        * this runner keeps no learning state;
-        * the verdict names an auction this runner did not answer, or answered longer ago than
-          :data:`MAX_REMEMBERED_ARMS`;
-        * the delta is exactly zero, which moved no dimension and is therefore silence about the
-          arm rather than evidence against it (see :func:`store_agent.learning.outcomes.verdict`).
+        Read LIVE off the context on every event, like every other envelope field except the
+        activation snapshot — a merchant who narrows the cap must not have to restart the process
+        for the loop to stop learning rungs it may no longer play.
+        """
+        return percent_as_fraction(_field(_field(self._context, "envelope"), "max_discount_pct"))
 
-        What it never does is invent an outcome. The store agent cannot observe award — see
-        :mod:`store_agent.learning.outcomes` for exactly why, and for what this signal is and is
-        not — so the only rows folded here are verdicts the platform actually pushed.
+    def _credit(self, payload: TrustEventPayload) -> ArmCredit:
+        """Fold ONE trust event into the arm that earned it, and say what that did.
+
+        **Which outcome is folded.** If the event carries a usable `trust_attribution` (see
+        :mod:`store_agent.learning.attribution`) the outcome is the impression's: `converted` is
+        the win, `shown and not converted` is the LOSS, and the rung is the discount actually
+        quoted rather than the one this runner sampled — a counter-proposal or a walled ask means
+        the terms that earned the outcome are not the terms first pitched. Otherwise the outcome
+        is the SIGN of the delta, which is exactly what this method did before and what it still
+        does for every event that carries no attribution.
+
+        **The cluster comes from the arm, and it has to.** `cluster_id` is not on the attribution
+        and deliberately so: it lives on `auction_opened`, whose `store_id` is null, so it is not
+        in the store's own ledger history and the trust service could not supply it without
+        reading another store's rows. This runner already holds it — :meth:`_select_arm` reads it
+        off the `BidRequest` it answered and :meth:`_remember` files the arm under that auction —
+        so the join is local, free, and the reason an unremembered auction credits nothing.
+
+        Five ways this legitimately folds nothing, and none of them is a failure: no learning
+        state, an auction this runner did not answer or no longer remembers, an impression already
+        folded, a delta of exactly zero with no usable attribution, and an attribution the reader
+        refused. Every one of them is named in the returned :class:`ArmCredit`.
+
+        What it never does is invent an outcome. The store agent still cannot observe award — see
+        :mod:`store_agent.learning.outcomes` — so the only rows folded here are outcomes the
+        platform actually pushed.
         """
         state = self._learning
+        auction_id = str(_field(payload.event, "auction_id", "") or "")
+        reading = read_impression(
+            _field(payload.event, "payload"),
+            auction_id=auction_id,
+            max_depth=self.authorized_depth,
+            depth_buckets=DEFAULT_DEPTH_BUCKETS if state is None else state.depth_buckets,
+        )
         if state is None:
-            return
-        arm = self._played.get(str(_field(payload.event, "auction_id", "") or ""))
+            return ArmCredit(CREDIT_NO_STATE, reading.reason, auction_id)
+
+        seen = state.observations
+        arm = self._played.get(auction_id)
         if arm is None:
-            return
-        won = verdict(payload.delta)
-        if won is None:
-            return
-        self._learning = update(state, [outcome_row(arm, store_id=self._store_id, won=won)])
+            return ArmCredit(CREDIT_UNREMEMBERED, reading.reason, auction_id, observations=seen)
+
+        outcome = reading.outcome
+        if outcome is not None:
+            if auction_id in self._credited:
+                return ArmCredit(
+                    CREDIT_ALREADY,
+                    reading.reason,
+                    auction_id,
+                    cluster_id=arm.cluster_id,
+                    observations=seen,
+                )
+            reason, source, won, depth = (
+                CREDIT_IMPRESSION,
+                ATTRIBUTION_SOURCE,
+                outcome.won,
+                outcome.depth,
+            )
+            self._credited[auction_id] = outcome.won
+            while len(self._credited) > MAX_REMEMBERED_ARMS:
+                self._credited.pop(next(iter(self._credited)))
+        else:
+            signed = verdict(payload.delta)
+            if signed is None:
+                return ArmCredit(
+                    CREDIT_NONE,
+                    reading.reason,
+                    auction_id,
+                    cluster_id=arm.cluster_id,
+                    observations=seen,
+                )
+            reason, source, won, depth = CREDIT_DELTA_SIGN, OUTCOME_SOURCE, signed, arm.depth
+
+        # The arm is copied rather than mutated: it is frozen, and the log entry the sink already
+        # holds refers to the very same object — an arm edited here would rewrite an audit row
+        # that was written auctions ago.
+        played = arm if depth == arm.depth else replace(arm, depth=depth)
+        self._learning = update(
+            state, [outcome_row(played, store_id=self._store_id, won=won, source=source)]
+        )
+        return ArmCredit(
+            reason,
+            reading.reason,
+            auction_id,
+            cluster_id=arm.cluster_id,
+            discount_depth=float(depth),
+            won=bool(won),
+            source=source,
+            observations=self._learning.observations,
+        )
 
     # -- trust intake -------------------------------------------------------
 
@@ -615,16 +809,36 @@ class AgentRunner:
             )
         return payload
 
+    def _record(self, payload: TrustEventPayload) -> ArmCredit:
+        """Absorb one ALREADY-VALIDATED payload: the posture first, then the policy.
+
+        The one place either happens, so the single-event door and the batch door cannot drift
+        into two opinions of what "ingested" means.
+        """
+        self._deltas.setdefault(payload.dim, []).append(float(payload.delta))
+        return self._credit(payload)
+
+    def ingest(self, event: Any) -> IntakeReport:
+        """Take one pushed event in, and report BOTH of the things it moved.
+
+        The posture is what this door has always answered with. The second half —
+        :class:`ArmCredit` — is what the store's own policy did about it, and it is returned
+        rather than kept private because "the attribution arrived and was ignored" and "the
+        attribution arrived and taught the 15% rung" are indistinguishable from outside a process
+        that only reports a posture. See :meth:`_accept` for what is refused outright.
+        """
+        payload = self._accept(event)
+        return IntakeReport(payload=payload, credit=self._record(payload))
+
     def ingest_trust_event(self, event: Any) -> TrustEventPayload:
         """Take one pushed `TrustEventPayload` — a mapping or the model — into the posture.
 
         Returns the validated payload, so a caller that handed over a mapping can see what was
-        actually taken in. See :meth:`_accept` for what is refused.
+        actually taken in. :meth:`ingest` is the same call with the learned-policy half of the
+        answer attached; this spelling is kept because it is what every existing caller uses and
+        because "what did the door take in" is a complete question on its own.
         """
-        payload = self._accept(event)
-        self._deltas.setdefault(payload.dim, []).append(float(payload.delta))
-        self._credit(payload)
-        return payload
+        return self.ingest(event).payload
 
     def ingest_trust_events(self, events: Iterable[Any]) -> tuple[TrustEventPayload, ...]:
         """:meth:`ingest_trust_event` over a batch — all of it, or none of it.
@@ -637,8 +851,7 @@ class AgentRunner:
         """
         accepted = tuple(self._accept(event) for event in events)
         for payload in accepted:
-            self._deltas.setdefault(payload.dim, []).append(float(payload.delta))
-            self._credit(payload)
+            self._record(payload)
         return accepted
 
     # -- the loop ------------------------------------------------------------
@@ -686,13 +899,21 @@ class AgentRunner:
 
 __all__ = [
     "COLLABORATOR_METHODS",
+    "CREDIT_ALREADY",
+    "CREDIT_DELTA_SIGN",
+    "CREDIT_IMPRESSION",
+    "CREDIT_NONE",
+    "CREDIT_NO_STATE",
+    "CREDIT_UNREMEMBERED",
     "GUARDED",
     "MAX_REMEMBERED_ARMS",
     "NEUTRAL",
     "REINFORCED",
     "SUBMITTING_MODES",
     "AgentRunner",
+    "ArmCredit",
     "BidLogEntry",
+    "IntakeReport",
     "TrustPosture",
     "TrustSignal",
     "rationale_for",

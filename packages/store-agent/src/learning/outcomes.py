@@ -41,6 +41,15 @@ the auctions this store lost silently, and no arithmetic here can invent those.
 arm that was played, and counting it against the arm would punish an emphasis for a non-event.
 Zero-delta events are ingested into the posture (that is the trust door's business) and
 contribute no outcome row.
+
+**And the impression the movement was attributed to**, when the pushing build supplies one:
+``trust.feedback.attribution.impression_for`` joins the store's own ledger rows and rides in the
+same payload under ``trust_attribution``. That record answers the question :func:`verdict` can
+only approximate — whether the arm CONVERTED, and whether it was shown and did not — and
+:mod:`store_agent.learning.attribution` is the reader. Where it is present and usable it
+supersedes the sign below, because the sign grades the store's reputation and the loop's
+posterior is over conversions; where it is absent, unversioned or unauthorised, everything on
+this page is exactly what still happens.
 """
 
 from __future__ import annotations
@@ -77,7 +86,9 @@ def verdict(delta: Any) -> bool | None:
     return number > 0.0
 
 
-def outcome_row(arm: Arm, *, store_id: str, won: bool) -> dict[str, Any]:
+def outcome_row(
+    arm: Arm, *, store_id: str, won: bool, source: str = OUTCOME_SOURCE
+) -> dict[str, Any]:
     """One outcome row for :func:`store_agent.learning.state.update`, in this store's name.
 
     Every field the fold reads is stated explicitly, in the unit the fold declares for it:
@@ -89,6 +100,13 @@ def outcome_row(arm: Arm, *, store_id: str, won: bool) -> dict[str, Any]:
     handing it a row named after whatever arrived on the wire would make that seal decide nothing
     — the runner has already refused a misrouted event by the time this is reached, and the seal
     here is the second lock on the same door.
+
+    ``source`` names WHICH observable produced the row and defaults to the one this module
+    describes. There are two now: the sign of a pushed delta (:data:`OUTCOME_SOURCE`) and the
+    impression the delta was attributed to
+    (:data:`~store_agent.learning.attribution.ATTRIBUTION_SOURCE`). The fold reads neither — it
+    is audit, so that a state can be asked which half of the loop taught it — and that is exactly
+    why it is a plain argument rather than a second row shape.
     """
     return {
         "store_id": str(store_id),
@@ -97,5 +115,5 @@ def outcome_row(arm: Arm, *, store_id: str, won: bool) -> dict[str, Any]:
         "discount_depth": float(arm.depth),
         "commitments": list(arm.commitment_set),
         "pitch_variant": arm.pitch_variant,
-        "source": OUTCOME_SOURCE,
+        "source": str(source),
     }

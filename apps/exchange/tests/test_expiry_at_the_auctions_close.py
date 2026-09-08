@@ -3,8 +3,10 @@
 **The defect, measured on the deployed droplet across 12 runs.** A hosted store agent stamps
 its offer's ``expires_at`` with the auction's own ``respond_by`` — that is what
 ``store_agent.runtime.context.AuctionContext.offer_expires_at`` falls back to when the
-merchant's context states no expiry of its own, and no store context in ``deploy/demo``
-states one. The exchange then judged liveness with a clock read taken AFTER the fan-out
+merchant's context states no expiry of its own, which every store context in ``deploy/demo``
+did when this was measured. (They now state a validity window — a separate repair, in
+``store_agent.runtime.context``. It does not retire this file: a merchant may still state
+nothing at all, and the store that does must not lose its slot to the exchange's own latency.) The exchange then judged liveness with a clock read taken AFTER the fan-out
 returned, against ``expires_at <= now`` in :func:`exchange.ranking.filters.expiry_reason`.
 Whenever the fan-out overran its window by even milliseconds, EVERY sponsored bid was
 excluded. Verbatim from the droplet::

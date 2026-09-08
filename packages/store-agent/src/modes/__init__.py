@@ -10,8 +10,13 @@ The public surface:
   trust posture, and the `rationale`. The rationale lives HERE and not on the `Bid`, which is
   ``extra="forbid"`` and has no such field.
 * :class:`~.runner.TrustPosture` / :class:`~.runner.TrustSignal` — what
-  ``runner.ingest_trust_event(...)`` accumulates, and the only thing an injected trust event is
-  allowed to move.
+  ``runner.ingest_trust_event(...)`` accumulates: this store's own read of the feedback pushed
+  at it, and the only thing an injected trust event moves in the answer being computed now.
+* :class:`~.runner.IntakeReport` / :class:`~.runner.ArmCredit` — ``runner.ingest(...)``, the
+  same intake with the OTHER half of the answer attached: which arm the event credited, at which
+  rung, from the impression the trust service attributed it to or from the delta's sign. That
+  half moves the policy the NEXT auction is answered under; it re-prices nothing in flight, and
+  the depth it learns still goes through the envelope wall at hook 5.
 
 **This module is sealed state.** `.importlinter`'s `c3-exchange-cannot-read-envelopes` contract
 names `store_agent.modes` in `forbidden_modules`: nothing under `apps/exchange/src` may import
@@ -36,12 +41,20 @@ from pathlib import Path
 
 from .runner import (
     COLLABORATOR_METHODS,
+    CREDIT_ALREADY,
+    CREDIT_DELTA_SIGN,
+    CREDIT_IMPRESSION,
+    CREDIT_NO_STATE,
+    CREDIT_NONE,
+    CREDIT_UNREMEMBERED,
     GUARDED,
     NEUTRAL,
     REINFORCED,
     SUBMITTING_MODES,
     AgentRunner,
+    ArmCredit,
     BidLogEntry,
+    IntakeReport,
     TrustPosture,
     TrustSignal,
     rationale_for,
@@ -90,12 +103,20 @@ def _install_canonical_alias() -> bool:
 __all__ = [
     "CANONICAL_MODULE",
     "COLLABORATOR_METHODS",
+    "CREDIT_ALREADY",
+    "CREDIT_DELTA_SIGN",
+    "CREDIT_IMPRESSION",
+    "CREDIT_NONE",
+    "CREDIT_NO_STATE",
+    "CREDIT_UNREMEMBERED",
     "GUARDED",
     "NEUTRAL",
     "REINFORCED",
     "SUBMITTING_MODES",
     "AgentRunner",
+    "ArmCredit",
     "BidLogEntry",
+    "IntakeReport",
     "TrustPosture",
     "TrustSignal",
     "rationale_for",

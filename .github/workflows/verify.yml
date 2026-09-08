@@ -412,11 +412,21 @@ jobs:
         timeout-minutes: 25
         run: make demo-corpus
 
+      # `deploy/demo/exchange-deployment.json` states no `trust_snapshot`, so the exchange's
+      # ranking gate reads the LIVE trust service and R12 excludes every store that service
+      # holds no row for. Nothing in the product writes `app.sellers`, so a stack that has not
+      # run this step shortlists NOBODY and `make demo-check` fails on `shortlist slots=0` —
+      # a message that points at ranking and names trust nowhere. Seconds; idempotent.
+      - name: Put the demo sellers into the live trust service (make demo-trust)
+        timeout-minutes: 5
+        run: make demo-trust
+
       # The after-deploy probe: one real roster-less auction over HTTP, asserting the roster
       # came from Neo4j and not from the request, that the eligibility gate passed, that the
-      # shortlist has slots, and that at least one bid came from a hosted store agent rather
-      # than a list-price fallback. Every container in this stack can report healthy while
-      # this is dead, which is the whole reason it exists.
+      # shortlist has slots, that at least one bid came from a hosted store agent rather
+      # than a list-price fallback, and that the live trust snapshot holds a row for every
+      # rostered seller. Every container in this stack can report healthy while this is dead,
+      # which is the whole reason it exists.
       - name: Drive a real auction through the running stack (make demo-check)
         timeout-minutes: 10
         run: make demo-check

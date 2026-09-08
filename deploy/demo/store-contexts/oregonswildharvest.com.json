@@ -1,5 +1,6 @@
 {
   "store_id": "oregonswildharvest.com",
+  "offer_valid_for_seconds": 600,
   "store_domain": "oregonswildharvest.com",
   "envelope": {
     "store_id": "oregonswildharvest.com",

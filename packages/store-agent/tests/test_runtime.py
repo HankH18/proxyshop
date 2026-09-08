@@ -1244,7 +1244,11 @@ def test_the_respond_by_expiry_floor_is_a_known_limitation_and_is_written_down()
 
     Asserted rather than left implicit, because it is the one place this runtime's output has a
     lifetime shorter than the flow that consumes it: a store that wants its offers to outlive
-    the auction must state `offer_expires_at`. Stating it removes the limitation entirely, and
+    the auction must SAY SO: `offer_expires_at` for an absolute instant, or
+    `offer_valid_for_seconds` for a window added to `respond_by` — the second being the one a
+    repeated auction can actually use, and the one the four shipped demo contexts now state.
+    This test still bids from a context that states NEITHER, so the floor it pins is unchanged.
+    Stating an expiry removes the limitation entirely, and
     that is asserted too, so this test fails the day someone "fixes" the fallback silently.
     """
     from contracts.boundary import validate_bid

@@ -207,8 +207,11 @@ def expiry_reason(offer: Any, now: float) -> str | None:
     `now`, so it is live here rather than expired. That one character used to be `<=`, and
     with it this filter voided every honest bid in an auction whose fan-out overran:
     :meth:`store_agent.runtime.context.AuctionContext.offer_expires_at` stamps an offer with
-    the auction's own `respond_by` when the merchant's context states no expiry (no store
-    context in `deploy/demo` states one), and the served path judged that stamp against a
+    the auction's own `respond_by` when the merchant's context states no expiry — which, when
+    this was measured, every store context in `deploy/demo` did (they now state a validity
+    WINDOW, which is a separate repair and does not retire this one: a merchant may still state
+    nothing, and a store that does must not be voided for it) — and the served path judged that
+    stamp against a
     clock read taken AFTER the fan-out returned. Measured on the deployed droplet, 2 runs in
     12::
 

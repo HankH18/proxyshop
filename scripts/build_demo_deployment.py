@@ -26,8 +26,15 @@ WHERE THE DATA COMES FROM. ``fixtures/real-catalogs/`` -- ten real supplement st
 3,093 products, collected by ``scripts/collect_real_catalogs.py`` from public
 ``products.json`` endpoints under robots.txt. Nothing here invents a store, a product or a
 price; the only invented numbers are the ones the platform has to state because no
-storefront publishes them -- the approved envelope's discount depth, the trust score, and
-the intent-cluster vocabulary.
+storefront publishes them -- the approved envelope's discount depth, the starting trust
+posture, and the intent-cluster vocabulary.
+
+THE TRUST POSTURE IS NO LONGER A DOCUMENT KEY. :data:`TRUST_SCORES` and
+:func:`dimension_posteriors` still live here, because a person still has to state what the
+platform's opening reading of each store is, but nothing writes them into
+``exchange-deployment.json`` any more: ``scripts/seed_demo_trust.py`` reads them and seeds
+the live trust service, and the exchange reads ``GET /snapshot``. See the comment above
+``exchange_doc`` in :func:`build` for why a stated key made the whole column unmovable.
 
 THE PRODUCT IDS MUST MATCH THE GRAPH. ``ingest.scheduler.load_corpus`` writes each product
 as ``prod_<stable_id(store_id, native_key)>`` through ``ingest.adapters.mapping.
@@ -109,10 +116,18 @@ HOSTED = (
 NEGATIVE_CONTROLS = ("livemomentous.com", "nakednutrition.com")
 
 #: Stated trust scores. The platform's reading of a store, not the store's own claim, so it
-#: cannot come from the catalogue and a person states it -- exactly as `.env.example` and
-#: `exchange.composition` say the trust snapshot must be. Nobody is blacklisted here: the
+#: cannot come from the catalogue and a person states it. Nobody is blacklisted here: the
 #: blacklist beat is `fixtures/manifest.json`'s scripted dishonest store, and marking a real
 #: company blacklisted in a shipped fixture would be a claim this project cannot support.
+#:
+#: These no longer reach a `trust_snapshot` key in the exchange document, and that is the
+#: point of the change that removed it: a stated snapshot makes `exchange.composition
+#: ._bind_live_ranking_snapshot` skip the live reader entirely, so the demo's whole `trust`
+#: column was a sorted copy of this table and nothing an audience did could move it. What
+#: reads this table now is `scripts/seed_demo_trust.py`, which turns each store's posture
+#: into marked ledger events on the running trust service, and the exchange reads what that
+#: service serves. The numbers are the same; what changed is that they are a STARTING
+#: POSITION rather than the answer.
 TRUST_SCORES = {
     "gaiaherbs.com": 0.86,
     "toniiq.com": 0.74,
@@ -149,22 +164,51 @@ DISPATCH_POSTERIOR = {
     "oregonswildharvest.com": 0.62,
 }
 
-#: Evidence mass behind each Beta, as `alpha + beta`.
+#: How much EVIDENCE stands behind each dimension -- observations, not the posterior's total
+#: mass. The Beta the trust engine ends up serving is this evidence ON TOP of the neutral
+#: `Beta(2, 2)` prior every dimension starts at, so a dimension whose evidence is entirely
+#: positive is served `Beta(2 + 12, 2)` and reads 0.875, not 1.0.
 #:
-#: 14.0 clears the exchange's admissibility floor with room to spare: `features` refuses to admit
-#: a promise until mass exceeds `TRUST_PRIOR_MASS` (4.0) by `MIN_DISPATCH_OBSERVATIONS` (5.0), so
-#: 9.0 is the line and a document at 9.5 would be one rounding away from every store reading the
-#: neutral 0.5 and the demo silently proving nothing.
-DIMENSION_MASS = 14.0
+#: That distinction is the correction of a real mistake in the version of this file that stated
+#: a `trust_snapshot`. It emitted `alpha = mean * 14, beta = (1 - mean) * 14` -- an ABSOLUTE
+#: posterior, which for `gaiaherbs.com`'s dispatch record was `Beta(13.02, 0.98)`. A `beta`
+#: BELOW the prior's 2.0 is not something any number of observations can produce: evidence only
+#: ever adds. The document was internally consistent and unreachable, and nothing noticed while
+#: the exchange read the document instead of the trust service.
+#:
+#: 12.0 is chosen against four floors, three of which bite:
+#:
+#: * `alpha + beta` reaches 16, clearing the exchange's dispatch admissibility floor --
+#:   `features` refuses a promise while `mass - TRUST_PRIOR_MASS (4.0) < MIN_DISPATCH_
+#:   OBSERVATIONS (5.0)`, so 9.0 itself is admitted and anything under it is not;
+#: * `trust.snapshot.builder.clean_episodes` takes the minimum POSITIVE observation count across
+#:   the five non-feedback dimensions and flags a store `low_data` below `NEW_STORE_PRIOR_N`
+#:   (5), which would switch on the exchange's exploration floor. `toniiq.com` is the binding
+#:   case at `shipped_on_time` 0.45: `0.45 * 12 = 5.4`, six positive rows;
+#: * every unit of POSITIVE evidence costs one ledger event, because the published weight of
+#:   `fulfilled`/`verified` is 1.0 and the per-observation channel only scales DOWN (R14's cap).
+#:   12.0 puts the whole seed at 568 events (340 `reconciled`, 228 `claim_verified`); the 26.0 it
+#:   would take to express a served mean of 0.93 would put it past 1,200, permanently, in an
+#:   append-only chain. `scripts/tests/test_seed_demo_trust.py` bounds it;
+#: * and it does NOT need to be large to leave room for the demo to move. A store's `score` is
+#:   the unweighted mean of its six dimension MEANS, not a mass-weighted pool, so evidence here
+#:   does not damp what buyer feedback does to `feedback_match` -- which the seed deliberately
+#:   leaves empty.
+#:
+#: What it costs: the served scores are the stated ones pulled toward 0.5 by the prior and by an
+#: unopinionated sixth dimension -- 0.86 is served as about 0.73. The ORDER, which is the demo's
+#: actual claim, is untouched. Across all ten the gaps between adjacent stores run 0.0052 to
+#: 0.0312; across the four HOSTED ones -- the only stores that bid, and so the only ones buyer
+#: feedback ever reaches -- they run 0.0245 to 0.0312, inside what one press of the learning
+#: page's button moves (measured on the served route: +0.0389).
+DIMENSION_EVIDENCE = 12.0
 
-#: The instant these Betas were last decayed at, stated rather than stamped at generation.
-#:
-#: A wall-clock value would make `--check` report drift on every run of a generator whose inputs
-#: had not changed. It is safe to fix because the exchange does NOT re-decay what it reads: a
-#: stated deployment document's alpha/beta reach `dispatch_credibility` as written. Decay is the
-#: trust engine's job, and a deployment that wants live decay binds the live reader instead of
-#: stating a snapshot.
-DIMENSION_DECAYED_AT = "2026-09-01T00:00:00+00:00"
+#: The neutral prior `trust.scoring.engine` starts every dimension at, restated here because
+#: this script must compute what the trust engine will serve without importing it (it runs
+#: against the corpus, not against a running service). `apps/trust/tests/test_scoring.py` pins
+#: the engine's copy; `scripts/tests/test_seed_demo_trust.py` pins that these two agree.
+PRIOR_ALPHA = 2.0
+PRIOR_BETA = 2.0
 
 #: The approved envelope's discount depth per hosted store. Deployment configuration: the
 #: merchant's authorisation, which no storefront publishes.
@@ -311,6 +355,35 @@ def _store_catalog(host: str) -> tuple[dict[str, dict[str, Any]], list[str]]:
     return catalog, [product_ref for _, _, product_ref in scored]
 
 
+#: How long an offer these demo merchants make STANDS, in seconds, past the auction's deadline.
+#:
+#: Read by ``store_agent.runtime.context.AuctionContext.offer_expires_at``, whose fallback
+#: without it is the auction's own ``respond_by`` — an offer with zero usable life, dead the
+#: instant the shortlist is handed to the shopper. Measured on the served buyer route before
+#: these contexts stated anything: all four sponsored rows expired **3.2 seconds** after they
+#: were served.
+#:
+#: **Why 600 and not the exchange's own 900.** The obvious number is
+#: ``exchange.auction.collect.FALLBACK_OFFER_TTL_SECONDS`` — 900 s, what the exchange gives the
+#: list-price stand-in it mints for a silent store. It is the wrong number, and an adversarial
+#: review measured why: the auction RECORD and its shortlist also live 900 s
+#: (``exchange.auction.state.AUCTION_TTL_SECONDS``), anchored at the CLOSE, while the offer's
+#: expiry is anchored at ``respond_by`` — which the fan-out usually reaches a second or two
+#: after the close. So a 900 s offer outlives the record that explains it, and a shopper who
+#: clicks late is answered::
+#:
+#:     404  "auction '...' is not in Redis at auction:... — it was never created, or its
+#:           900s TTL has expired."
+#:
+#: rather than the honest ``409 DiscountDoesNotApply: the offer's own expiry``. The whole
+#: argument for putting a merchant's offer on a shortlist at all is that a late click gets told
+#: the truth about the OFFER, so the window has to end while the record is still readable.
+#:
+#: 600 s is ten minutes of usable life — long enough to read a shortlist, talk about it and
+#: click — and leaves roughly five minutes in which a lapsed offer is refused by name.
+OFFER_VALID_FOR_SECONDS = 600
+
+
 def _store_context(host: str, catalog: dict[str, Any], ranked: list[str]) -> dict[str, Any]:
     """The document one hosted agent reads out of ``STORE_AGENT_CONTEXT``.
 
@@ -323,6 +396,7 @@ def _store_context(host: str, catalog: dict[str, Any], ranked: list[str]) -> dic
     lead = ranked[0]
     return {
         "store_id": host,
+        "offer_valid_for_seconds": OFFER_VALID_FOR_SECONDS,
         "store_domain": host,
         "envelope": {
             "store_id": host,
@@ -396,19 +470,34 @@ def _snapshot(host: str, catalog: dict[str, Any], ranked: list[str]) -> dict[str
     }
 
 
-def _dims(host: str) -> dict[str, dict[str, Any]]:
-    """The six Betas for one store, whose means average to its stated `score`.
+def dimension_posteriors(host: str) -> dict[str, dict[str, Any]]:
+    """The six Betas for one store: :data:`DIMENSION_EVIDENCE` of evidence, over the prior.
 
-    The trust engine defines a store's `score` as the mean of its six dimension means (D53), so
-    emitting dims that averaged to something else would publish a document contradicting itself.
-    `shipped_on_time` is stated first, from :data:`DISPATCH_POSTERIOR`; the other five carry
-    whatever mean makes the six average back to :data:`TRUST_SCORES` -- `m = (6*score - d)/5`.
+    THIS IS NOT WRITTEN INTO ANY DOCUMENT ANY MORE. It is the target
+    `scripts/seed_demo_trust.py` seeds the live trust service to, one marked ledger event per
+    unit of evidence, so the ranking gate can read a real `GET /snapshot` instead of a frozen
+    key. What each store's EVIDENCE says is unchanged, which is what makes the demo's story
+    about who is more reliable survive the switch.
 
-    That arithmetic is why the dispatch numbers in `DISPATCH_POSTERIOR` are chosen close enough
-    to the score to keep `m` inside [0, 1]: a store scored 0.74 cannot also have shipped on time
-    0.05, because no set of five means fixes that average. The function refuses rather than
-    clamping, since a clamp would publish a `score` the dims do not support and the mismatch
-    would surface as an unexplained ranking rather than as a build failure.
+    :data:`TRUST_SCORES` and :data:`DISPATCH_POSTERIOR` are read here as the ratio the evidence
+    carries, NOT as the posterior the trust engine will serve. The trust engine defines a
+    store's `score` as the mean of its six dimension means (D53) over a `Beta(2, 2)` prior, so
+    a store whose evidence is 86% positive is served about 0.73 once the prior is included and
+    `feedback_match` is counted at the neutral 0.5. Both are true statements about the same
+    store; only one of them is a posterior.
+
+    `shipped_on_time` takes its ratio from :data:`DISPATCH_POSTERIOR`; the other five carry
+    whatever ratio makes the six average back to :data:`TRUST_SCORES` -- `m = (6*score - d)/5`.
+    That arithmetic is why the dispatch numbers are chosen close enough to the score to keep `m`
+    inside [0, 1]: a store scored 0.74 cannot also have shipped on time 0.05, because no set of
+    five ratios fixes that average. The function refuses rather than clamping, since a clamp
+    would imply a `score` the dims do not support and the mismatch would surface as an
+    unexplained ranking rather than as a build failure.
+
+    The `feedback_match` entry it returns is what that dimension WOULD carry if the demo pretended
+    buyers had spoken. The seeder skips it on purpose and leaves the dimension at the neutral
+    prior -- nobody has ever left feedback for these ten storefronts, and it is the only
+    dimension `POST /buyer/feedback` can move.
     """
     score = TRUST_SCORES.get(host, 0.6)
     dispatch = DISPATCH_POSTERIOR.get(host, score)
@@ -421,10 +510,10 @@ def _dims(host: str) -> dict[str, dict[str, Any]]:
         )
 
     def beta(mean: float) -> dict[str, Any]:
+        """`mean` as evidence laid on top of the prior, never as an absolute posterior."""
         return {
-            "alpha": round(mean * DIMENSION_MASS, 6),
-            "beta": round((1.0 - mean) * DIMENSION_MASS, 6),
-            "decayed_at": DIMENSION_DECAYED_AT,
+            "alpha": round(PRIOR_ALPHA + mean * DIMENSION_EVIDENCE, 6),
+            "beta": round(PRIOR_BETA + (1.0 - mean) * DIMENSION_EVIDENCE, 6),
         }
 
     return {
@@ -459,7 +548,6 @@ def build() -> dict[str, Any]:
             raise SystemExit(f"FATAL: {host} recorded no priced product; nothing to auction")
 
     sellers = []
-    trust_snapshot = {}
     for host in hosts:
         row: dict[str, Any] = {
             "store_id": host,
@@ -469,16 +557,20 @@ def build() -> dict[str, Any]:
         if host in HOSTED:
             row["bid_endpoint"] = f"http://{agent_service(host)}:8086/v1/bid-requests"
         sellers.append(row)
-        trust_snapshot[host] = {
-            "store_id": host,
-            "blacklisted": False,
-            "score": TRUST_SCORES.get(host, 0.6),
-            "dims": _dims(host),
-        }
 
+    # NO `trust_snapshot` KEY, deliberately, and this is the one line of this document worth
+    # reading twice. `exchange.composition._bind_live_ranking_snapshot` returns without binding
+    # a live reader whenever the document states that key, so a demo that stated one could not
+    # read the trust service at all -- every `trust` term was 0.20 x a number typed into this
+    # file, identical on every run, unmovable by anything an audience did. Leaving the key out
+    # binds `LiveTrustSnapshot` against `trust_url` below.
+    #
+    # It is fail-closed: a store the live snapshot holds no row for is EXCLUDED from ranking
+    # (`exchange.ranking.filters.blacklist_reason`, R12), so a stack whose trust service knows
+    # nobody shortlists nobody. `scripts/seed_demo_trust.py` is what puts the ten sellers there,
+    # and `scripts/demo_check.sh` names it by name when the shortlist comes back empty.
     exchange_doc = {
         "sellers": sellers,
-        "trust_snapshot": trust_snapshot,
         "intent_clusters": [
             {
                 "cluster_id": CLUSTER_ID,

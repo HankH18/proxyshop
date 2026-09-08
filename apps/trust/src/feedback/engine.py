@@ -55,6 +55,7 @@ __all__ = [
     "FEEDBACK_NEGATIVE_TYPE",
     "FEEDBACK_POSITIVE_TYPE",
     "RETURN_CONTRADICTION_FACTOR",
+    "TRUST_ATTRIBUTION_KEY",
     "TRUST_EVENT_SCHEMA_VERSION",
     "TRUST_REPORT_KEY",
     "FeedbackRejected",
@@ -135,6 +136,12 @@ DISCLOSURE_POLICY = "R13/R5: the affected store learns what moved and never who 
 #: event, so writing ``policy`` / ``reason_code`` / ``schema_version`` straight into it would
 #: silently overwrite a producer that already uses those perfectly ordinary names.
 TRUST_REPORT_KEY = "trust_report"
+
+#: Where the impression attribution rides. A SECOND namespaced key rather than more fields
+#: inside :data:`TRUST_REPORT_KEY`, because the two answer different questions and have
+#: different readers: the report is a disclosure audit for a human, and this is the arm a
+#: store agent attributes an outcome to. See :mod:`trust.feedback.attribution`.
+TRUST_ATTRIBUTION_KEY = "trust_attribution"
 
 #: The eight fields ``contracts.LedgerEvent`` declares, and therefore the ONLY keys a pushed
 #: event may carry: the model sets ``extra="forbid"``, so anything else is a refusal at the
@@ -238,6 +245,22 @@ def _wire_event(
         "redacted_fields": redacted_fields,
         "policy": DISCLOSURE_POLICY,
     }
+
+    # WHICH impression earned this movement, under its own namespaced key and for the same
+    # reason `TRUST_REPORT_KEY` has one: five loose names in an open mapping is a collision
+    # surface of five against any producer whose own body already uses one of them.
+    #
+    # Added here, AFTER the scrub, exactly as the report above is — and unlike the report, that
+    # placement is load-bearing rather than incidental. `scrub` redacts any run of nine or more
+    # digits, which would turn an ordinary `order_ref` inside this record into "[redacted]"
+    # while leaving it truthy, so no fallback would fire and the store would be told its score
+    # moved on an order it cannot identify. That is the same hazard, and the same ruling, as
+    # the `order_ref` field below. Nothing in the record is an identifier the wire does not
+    # already carry verbatim; see `feedback/attribution.py` for the full argument.
+    attribution = _field(delta, "attribution")
+    if isinstance(attribution, Mapping):
+        payload[TRUST_ATTRIBUTION_KEY] = dict(attribution)
+
     projected["payload"] = payload
 
     # `is not None` rather than `or`: an order reference of "" or 0 is a value the ORIGINATING

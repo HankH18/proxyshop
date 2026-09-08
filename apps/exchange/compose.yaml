@@ -231,10 +231,26 @@ services:
       # `scripts/build_demo_deployment.py` from the ten real storefronts in
       # `fixtures/real-catalogs/`: ten eligible sellers whose `registered_domain` is the real
       # host, `bid_endpoint`s for the four that get a hosted agent in
-      # `packages/store-agent/compose.yaml`, a stated trust snapshot, the one named intent
-      # cluster those agents' envelopes pursue, and the catalogue snapshots the claim
-      # verifier grades against. Nothing in it is invented except the three things no
-      # storefront publishes — envelope depth, trust score, cluster vocabulary.
+      # `packages/store-agent/compose.yaml`, a `trust_url`, the one named intent cluster
+      # those agents' envelopes pursue, and the catalogue snapshots the claim verifier
+      # grades against. Nothing in it is invented except the two things no storefront
+      # publishes — envelope depth and cluster vocabulary.
+      #
+      # NO `trust_snapshot` KEY, deliberately, and that absence is load-bearing.
+      # `composition._bind_live_ranking_snapshot` returns WITHOUT binding a live reader
+      # whenever the document states one — "that key is a person's statement and this
+      # function does not overrule one" — so a demo that stated a trust column could not
+      # read the trust service at all, and every `trust` term would be 0.20 x a typed
+      # number. Absent, the ranking gate binds `LiveTrustSnapshot` against the `trust_url`
+      # above and reads `GET /snapshot` per auction.
+      #
+      # The cost is a step, and it is not optional: `ranking.filters.blacklist_reason` fails
+      # closed on a store the live snapshot holds no row for, so on a stack whose trust
+      # service has never heard of these ten storefronts EVERY candidate is excluded and the
+      # shortlist is empty while `entries` looks normal. `make demo-trust`
+      # (`scripts/seed_demo_trust.py`) registers them, through the trust service's own
+      # `POST /events`. `make demo-check` reads the snapshot itself and names the missing
+      # step rather than leaving an operator with `shortlist: []` and no lead.
       #
       # Still fully overridable: export EXCHANGE_DEPLOYMENT to point somewhere else, or set
       # it EMPTY to get the unconfigured exchange back. EXCHANGE_DEPLOYMENT_JSON carries the

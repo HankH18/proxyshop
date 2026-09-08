@@ -49,6 +49,39 @@ INTRO_DISCOUNT_KEY = "intro_discount_pct"
 #: to the request's own `respond_by`; see :meth:`AuctionContext.offer_expires_at`.
 OFFER_EXPIRES_AT_KEY = "offer_expires_at"
 
+#: The store-context key stating how long an offer this agent makes STANDS, as seconds.
+#:
+#: The second way a merchant can answer the same question :data:`OFFER_EXPIRES_AT_KEY` answers,
+#: and the only one that survives being asked twice. That key takes an absolute instant, so the
+#: single thing a merchant can state with it is one fixed timestamp — correct for one auction
+#: and stale by the next. :meth:`AuctionContext.offer_expires_at` has always said "a store that
+#: wants its offers to outlive the auction says so, once, on its context", and until this key
+#: existed that sentence pointed at a mechanism with no working form: not one of the four
+#: shipped demo contexts states an expiry, every one of them falls through to `respond_by`, and
+#: every real offer on the demo was therefore dead the moment the auction closed. Measured on
+#: the served buyer route: all four sponsored rows expired **3.2 seconds** after the shortlist
+#: was handed over.
+#:
+#: A DURATION is not the invented "+48h" the fallback's docstring rejects, and the difference is
+#: who chose the number. `respond_by + 48h` would be the agent committing its merchant to a
+#: window nobody approved; `respond_by + <this>` is the merchant's own approved number, stated
+#: once, in the only shape a repeated auction can use. The agent still invents nothing.
+#:
+#: Absent means absent: the conservative `respond_by` floor is unchanged for every context that
+#: does not state one, which is every context written before this key existed. Present but
+#: unreadable, or zero, or negative, is a DECLINE and never a silent fall-through — see
+#: :meth:`AuctionContext.offer_expires_at` for why, and it is the same rule an unreadable
+#: absolute expiry has always had.
+OFFER_VALID_FOR_SECONDS_KEY = "offer_valid_for_seconds"
+
+#: "The context did not mention a window at all", told apart from every value it could mention.
+#:
+#: A private sentinel rather than `None`, because `None` is a thing a merchant can write into
+#: JSON and `0` is a thing a merchant can mean. Reading the key with `or` would fold both into
+#: "absent" and hand a merchant who wrote `0` the conservative floor instead of the decline
+#: their statement earns.
+_MISSING_WINDOW = object()
+
 #: The store-context key carrying pitches that were ALREADY SERVED, as ``{bid_offer_id: text}``.
 #:
 #: R15/S3 promise that a replay reproduces what was served. A pitch is written by a language
@@ -212,11 +245,123 @@ def as_number(value: Any) -> float | None:
         return None
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # `OverflowError` is the one a reader adds last and a merchant reaches first: an integer
+        # with more than 308 digits is a thing `json.loads` produces from a context file, and
+        # `float()` refuses it with an `ArithmeticError` that is neither a `TypeError` nor a
+        # `ValueError`. It escaped `bid()`'s own `_UNUSABLE_INPUT` tuple and surfaced as a raw
+        # traceback rather than a decline that names the field — measured on a 401-digit
+        # `offer_valid_for_seconds`, and reproducible on `intro_discount_pct` long before this
+        # key existed.
         return None
     if number != number or number in (float("inf"), float("-inf")):  # NaN / ±inf
         return None
     return number
+
+
+#: The calendar this runtime can state an instant in — RFC-3339's own, years 1 through 9999 —
+#: expressed as EPOCH SECONDS — `0001-01-01T00:00:00Z` and `10000-01-01T00:00:00Z`.
+#:
+#: They are checked BEFORE any arithmetic, and that is not belt-and-braces. A merchant may
+#: state a window of `1e306` seconds: `as_number` reads it (finite, positive), the sum with the
+#: deadline is still finite, and then `epoch * 1000.0` overflows to `inf`, whose floor is `nan`,
+#: which `int()` refuses. Measured before this guard existed — a real bid, a real context::
+#:
+#:     decline(unusable_store_context): ValueError: cannot convert float NaN to integer
+#:
+#: A decline, because an outer handler caught it, but the WRONG decline: it named the whole
+#: context unusable and put a Python exception string in a merchant-facing detail, where the
+#: honest answer is `unstatable_offer_expiry` and the merchant's own number. This pair decides
+#: both whether the arithmetic may run and whether its answer is spellable.
+#:
+#: These bounds are the ONLY calendar check. An earlier draft also tested the computed
+#: YEAR afterwards, which an adversarial review showed to be unreachable — no epoch that passes
+#: the bounds can produce an out-of-range year — so it was removed rather than left as a branch
+#: no input takes and a docstring nobody could verify.
+#:
+#: Verified against `datetime` in ``test_offer_validity_window``, because a hardcoded epoch
+#: nobody checked is exactly the kind of constant that is wrong by a day.
+_EPOCH_AT_YEAR_1 = -62_135_596_800.0
+_EPOCH_AT_YEAR_10000 = 253_402_300_800.0
+
+
+def _instant(epoch: float) -> str | None:
+    """An epoch as the RFC-3339 string `contracts.Offer.expires_at` is typed as, or `None`.
+
+    **Integer arithmetic by hand, and that is not an accident.**
+    `test_the_runtime_reads_no_clock_and_no_randomness` refuses the `datetime` import anywhere
+    on the bid path — "a clock read once a day is still a clock" — and it reads the SOURCE, so
+    it cannot tell `datetime.fromtimestamp`, a pure conversion, from `datetime.now`, a clock.
+    Being right about this one call is not a reason to make that gate blind to the next one, and
+    the gate caught this import the first time it was written. S4's byte-identical reproduction
+    is the property it protects and the property this method needs, so the honest move is to
+    stop needing the import.
+
+    It is also not duplicating a renderer this module could have called. The exchange's own
+    (`exchange.auction.routes.rfc3339_deadline`) is not importable from here at all:
+    `packages/store-agent/Dockerfile` copies `packages/contracts`, `proxyshop_support`,
+    `packages/store-agent/src` and `packages/llm/src`, and nothing under `apps/` — so the hosted
+    image does not contain it. (An earlier draft of this paragraph said an import linter forbade
+    it. That was wrong, and an adversarial review checked: `.importlinter` holds two contracts,
+    and the C3 one runs the other way — `source_modules = exchange` — so nothing there forbids
+    `store_agent -> exchange`, and store-agent TESTS import the exchange freely. The packaging
+    is the real reason and it is a harder one.) `contracts` publishes a reader
+    (:func:`parse_timestamp`) and no writer; if a shared writer is ever wanted, beside that
+    reader is where it goes, and this becomes a call.
+
+    The conversion is the standard civil-from-days one, in whole milliseconds — the resolution
+    the exchange publishes `respond_by` at, so an offer expiry carries no digits the deadline it
+    was derived from could not. `None` for an instant outside the years RFC-3339 can spell,
+    which is refused rather than clamped for the same reason an unusable window is: a merchant
+    who stated it meant something, and no clamp chosen here would be the thing they meant.
+    """
+    if not _EPOCH_AT_YEAR_1 <= epoch < _EPOCH_AT_YEAR_10000:
+        return None
+    # Split BEFORE scaling, and round the fraction to microseconds exactly as
+    # `datetime.fromtimestamp` does. The obvious `int(epoch * 1000.0 // 1.0)` is wrong and was:
+    # at large epochs the product `epoch * 1000.0` is itself rounded to the nearest double,
+    # which can cross a millisecond boundary the true value never reached. Measured over 300,000
+    # random instants across years 1..9999, against the standard library: **2,349 disagreements**,
+    # every one an off-by-one millisecond, the first at ``176048524741.948`` (year 7548) where
+    # this rendered ``.948`` and the calendar says ``.947``.
+    #
+    # Splitting first keeps the whole seconds exact (they are integers well inside a double's
+    # exact range for every year RFC-3339 can spell) and leaves a fraction in [0, 1), where a
+    # double has precision to spare. Nothing on the bid path could reach the broken case —
+    # `respond_by` parses to a millisecond multiple around 1.8e9 and the sums are exact there —
+    # but "no caller reaches it today" is not the same claim as "it is right", and the docstring
+    # above says this agrees with the calendar.
+    whole_seconds = int(epoch // 1.0)
+    microseconds = int(round((epoch - whole_seconds) * 1_000_000.0))
+    if microseconds >= 1_000_000:  # a fraction that rounded up to a whole second
+        whole_seconds += 1
+        microseconds = 0
+
+    days, seconds_of_day_total = divmod(whole_seconds, 86_400)
+    ms_of_day = seconds_of_day_total * 1000 + microseconds // 1000
+
+    # Howard Hinnant's `civil_from_days`, shifted to an era starting 0000-03-01 so leap days
+    # land at the end of a cycle and the month arithmetic below has no special cases.
+    z = days + 719_468
+    era = (z if z >= 0 else z - 146_096) // 146_097
+    day_of_era = z - era * 146_097
+    year_of_era = (
+        day_of_era - day_of_era // 1460 + day_of_era // 36_524 - day_of_era // 146_096
+    ) // 365
+    year = year_of_era + era * 400
+    day_of_year = day_of_era - (365 * year_of_era + year_of_era // 4 - year_of_era // 100)
+    shifted_month = (5 * day_of_year + 2) // 153
+    day = day_of_year - (153 * shifted_month + 2) // 5 + 1
+    month = shifted_month + 3 if shifted_month < 10 else shifted_month - 9
+    if month <= 2:
+        year += 1
+
+    seconds_of_day, milliseconds = divmod(ms_of_day, 1000)
+    minutes_of_day, second = divmod(seconds_of_day, 60)
+    hour, minute = divmod(minutes_of_day, 60)
+    return (
+        f"{year:04d}-{month:02d}-{day:02d}T{hour:02d}:{minute:02d}:{second:02d}.{milliseconds:03d}Z"
+    )
 
 
 @dataclass(frozen=True)
@@ -271,6 +416,16 @@ class AuctionContext:
     #: itself exactly as it always did. Defaulted, like :attr:`store_domain`, so that adding it
     #: broke no caller that built an `AuctionContext` positionally.
     solicited_product_ref: str | None = None
+    #: The merchant's stated offer lifetime in seconds, RAW and unvalidated, or `None` when the
+    #: context states none. `Any` rather than `float` on purpose: whether the value is usable is
+    #: :meth:`offer_expires_at`'s decision, and coercing it here would turn "the merchant wrote
+    #: something unreadable" into "the merchant wrote nothing" — different facts with different
+    #: answers, one a decline and one the conservative floor. See
+    #: :data:`OFFER_VALID_FOR_SECONDS_KEY`.
+    #:
+    #: Appended LAST, like :attr:`store_domain` and :attr:`solicited_product_ref` before it, so
+    #: adding it breaks no caller that builds an `AuctionContext` positionally.
+    stated_offer_window: Any = None
 
     @property
     def cluster_id(self) -> str:
@@ -327,13 +482,33 @@ class AuctionContext:
     def offer_expires_at(self) -> str | None:
         """When an offer made in this auction stops standing. Never computed from a clock.
 
-        The merchant's own :data:`OFFER_EXPIRES_AT_KEY` when the context states one, and
-        otherwise the request's `respond_by`: the offer stands at least as long as the auction it
-        was solicited for. That fallback is a FLOOR, and a deliberately conservative one — an
-        offer that expires exactly when the auction closes is honest about what the agent was
-        actually authorized to promise, where an invented "+48h" would be the agent committing
-        the merchant to a window nobody approved. A store that wants its offers to outlive the
-        auction says so, once, on its context.
+        Three answers, in the merchant's order of preference:
+
+        1. the merchant's own :data:`OFFER_EXPIRES_AT_KEY`, an absolute instant, when the context
+           states one — unchanged, and still the most specific thing a merchant can say;
+        2. otherwise :data:`OFFER_VALID_FOR_SECONDS_KEY`, a DURATION, added to the request's
+           `respond_by` — the merchant's own number, stated once, in the shape that survives
+           being asked again tomorrow;
+        3. otherwise the request's `respond_by` alone: the offer stands at least as long as the
+           auction it was solicited for.
+
+        (3) is a FLOOR, and a deliberately conservative one — an offer that expires exactly when
+        the auction closes is honest about what the agent was actually authorized to promise,
+        where an invented "+48h" would be the agent committing the merchant to a window nobody
+        approved.
+
+        **(2) is what makes that sentence true rather than merely well-meant.** This docstring
+        has always ended "a store that wants its offers to outlive the auction says so, once, on
+        its context" — and until the duration key existed, it could not. The only sayable thing
+        was one absolute timestamp, correct for a single auction and stale by the next, so no
+        real deployment ever stated one: none of the four shipped demo contexts did, all four
+        fell through to (3), and every real offer in the demo was dead the instant the auction
+        closed. Measured on the served buyer route, all four sponsored rows: **expires in 3.2
+        seconds**. A shortlist a person cannot read fast enough to click is not a market, and
+        the exchange's honest ``409`` at accept time is the right answer to the wrong question.
+
+        A duration is not the invented window (3) refuses, and the difference is who chose the
+        number. The agent still invents nothing; it adds a number its merchant wrote down.
 
         Stated as the ISO instant `contracts.Offer.expires_at` is typed as, and **checked with
         the same `parse_timestamp` the boundary will use**, so an unreadable one is `None` here
@@ -347,6 +522,50 @@ class AuctionContext:
         would turn a merchant's typo into "the offer dies when the auction closes", silently and
         with the wrong lifetime; the merchant asked for something specific and unreadable, and
         the honest answer is to say so.
+
+        **WHO OWNS "how long must a shortlist offer stand", and why it is not this method.**
+        The paragraph above is right about what this agent may promise and it says nothing at
+        all about what a shortlist needs, and for a while nobody answered the second question:
+        the exchange knew (it mints its own R10 stand-in offers with `deadline + 900 s`,
+        `exchange.auction.collect.FALLBACK_OFFER_TTL_SECONDS`), never told a store, and the
+        store guessed the one value that cannot work — an offer with zero usable lifetime, dead
+        the instant the auction ends and before any shopper can look at it.
+
+        The answer is that the EXCHANGE owns it, on both halves, and this fallback stays exactly
+        as conservative as it is:
+
+        * **Admission.** An offer that stood for the whole auction is live for that auction's
+          shortlist. The exchange used to judge liveness against a clock read taken AFTER its
+          own fan-out returned, so an auction that overran its window by 21 ms voided every
+          honest bid in it and served the shopper nothing but the exchange's own list prices —
+          measured on the deployed droplet, 2 runs in 12. That was the exchange charging a store
+          for the exchange's own latency, and it is fixed where it was caused:
+          `exchange.ranking.serving.rank_auction` now caps the judging instant at the
+          `respond_by` this exchange itself published.
+        * **Honesty after admission.** A shortlisted offer that really has lapsed is refused
+          rather than sold: `exchange.checkout.provider` re-reads the offer's own expiry at
+          accept time and answers `409 DiscountDoesNotApply` before minting anything. A
+          shortlist that silently dropped every real bid could not say even that much.
+
+          **That refusal has a shelf life, and a merchant's window must fit inside it.** The
+          exchange keeps the auction record and its shortlist for
+          `exchange.auction.state.AUCTION_TTL_SECONDS` (900 s) from the CLOSE, while an offer's
+          expiry runs from `respond_by` — which the fan-out normally reaches a second or two
+          after the close. So an offer stated at 900 s outlives the record that explains it, and
+          a late click is answered `404 … is not in Redis … its 900s TTL has expired` instead.
+          Measured: never a `409`, on any run. The demo contexts therefore state **600**, which
+          leaves about five minutes in which a lapsed offer is refused BY NAME. A merchant
+          stating more than the record's TTL is not refused here — it is their offer to make —
+          but they should know the late shopper gets a vaguer answer.
+
+        **What would change this, and what it would cost.** A store cannot state a lifetime it
+        was never asked for, because `BidRequest` carries `respond_by` and nothing else about how
+        long an answer must stand — and `BidRequest` is `additionalProperties: false`, so the
+        exchange publishing the window it needs is a change to `packages/contracts` and to every
+        agent that validates against it. That is the shape of the real fix, and it is a protocol
+        decision rather than a defaulting decision. Until it is made, the honest floor is the one
+        below: the merchant approved a window for exactly as long as the auction it was asked
+        about, and the agent says so instead of inventing more.
         """
         if self.stated_offer_expiry:
             return (
@@ -354,7 +573,41 @@ class AuctionContext:
                 if parse_timestamp(self.stated_offer_expiry) is not None
                 else None
             )
-        if self.respond_by and parse_timestamp(self.respond_by) is not None:
+
+        closes_at = parse_timestamp(self.respond_by) if self.respond_by else None
+        if self.stated_offer_window is not None:
+            # A stated window that cannot be used does NOT fall through to `respond_by`, for
+            # exactly the reason a stated instant does not: falling back would turn a merchant's
+            # typo into "the offer dies when the auction closes", silently and with the wrong
+            # lifetime. The merchant asked for something specific and unusable, and the honest
+            # answer is to say so — which `bid()` does, as `unstatable_offer_expiry`.
+            seconds = as_number(self.stated_offer_window)
+            if seconds is None or seconds <= 0.0 or closes_at is None:
+                return None
+            # `None` when the sum leaves the calendar RFC-3339 can spell — a window so wide it
+            # names no instant. Refused rather than clamped, like every other unusable
+            # statement here.
+            stated = _instant(closes_at.timestamp() + seconds)
+            if stated is None:
+                return None
+            # AND when the window is real but too small to survive the wire. Instants are
+            # stated to the millisecond, so a positive window under one of them renders as the
+            # deadline itself — the zero-length life this whole key exists to end, reached
+            # SILENTLY from a bid rather than said out loud as a decline. Measured before this
+            # check: a stated `0.0009` produced `expires_at` exactly equal to `respond_by`, and
+            # with a sub-millisecond `respond_by` it produced an expiry ~0.7 ms BEFORE the
+            # auction closed — an offer the exchange's own ranker would then exclude as expired,
+            # for a merchant who had asked for a longer life and got a shorter one.
+            #
+            # Compared through `parse_timestamp` rather than against `seconds`, because what has
+            # to be true is a property of the STRING that leaves here: the offer stands strictly
+            # past the close, as read by the same parser the boundary will use.
+            landed = parse_timestamp(stated)
+            if landed is None or landed.timestamp() <= closes_at.timestamp():
+                return None
+            return stated
+
+        if closes_at is not None:
             return self.respond_by
         return None
 
@@ -475,6 +728,13 @@ def assemble_context(request: Any, context: Any) -> AuctionContext:
     envelope = as_mapping(ctx.get("envelope"), "envelope")
     currency = ctx.get("currency")
     stated_expiry = ctx.get(OFFER_EXPIRES_AT_KEY) or envelope.get(OFFER_EXPIRES_AT_KEY)
+    # Read with a MISSING sentinel rather than `or`, because `0` is a value a merchant can write
+    # and `0 or envelope.get(...)` would read it as absent — and a zero-second window is exactly
+    # the statement that has to reach the decline branch rather than the fallback.
+    stated_window = ctx.get(OFFER_VALID_FOR_SECONDS_KEY, _MISSING_WINDOW)
+    if stated_window is _MISSING_WINDOW:
+        stated_window = envelope.get(OFFER_VALID_FOR_SECONDS_KEY, _MISSING_WINDOW)
+    stated_window = None if stated_window is _MISSING_WINDOW else stated_window
     domain = next(
         (
             host
@@ -500,6 +760,7 @@ def assemble_context(request: Any, context: Any) -> AuctionContext:
         respond_by=str(req.get("respond_by") or ""),
         store_currency=str(currency) if currency else None,
         stated_offer_expiry=str(stated_expiry) if stated_expiry else None,
+        stated_offer_window=stated_window,
         store_domain=domain,
         served_pitches=as_mapping(ctx.get(SERVED_PITCHES_KEY), "served pitches"),
         solicited_product_ref=_solicited_ref(req.get("product_ref")),
@@ -552,6 +813,7 @@ def satisfies(op: str, observed: Any, wanted: Any) -> bool:
 __all__ = [
     "INTRO_DISCOUNT_KEY",
     "OFFER_EXPIRES_AT_KEY",
+    "OFFER_VALID_FOR_SECONDS_KEY",
     "SERVED_PITCHES_KEY",
     "STORE_DOMAIN_KEYS",
     "AuctionContext",

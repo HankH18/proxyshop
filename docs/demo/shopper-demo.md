@@ -96,10 +96,16 @@ Idempotent: run it again and it re-reads nothing that has not changed.
 
 ```bash
 make demo-up
+make demo-trust
 ```
 
-That brings the whole stack up under the `demo` compose profile and waits for it, and that
-profile is what turns four real merchants on. The stack it brings up:
+**Both, and in that order.** `make demo-up` brings the whole stack up under the `demo` compose
+profile and waits for it; `make demo-trust` puts the ten demo sellers into the trust service the
+exchange is about to read. Skipping the second one leaves you with a stack whose containers are
+all `(healthy)` and whose shortlist is empty — [why, and what it looks
+like](#the-other-one-that-will-catch-you-out-an-unseeded-trust-service) is below.
+
+`make demo-up` is what turns four real merchants on. The stack it brings up:
 
 | service | port | what it is |
 |---|---|---|
@@ -120,9 +126,44 @@ share their environment and volumes byte for byte, so four replicas would be fou
 advocating for the *same* store while the exchange believed it had found four merchants.
 
 The other six storefronts in the corpus get no agent **on purpose**. The exchange still finds
-them in the graph and still rosters them; nobody answers their bid door; and the auction
-represents each at its catalogue list price and marks the entry `fallback / no_response`.
+them in the graph and still rosters them; it never opens a socket to them, because it holds no
+`bid_endpoint` for them; and the auction represents each at its catalogue list price and marks the
+entry `fallback / tier_0_no_agent:no_bid_endpoint` — *there is no agent here for the exchange to
+ask*, which is a different fact from *asked and stayed quiet* and now carries a different word.
 That is R10, and both halves of it are on screen in one run.
+
+### What `make demo-trust` does, and why the demo is dead without it
+
+`deploy/demo/exchange-deployment.json` states no `trust_snapshot` key. That is the deliberate
+choice `deploy/demo/README.md` writes up: `exchange.composition._bind_live_ranking_snapshot`
+returns **without binding a live reader** whenever the document states one, so a demo that stated
+a snapshot could not read the trust service at all and its `trust` column would be a sorted copy
+of a hand-written table. With the key absent, the ranking gate binds `LiveTrustSnapshot` against
+the document's `trust_url` and reads `GET /snapshot` on the running trust service.
+
+Which means the trust service has to have heard of these ten storefronts, and on a fresh stack it
+has not. `exchange.ranking.filters.blacklist_reason` fails closed: a store the snapshot holds no
+row for cannot have its blacklist status established, so it is EXCLUDED from ranking rather than
+defaulted in. On an unseeded stack that is every store, and the auction answers `shortlist: []`.
+
+`make demo-trust` closes that. It is one script, and running it directly is the same step:
+
+```bash
+./.venv/bin/python scripts/seed_demo_trust.py
+```
+
+It works over the trust service's own doors rather than by writing its tables:
+
+* it inserts the ten sellers into `app.sellers`, which `trust.snapshot.routes` joins against and
+  which nothing in the product ever writes; and
+* it appends each store's opening posture as sealed ledger events through `POST /events`, every
+  one carrying the `sim-fb-` marker in `order_ref` — a top-level column inside the event digest,
+  so a manufactured observation cannot be un-marked without breaking `GET /events/verify`.
+
+It leaves `feedback_match` at its prior for the stores nobody has reviewed, which is the one
+dimension `POST /buyer/feedback` moves — so the learning page at `http://localhost:8080/#/learning`
+has a whole dimension to itself and its readings are not competing with a seeded number. Run this
+once, after `make demo-up`; `--check` re-verifies without writing.
 
 ## 4. Prove the graph found the shops — the money path
 
@@ -138,6 +179,12 @@ It fails, loudly and by name, on each of the ways this can come back empty — a
 `roster_source.source` of `unwired` (the graph roster is not bound), an empty `shops` count
 (nothing in Neo4j), no `entries` (the deployment document's `sellers` do not name the graph's
 store ids), an empty shortlist.
+
+It also reads `GET /snapshot` on the trust service itself, and that read is not a healthcheck
+either. An empty shortlist has two very different causes and the auction response only shows the
+symptom, so the probe names which one: it prints how many of the rostered sellers the live
+snapshot actually holds, and when the shortlist is empty *and* rows are missing it says
+`Run \`make demo-trust\``.
 
 The request it sends, if you would rather drive it yourself:
 
@@ -160,21 +207,38 @@ candidate set was **found**, not supplied. `"unwired"` means the roster was neve
 
 ### What a good run looks like
 
-```json
-{"source": "neo4j", "shops": 7, "products_considered": 25, "reason": null, "elapsed_ms": 55.426}
+```text
+roster_source: source='neo4j' shops=7 products_considered=25 reason=None elapsed_ms=32.58
+entries=7  ranked=7  shortlist slots=4
+trust snapshot: 11 store(s); 10/10 rostered sellers present
 ```
 
-Seven shops out of ten, with no roster sent. The three the graph leaves out are the two the
+Seven shops out of ten, with no roster sent. `10/10 rostered sellers present` is the
+`make demo-trust` step reporting home; `0/10` there with an empty shortlist is that step missing.
+The eleventh store in the snapshot is `store-breaker`, the dishonest merchant the simulation
+writes, and it is on no roster here. The three the graph leaves out are the two the
 corpus calls negative controls — storefronts carrying no liver-support inventory at all —
 plus one more that carries none matching. A shortlist that never has to reject anybody
 demonstrates nothing, which is why the corpus ships those stores.
 
 `entries` then carries both halves of the market in one response: four hosted stores that
 really bid (`"fallback": false`, at their agent's own price) and three with no agent
-(`"fallback": true, "fallback_reason": "no_response"`) represented at their catalogue list
-price. `shortlist.slots` comes back with four filled slots — `value`, `fit`, `specialist`,
+(`"fallback": true, "fallback_reason": "tier_0_no_agent:no_bid_endpoint"`) represented at their
+catalogue list price. That reason is the exchange saying it holds no bidding agent for the shop,
+not that the shop was asked and stayed quiet — `market` on the same response reads
+`"solicited": 4` and `"no_endpoint": 3`, and four is the number of doors that were actually
+knocked on. `shortlist.slots` comes back with four filled slots — `value`, `fit`, `specialist`,
 `reliability` — each carrying the store's own `commitments` beside the platform's
 `trust_summary` and `provenance_labels`. Those are the two voices.
+
+**A hosted store falls back sometimes, and it is not this step failing.** Measured over six
+consecutive probes on one stack: four runs had all four agents bidding, two had one of them
+`"fallback_reason": "bid_price_unreconcilable"` — which `collect.py` defines as the store
+answering *in time, with a well-formed bid*, declaring a discount that does not reconcile against
+the roster row it was asked from. That is a policy refusal, not a slow store and not a dead one;
+the entry keeps the store's own `price_reasons` beside it so the rejection can be quoted back.
+`make demo-check` passes either way and the shortlist still fills, so read it as the agents'
+discount sampler occasionally landing outside what the exchange will authorize.
 
 ### What this used to get wrong, kept because the shape is worth recognising
 
@@ -284,9 +348,9 @@ against `GET /stores/gaiaherbs.com/dashboard`:
 
 To watch the interview turn into an envelope, answer the questions and press the button. It
 writes version 1 in **shadow**, and the store still bids nothing until you type your name into
-the approval form that then appears. That is R6 and R7 end to end in the product, without a
-transcript file or a `python -m` on anyone's laptop. Driven against this stack, over the same
-routes the buttons call:
+the approval form that then appears. That is R6 and R7 end to end in the product — in the
+browser, with no transcript file and no module invoked from anyone's shell. Driven against this
+stack, over the same routes the buttons call:
 
 ```http
 PUT /stores/<id>/envelope   {"turns":[…], "completed_at":…}
@@ -333,11 +397,55 @@ can only ever *stop* a store bidding, never start one.
 | `shops: 0`, no reason worth reading | Neo4j is empty — `make demo-corpus` |
 | the demo worked and then stopped finding shops | **something ran the graph tests in this checkout.** See the warning below |
 | shops found, `entries: []` | every rostered store failed the eligibility gate: the deployment document's `sellers` do not name the graph's store ids (which are bare hosts, e.g. `gaiaherbs.com`) |
+| shops found, `entries: 7`, `shortlist slots=0` | **`make demo-trust` was never run.** R12 excludes every store the live trust snapshot holds no row for. See below |
 | every entry is `fallback / no_response` | the agents are not running; the `demo` profile was not used |
 | a service is `(healthy)` and answers 503 | the migrations are not applied — `make db-migrate` |
 | the mailed sign-in link 404s | the base URL is buyer-svc's origin, not buyer-web's — see §5 |
 | `POST /buyer/auth/magic-link` answers 503 | no mail transport configured; the service says so rather than promising a mail nothing will send |
 | everything authenticates badly on a stack that used to work | you exported `PROXYSHOP_ROLE_PASSWORD` **after** the pgdata volume existed. That hook runs once; `make deps-down` then `make deps-up` |
+
+### The other one that will catch you out: an unseeded trust service
+
+**A fresh clone that follows every step on this page except `make demo-trust` gets an empty
+shortlist, and nothing in the auction response says the word "trust".** Every container reports
+`(healthy)`, the graph finds its shops, every rostered store is collected — and then the ranking
+excludes every one of them, with one of these per store:
+
+```text
+blacklist_unreadable: no trust snapshot row for 'gaiaherbs.com', so its blacklist status
+could not be established; failing closed (R12)
+```
+
+Measured on the browser path, whose roster is six rows: six exclusions, zero slots, `entries: 6`.
+That `entries` count is what makes this confusing — **eligibility is unaffected.**
+`deploy/demo/exchange-deployment.json` states every seller's status itself, so
+`exchange.composition.bind_eligibility` takes its first rung — the stated registry — and every
+store is cleared to participate. R12 is three gates, and only the ranking's blacklist read
+consults the live snapshot. A store can be perfectly eligible and still unshortlistable.
+
+`make demo-trust` is the fix and it is safe to run again — `event_id` is the ledger's idempotency
+key and `seeded_instant` adopts the `observed_at` the chain already holds, so a second run of the
+same version of the script appends nothing.
+
+A stack seeded by an *older* version of that script is the one case where it stops instead: the
+event ids are stable across versions and the bodies are not, so `POST /events` answers 409. The
+script names the event, appends nothing, and offers two ways out — keep the seed you have, or wind
+the stack back and seed it afresh:
+
+```bash
+./.venv/bin/python scripts/seed_demo_trust.py --check
+```
+
+```bash
+make deps-down
+make deps-up
+make demo-up
+make demo-trust
+```
+
+Measured on a stack in exactly that state: `0 event(s) were appended before this one and nothing
+after it was`, exit 2 — and `--check` against the same stack still passed, because the seed it
+already carries is a working one.
 
 ### The one that will catch you out: the test suite empties this graph
 
@@ -384,9 +492,11 @@ own published bytes:
 That reports drift instead of writing; drop `--check` to regenerate. What it emits:
 
 - `deploy/demo/exchange-deployment.json` — ten eligible sellers with their real registered
-  domains, bid endpoints for the four hosted agents, the stated trust snapshot, the one named
-  intent cluster those agents' envelopes pursue, and the catalogue snapshots the claim
-  verifier grades against.
+  domains, bid endpoints for the four hosted agents, the `trust_url` the ranking gate reads
+  `GET /snapshot` on, the one named intent cluster those agents' envelopes pursue, and the
+  catalogue snapshots the claim verifier grades against. **No `trust_snapshot` key**, and that
+  absence is what makes the trust read happen at all — see
+  [`deploy/demo/README.md`](../../deploy/demo/README.md), and §3 above for the step it costs.
 - `deploy/demo/buyer-deployment.json` and `deploy/demo/buyer-roster.json` — where the
   exchange is, and the candidate set the buyer opens an auction with. Separate files because
   the buyer document is capped at 64 KiB and the roster at 512 KiB.
@@ -404,10 +514,14 @@ that same id. Verified on this stack: a clarified intent carrying `cl-69eb1ce2b0
 comes out of `assign_cluster` as `cluster-liver-support`, which is what all four envelopes
 pursue.
 
-Three numbers in there are *stated by a person* rather than read from a storefront, because
-no storefront publishes them, and they are the same three the composition root says must be
-stated: the approved envelope's discount depth, the trust score, and the intent-cluster
-vocabulary. Everything else is the corpus.
+Two numbers in there are *stated by a person* rather than read from a storefront, because no
+storefront publishes them: the approved envelope's discount depth and the intent-cluster
+vocabulary. Everything else is the corpus. There used to be a third — each store's trust score,
+typed into a `trust_snapshot` key — and it is now stated somewhere else, as an opening posture the
+`make demo-trust` step appends to the trust ledger as marked events. The difference is not
+cosmetic: a number in the deployment document was the exchange's final answer and could not be
+moved by anything a demo did, and the same number appended as evidence is a prior the ledger then
+argues with.
 
 The generated documents are tracked, so a clone runs the demo without running the generator.
 Re-run it after the corpus moves, and `--check` reports drift instead of writing.
