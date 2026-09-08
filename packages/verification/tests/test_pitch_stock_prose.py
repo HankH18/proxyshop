@@ -305,34 +305,226 @@ def test_the_conflict_rule_does_not_reach_past_the_key_it_cancels() -> None:
     assert [(claim["key"], claim["value"]) for claim in claims] == [("warranty_months", 24)]
 
 
-def test_the_same_cancellation_covers_the_one_other_equality_graded_family() -> None:
-    """``boiler_type`` had the identical "convicted and vindicated at once" shape. Measured::
+def _values(text: str, *vocabulary: str) -> list[tuple[str, Any]]:
+    return [
+        (claim["key"], claim["value"])
+        for claim in decompose_pitch(text, store_id="store-1", vocabulary=vocabulary)
+    ]
+
+
+def _positional(text: str, availability: str) -> list[tuple[Any, str]]:
+    """``(claimed value, status)`` per ``in_stock`` reading, zipped BY POSITION.
+
+    :func:`_graded` keys its lookup on ``claim_ref or key``, which collapses when one pitch
+    mints two readings of the SAME key — precisely the case here. ``verify`` returns one
+    result per input claim in input order (``exchange.ranking.verification`` relies on that and
+    mints a positional ``claim_ref`` for the same reason), so position is the honest join.
+    """
+    snapshot = _crawled(availability)
+    claims = decompose_pitch(text, store_id="store-1", vocabulary=catalog_keys(snapshot, PRODUCT))
+    result = verify(
+        {
+            "pitch_id": "pitch-1",
+            "store_id": "store-1",
+            "product_ref": PRODUCT,
+            "text": text,
+            "claims": [{k: v for k, v in claim.items() if k != "provenance"} for claim in claims],
+        },
+        snapshot,
+        VERIFIER_VERSION,
+    )
+    return [
+        (claim["value"], row["status"])
+        for claim, row in zip(claims, result["claims"], strict=True)
+        if row["key"] == "in_stock"
+    ]
+
+
+def test_a_contrastive_clause_is_declined_and_the_clause_about_this_offer_is_kept() -> None:
+    """The contrastive shape, on the one other equality-graded family. Measured, before::
 
         "Unlike a dual boiler machine, this one is a heat exchanger."
             -> boiler_type "dual boiler"   -> contradicted   (-0.15)
             -> boiler_type "heat exchange" -> verified
 
-    Same filter, same reason: a closed-vocabulary term read two ways in one pitch is one fact
-    asserted twice and incompatibly, and it can only be right once. NUMBERS stay out of the
-    filter on purpose — see :func:`pitch._drop_self_contradicting_readings` — so the pump,
-    tank, voltage, warranty, dispatch and return rules are unchanged here.
+    — one honest sentence, one key, the store convicted and vindicated at once.
+
+    **This assertion used to read ``== []``, and changing it is a change of contract rather
+    than a relaxation, so the reason is recorded here.** ``== []`` was satisfied by
+    ``pitch._drop_self_contradicting_readings``, a whole-pitch filter that dropped EVERY
+    reading of a key the pitch read two incompatible ways. It answered this sentence, and it
+    handed every bidder an eraser. Measured on the pre-change module at 77c83ce, against a
+    crawl-shaped catalogue whose offer says ``out_of_stock``::
+
+        "This machine is in stock and ships today."
+            -> [('in_stock', True, 'contradicted')]
+        "This machine is in stock and ships today. Some sizes are sold out."
+            -> []
+        "This machine is in stock and ships today. It is sold out."
+            -> []
+
+    A store contradicted by the platform's own crawl walked away with no verdict at all by
+    adding a sentence — and D55 is explicit that the adversarial check is what justifies
+    letting a sponsored shop speak in its own voice at all. The cancellation is therefore gone
+    and the contrastive clause is declined where it belongs, in the clause it is in: "unlike"
+    introduces a clause about somebody else's machine, so no reading is taken from it, and the
+    clause that IS about this offer keeps the true reading it always deserved. The store is
+    now better off than under ``== []`` — it earns the ``verified`` it truthfully asserted
+    instead of silence — and the eraser is not available to anyone.
     """
     contrastive = "Unlike a dual boiler machine, this one is a heat exchanger."
-    assert decompose_pitch(contrastive, store_id="store-1", vocabulary=("boiler_type",)) == []
+    assert _values(contrastive, "boiler_type") == [("boiler_type", "heat exchange")]
 
     # ...and one boiler type stated once is still read, so this is not the rule being deleted.
-    plain = "This one is a heat exchanger."
-    assert [
-        (claim["key"], claim["value"])
-        for claim in decompose_pitch(plain, store_id="store-1", vocabulary=("boiler_type",))
-    ] == [("boiler_type", "heat exchange")]
+    assert _values("This one is a heat exchanger.", "boiler_type") == [
+        ("boiler_type", "heat exchange")
+    ]
 
-    # Two NUMBERS on one key are still both read: two models is as likely a reading as a lie,
-    # and cancelling them is a separate decision this filter deliberately does not take.
-    two_pumps = "This runs a 9 bar pump. The older model ran a 15 bar pump."
-    assert sorted(
-        claim["value"]
-        for claim in decompose_pitch(
-            two_pumps, store_id="store-1", vocabulary=("pump_pressure_bar",)
-        )
-    ) == [9.0, 15.0]
+
+def test_the_reported_immunity_is_closed_where_it_actually_lived() -> None:
+    """The exploit as reported, and where it turned out to live.
+
+    Measured on the module at 77c83ce against a crawl saying ``out_of_stock`` — a store adding
+    a sentence walked away with no verdict at all::
+
+        "This machine is in stock and ships today."                          -> contradicted
+        "This machine is in stock and ships today. Some sizes are sold out." -> NO VERDICT
+
+    It is closed, and NOT by changing what happens to two conflicting readings. It is closed
+    because "Some sizes are sold out." no longer mints one: ``pitch._asserts_this_offer``
+    declines it as a statement about a variant. There is nothing to cancel against, and the lie
+    is graded.
+
+    **Two other repairs for it were built and both measured worse**, which is why the
+    whole-pitch cancellation is still here:
+
+    * grading BOTH readings convicts an honest store describing two products or two channels —
+      "The grinder is sold out, but this machine is ready to ship.", "In stock online. Sold out
+      in our shops." each earned ``verified`` AND ``contradicted``, at ``-0.15``;
+    * keeping the reading whose clause carries a pronoun hands the tie-break to the SELLER.
+      Measured: "The machine is in stock. Our shelf is sold out." erased the lead lie — its
+      clause has no pronoun — and left the auction holding ``in_stock False``, **verified**. A
+      false headline earning a positive verdict is worse than the immunity it replaced.
+    """
+    lie = "This machine is in stock and ships today."
+    assert _positional(lie, "out_of_stock") == [(True, "contradicted")]
+    for tail in (
+        "Some sizes are sold out.",
+        "The 1 kg bag is sold out.",
+        "The blue tin is sold out.",
+        "Sold out sizes are restocked weekly.",
+    ):
+        assert _positional(f"{lie} {tail}", "out_of_stock") == [(True, "contradicted")], tail
+
+
+def test_what_remains_reachable_is_a_public_retraction_and_that_is_a_different_act() -> None:
+    """A store CAN still cancel its own stock claim — by retracting it in the same pitch.
+
+    "This machine is in stock and ships today. It is sold out." mints nothing, and that is
+    deliberate rather than a hole left open. The retraction is in the prose the BUYER reads, so
+    the pitch has not asserted stock to anybody, and D58 already records that a store may
+    decline to make a claim at all: a public retraction buys exactly what silence buys, at a
+    higher price in persuasion. What it must not do is cost the store LESS than silence, and it
+    does not — no ``verified`` is minted either, in either direction.
+    """
+    retracted = "This machine is in stock and ships today. It is sold out."
+    assert _positional(retracted, "out_of_stock") == []
+    assert _positional(retracted, "in_stock") == []
+    # ...and every OTHER key in the same pitch is untouched by the cancellation.
+    assert _values(
+        f"{retracted} It comes with a two-year warranty.", "in_stock", "warranty_months"
+    ) == [("warranty_months", 24)]
+
+
+def test_the_eraser_that_remains_reachable_is_the_noun_nobody_listed() -> None:
+    """The open hole, measured, and it is SMALLER than the source used to claim.
+
+    :func:`~claim_verification.pitch._drop_self_contradicting_readings` cancels both readings
+    when a pitch reads one equality-graded key two ways, so a liar can in principle erase its
+    own ``contradicted`` by writing the opposite flag about something else it sells. What
+    decides whether that works is whether the second sentence mints at all, which is
+    :data:`~claim_verification.pitch._OTHER_REFERENT`'s question and not this filter's.
+
+    So the residual is exactly the nouns that guard does NOT name. A docstring in ``pitch.py``
+    listed "This machine is in stock. The waitlist is sold out." among the working erasers and
+    it does not work — ``waitlist`` is named, the second sentence mints nothing, and the lie is
+    still ``contradicted``. That is why this is a test and not a paragraph: the boundary moves
+    whenever either the referent guard or the filter changes, and a paragraph does not notice.
+    """
+    lie = "This machine is in stock"
+    # Named in _OTHER_REFERENT -> the second sentence mints nothing -> the lie still convicts.
+    for named in (
+        "The waitlist is sold out.",
+        "The 1 kg bag is sold out.",
+        "Some sizes are sold out.",
+    ):
+        assert _positional(f"{lie}. {named}", "out_of_stock") == [(True, "contradicted")], named
+    # Not named -> the second sentence mints -> both cancel and the lie costs nothing.
+    for unnamed in ("our tasting class is sold out.", "the workshop is sold out."):
+        assert _positional(f"{lie}; {unnamed}", "out_of_stock") == [], unnamed
+    # The escape buys silence, never a verdict in the liar's favour.
+    for unnamed in ("our tasting class is sold out.", "the workshop is sold out."):
+        assert _positional(f"{lie}; {unnamed}", "in_stock") == [], unnamed
+
+
+@pytest.mark.parametrize(
+    ("prefix", "why"),
+    [
+        ("", "the plain form"),
+        ("İ ", "U+0130 lower-cases to TWO code points and shifts every later span by one"),
+        ("Sadly ", "a word in front of the pronoun"),
+        ("x " * 40, "a lot of words in front of the pronoun"),
+    ],
+)
+def test_no_prefix_changes_what_a_pitch_is_read_to_say(prefix: str, why: str) -> None:
+    """What precedes a claim must not change how the claim is graded.
+
+    ``"İ"`` is here because the shared engine adds a match offset computed on
+    ``sentence.lower()`` to the sentence's offset in the original text, and U+0130 gets longer
+    when lowered — so every span after it is shifted by one. A draft of the conflict rule
+    recovered its clause by arithmetic on ``reading.span`` and was steered by exactly that:
+    against a crawl saying ``out_of_stock``, one character turned
+    ``[(True, contradicted), (False, verified)]`` into ``[(False, verified)]``. Nothing reaches
+    a verdict through those offsets now.
+    """
+    assert _graded(f"{prefix}This machine is in stock.", "out_of_stock") == [
+        (True, "contradicted")
+    ], why
+    assert _graded(f"{prefix}This machine is in stock.", "in_stock") == [(True, "verified")], why
+
+
+def test_a_number_stated_about_another_model_is_not_a_number_stated_about_this_one() -> None:
+    """The numeric rules, which had no guard at all before this change.
+
+    ``_asserts_current_state`` ran inside ``_FlagRule.read`` only, so the duration, quantity
+    and vocabulary rules minted a reading from any sentence their pattern touched. Measured
+    against a catalogue recording ``pump_pressure_bar: 15`` and ``warranty_months: 24`` — a
+    platform AGREEING with the store::
+
+        "Unlike the 9 bar competitor, ours delivers 15 bar of pressure."
+            -> pump_pressure_bar 9  -> contradicted   (-0.15)
+        "Our previous model had a 12 month warranty; this one carries a 24 month warranty."
+            -> warranty_months 12   -> contradicted   (-0.15)
+
+    **This assertion used to require the opposite** — that "This runs a 9 bar pump. The older
+    model ran a 15 bar pump." read BOTH numbers — on the reasoning that two numbers on one key
+    are as likely to be two products as a lie. That reasoning is right about the ambiguity and
+    wrong about who pays for it: the catalogue holds one number, so whichever reading is not
+    it comes back ``contradicted``, and "as likely to be two products" is therefore a coin
+    toss the honest store loses half the time. The sentence names the other model in so many
+    words; that is not ambiguity, and the reading is simply not taken.
+    """
+    two_models = "This runs a 9 bar pump. The older model ran a 15 bar pump."
+    assert _values(two_models, "pump_pressure_bar") == [("pump_pressure_bar", 9.0)]
+
+    # Two numbers this offer really does state are still BOTH read, so the numeric rules are
+    # not being gutted on the way past — the filter is about whose product it is, not about
+    # how many numbers a pitch may carry.
+    assert _values("This runs a 9 bar pump. It also runs a 15 bar pump.", "pump_pressure_bar") == [
+        ("pump_pressure_bar", 9.0),
+        ("pump_pressure_bar", 15.0),
+    ]
+    assert _values("A 9 bar pump drives a 2.9 L tank.", "pump_pressure_bar", "water_tank_l") == [
+        ("pump_pressure_bar", 9.0),
+        ("water_tank_l", 2.9),
+    ]

@@ -230,6 +230,133 @@ def test_an_operator_window_may_tighten_the_stock_rule_but_never_loosen_it() -> 
     )
 
 
+#: A stated ``availability`` row with its own June timestamp, beside a September ``captured_at``
+#: — the shape ``fixtures/golden/golden_set.json``'s stale-evidence product has. The platform's
+#: own reckoning is that this reading is months out of date.
+_STATED_JUNE_ROW = {"availability": {"value": "out_of_stock", "observed_at": OFFER_LAST_CHANGED}}
+
+#: Every snapshot shape the freshness floor is asked about, and it is the WHOLE set on purpose:
+#: the lever below only appears where the platform publishes no ``read_at``, which per D59 is
+#: every hand-authored deployment document, devstack market, fixture and frozen-suite catalogue
+#: in the tree. A test written only against the crawl-shaped pair would have been green before
+#: the fix and proved nothing.
+_EVERY_SNAPSHOT_SHAPE = {
+    "stated, no read time": lambda: _crawled("out_of_stock"),
+    "stated, June availability row": lambda: _crawled("out_of_stock", attributes=_STATED_JUNE_ROW),
+    "crawled, read 20 minutes later": lambda: _crawled("out_of_stock", read_at=READ_FRESH),
+    "crawled, read a day later": lambda: _crawled("out_of_stock", read_at=READ_LATE),
+}
+
+
+@pytest.mark.parametrize(
+    ("stamp", "capped_to"),
+    [
+        (CRAWLED_AT, "the truthful stamp, which is already captured_at"),
+        ("2026-09-07T13:00:00Z", "an hour after the crawl, inside the freshness window"),
+    ],
+)
+def test_a_bidder_cannot_stamp_its_way_out_of_a_current_reading(stamp: str, capped_to: str) -> None:
+    """A freshness floor a bidder can move upward is not a floor.
+
+    ``_is_stale`` measures back from when the claim was made, and on a STATED document — the
+    demo deployment, the devstack market, every fixture and the frozen suite, none of which
+    publishes a ``read_at`` — "when the claim was made" comes from
+    ``claim["provenance"]["observed_at"]``, which the counterparty writes. Measured on the
+    verifier at 77c83ce, a store claiming ``in_stock: True`` against a stated ``out_of_stock``::
+
+        no stamp                        -> contradicted
+        observed_at "2030-01-01"        -> unsupported
+
+    The store bought immunity with a timestamp it wrote itself. A stamp inside the freshness
+    window buys nothing, which is what the two cases below pin; a stamp far enough past it is a
+    real lever, and :func:`test_a_far_future_stamp_is_still_a_lever_here_and_is_closed_one_layer_up`
+    holds that open rather than letting this test's name imply it is shut.
+
+    **Capping the reference at ``captured_at`` was built and REVERTED.** It closes the lever and
+    costs the thing the reference exists for. Measured: a stated snapshot with no ``read_at``,
+    captured a fortnight ago, an honest store that has since restocked, claiming ``in_stock:
+    True`` with a TRUTHFUL ``provenance.observed_at`` of now — ``unsupported`` (no penalty)
+    without the cap, ``contradicted`` (-0.15) with it. Because a claim is normally made AFTER a
+    hand-authored document was written, the cap collapses to ``reference = captured_at`` in
+    exactly the case it was meant to preserve, and that case is the restocked seller on every
+    fixture, devstack market and demo seed in the tree. ``unsupported`` is the verdict for both
+    "too old to judge" and "immunity", and a clock-free function cannot tell them apart, so the
+    cap can only trade one for the other.
+
+    **Deleting the reference instead was built and measured worse.** On a stated document
+    carrying a dated ``roast_level`` row, an honest store's TRUE claim went ``verified`` ->
+    ``unsupported`` and a liar's false one went ``contradicted`` -> ``unsupported`` — the
+    evidence retired in both directions on every hand-authored catalogue in the tree, because
+    ``captured_at`` makes a dated attribute aged rather than current. The claim's own instant is
+    a real and useful reference; only its unbounded end was a lever.
+    """
+    claim = dict(_stock(True), provenance={"source": "seller_asserted", "observed_at": stamp})
+    stated = _crawled("out_of_stock")
+    assert "read_at" not in stated
+    assert _graded(stated, [claim])["in_stock"]["status"] == "contradicted", capped_to
+    assert (
+        _graded(stated, [claim])["in_stock"]["status"]
+        == _graded(stated, [_stock(True)])["in_stock"]["status"]
+    ), capped_to
+
+    # ...and where the platform DOES stamp the moment it read the graph, that wins over both.
+    for read_at, expected in ((READ_FRESH, "contradicted"), (READ_LATE, "unsupported")):
+        crawled = _crawled("out_of_stock", read_at=read_at)
+        assert _graded(crawled, [claim])["in_stock"]["status"] == expected, capped_to
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "OPEN, and deliberately not closed here. A stamp far enough past the freshness window "
+        "does turn `contradicted` into `unsupported`, so a counterparty's own instant is a "
+        "lever on this function. Capping it at `captured_at` closes the lever and reintroduces "
+        "the restocked seller's penalty -- see the sibling test's docstring for that "
+        "measurement. It is closed ON THE SERVED PATH instead, one layer up: "
+        "`exchange.ranking.verification.STORE_SUPPLIED_FIELDS_DROPPED` lists `provenance`, and "
+        "`_pitch_claims` strips it from every claim -- bidder-asserted and pitch-derived alike "
+        "-- before `verify` is called, so no bidder can reach this reference through "
+        "`POST /auctions`. Measured: four stores differing only in their stamp (none / "
+        "2030-01-01 / truthful-now / backdated) all graded `contradicted` over one real "
+        "auction. Remove this marker if a caller that KEEPS provenance ever appears."
+    ),
+)
+def test_a_far_future_stamp_is_still_a_lever_here_and_is_closed_one_layer_up() -> None:
+    """The registry entry for the lever, so it cannot be forgotten by being unreachable."""
+    claim = dict(
+        _stock(True),
+        provenance={"source": "seller_asserted", "observed_at": "2030-01-01T00:00:00Z"},
+    )
+    stated = _crawled("out_of_stock")
+    assert "read_at" not in stated
+    assert _graded(stated, [claim])["in_stock"]["status"] == "contradicted"
+
+
+def test_a_claim_instant_earlier_than_the_snapshot_is_still_the_counterpartys_to_choose() -> None:
+    """The residual, recorded rather than left to be rediscovered.
+
+    The cap closes the FORWARD direction — a stamp later than the platform's newest observation
+    cannot make its evidence look aged. The BACKWARD direction is still open: a stamp earlier
+    than ``captured_at`` makes an aged reading look current, which
+    ``exchange.ranking.verification.STORE_SUPPLIED_FIELDS_DROPPED`` measured as a store
+    harvesting a ``verified`` off a year-old reading. It is not closable by another cap — a
+    claim genuinely made before the snapshot was captured is exactly the honest case, and
+    flooring the reference at ``captured_at`` is the deletion measured worse above.
+
+    The exchange closes it by dropping the whole ``provenance`` block before calling
+    :func:`verify`; a caller that does not do that is exposed, and this test says so out loud
+    rather than pretending otherwise.
+    """
+    aged = _crawled("out_of_stock", attributes=_STATED_JUNE_ROW)
+    assert _graded(aged, [_stock(True)])["in_stock"]["status"] == "unsupported"
+    backdated = dict(
+        _stock(True), provenance={"source": "seller_asserted", "observed_at": OFFER_LAST_CHANGED}
+    )
+    assert _graded(aged, [backdated])["in_stock"]["status"] == "contradicted", (
+        "a backdated stamp still revives a reading the freshness floor had retired"
+    )
+
+
 def test_a_stated_document_with_no_read_time_is_taken_as_current() -> None:
     """Every hand-authored catalogue in the tree — the demo deployment, the devstack, the
     fixtures, the frozen acceptance suite — states an availability and no ``read_at``. There is
