@@ -60,6 +60,11 @@ from ingest.adapters.mapping import (  # noqa: E402 - after the sys.path bootstr
     product_id_for,
 )
 
+# The six trust dimensions, imported rather than restated: D53 says EXACTLY six and the schema
+# refuses a seventh, so a second copy here would be a vocabulary that could drift out of the one
+# the trust service and the contracts share.
+from trust.scoring.dimensions import TRUST_DIMENSIONS  # noqa: E402 - after the bootstrap
+
 #: The recorded corpus this demo is built from.
 CORPUS = REPO_ROOT / "fixtures" / "real-catalogs"
 
@@ -120,6 +125,46 @@ TRUST_SCORES = {
     "livemomentous.com": 0.75,
     "nakednutrition.com": 0.70,
 }
+
+#: Each store's `shipped_on_time` posterior -- what its dispatch record says, as distinct from
+#: what it is worth overall. Deployment configuration like `TRUST_SCORES` above, and invented for
+#: the same reason: no storefront publishes its own fulfilment history.
+#:
+#: **These deliberately do NOT track `TRUST_SCORES`, and that is the point of the whole table.**
+#: D57 rewired `delivery_fit` to read this dimension because a store used to buy `w_d = 0.10` of
+#: the published score by typing a smaller number into `delivery_estimate_days`. If every store's
+#: dispatch record simply equalled its overall score, `delivery_fit` would be a carbon copy of
+#: `trust` -- the double-count D57 exists to avoid -- and the demo would demonstrate nothing.
+#:
+#: So the four hosted stores each carry a different story, and `toniiq.com` is the one to watch:
+#: 0.74 overall but 0.45 on dispatch, a store that promises fast and does not deliver. Its quote
+#: is divided by that posterior (`features.credible_delivery_estimate`), so a one-day promise is
+#: read as 2.2 days. `gaiaherbs.com` at 0.93 is quoted near face value. The six stores nobody
+#: bids for sit at parity with their overall score, because a store with no story does not need
+#: an invented one.
+DISPATCH_POSTERIOR = {
+    "gaiaherbs.com": 0.93,
+    "toniiq.com": 0.45,
+    "paradiseherbs.com": 0.88,
+    "oregonswildharvest.com": 0.62,
+}
+
+#: Evidence mass behind each Beta, as `alpha + beta`.
+#:
+#: 14.0 clears the exchange's admissibility floor with room to spare: `features` refuses to admit
+#: a promise until mass exceeds `TRUST_PRIOR_MASS` (4.0) by `MIN_DISPATCH_OBSERVATIONS` (5.0), so
+#: 9.0 is the line and a document at 9.5 would be one rounding away from every store reading the
+#: neutral 0.5 and the demo silently proving nothing.
+DIMENSION_MASS = 14.0
+
+#: The instant these Betas were last decayed at, stated rather than stamped at generation.
+#:
+#: A wall-clock value would make `--check` report drift on every run of a generator whose inputs
+#: had not changed. It is safe to fix because the exchange does NOT re-decay what it reads: a
+#: stated deployment document's alpha/beta reach `dispatch_credibility` as written. Decay is the
+#: trust engine's job, and a deployment that wants live decay binds the live reader instead of
+#: stating a snapshot.
+DIMENSION_DECAYED_AT = "2026-09-01T00:00:00+00:00"
 
 #: The approved envelope's discount depth per hosted store. Deployment configuration: the
 #: merchant's authorisation, which no storefront publishes.
@@ -303,6 +348,43 @@ def _snapshot(host: str, catalog: dict[str, Any], ranked: list[str]) -> dict[str
     }
 
 
+def _dims(host: str) -> dict[str, dict[str, Any]]:
+    """The six Betas for one store, whose means average to its stated `score`.
+
+    The trust engine defines a store's `score` as the mean of its six dimension means (D53), so
+    emitting dims that averaged to something else would publish a document contradicting itself.
+    `shipped_on_time` is stated first, from :data:`DISPATCH_POSTERIOR`; the other five carry
+    whatever mean makes the six average back to :data:`TRUST_SCORES` -- `m = (6*score - d)/5`.
+
+    That arithmetic is why the dispatch numbers in `DISPATCH_POSTERIOR` are chosen close enough
+    to the score to keep `m` inside [0, 1]: a store scored 0.74 cannot also have shipped on time
+    0.05, because no set of five means fixes that average. The function refuses rather than
+    clamping, since a clamp would publish a `score` the dims do not support and the mismatch
+    would surface as an unexplained ranking rather than as a build failure.
+    """
+    score = TRUST_SCORES.get(host, 0.6)
+    dispatch = DISPATCH_POSTERIOR.get(host, score)
+    others = (6.0 * score - dispatch) / 5.0
+    if not 0.0 <= others <= 1.0:
+        raise SystemExit(
+            f"FATAL: {host} states score={score} and shipped_on_time={dispatch}, which needs the "
+            f"other five dimensions to average {others:.4f} -- outside [0, 1]. Move the dispatch "
+            f"posterior closer to the score, or move the score."
+        )
+
+    def beta(mean: float) -> dict[str, Any]:
+        return {
+            "alpha": round(mean * DIMENSION_MASS, 6),
+            "beta": round((1.0 - mean) * DIMENSION_MASS, 6),
+            "decayed_at": DIMENSION_DECAYED_AT,
+        }
+
+    return {
+        dimension: beta(dispatch if dimension == "shipped_on_time" else others)
+        for dimension in TRUST_DIMENSIONS
+    }
+
+
 def agent_service(host: str) -> str:
     """The compose service name for ``host``'s store agent.
 
@@ -343,6 +425,7 @@ def build() -> dict[str, Any]:
             "store_id": host,
             "blacklisted": False,
             "score": TRUST_SCORES.get(host, 0.6),
+            "dims": _dims(host),
         }
 
     exchange_doc = {
