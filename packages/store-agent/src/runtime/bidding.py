@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from contracts import SCHEMA_VERSION, Bid, Claim, Discount, Offer
+from contracts.ranking import canonical_field
 from contracts.signing import canonical_json
 
 from ..hooks import (
@@ -62,6 +63,49 @@ AGENT_VERSION = "store-agent/0.0.0"
 
 #: The catalog key carrying a product's list price. The one number the cold-start bid is made of.
 LIST_PRICE_KEY = "list_price"
+
+#: Spellings of "what this costs" that a hard constraint may arrive under, folded through
+#: :func:`contracts.ranking.canonical_field`, all of which address :data:`LIST_PRICE_KEY`.
+#:
+#: MEASURED, and it is the reason this exists rather than a tidiness: a shopper who says "under
+#: $50" produces ``price_usd lte 50.0`` — that is the spelling `packages/contracts`' own
+#: published buyer OpenAPI uses in its examples, and the one
+#: ``buyer_svc.intent.extraction`` emits. This runtime looked the field up in the catalog under
+#: that literal name, found nothing, and disqualified the product for having "no evidence" —
+#: for a $25.49 product against a $50 ceiling, and for every other product too, so the store
+#: declined ``no_matching_product`` and the shortlist carried its catalogue price instead. Every
+#: hosted store, on the single most common thing a shopper says. Verbatim, against the running
+#: gaiaherbs agent on one bid request that differed in nothing else::
+#:
+#:     field=list_price   http=200   (a real bid, unit_price 25.49)
+#:     field=price        http=204   declined
+#:     field=unit_price   http=204   declined
+#:     field=price_usd    http=204   declined
+#:
+#: The fold is `packages/contracts`' rather than a second vocabulary invented here, because the
+#: ranker already treats these as ONE field (:data:`contracts.ranking.PREFERENCE_FIELD_TERMS`
+#: maps every one of them to ``price_value``) and two disagreeing answers to "is this a price"
+#: is how this went wrong in the first place.
+#:
+#: It resolves to the LIST price, not to the discounted one this bid is about to offer. That is
+#: conservative in the safe direction — the offer is never above list, so a product that clears
+#: a ceiling on list clears it on the price the buyer is quoted — and it is the only one of the
+#: two that is a catalog FACT with provenance, which R19 requires: a hard constraint may not be
+#: satisfied by a number this runtime computed for itself.
+PRICE_CONSTRAINT_FIELDS: frozenset[str] = frozenset(
+    {"price", "price-usd", "unit-price", "total-price", "list-price", "cost"}
+)
+
+
+def catalog_key_for(field: str) -> str:
+    """The catalog key a hard constraint on ``field`` should be evaluated against.
+
+    Every field but a price is returned unchanged: a constraint on ``material`` or
+    ``roast_level`` means exactly that key, and a catalog that carries no evidence for it
+    disqualifies the product (R19), which is the behaviour to keep.
+    """
+    return LIST_PRICE_KEY if canonical_field(field) in PRICE_CONSTRAINT_FIELDS else field
+
 
 #: The pixel-feed key that says a product cannot be sold right now.
 IN_STOCK_KEY = "in_stock"
@@ -188,10 +232,20 @@ def _gather(ctx: AuctionContext, hooks: Any) -> tuple[list[_Candidate], dict[str
         facts: list[Claim] = [price_claim]
         failure = ""
         for constraint in ctx.hard_constraints:
+            # The catalog key, not the constraint's own spelling. See PRICE_CONSTRAINT_FIELDS:
+            # a shopper's "under $50" arrives as `price_usd`, which no catalog carries.
+            key = catalog_key_for(constraint.field)
             try:
-                fact = hooks.get_product_fact(product_ref, constraint.field)
+                fact = hooks.get_product_fact(product_ref, key)
             except HookInputError:
-                failure = f"no evidence for hard constraint {constraint.field!r}"
+                # Naming BOTH spellings when they differ, so an operator reading this is not
+                # sent looking for a key the request never used.
+                looked_for = (
+                    f"{constraint.field!r}"
+                    if key == constraint.field
+                    else f"{constraint.field!r} (looked up as {key!r})"
+                )
+                failure = f"no evidence for hard constraint {looked_for}"
                 break
             facts.append(fact)
             if not satisfies(constraint.op, fact.value, constraint.value):
@@ -460,11 +514,12 @@ def bid(
     list price that is NaN — used to leave this function as a `TypeError`, a `ValueError` or a
     `pydantic.ValidationError`, thrown into whoever solicited the bid. None of those is a
     better outcome than a decline that names the problem: the merchant service owns the shape
-    of the context, and the exchange asked a question that deserves an answer. So the assembly
-    runs inside :func:`_answered`, which converts exactly the "this input is not what it claims
-    to be" family into :attr:`DeclineReason.unusable_store_context` with the original message
-    attached, and lets everything else — including a `HookProvenanceError`, which is handled on
-    its own terms below — propagate.
+    of the context, and the exchange asked a question that deserves an answer. So the call to
+    :func:`_assemble` below runs under an ``except`` on :data:`_UNUSABLE_INPUT`, which hands
+    exactly the "this input is not what it claims to be" family to :func:`_unanswerable` — a
+    decline carrying :attr:`DeclineReason.unusable_store_context` and the original message —
+    and lets everything else propagate. A `HookProvenanceError` never reaches it: `_assemble`
+    catches that one itself and answers it on its own terms.
     """
     try:
         return _assemble(request, context, hooks, llm)
