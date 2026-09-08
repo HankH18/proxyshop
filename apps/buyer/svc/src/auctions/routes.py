@@ -267,12 +267,22 @@ async def read_auction(auction_id: str, request: Request) -> AuctionView:
             ),
         )
 
+    # Merged into ONE mapping before unpacking, and annotated, because two `**` expressions
+    # each carry a homogeneous value type — `dict[str, Any] | None` for the mappings and
+    # `list[Any]` for the arrays — and mypy matches a `**` argument's value type against every
+    # field it could fill. Unpacking them separately made each one an error about the other's
+    # fields; one `dict[str, Any]` says what is actually true, which is that these keys have
+    # different types and the model declares which.
+    recorded_fields: dict[str, Any] = {
+        key: _recorded_mapping(recorded, key) for key in RECORDED_MAPPING_KEYS
+    }
+    recorded_fields.update({key: _recorded_rows(recorded, key) for key in RECORDED_KEYS})
+
     return AuctionView(
         auction_id=auction_id,
         shortlist=dict(shortlist) if shortlist is not None else None,
         recorded_at=str(recorded["recorded_at"]) if recorded is not None else None,
-        **{key: _recorded_mapping(recorded, key) for key in RECORDED_MAPPING_KEYS},
-        **{key: _recorded_rows(recorded, key) for key in RECORDED_KEYS},
+        **recorded_fields,
     )
 
 

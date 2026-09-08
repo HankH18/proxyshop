@@ -19,6 +19,7 @@ a stub driver, so the contract holds in a stack-down run too.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -185,6 +186,47 @@ def test_reset_graph_reports_what_it_deleted(lock_file: Path) -> None:
     assert outcome.relationships_deleted == 4
     assert outcome.reset_ms >= 0.0
     assert driver.session().statements == ["MATCH (n) DETACH DELETE n"]
+
+
+def test_a_corpus_scale_wipe_says_so_and_a_fixture_scale_one_stays_quiet(
+    lock_file: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Both directions of the warning, because a warning on every reset is no warning.
+
+    The reset is correct and stays: a lane needs a clean graph, and D37 records that Neo4j
+    isolation here is scheduler serialisation plus an flock rather than tenant scoping — ONE
+    database, shared with any demo stack on the same host. `PROXYSHOP_WORKER` gives a lane its
+    own Postgres and Redis and NOT its own graph, so a lane looks isolated while a routine
+    `pytest proxyshop_support` takes a loaded corpus with it, the suite passes green, and the
+    loss surfaces later when somebody drives the demo. It happened twice in one session.
+
+    So the wipe now says what it took. The quiet direction is the half that makes it useful:
+    thousands of resets delete nothing or delete a fixture, and a line printed on all of them
+    is a line nobody reads by the time it matters.
+    """
+    with caplog.at_level(logging.WARNING, logger=neo4j_lock.__name__):
+        with neo4j_lock.neo4j_flock(path=lock_file):
+            neo4j_lock.reset_graph(
+                _StubDriver(nodes=neo4j_lock.CORPUS_SCALE_NODES, relationships=90_000),
+                path=lock_file,
+            )
+    loud = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(loud) == 1, [r.getMessage() for r in loud]
+    message = loud[0].getMessage()
+    assert str(neo4j_lock.CORPUS_SCALE_NODES) in message
+    assert "make demo-corpus" in message, (
+        "a warning that says something was destroyed and not how to get it back is a warning "
+        "that costs the reader a search"
+    )
+
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger=neo4j_lock.__name__):
+        with neo4j_lock.neo4j_flock(path=lock_file):
+            neo4j_lock.reset_graph(
+                _StubDriver(nodes=neo4j_lock.CORPUS_SCALE_NODES - 1, relationships=3),
+                path=lock_file,
+            )
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
 
 
 def test_a_reset_inside_a_hold_is_attributed_to_that_hold(lock_file: Path) -> None:

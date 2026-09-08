@@ -79,6 +79,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
 import signal
 import sys
@@ -344,6 +345,24 @@ def lock_holder(path: Path | str | None = None) -> str:
     if not stamped:
         return "unknown (the holder has not stamped the lock file yet)"
     return stamped.splitlines()[0]
+
+
+#: Above this many nodes, a reset is deleting something nobody generated in a fixture.
+#:
+#: A test fixture builds tens of nodes; the demo corpus is ~44,800, of which 3,093 are
+#: ``Product``. :func:`reset_graph` cannot tell them apart and must not try — a test needs a
+#: clean graph and that is the whole point of the reset. What it CAN do is say what it took.
+#:
+#: This exists because it happened, twice in one session and silently both times: `PROXYSHOP_WORKER`
+#: gives each lane its own Postgres database and Redis logical DB, so a lane looks isolated,
+#: and D37 records that Neo4j isolation is scheduler serialisation plus an flock rather than
+#: tenant scoping — ONE database, shared with whatever demo stack is running on the same box.
+#: A routine `pytest proxyshop_support` therefore wipes a loaded corpus, the suite passes, and
+#: the loss is discovered later by somebody driving the demo.
+#:
+#: 1,000 is chosen to sit far above any fixture and far below a corpus, so the warning fires on
+#: the case that matters and stays quiet on the thousands of resets that take nothing.
+CORPUS_SCALE_NODES = 1000
 
 
 def lock_log_path(path: Path | str | None = None) -> Path | None:
@@ -763,6 +782,19 @@ def reset_graph(driver: Any, *, path: Path | str | None = None) -> ResetOutcome:
         relationships_deleted=int(getattr(counters, "relationships_deleted", 0) or 0),
     )
     _record_reset(path, outcome)
+    # SAID OUT LOUD, because the lock log is not somewhere anybody looks after a green run.
+    # The reset is correct and stays; what was missing is that it can take a loaded corpus with
+    # it and nothing on screen says so. See CORPUS_SCALE_NODES for the two times it did.
+    if outcome.nodes_deleted >= CORPUS_SCALE_NODES:
+        logging.getLogger(__name__).warning(
+            "neo4j reset deleted %s nodes and %s relationships — far more than a fixture "
+            "builds, so a loaded corpus was almost certainly in this database. Neo4j is ONE "
+            "database shared by every lane and by any demo stack on this host (D37): "
+            "PROXYSHOP_WORKER does not isolate it. Reload with `make demo-corpus` before "
+            "driving the demo again.",
+            outcome.nodes_deleted,
+            outcome.relationships_deleted,
+        )
     return outcome
 
 
