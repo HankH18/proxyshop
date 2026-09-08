@@ -43,15 +43,27 @@ clusters into one posterior, which is worse than refusing: an auction id is cosm
 id is the key the model is indexed by. So a schema-valid payload carrying no cluster is a 400,
 and it says so.
 
-**What is persisted, said plainly: nothing.** The posteriors live in
-:class:`InMemoryBanditPosteriors`, a process-local book reached through
+**What is persisted, and by whom.** This paragraph used to open "What is persisted, said
+plainly: nothing", and that was true of every deployment that had ever run. The posteriors lived
+only in :class:`InMemoryBanditPosteriors`, a process-local book reached through
 :attr:`app.state.bandit_posteriors` — the same injected-port shape
-:attr:`app.state.auction_bids` uses in ``accept/routes.py``. They are lost on restart, they are
-not shared between replicas, and two uvicorn workers behind one load balancer keep two different
-models. D26 asks for posteriors in Redis and this is not that; it is the seam Redis plugs into
-(:func:`configure_outcomes`). The cost of the gap is bounded and worth stating exactly: the
-bandit adjusts **exposure and exploration only** — it never touches rank, price or eligibility —
-so a lost posterior costs exploration accuracy, never money and never a wrong shortlist.
+:attr:`app.state.auction_bids` uses in ``accept/routes.py`` — so they were lost on restart, were
+not shared between replicas, and two uvicorn workers behind one load balancer kept two different
+models. D26 asked for posteriors in Redis and nothing implemented it.
+
+:mod:`exchange.policy.durable` is that implementation, and this door does not know about it:
+:class:`~exchange.policy.durable.RedisBanditPosteriors` arrives through
+:func:`configure_outcomes`, which is the seam it was always the seam for, and
+``composition.bind_bandit_posteriors`` binds it from ``EXCHANGE_BANDIT_POSTERIORS`` (``redis`` in
+``apps/exchange/compose.yaml``). Everything below about what this MODULE decides is unchanged —
+where the book keeps its bytes is not this door's business, and the fact that both books answer
+:meth:`record` identically is the point of the port.
+
+The in-memory book is still what an unconfigured process gets (see :func:`_posteriors`), so the
+cost of running one is still worth stating exactly: the bandit adjusts **exposure and exploration
+only** — it never touches rank, price or eligibility — so a lost posterior costs exploration
+accuracy, never money and never a wrong shortlist. That is also why the durable book DEGRADES to
+this one when Redis is unreachable instead of refusing the auction.
 
 **The consumer landed, and this paragraph records what it replaced.** This module used to say
 ":func:`~.bandit.exposure` has no production call site: nothing on the served path reads the
@@ -272,7 +284,9 @@ class InMemoryBanditPosteriors:
 def configure_outcomes(app: FastAPI, *, posteriors: Any | None = None) -> None:
     """Wire this door's dependencies. Anything omitted keeps what is already there.
 
-    ``posteriors`` is the seam D26's Redis-backed model plugs into. It has to expose
+    ``posteriors`` is the seam D26's Redis-backed model plugs into — and now does:
+    :class:`exchange.policy.durable.RedisBanditPosteriors` is passed through here by
+    ``composition.bind_bandit_posteriors``. It has to expose
     ``record(store_id, cluster_id, converted, *, trust_snapshot=...)``; anything else is a
     misconfigured deployment and is answered 503 rather than dressed up as a decision about the
     caller's outcome.
@@ -283,6 +297,11 @@ def configure_outcomes(app: FastAPI, *, posteriors: Any | None = None) -> None:
 
 def _posteriors(request: Request) -> Any:
     """This app's posterior book, created on first use.
+
+    Reached, in a configured deployment, by ``composition.bind_bandit_posteriors`` having already
+    put one on ``app.state`` — ``ensure_configured`` runs at the top of :func:`_record_outcome`,
+    so the lazy default below is what an exchange with ``EXCHANGE_BANDIT_POSTERIORS`` unset or set
+    to ``memory`` gets, and not what the shipped stack gets.
 
     The default is the real bounded book rather than a null object, and that asymmetry with
     :class:`~..accept.routes.NoRecordedBids` is on purpose: refusing to *record* is not a safety

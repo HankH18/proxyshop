@@ -1,0 +1,804 @@
+"""The learning loop surviving a restart — D26's durable posteriors, driven over the socket.
+
+WHAT WAS MEASURED BEFORE THIS FILE
+----------------------------------
+The loop is closed at both ends and everything it learned was thrown away.
+``POST /auctions/{id}/accept`` records ``converted=True`` for the winner and ``converted=False``
+for every other store the same auction showed (``accept/routes.py``); ``policy/routes.py`` folds
+those into a Beta posterior; ``policy/exploration.py`` reads it and ``ranking/serving.py`` spends
+it on ONE shortlist slot of four, granted only to a store the trust snapshot marks ``low_data``.
+And ``policy/routes.py``'s own header said, in these words: *"What is persisted, said plainly:
+nothing."* :class:`~exchange.policy.routes.InMemoryBanditPosteriors` is a process-local ``dict``
+created lazily on first use, so a restart wiped the market's memory, two replicas never agreed,
+and ``apps/buyer/app/learning/`` — a demo page whose whole purpose is showing the loop move —
+was reset by any exchange restart mid-demonstration.
+
+WHAT IS ASSERTED HERE, AND WHY IT IS ASSERTED THIS WAY
+------------------------------------------------------
+**Nothing in this file wires the posterior book.** Every test builds an app the way the other
+served-path suites build one and then drives a real request; the book arrives because
+``composition.bind_bandit_posteriors`` put it there from ``EXCHANGE_BANDIT_POSTERIORS``. A test
+that called ``configure_outcomes(app, posteriors=RedisBanditPosteriors())`` would be measuring
+the wiring it wrote — this repository's largest defect class is a feature that is built, tested
+and reached by no served request, and the composition root is exactly where that gap lives.
+
+**The restart is a real one.** :func:`test_the_exploration_slot_moves_the_same_way_after_a_restart`
+posts outcomes through the published ``POST /internal/outcomes`` door, records which shop the
+served ``POST /auctions`` promotes into the exploration slot, throws the entire app away, builds
+a brand-new one with a brand-new book object, and requires the same shop to be promoted. The
+control beside it is the same sequence on ``EXCHANGE_BANDIT_POSTERIORS=memory``, where the
+posteriors are gone.
+
+**Redis being down is a first-class case, checked in both directions.** An auction must still
+serve, the outcome must still be recorded somewhere, and an operator must be told once — and,
+just as importantly, a HEALTHY Redis must produce no warning at all. Every gate in this
+repository is written pointing at the failure and never checked in the silent-on-honest
+direction; :func:`test_a_healthy_book_says_nothing_at_all` is that check.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any
+
+import pytest
+from contracts.ranking import RANK_FEATURES
+from exchange.accept import use_registered_domains
+from exchange.accept.routes import configure_accept
+from exchange.checkout import StaticRegisteredDomains
+from exchange.composition import STATE_FLAG
+from exchange.eligibility import ELIGIBLE, StaticSellerEligibility
+from exchange.main import create_app
+from exchange.policy.bandit import initial_state
+from exchange.policy.durable import (
+    DEFAULT_MAX_PAIRS,
+    ENV_BANDIT_POSTERIORS,
+    MAX_DURABLE_IDENTIFIER_CHARS,
+    PAIRS_KEY,
+    POSTERIORS_KEY,
+    RedisBanditPosteriors,
+)
+from exchange.policy.exploration import exposure_shares
+from exchange.policy.routes import InMemoryBanditPosteriors
+from exchange.ranking.serving import bandit_posteriors_of
+from fastapi.testclient import TestClient
+
+from proxyshop_support.redis_client import WorkerRedis
+
+from .test_accept_routes import RecordingCodeCreator  # the accept wiring, already tested
+from .test_exploration_slice import (  # the served POST /auctions this file has to drive
+    INTENT,
+    TRUST,
+    _app,
+    _domain,
+    _outcome,
+    _post,
+)
+
+#: The cluster the newcomers' outcomes are recorded in, kept off ``cluster-1`` so a test that
+#: accidentally read the default cluster's untouched prior fails instead of passing.
+LEARNED_CLUSTER = "cluster-9"
+
+#: Two stores the snapshot marks ``low_data`` — the only candidates the slice may promote.
+NEWCOMERS = ("store-x", "store-y")
+
+
+@pytest.fixture
+def durable_env(monkeypatch: pytest.MonkeyPatch, redis_client: WorkerRedis) -> WorkerRedis:
+    """An environment that selects the durable book, with this worker's Redis flushed.
+
+    ``redis_client`` is the root conftest's fixture: this worker's logical DB and ``w{N}:``
+    prefix (D39), ``FLUSHDB``-ed before and after. Requesting it is also what makes these tests
+    SKIP cleanly rather than fail when the stack is down.
+
+    ``EXCHANGE_DEPLOYMENT`` is cleared so ``ensure_configured`` takes its no-document branch —
+    the branch the shipped container actually lands in, because ``apps/exchange/compose.yaml``
+    forwards named variables into an image whose deployment document is generated by a script.
+    ``EXCHANGE_AUCTION_STORE`` is pinned to ``memory`` so a developer shell that already
+    selects Redis for auctions cannot make these assertions about the posterior book depend on
+    the auction store as well.
+    """
+    monkeypatch.setenv(ENV_BANDIT_POSTERIORS, "redis")
+    monkeypatch.delenv("EXCHANGE_DEPLOYMENT", raising=False)
+    monkeypatch.delenv("EXCHANGE_DEPLOYMENT_JSON", raising=False)
+    monkeypatch.setenv("EXCHANGE_AUCTION_STORE", "memory")
+    return redis_client
+
+
+@pytest.fixture
+def unwired() -> Any:
+    """Leave the process-wide registered-domain registry exactly as this test found it.
+
+    ``configure_accept(registered_domains=...)`` turns a PROCESS-wide seam as well as this
+    app's, so a test that wires the accept path has to put it back. The twin of this fixture
+    lives in ``test_accept_feeds_the_bandit.py`` for the same reason.
+    """
+    previous = use_registered_domains(None)
+    try:
+        yield
+    finally:
+        use_registered_domains(previous)
+
+
+def acceptable(app: Any, stores: dict[str, float]) -> None:
+    """Wire what ``POST /auctions/{id}/accept`` needs that ``POST /auctions`` does not.
+
+    The accept path mints a checkout, so it checks the chosen store's host against the
+    platform's OWN registry and refuses ``checkout_refused: OffDomainCheckout`` without one.
+    ``_app`` binds the registry the RANKING reads; this binds the one the accept reads, against
+    the same hosts. Nothing here touches the posterior book — that is still the composition
+    root's job, which is the whole measurement.
+    """
+    configure_accept(
+        app,
+        code_creator=RecordingCodeCreator(),
+        checkout_mode="shopify",
+        registered_domains=StaticRegisteredDomains({s: _domain(s) for s in stores}),
+        eligibility=StaticSellerEligibility({store: ELIGIBLE for store in stores}),
+    )
+
+
+def seeded_prior(store_id: str, score: float) -> Any:
+    """The pair's starting posterior, through the model's own seeder rather than a constant.
+
+    ``_app`` states ``confidence: 0.5`` for every store, so ``PRIOR_WEIGHT * 0.5 = 2.0``
+    pseudo-observations are split by the score. Written this way so the assertion below reads as
+    "the trust-seeded prior plus exactly one win" instead of as two magic numbers that stop
+    meaning anything the day the seeding changes.
+    """
+    snapshot = {store_id: {"blacklisted": False, "score": score, "confidence": 0.5}}
+    return initial_state([store_id], ["c"], snapshot).posteriors["c"][store_id]
+
+
+def newcomer_app(low_data: tuple[str, ...] = NEWCOMERS) -> Any:
+    """The four incumbents plus the two newcomers, wired exactly as the slice suite wires them.
+
+    Note what is NOT called: ``configure_outcomes``. The posterior book has to arrive from the
+    composition root or these tests measure nothing.
+    """
+    stores = {**TRUST, **{store: 0.10 for store in low_data}}
+    app = _app(stores, low_data=low_data)
+    assert getattr(app.state, "bandit_posteriors", None) is None, (
+        "the fixture wired a posterior book itself; then nothing here measures the composition "
+        "root, which is the half that was missing"
+    )
+    return app, stores
+
+
+def teach(app: Any, *, winner: str, loser: str, rounds: int = 20) -> None:
+    """Push ``rounds`` wins into ``winner`` and ``rounds`` losses into ``loser``.
+
+    Through the published door over HTTP — ``POST /internal/outcomes`` — and never by calling
+    ``book.record``, so the write path under test is the served one.
+    """
+    client = TestClient(app)
+    for _ in range(rounds):
+        assert (
+            client.post(
+                "/internal/outcomes", json=_outcome(winner, LEARNED_CLUSTER, delta=1.0)
+            ).status_code
+            == 204
+        )
+        assert (
+            client.post(
+                "/internal/outcomes", json=_outcome(loser, LEARNED_CLUSTER, delta=-1.0)
+            ).status_code
+            == 204
+        )
+
+
+def explored(app: Any, stores: dict[str, float]) -> Any:
+    """The shop the served ``POST /auctions`` promoted into the exploration slot."""
+    body = _post(app, stores, intent={**INTENT, "cluster_id": LEARNED_CLUSTER})
+    assert body["exploration"] is not None, body
+    return body["exploration"]["store_id"]
+
+
+def pairs_in_redis(client: WorkerRedis) -> dict[str, str]:
+    """The raw hash this exchange's learning lives in, as Redis holds it."""
+    return dict(client.hgetall(POSTERIORS_KEY) or {})
+
+
+# =====================================================================================
+# 1. Reachability — the composition root, and the served accept, and Redis
+# =====================================================================================
+@pytest.mark.docker
+def test_the_composition_root_is_what_binds_the_durable_book(durable_env: WorkerRedis) -> None:
+    """A served request is what installs it; nothing in this test wires a book.
+
+    The positive control for the whole file. ``EXCHANGE_BANDIT_POSTERIORS`` was chosen to be an
+    ENVIRONMENT variable rather than a deployment-document key precisely so this works with no
+    document at all — ``apps/exchange/compose.yaml`` records the twin trap in its own words for
+    ``EXCHANGE_SHOP_ROSTER``: "⚠️ IT DOES NOTHING ON ITS OWN".
+    """
+    app, stores = newcomer_app()
+
+    _post(app, stores)
+
+    book = bandit_posteriors_of(app)
+    assert isinstance(book, RedisBanditPosteriors), (
+        f"the served auction ran with {type(book).__name__} — the exchange the composition root "
+        f"builds is not the one holding the durable posteriors"
+    )
+
+
+@pytest.mark.docker
+def test_the_document_branch_binds_it_too_which_is_the_branch_compose_takes(
+    durable_env: WorkerRedis, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ensure_configured`` has two branches and the SHIPPED container takes the other one.
+
+    ``durable_env`` clears ``EXCHANGE_DEPLOYMENT`` so the other tests here exercise the
+    no-document branch. ``apps/exchange/compose.yaml`` does not: it defaults
+    ``EXCHANGE_DEPLOYMENT`` to ``/srv/deploy/exchange-deployment.json`` and mounts the file, so
+    every real deployment goes through ``configure_exchange`` instead. A binding that only
+    existed on the branch the tests happened to take would be unreachable in production while
+    this file stayed green — which is the exact failure mode this repository keeps hitting.
+    """
+    monkeypatch.setenv(
+        "EXCHANGE_DEPLOYMENT_JSON",
+        json.dumps(
+            {
+                "sellers": [
+                    {
+                        "store_id": store,
+                        "eligibility": "eligible",
+                        "registered_domain": _domain(store),
+                    }
+                    for store in NEWCOMERS
+                ],
+                "trust_snapshot": {
+                    store: {"store_id": store, "blacklisted": False, "score": 0.5, "low_data": True}
+                    for store in NEWCOMERS
+                },
+                "checkout_mode": "redirect",
+            }
+        ),
+    )
+    app = create_app()
+
+    response = TestClient(app).post(
+        "/internal/outcomes", json=_outcome("store-x", LEARNED_CLUSTER, delta=1.0)
+    )
+    assert response.status_code == 204, response.text
+
+    # Non-vacuous: STATE_FLAG is set ONLY by the document branch, so this asserts the request
+    # really went that way rather than falling through to the no-document branch the other
+    # tests here drive and passing for the wrong reason.
+    bound = getattr(app.state, STATE_FLAG, None)
+    assert bound is not None, "EXCHANGE_DEPLOYMENT_JSON was ignored; this test proves nothing"
+    assert "bandit_posteriors" in bound, bound
+
+    book = bandit_posteriors_of(app)
+    assert isinstance(book, RedisBanditPosteriors), (
+        f"the document branch of ensure_configured left {type(book).__name__} in place — the "
+        f"shipped container would keep the process-local book"
+    )
+    assert pairs_in_redis(durable_env), "the document branch bound a book that wrote nothing"
+
+
+@pytest.mark.docker
+def test_the_served_outcomes_door_writes_the_posterior_into_redis(
+    durable_env: WorkerRedis,
+) -> None:
+    """One HTTP POST in, one Beta pair out — read back off the datastore, not off the object.
+
+    The claim this file exists to support is that the learning is IN REDIS, so it is read out
+    of Redis with a client this test built for itself, at the key an operator would look at.
+    """
+    app, _stores = newcomer_app()
+    assert pairs_in_redis(durable_env) == {}
+
+    response = TestClient(app).post(
+        "/internal/outcomes", json=_outcome("store-x", LEARNED_CLUSTER, delta=1.0)
+    )
+    assert response.status_code == 204, response.text
+
+    prior = seeded_prior("store-x", 0.10)
+    held = pairs_in_redis(durable_env)
+    assert sorted(held) == [f"{LEARNED_CLUSTER}:store-x:a", f"{LEARNED_CLUSTER}:store-x:b"], held
+    assert float(held[f"{LEARNED_CLUSTER}:store-x:a"]) == pytest.approx(prior.alpha + 1.0), held
+    assert float(held[f"{LEARNED_CLUSTER}:store-x:b"]) == pytest.approx(prior.beta), held
+    # And the key an operator would look at is the namespaced one, so a sibling worker's
+    # FLUSHDB cannot reach it (D39).
+    assert durable_env.key(POSTERIORS_KEY).startswith(durable_env.prefix)
+
+
+@pytest.mark.docker
+def test_the_served_accept_writes_both_a_win_and_a_loss_into_redis(
+    durable_env: WorkerRedis, unwired: None
+) -> None:
+    """``POST /auctions/{id}/accept`` — the production producer — reaches the durable book.
+
+    Driven over the real socket: a real ``POST /auctions`` produces the shortlist, and the
+    accept of one of its slots is what folds the outcomes. Recording only the win would leave
+    every posterior rising together, so both directions are asserted from the datastore.
+    """
+    app, stores = newcomer_app()
+    acceptable(app, stores)
+    body = _post(app, stores, intent={**INTENT, "cluster_id": LEARNED_CLUSTER})
+    slots = body["shortlist"]["slots"]
+    assert len(slots) >= 2, body["shortlist"]
+    chosen = slots[0]["bid_ref"]
+    winner = chosen.split(":", 1)[1]
+    shown = [slot["bid_ref"].split(":", 1)[1] for slot in slots]
+
+    accepted = TestClient(app).post(
+        f"/auctions/{body['auction_id']}/accept", json={"bid_ref": chosen}
+    )
+    assert accepted.status_code == 200, accepted.text
+
+    # Measured against each store's OWN trust-seeded prior rather than by comparing alpha with
+    # beta: a well-trusted store starts with more alpha than beta, so "alpha > beta" would pass
+    # for a store that took no outcome at all. One win is +1 alpha and nothing else; one loss is
+    # +1 beta and nothing else.
+    held = pairs_in_redis(durable_env)
+    for store in shown:
+        prior = seeded_prior(store, stores[store])
+        alpha = float(held[f"{LEARNED_CLUSTER}:{store}:a"])
+        beta = float(held[f"{LEARNED_CLUSTER}:{store}:b"])
+        if store == winner:
+            assert (alpha, beta) == pytest.approx((prior.alpha + 1.0, prior.beta)), (
+                f"the store the buyer chose did not take exactly one win in Redis: "
+                f"{store} {(alpha, beta)} against prior {(prior.alpha, prior.beta)}"
+            )
+        else:
+            assert (alpha, beta) == pytest.approx((prior.alpha, prior.beta + 1.0)), (
+                f"a store that was shown and passed over did not take exactly one loss in "
+                f"Redis: {store} {(alpha, beta)} against prior {(prior.alpha, prior.beta)}"
+            )
+
+
+# =====================================================================================
+# 2. The whole point: it survives the restart
+# =====================================================================================
+@pytest.mark.docker
+def test_the_exploration_slot_moves_the_same_way_after_a_restart(
+    durable_env: WorkerRedis,
+) -> None:
+    """Record, throw the process's app away, and the served auction still promotes the same shop.
+
+    This is the single piece of evidence the whole module is for. The second app shares NOTHING
+    with the first — new ``create_app()``, new ``app.state``, new
+    :class:`~exchange.policy.durable.RedisBanditPosteriors`, new client — except the datastore.
+    """
+    first, stores = newcomer_app()
+    teach(first, winner="store-x", loser="store-y")
+    before = explored(first, stores)
+    assert before == "store-x", (
+        f"the slice did not follow the outcomes even BEFORE any restart (promoted {before!r}); "
+        f"this test cannot say anything about durability until that holds"
+    )
+    held = pairs_in_redis(durable_env)
+
+    # THE RESTART. Nothing of the first app survives it.
+    del first
+    second, _stores = newcomer_app()
+
+    assert explored(second, stores) == "store-x", (
+        "a restarted exchange promoted a different shop into the exploration slot — the "
+        "posteriors did not survive"
+    )
+    after = pairs_in_redis(durable_env)
+    assert after[f"{LEARNED_CLUSTER}:store-x:a"] == held[f"{LEARNED_CLUSTER}:store-x:a"], (
+        f"the restart moved store-x's alpha: {held} -> {after}"
+    )
+
+
+@pytest.mark.docker
+def test_the_process_local_book_is_the_control_and_loses_everything(
+    monkeypatch: pytest.MonkeyPatch, redis_client: WorkerRedis
+) -> None:
+    """``EXCHANGE_BANDIT_POSTERIORS=memory`` is the old behaviour, and it is still gone.
+
+    Without this control the test above proves only that the assertion can pass, not that it
+    could ever have failed — the defect being fixed has to be reproducible on demand.
+    """
+    monkeypatch.setenv(ENV_BANDIT_POSTERIORS, "memory")
+    monkeypatch.delenv("EXCHANGE_DEPLOYMENT", raising=False)
+    monkeypatch.delenv("EXCHANGE_DEPLOYMENT_JSON", raising=False)
+    monkeypatch.setenv("EXCHANGE_AUCTION_STORE", "memory")
+
+    first, _stores = newcomer_app()
+    teach(first, winner="store-x", loser="store-y", rounds=5)
+    assert isinstance(bandit_posteriors_of(first), InMemoryBanditPosteriors)
+    assert first.state.bandit_posteriors.state() is not None
+
+    del first
+    second, _stores = newcomer_app()
+    TestClient(second).post("/internal/outcomes", json=_outcome("store-z", "cluster-3", delta=1.0))
+
+    survived = second.state.bandit_posteriors.state()
+    assert survived is not None
+    assert LEARNED_CLUSTER not in survived.posteriors, (
+        f"the in-memory book kept a cluster from before the restart: {sorted(survived.posteriors)}"
+    )
+    assert redis_client.hgetall(POSTERIORS_KEY) == {}, (
+        "the memory book wrote to Redis anyway, so the two words select the same thing"
+    )
+
+
+# =====================================================================================
+# 3. Redis down must not break an auction — and healthy Redis must be silent
+# =====================================================================================
+def test_an_unreachable_redis_still_serves_the_auction_and_still_records(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Point the client at a closed port, drive the served door, and read the three properties.
+
+    The auction serves, the outcome is folded into the in-process fallback so the exploration
+    slice still has something to read within this process, and exactly one WARNING names what
+    an operator has to fix. No Redis fixture: the whole point is that there is no Redis.
+    """
+    monkeypatch.setenv(ENV_BANDIT_POSTERIORS, "redis")
+    monkeypatch.setenv("REDIS_URL", "redis://127.0.0.1:1")
+    monkeypatch.delenv("EXCHANGE_DEPLOYMENT", raising=False)
+    monkeypatch.delenv("EXCHANGE_DEPLOYMENT_JSON", raising=False)
+    monkeypatch.setenv("EXCHANGE_AUCTION_STORE", "memory")
+    app, stores = newcomer_app()
+
+    with caplog.at_level(logging.WARNING, logger="exchange.policy.durable"):
+        outcome = TestClient(app).post(
+            "/internal/outcomes", json=_outcome("store-x", LEARNED_CLUSTER, delta=1.0)
+        )
+        body = _post(app, stores, intent={**INTENT, "cluster_id": LEARNED_CLUSTER})
+
+    assert outcome.status_code == 204, outcome.text
+    assert body["shortlist"]["slots"], "the auction served no shortlist while Redis was down"
+
+    book = bandit_posteriors_of(app)
+    assert isinstance(book, RedisBanditPosteriors)
+    fallen_back = book.state()
+    assert fallen_back is not None, "the outcome was dropped rather than degraded"
+    assert fallen_back.posteriors[LEARNED_CLUSTER]["store-x"].alpha > 1.0, (
+        "the fallback book took the outcome but did not fold it"
+    )
+
+    complaints = [
+        r
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and r.name == "exchange.policy.durable"
+    ]
+    assert complaints, "a silent degradation to a process-local book is the defect, not the fix"
+    said = complaints[0].getMessage()
+    assert "UNAVAILABLE" in said and "REDIS_URL" in said, said
+
+
+@pytest.mark.docker
+def test_a_healthy_book_says_nothing_at_all(
+    durable_env: WorkerRedis, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The honest direction, which is the one this repository's gates keep skipping.
+
+    A book that warns on the healthy path teaches an operator to filter the one line that
+    matters, so "Redis is fine" has to be indistinguishable from "nothing happened" in the log.
+    """
+    app, stores = newcomer_app()
+    with caplog.at_level(logging.WARNING, logger="exchange.policy.durable"):
+        teach(app, winner="store-x", loser="store-y", rounds=3)
+        _post(app, stores, intent={**INTENT, "cluster_id": LEARNED_CLUSTER})
+
+    # Filtered to this module's logger. `caplog.records` is every record the run produced, and
+    # this stack legitimately warns about other things a test has not stood up (the trust
+    # ledger's endpoint, for one); the claim being made is about the POSTERIOR BOOK's silence.
+    noisy = [
+        r.getMessage()
+        for r in caplog.records
+        if r.levelno >= logging.WARNING and r.name == "exchange.policy.durable"
+    ]
+    assert noisy == [], f"a healthy durable book complained: {noisy}"
+
+
+@pytest.mark.docker
+def test_a_book_that_comes_back_says_so_once_and_then_goes_quiet(
+    redis_client: WorkerRedis, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Recovery is announced at INFO, exactly once, and the writes resume.
+
+    Without this an operator who fixed Redis has no way to tell from the log that the exchange
+    noticed — the outage line would be the last word on the subject forever, which is how a
+    fixed system goes on looking broken. The retry cooldown is stepped past by hand rather than
+    slept through: ``RETRY_AFTER_SECONDS`` is ten seconds and a test may not spend them.
+    """
+
+    class _Refusing:
+        """A client that fails every command, then is swapped for the real one."""
+
+        def __getattr__(self, name: str) -> Any:
+            def boom(*_args: Any, **_kwargs: Any) -> Any:
+                raise ConnectionError("connection refused")
+
+            return boom
+
+    book = RedisBanditPosteriors(_Refusing())
+    with caplog.at_level(logging.INFO, logger="exchange.policy.durable"):
+        book.record("store-a", "cluster-1", True)
+        assert book._degraded is True
+
+        book._client = redis_client
+        book._blocked_until = 0.0
+        book.record("store-a", "cluster-1", True)
+        book.record("store-a", "cluster-1", True)
+
+    mine = [r for r in caplog.records if r.name == "exchange.policy.durable"]
+    warnings = [r.getMessage() for r in mine if r.levelno >= logging.WARNING]
+    recoveries = [r.getMessage() for r in mine if "reachable again" in r.getMessage()]
+    assert len(warnings) == 1, warnings
+    assert len(recoveries) == 1, f"recovery was announced {len(recoveries)} times: {recoveries}"
+    assert redis_client.hgetall(POSTERIORS_KEY), "the recovered book wrote nothing to Redis"
+
+
+# =====================================================================================
+# 4. D55 — conversion may move the exploration slot and nothing else
+# =====================================================================================
+def test_the_rank_formula_did_not_gain_a_sixth_feature() -> None:
+    """The five published features, named. A conversion term here would be a signal buying rank.
+
+    ``contracts.ranking.RANK_FEATURES`` is the published list and this asserts it verbatim, so
+    a future "conversion_rate" feature cannot be added to the ranked formula without failing a
+    test that says why it may not be.
+    """
+    assert RANK_FEATURES == (
+        "intent_match",
+        "verified_claim_ratio",
+        "trust",
+        "price_value",
+        "delivery_fit",
+    ), RANK_FEATURES
+
+
+@pytest.mark.docker
+def test_what_the_book_learned_decides_the_slice_and_never_a_rank_score(
+    durable_env: WorkerRedis,
+) -> None:
+    """Teach it two opposite lessons. The exploration slot swaps; every ``rank_score`` does not.
+
+    D55 as an executable statement, driven over two real ``POST /auctions`` calls. A scraped
+    shop is an organic result and an in-network shop buys the right to make its case — never
+    visibility, never score — so a conversion record may move WHICH low-data shop gets the one
+    exploration slot and may never move the published order or any component of it.
+
+    Two opposite lessons rather than "taught vs untaught", because untaught is a coin flip: the
+    sampler is seeded from the auction id, two POSTs are two auctions, and an untaught pair of
+    equally-primed newcomers comes out either way. Teaching each direction decisively makes the
+    slice's answer deterministic in both runs, so the assertion is about the learning and not
+    about which uuid the second request drew.
+
+    The book is emptied between the two lessons because both apps share one datastore — that is
+    the whole point of the datastore — and the second lesson would otherwise be folded on top of
+    the first.
+    """
+    first, stores = newcomer_app()
+    teach(first, winner="store-x", loser="store-y")
+    body_x = _post(first, stores, intent={**INTENT, "cluster_id": LEARNED_CLUSTER})
+
+    durable_env.delete(POSTERIORS_KEY)
+    durable_env.delete(PAIRS_KEY)
+
+    second, _stores = newcomer_app()
+    teach(second, winner="store-y", loser="store-x")
+    body_y = _post(second, stores, intent={**INTENT, "cluster_id": LEARNED_CLUSTER})
+
+    assert body_x["exploration"]["store_id"] == "store-x", body_x["exploration"]
+    assert body_y["exploration"]["store_id"] == "store-y", body_y["exploration"]
+
+    def scores(body: dict[str, Any]) -> list[tuple[str, float]]:
+        return [(row["store_id"], row["rank_score"]) for row in body["ranked"]]
+
+    assert scores(body_x) == scores(body_y), (
+        "forty conversion outcomes moved rank_score — a signal bought rank, which D55 forbids:\n"
+        f"  taught store-x: {scores(body_x)}\n  taught store-y: {scores(body_y)}"
+    )
+    # And the cost to the shopper is the published bound: one slot, out of at most four.
+    assert len(body_x["shortlist"]["slots"]) <= 4
+    assert body_x["exploration"]["slot"] == body_y["exploration"]["slot"], (
+        f"the slice took a different slot depending on what the book learned: "
+        f"{body_x['exploration']} vs {body_y['exploration']}"
+    )
+
+
+@pytest.mark.docker
+def test_the_fail_closed_flags_never_reach_a_served_shortlist(durable_env: WorkerRedis) -> None:
+    """``state()`` marks every store blacklisted; the served path re-derives R12 from trust.
+
+    The durable book holds conversion counts and no trust snapshot, so its ``BanditState``
+    cannot answer "is this store blacklisted" honestly and answers it fail-closed. That is only
+    safe because ``exploration.exposure_shares`` builds its own state from the LIVE snapshot and
+    carries across ``posteriors`` alone — this pins that, so a future refactor that started
+    trusting the book's flags fails here instead of silently denying every store.
+    """
+    app, _stores = newcomer_app()
+    teach(app, winner="store-x", loser="store-y", rounds=3)
+    book = bandit_posteriors_of(app)
+
+    learned = book.state()
+    assert learned is not None
+    assert learned.blacklisted == frozenset(learned.stores), learned.blacklisted
+    assert learned.low_data == frozenset()
+
+    snapshot = {
+        store: {"blacklisted": False, "score": 0.5, "confidence": 0.5, "low_data": True}
+        for store in NEWCOMERS
+    }
+    shares = exposure_shares(
+        book,
+        stores=list(NEWCOMERS),
+        cluster_id=LEARNED_CLUSTER,
+        trust_snapshot=snapshot,
+        seed="auction-1",
+    )
+    assert shares and any(value > 0.0 for value in shares.values()), (
+        f"the book's fail-closed blacklist reached the served exposure decision: {shares}"
+    )
+    assert shares["store-x"] > shares["store-y"], shares
+
+
+# =====================================================================================
+# 5. The bound
+# =====================================================================================
+@pytest.mark.docker
+def test_the_book_evicts_least_recently_written_pairs_at_its_cap(
+    redis_client: WorkerRedis,
+) -> None:
+    """A pair is created by a caller naming one on an unauthenticated door, so it is capped.
+
+    Eviction rather than refusal: an attacker who filled a refusing book once would lock real
+    stores out of it until the TTL expired, while under eviction their junk is the coldest thing
+    in the book and honest traffic pushes it straight back out. The pair being written is
+    touched FIRST, so it can never be the pair the eviction removes.
+    """
+    book = RedisBanditPosteriors(redis_client, max_pairs=3)
+    for index in range(5):
+        book.record(f"store-{index}", "cluster-1", True)
+
+    held = redis_client.hgetall(POSTERIORS_KEY) or {}
+    stores = sorted({field.split(":")[1] for field in held})
+    assert stores == ["store-2", "store-3", "store-4"], stores
+    assert int(redis_client.zcard(PAIRS_KEY)) == 3
+
+    state = book.state()
+    assert state is not None
+    assert set(state.stores) == {"store-2", "store-3", "store-4"}
+
+
+@pytest.mark.docker
+def test_an_over_long_identifier_is_not_persisted_but_is_still_folded(
+    redis_client: WorkerRedis,
+) -> None:
+    """The bound that makes the pair cap a BYTE cap, and the direction it fails in.
+
+    The outcomes door already holds one request to 128-character names; this holds the
+    DATASTORE to 64, because every served auction reads the whole book back and a durable
+    structure keeps what it is given. Measured on this repository at ``PROXYSHOP_WORKER=9``: a
+    full book of 128-character names is 1514 KiB and 79.8 ms per ``state()``; the same cap at 64
+    is 373 KiB and 21.1 ms. Nothing is REFUSED, though — the outcome still lands in the
+    in-process book, because "we do not keep this one across restarts" is a much smaller claim
+    than "this did not happen".
+    """
+    book = RedisBanditPosteriors(redis_client)
+    long_store = "s" * (MAX_DURABLE_IDENTIFIER_CHARS + 1)
+    book.record(long_store, "cluster-1", True)
+
+    assert redis_client.hgetall(POSTERIORS_KEY) == {}, "an over-long name reached the datastore"
+    state = book.state()
+    assert state is not None, "the outcome was dropped rather than kept in the fallback"
+    assert state.posteriors["cluster-1"][long_store].alpha == 2.0
+
+    # ...and a name at the ceiling is kept, so the bound is a boundary and not a blanket.
+    book.record("s" * MAX_DURABLE_IDENTIFIER_CHARS, "cluster-1", True)
+    assert redis_client.hgetall(POSTERIORS_KEY), "the ceiling itself was refused"
+
+
+@pytest.mark.docker
+def test_the_worst_case_read_a_caller_can_build_stays_bounded(
+    redis_client: WorkerRedis,
+) -> None:
+    """The two caps multiplied out, asserted as bytes rather than trusted as reasoning.
+
+    Every served ``POST /auctions`` reads the whole book back, so an oversized book is a
+    permanent, restart-surviving latency amplifier with an unauthenticated handle on it. This
+    fills the book the way a caller could and holds the result under half a megabyte.
+    """
+    book = RedisBanditPosteriors(redis_client)
+    cluster = "%" * MAX_DURABLE_IDENTIFIER_CHARS
+    for index in range(DEFAULT_MAX_PAIRS + 40):
+        book.record(("%" * (MAX_DURABLE_IDENTIFIER_CHARS - 8)) + f"{index:08d}", cluster, True)
+
+    held = redis_client.hgetall(POSTERIORS_KEY)
+    assert len(held) == 2 * DEFAULT_MAX_PAIRS, len(held)
+    payload = sum(len(key) + len(value) for key, value in held.items())
+    assert payload < 512 * 1024, f"the worst-case book is {payload / 1024:.0f} KiB"
+
+
+@pytest.mark.docker
+def test_both_keys_carry_the_expiry(redis_client: WorkerRedis) -> None:
+    """A deployment that stops recording stops holding, rather than holding forever."""
+    book = RedisBanditPosteriors(redis_client, ttl_seconds=1234)
+    book.record("store-a", "cluster-1", True)
+
+    assert 0 < int(redis_client.ttl(POSTERIORS_KEY)) <= 1234
+    assert 0 < int(redis_client.ttl(PAIRS_KEY)) <= 1234
+
+
+@pytest.mark.docker
+def test_an_identifier_cannot_forge_another_pairs_field(redis_client: WorkerRedis) -> None:
+    """Both halves of the key are caller-chosen, so both are percent-encoded before joining.
+
+    Unencoded, ``cluster_id="a"`` with ``store_id="b:c"`` and ``cluster_id="a:b"`` with
+    ``store_id="c"`` produce the same field, and one anonymous caller writes into a posterior
+    it did not name.
+    """
+    book = RedisBanditPosteriors(redis_client)
+    book.record("b:c", "a", True)
+    book.record("c", "a:b", True)
+
+    state = book.state()
+    assert state is not None
+    assert sorted(state.clusters) == ["a", "a:b"], state.clusters
+    assert state.posteriors["a"]["b:c"].alpha == 2.0
+    assert state.posteriors["a:b"]["c"].alpha == 2.0
+
+
+@pytest.mark.docker
+def test_two_replicas_recording_at_once_both_land(redis_client: WorkerRedis) -> None:
+    """The divergence this module removes rather than relocates.
+
+    ``apps/exchange/compose.yaml`` runs one uvicorn worker today and the header of
+    ``policy/routes.py`` names two behind one load balancer as the case it could not serve. Two
+    books over one datastore are that case: a read-modify-write of a single blob would drop one
+    of these two wins, which is why the increments are ``HINCRBYFLOAT`` and the seeding is
+    ``HSETNX``.
+    """
+    left = RedisBanditPosteriors(redis_client)
+    right = RedisBanditPosteriors(redis_client)
+
+    left.record("store-a", "cluster-1", True)
+    right.record("store-a", "cluster-1", True)
+
+    state = left.state()
+    assert state is not None
+    assert state.posteriors["cluster-1"]["store-a"].alpha == 3.0, (
+        f"one replica's win was lost: {state.posteriors['cluster-1']['store-a']}"
+    )
+    assert right.state().posteriors["cluster-1"]["store-a"].alpha == 3.0
+
+
+@pytest.mark.docker
+def test_the_prior_is_the_trust_seeded_one_and_only_the_first_writer_sets_it(
+    redis_client: WorkerRedis,
+) -> None:
+    """A pair starts where ``bandit.initial_state`` says it starts, in both books.
+
+    ``score=0.8`` at ``confidence=0.5`` is ``PRIOR_WEIGHT * 0.5 = 2.0`` pseudo-observations
+    split 0.8/0.2, i.e. ``(2.6, 1.4)``; one win makes it ``(3.6, 1.4)``. A second writer
+    arriving with a DIFFERENT snapshot must not reset that — ``HSETNX`` loses to whoever got
+    there first, so the second store's learning is added to and not overwritten.
+    """
+    snapshot = {"store-a": {"blacklisted": False, "score": 0.8, "confidence": 0.5}}
+    book = RedisBanditPosteriors(redis_client)
+    book.record("store-a", "cluster-1", True, trust_snapshot=snapshot)
+    seeded = book.state().posteriors["cluster-1"]["store-a"]
+    assert (seeded.alpha, seeded.beta) == pytest.approx((3.6, 1.4)), seeded
+
+    other = {"store-a": {"blacklisted": False, "score": 0.1, "confidence": 1.0}}
+    RedisBanditPosteriors(redis_client).record("store-a", "cluster-1", True, trust_snapshot=other)
+
+    after = book.state().posteriors["cluster-1"]["store-a"]
+    assert (after.alpha, after.beta) == pytest.approx((4.6, 1.4)), after
+
+
+@pytest.mark.docker
+def test_an_unreadable_field_costs_that_field_and_not_the_book(
+    redis_client: WorkerRedis,
+) -> None:
+    """This reads a datastore other processes and other versions of this file write into."""
+    book = RedisBanditPosteriors(redis_client)
+    book.record("store-a", "cluster-1", True)
+    redis_client.hset(POSTERIORS_KEY, "not-a-pair", "banana")
+    redis_client.hset(POSTERIORS_KEY, "cluster-1:store-b:a", "not-a-number")
+
+    state = book.state()
+    assert state is not None
+    assert state.posteriors["cluster-1"]["store-a"].alpha == 2.0
+    assert "store-b" not in state.stores, state.stores

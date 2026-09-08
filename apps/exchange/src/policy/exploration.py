@@ -158,9 +158,11 @@ def _learned(book: Any) -> BanditState | None:
     """The posteriors this process has actually recorded, or ``None``.
 
     Accepts a :class:`~.bandit.BanditState` directly or anything exposing ``state()`` — the shape
-    :class:`~.routes.InMemoryBanditPosteriors` publishes and the seam D26's Redis-backed model
-    plugs into. A book that raises is a book that knows nothing: exploration must not be able to
-    fail an auction.
+    both books publish: :class:`~.routes.InMemoryBanditPosteriors` and D26's Redis-backed
+    :class:`~.durable.RedisBanditPosteriors`, which is what the shipped ``apps/exchange/compose.yaml``
+    binds. A book that raises is a book that knows nothing: exploration must not be able to fail
+    an auction — and the durable one never raises here anyway, because an unreachable Redis
+    degrades it to an in-process book rather than failing the read.
     """
     if book is None:
         return None
@@ -187,8 +189,8 @@ def exposure_shares(
     """``{store_id: share}`` for THIS auction's stores in THIS auction's cluster.
 
     The state is built for the auction rather than read out of the book, and that is the load
-    bearing difference between this and a plain ``book.state()``: :class:`InMemoryBanditPosteriors`
-    grows one ``(cluster, store)`` pair per RECORDED OUTCOME, so a store that has never converted
+    bearing difference between this and a plain ``book.state()``: both books grow one
+    ``(cluster, store)`` pair per RECORDED OUTCOME, so a store that has never converted
     — which is every store this module exists for — appears in it nowhere. Reading the book alone
     would report no share for exactly the candidates the exploration slice is meant to find.
 

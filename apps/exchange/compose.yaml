@@ -86,6 +86,52 @@ services:
       # `ensure_configured` binds the machine on both branches. An unreachable Redis is a 503
       # naming the store, never a silent downgrade to the in-memory one.
       EXCHANGE_AUCTION_STORE: "${EXCHANGE_AUCTION_STORE:-redis}"
+      # WHERE THIS EXCHANGE'S LEARNING LIVES — the same question one line above, asked about
+      # the bandit instead of the auction. `redis` is the durable book
+      # (`exchange.policy.durable.RedisBanditPosteriors`); anything else, or empty, is the
+      # process-local one every deployment ran until this line existed.
+      #
+      # It is here because the loop is CLOSED on the served path and was being thrown away
+      # anyway. `POST /auctions/{id}/accept` folds one win for the store the buyer chose and
+      # one loss for every other store the same auction showed; `ranking/serving.py` spends
+      # the result on one shortlist slot of four. `policy/routes.py` stated the cost in its own
+      # header — "What is persisted, said plainly: nothing" — and this container runs
+      # `restart: unless-stopped`, so every restart wiped the market's memory. The demo page at
+      # `apps/buyer/app/learning/` exists to show that loop move.
+      #
+      # DEFAULTED OFF, and it was defaulted ON when this was written. An adversarial review of
+      # the durable book found two defects on the SERVED path, both of which this variable's
+      # default decides whether anyone ever meets:
+      #
+      #   * `durable.py`'s read materialises the CROSS PRODUCT of every cluster by every store
+      #     it holds, while `DEFAULT_MAX_PAIRS` bounds the recorded PAIRS. 512 pairs spread
+      #     across many clusters and stores is not 512 cells, it is up to 512 x 512 —
+      #     measured at 262,144 cells and 178 ms per served outcome — reached through the
+      #     unauthenticated `POST /auctions/{id}/accept` door and surviving a restart.
+      #   * the filler for a pair nobody recorded is `Posterior(1.0, 1.0)`, which is what
+      #     `bandit.initial_state` seeds ONLY when the trust snapshot says nothing about the
+      #     store. Where the snapshot DOES say something, the durable read flattens the
+      #     trust-seeded prior on the ranking path, and lets an outcome in one cluster move
+      #     another cluster's exposure.
+      #
+      # Neither is a reason to throw the book away — the wiring, the reachability and the D55
+      # bound were all confirmed by driving the served route — but a demo must not ship a
+      # ranking-correctness bug to buy a nicety. Empty is the OLD behaviour, unchanged:
+      # `bandit_posteriors_from_env` reads an empty value as "this environment said nothing"
+      # and the process-local book is created lazily exactly as before. Set this to `redis`
+      # once the two above are closed, or to `memory` to state the process-local book
+      # explicitly.
+      #
+      # UNLIKE EXCHANGE_SHOP_ROSTER, it works with no deployment document: `ensure_configured`
+      # binds the book on both of its branches (`composition.bind_bandit_posteriors`), so this
+      # line is not half a switch.
+      #
+      # A Redis this cannot reach is NOT a 503 and NOT a boot failure — the opposite ruling from
+      # EXCHANGE_AUCTION_STORE above, on purpose. An auction store that is down means no auction
+      # can be held; a posterior book that is down costs one exploration slot out of four and
+      # never touches rank or price, so it degrades to the in-memory book and says so at WARNING
+      # once per outage. The auction still serves.
+      EXCHANGE_BANDIT_POSTERIORS: "${EXCHANGE_BANDIT_POSTERIORS:-}"
       # R10'S BIDDING WINDOW, in seconds — how long the exchange waits for the stores it
       # solicited before every one of them falls back to its catalogue price.
       #
