@@ -88,13 +88,28 @@ PAGE_ORIGIN = "http://127.0.0.1:8100/"
 
 @pytest.fixture
 def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Nothing the runner's shell exports decides what any test here is configured with."""
+    """Nothing the runner's shell exports decides what any test here is configured with.
+
+    The magic-link variables are cleared BY PREFIX rather than by the :data:`MAGIC_LINK_ENVS`
+    tuple, and that is the difference between a test and a coincidence. Every test below is a
+    statement about one exact configuration — "an MTA named and no sender", "a transport
+    stated and no MTA" — and each is only that statement if the variables it does NOT set are
+    provably absent. A fixed tuple answers for the eight variables that existed when it was
+    written; a ninth, added by anyone, would silently join every test's environment and the
+    file would go on passing while testing something else. `scripts/verify.sh` sources `.env`
+    with `set -a`, and an operator who has been driving the stack by hand has these exported
+    too, so "the runner's shell" is not a hypothetical.
+    """
     import os
 
     from buyer_svc.auth.routes import WORKER_COUNT_ENVS
 
     for name in list(os.environ):
-        if name.startswith("PROXYSHOP_PG_DSN") or name in WORKER_COUNT_ENVS:
+        if (
+            name.startswith("PROXYSHOP_PG_DSN")
+            or name.startswith("PROXYSHOP_BUYER_MAGIC_LINK")
+            or name in WORKER_COUNT_ENVS
+        ):
             monkeypatch.delenv(name, raising=False)
     for name in (*MAGIC_LINK_ENVS, "PROXYSHOP_BUYER_K_ANONYMITY"):
         monkeypatch.delenv(name, raising=False)
@@ -562,4 +577,60 @@ def test_asking_whether_sign_in_is_offered_prints_no_token_and_no_credential_ban
     assert not printed.out.strip(), (
         f"asking whether sign-in is offered printed to stdout at all; this route is meant to "
         f"return before it reaches any transport:\n{printed.out}"
+    )
+
+
+def test_a_multi_worker_deployment_does_not_turn_every_page_load_into_a_500(
+    clean_env: None,
+    fresh_process_state: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`build_auth_service` has TWO documented failures, and both reach this route.
+
+    `MagicLinkTransportMisconfigured` is the one everything above is about.
+    `ProcessLocalStateUnsafe` is the other: a process manager asking for more than one worker,
+    which the builder refuses because sessions and unredeemed links live in one process's
+    memory and a link issued by one worker cannot be redeemed by another.
+
+    It used to escape this handler, and the cost was worse than an untidy traceback.
+    `auth_service()` caches only on SUCCESS, so `_service` stays `None` and the exception is
+    raised again on the next call — and this route is the FIRST thing the SPA asks on every
+    page load. MEASURED before the fix, on a served app with a working SMTP transport and
+    `WEB_CONCURRENCY=2`: `500 Internal Server Error` with a full traceback, on every load,
+    for every visitor, forever.
+
+    Answering `false` is the honest answer rather than the quiet one: that deployment cannot
+    complete a login for anybody, so offering the form would be the same broken promise a
+    missing MTA is. Nothing about the refusal is softened — the login door still refuses and
+    the reason is still in the log, which this pins too.
+    """
+    monkeypatch.setenv(TRANSPORT_ENV, "smtp")
+    monkeypatch.setenv(SMTP_URL_ENV, SINK_URL)
+    monkeypatch.setenv(STARTTLS_ENV, "disabled")
+    monkeypatch.setenv(SENDER_ENV, SENDER)
+    monkeypatch.setenv(BASE_URL_ENV, PAGE_ORIGIN)
+    # A mailing deployment in every other respect, so this test can only fail for the one
+    # reason it is about: without the worker variable it answers `true` (pinned above).
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+    _, client = _served_app()
+
+    with caplog.at_level(logging.ERROR, logger="buyer_svc.auth.routes"):
+        first = client.get(SIGN_IN_PATH)
+        second = client.get(SIGN_IN_PATH)
+
+    for nth, answered in (("first", first), ("second", second)):
+        assert answered.status_code == 200, (
+            f"the {nth} page load of a multi-worker deployment answered "
+            f"{answered.status_code}; the SPA asks this route before it renders anything, so "
+            f"a 5xx here is a traceback per visitor: {answered.text}"
+        )
+        assert answered.json() == {"offered": False}, (
+            f"the {nth} page load offered a sign-in form on a deployment where a link issued "
+            f"by one worker cannot be redeemed by another: {answered.json()}"
+        )
+    # The operator is told, rather than the page merely going quiet.
+    assert _errors(caplog), (
+        "the login stack could not be built and nothing was logged; the form disappearing "
+        "would be the only symptom an operator ever saw"
     )

@@ -1333,12 +1333,27 @@ def read_sign_in_offered() -> SignInOffered:
         return SignInOffered(offered=False)
     try:
         auth_service()
-    except MagicLinkTransportMisconfigured as exc:
-        # The same fact `get_auth_service` turns into a 503 for the login door, answered here
-        # as "do not offer the form". Logged at the same level and with the same words,
-        # because an operator who half-configured a transport needs to find out from the log
+    except (MagicLinkTransportMisconfigured, ProcessLocalStateUnsafe) as exc:
+        # The same facts `get_auth_service` turns into a refusal for the login door, answered
+        # here as "do not offer the form". Logged at the same level and with the same words,
+        # because an operator whose login stack cannot be built needs to find out from the log
         # either way — the page going quiet must not be the only symptom.
-        _log.error("sign-in is not offered: magic-link transport is misconfigured: %s", exc)
+        #
+        # BOTH of `build_auth_service`'s documented failures, not just the transport one.
+        # `ProcessLocalStateUnsafe` — a process manager configured for more than one worker —
+        # used to escape this handler, and the cost was not a tidier traceback: `auth_service`
+        # caches only on SUCCESS, so `_service` stayed `None` and the exception was raised
+        # again on the NEXT page load, and the next. MEASURED against a served app with
+        # `WEB_CONCURRENCY=2` and a working SMTP transport: `GET /buyer/auth/sign-in` answered
+        # `500 Internal Server Error` with a full traceback in the log, on every load, forever.
+        # This route is the first thing the SPA calls, so that is a traceback per visitor.
+        #
+        # Answering `false` is right rather than merely quieter. That deployment cannot log
+        # anybody in — a link issued by one worker cannot be redeemed by another, which is the
+        # whole reason the builder refuses — so a form there is the same broken promise the
+        # transport check exists to prevent. The refusal itself is not softened anywhere: the
+        # login door still refuses, and the reason is still in the log.
+        _log.error("sign-in is not offered: the login stack cannot be built: %s", exc)
         return SignInOffered(offered=False)
     return SignInOffered(offered=True)
 
