@@ -1186,18 +1186,51 @@ credibility problem by deleting the signal. What changes is what the term is fed
 2. **Insufficient observations means the promise is NOT ADMITTED**: the feature is ABSENT for that
    store and therefore reads the published neutral 0.5. A store with no shipping history can neither
    win this term nor be punished by it. The floor is `MIN_DISPATCH_OBSERVATIONS = 5.0` of evidence
-   mass in excess of `TRUST_PRIOR_MASS = 4.0`, and five is not a new number — it is the manifest's
-   own `new_store_prior_n`, already published as the count of clean episodes below which a store is
-   `low_data`. A second, different threshold for "watched enough to be believed" would let the
-   exchange and the trust system disagree about which stores are new, invisibly to both.
+   mass in excess of `TRUST_PRIOR_MASS = 4.0`.
+
+   **What that floor measures — corrected here, because the first draft of this entry said
+   something false and an adversarial read caught it.** It is WEIGHTED, DECAYED evidence mass, not
+   an episode count, and it could not be a count: `TrustDims` publishes exactly `alpha`, `beta` and
+   `decayed_at` per dimension, so mass is the only per-dimension evidence signal a served snapshot
+   carries. Five is borrowed from the manifest's `new_store_prior_n` as a MAGNITUDE and is **not
+   the same measurement** — that constant counts clean episodes and drives the snapshot's
+   store-level `low_data` flag. Two measured consequences, both real:
+
+   * a missed promise is `contradicted` at weight 2.0 while a kept one is `fulfilled` at 1.0, so
+     three broken promises clear the floor and four kept ones do not. That is the defensible
+     direction — the floor exists to stop an UNMEASURED store being judged, not to shelter a
+     measured bad one — but it is an asymmetry and it is stated rather than left to be found;
+   * decay means five clean dispatches clear the floor only while fresh; spread across a half-life
+     they fall back under it. A real store needs closer to ten inside a couple of half-lives.
+
+   `test_the_admissibility_floor_reads_weighted_decayed_mass_not_an_episode_count` drives the real
+   trust engine and asserts all four of those numbers, so the false version cannot be restored by
+   anyone reasoning from the constant's name.
 3. With a record, the quote is adjusted before the auction-normalisation runs:
    `effective_days = days / max(credibility, MIN_DISPATCH_CREDIBILITY)`, with
-   `MIN_DISPATCH_CREDIBILITY = 0.25` bounding the inflation at 4x. Monotone (keeping a promise never
-   costs a store; quoting sooner never costs it either), scale-free (a pure multiplication, so no
-   absolute days-to-score curve is smuggled in — the exchange still holds no shipping model and
-   `Intent.ship_to` still contributes only the fact that everyone in one auction quotes for the same
-   destination), and auditable (one division by one published posterior against one published
-   floor, all of which a store can read off its own snapshot).
+   `MIN_DISPATCH_CREDIBILITY = 0.25` bounding the inflation at 4x. Scale-free (a pure
+   multiplication, so no absolute days-to-score curve is smuggled in — the exchange still holds no
+   shipping model and `Intent.ship_to` still contributes only the fact that everyone in one auction
+   quotes for the same destination), auditable (one division by one published posterior against one
+   published floor, all of which a store can read off its own snapshot), and monotone **in the
+   adjustment**: within that function, keeping a promise never costs a store and quoting sooner
+   never costs it either.
+
+   **Two things the bound does NOT do, both corrected from a first draft that overclaimed them.**
+   The 4x cap does not guarantee an unreliable store loses; ordering depends on the quotes as much
+   as the records, and the break-even is exact — a store at the floor quoting `d_bad` loses to a
+   rival with posterior `p` quoting `d_good` if and only if `d_good < 4 * p * d_bad`. Against
+   `p = 0.857`, a 1-day promise from a store that never keeps it is beaten by a 3-day promise and
+   beats a 4-day one. A cap that instead made the unreliable store lose at every quote would not be
+   a delivery comparison at all; it would be a trust term wearing `delivery_fit`'s name, which is
+   the double-count this ruling exists to avoid. And the COMPOSED feature is not monotone across
+   the admissibility cliff: unadmitted reads 0.5 while admitted can read 0.0, so a store whose
+   credible quote would land in the bottom half of its auction is better off unadmitted, and
+   earning a record can cost it up to `w_d/2`. That is the SAME incentive D13's published
+   `when_absent` already creates for declaring no estimate at all — `delivery_fits` has documented
+   it since before this ruling — and D57 adds a second route to the same absence rather than
+   creating the incentive. Closing it means moving `delivery_fit_when_absent`, which is a published
+   contract and a separate decision.
 4. Everything else about `delivery_fits` is unchanged: fewer than two admissible estimates is all
    neutral, a degenerate range is all neutral, inputs are never mutated, and the answer is
    deterministic.
@@ -1237,6 +1270,20 @@ degree:
   That is the honest failure and it is deliberate: the alternative is inventing a posterior. It is
   also load-bearing on the wiring — `rank_auction` hands `attach_features` the snapshot, and a
   caller that hands nothing gets the absent path for all candidates rather than a fabricated one.
+
+  **Named plainly, because "honest failure" is not the same as "nobody is affected": on every
+  end-to-end path anyone can drive today, this term is neutral for all stores.**
+  `deploy/demo/exchange-deployment.json` states a literal `trust_snapshot` whose rows are
+  `{store_id, blacklisted, score}` with no `dims`, and `composition._bind_live_ranking_snapshot`
+  is deliberately silent whenever a document states that key — so the demo never installs the live
+  trust reader and those dims-free rows reach the ranker. The S1 e2e flow builds its snapshot with
+  no dispatch history at all, so every dimension sits at the prior with mass 4 and clears nothing.
+  The live wiring is correct and proven (trust's `GET /snapshot` publishes all six dims with
+  `alpha`/`beta`, and `snapshot_rows`/`LiveTrustSnapshot` pass them through untouched), but the
+  observable demo shows a flat term. The fix belongs to whoever owns `build_demo_deployment.py`:
+  emit six Betas whose means each equal the store's existing `TRUST_SCORES` entry — the trust
+  engine defines `score` as exactly that mean, so nothing new is invented — with enough mass to
+  clear the floor.
 * Trust observations decay toward the prior (30-day half-life, D17), so the admissibility floor is
   also a staleness gate: a store whose only dispatches are long past falls back under it and its
   promise stops being admitted. An old record is not a current promise.
