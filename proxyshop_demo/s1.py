@@ -1549,14 +1549,20 @@ def _beat_seven(say: Narrator, result: JourneyResult, trust: Any) -> None:
            reconcile: that is the probe printed above, and it is a probe rather than a result
            precisely because this driver had to supply them.
 
-        2. `checkout_pixel` still has no producer anywhere in this repository. Not for want
-           of a pixel: `pixel/src/` holds a real Web Pixel extension (beacon, transport,
-           settings, pixel, index). What is missing is the last hop — nothing on a served
-           path turns a beacon into a ledger event, and `merchant_svc.collector` stops at a
-           `PixelObservation` in memory (beat 6 read one, in process). That one costs
-           EVIDENCE rather than the verdict: a group with no beacon grades `pixel_missing`,
-           which by design is not a blocker. A driver that manufactured a beacon would be
-           supplying the evidence whose absence is the defect.
+        2. `checkout_pixel` HAS a producer now, and this paragraph used to say it did not.
+           `merchant_svc.composition.publish_pixel_observation` sits on the served
+           `POST /pixel/collect` (`collector/routes.py:115`) and appends the row to the
+           chained ledger; `pixel/src/` supplies the beacon that reaches it. What was
+           missing was the last hop, and it landed. This command still does not exercise it
+           — it runs no merchant service — so the absence here is this driver's scope, not
+           the product's, and a group with no beacon still grades `pixel_missing`, which by
+           design is not a blocker. `e2e/support/s1/flow.py` drives the real route.
+
+           Worth knowing WHY this sentence survived so long after it stopped being true: the
+           suite's per-kind multiset was supposed to double-count and turn red the moment a
+           producer landed, and it stayed green because the run never drove the route — it
+           called the collector's library function and built the row itself. A gate that
+           only watches its own output cannot see a second writer it never invokes.
 
         The trust side of the naming problem is already built and needs nothing from here:
         `trust.reconcile.routes.resolve_store_aliases` maps a seller's registered domain onto
