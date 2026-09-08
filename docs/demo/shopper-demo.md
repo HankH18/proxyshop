@@ -173,18 +173,29 @@ price. `shortlist.slots` comes back with four filled slots — `value`, `fit`, `
 `reliability` — each carrying the store's own `commitments` beside the platform's
 `trust_summary` and `provenance_labels`. Those are the two voices.
 
-### One thing that is measurably off, and is not this page's to fix
+### What this used to get wrong, kept because the shape is worth recognising
 
-A hosted store's bid is scored with a `policy_penalties: -0.15` against it, and the cause is a
-product-identity gap rather than a lie. The `BidRequest` on the wire names no product, so an
-agent picks one out of its own catalogue by reading the intent text; the exchange grades the
-resulting claims against the product **the auction** rostered from the graph. When those two
-products differ, the agent's honest `list_price` claim about its own product is contradicted
-by the snapshot entry for a different one, and `contradicted_claim` fires. Graded against the
-product the agent actually bid, the identical claim comes back `verified` with zero
-contradiction events — measured on this stack. The fix is in the wire contract, the agent's
-product selection, or the attestation's choice of reference, and all three are outside this
-lane.
+This section used to say a hosted store's bid was scored with `policy_penalties: -0.15`
+against it for a product-identity gap rather than a lie — and it was right. `BidRequest` named
+no product, so an agent picked one out of its own catalogue by reading the intent text, and the
+exchange graded the resulting claims against the product **the auction** rostered. An honest
+`list_price` claim about the agent's own product was contradicted by the snapshot entry for a
+different one.
+
+Closed as D58: the solicitation carries `product_ref` now, so the agent is told what it is
+being asked about. On this stack the honest stores come back with zero contradicted claims and
+no penalty, and the store claiming thirty units where the crawl says two is still contradicted
+and still penalised.
+
+**Two things about it are worth keeping.** The penalty was one of a matched pair — a false
+`-0.15` alongside a `price_value` credited `(78 - 39) / 78` for a discount nobody gave, a ratio
+between two different products' prices. They cancelled to within a rounding of each other, so
+`rank_score` read the same either way and nothing in the ranking looked wrong. And the obvious
+fix — grade whatever the offer names — is exploitable and was built and withdrawn: on the
+hosted path `product_ref`, `variant_ref` and `checkout_url` are three independent
+store-written strings nothing joins, so changing one field to a crawled sibling turned a
+contradiction into a verified claim while still selling the original variant. D58 records the
+condition under which it can land.
 
 ## 5. The shopper journey in a browser
 
