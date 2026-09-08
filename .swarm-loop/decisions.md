@@ -1301,3 +1301,195 @@ degree:
   reads 0.0 effective days if it claims same-day dispatch. That follows from scale-freedom rather
   than from an oversight, and the guard against it is not in the ranker — it is that
   `trust.reconcile.engine` grades exactly that promise every time such a store ships.
+
+## D58 — The solicitation names the product; the platform grades the product it was offered **[owner-delegated ruling, 2026-09-07]**
+
+**The defect.** `BidRequest`'s published properties were exactly
+`['auction_id', 'intent', 'profile', 'respond_by']`, all four required. **It named no product.**
+So the exchange rostered store X for product P, solicited X *without telling it P*, X picked a
+product Q out of its own catalogue — `store_agent.runtime.bidding._Candidate.order` is
+cheapest-first — and the exchange then graded X's claims about Q against the platform's snapshot
+of P. Measured on the served `POST /auctions` at HEAD, this repo's own hosted agents on its own
+demo market, one store carrying two products and rostered for the dearer one:
+
+```
+offer.product_ref = beanie-merino-lite   claims list_price 39.00, units_left 12   (all TRUE)
+roster product_ref = beanie-merino-01    the platform lists it at 78.00
+components: {..., "policy_penalties": -0.15, "price_value": 0.15, ...}
+```
+
+Both numbers are wrong and they are wrong in opposite directions. The penalty is a
+`contradicted_claim` against a store whose every statement was true — graded against the product
+it actually bid, the identical claim is `verified` with zero contradiction events. The
+`price_value` is a full 0.15, the most that term can pay, credited for a discount nobody gave:
+`(78 − 39) / 78` is a ratio between two different products' prices.
+
+**Why this is the worst defect this system can have, rather than one more bug.** D55 makes
+adversarial verification of the seller's own message the thing that *justifies* the sponsored
+half of the market: an organic result is the platform rendering its own crawl, and what a shop
+buys by joining is the right to make its case in its own voice — safe only because that purchased
+message is checked against the platform's snapshot. A false contradiction is that mechanism
+firing at an honest store. It is not a missed catch; it is the catch turned against the party it
+exists to protect.
+
+**Why the price wall did not already catch it, measured rather than assumed.** `auction/collect.
+py`'s `_price_refusal` was *already* keyed by the ROSTER's `product_ref` and looked the row up by
+the OFFER's, documented in its own docstring as closing exactly this: "a store answering about a
+product it was not asked about finds no row, and an unpriceable product is a refusal rather than
+an abstention". That wall never ran, because `_is_judged` gated it and none of its five clauses
+was about the product. One store, one bid, one price, differing only in whether the roster row
+happened to state a `max_discount_pct`:
+
+```
+roster max_discount_pct: 20  -> refused, bid_price_unreconcilable, represented at 78.00
+roster states none           -> ADMITTED at 39.00, penalised -0.15, credited price_value 0.15
+```
+
+`SolicitedShop.as_roster_row` — the graph-backed roster, D55's organic half — emits
+`{store_id, tier, product_ref, list_price}` and **no `max_discount_pct` at all**. So the second
+row is the one the product actually served, and a field with nothing to do with which product was
+offered was deciding whether the offered product was checked.
+
+**`price_value` verdict: the same root cause, confirmed on the served route.** It is not a second
+defect. `attach_features` divides by `BidEntry.list_price`, which `collect_bids` reads off the
+ROSTER row; when the offer names another product that denominator is about a different product
+from the numerator. Note the direction: the false contradiction *punishes* the honest store by
+0.15 and this *rewards* it by 0.15, and on the measured request they cancelled exactly, so
+`rank_score` was identical to the correct one and neither error was visible in the ranking.
+
+---
+
+### The ruling: (a) AND (b). (c) is rejected.
+
+**(a) The wire contract names the product.** `BidRequest` gains an optional, nullable
+`product_ref` — the product this exchange rostered the store for — so a solicitation says what it
+is soliciting a bid ON. `SCHEMA_VERSION` moves `1.0.0` -> `1.1.0`: additive and unrequired, so
+every request valid before is valid now and an agent that ignores the field answers as it did.
+`composition.HttpBidSolicitor.solicit` writes it off the same roster row, per store, because it
+is a per-STORE fact and `for_auction` binds only per-auction ones.
+
+Without (a) the whole situation is undecidable rather than merely unlucky: a shop that has not
+been told what it was asked about cannot counter-propose, because a counter-proposal is only a
+counter-proposal if you know what the proposal was. It also restores meaning to the roster's own
+`list_price`, to `intent_match`, and to `retrieval.fit`'s join, all of which are per-product facts
+the exchange was computing about a product it never mentioned.
+
+**(b) The platform grades and prices what was actually offered.** `ranking.verification.
+graded_product_ref` resolves a candidate's claims against the OFFER's `product_ref` when the
+platform's own snapshot for that store carries a row for it, and against the ROSTER's otherwise.
+`auction/collect.py` takes an optional `catalogue` port (`(store_id, product_ref) -> {product_ref,
+list_price} | None`, bound by the route to `verification.catalog_product_row`) and, for a bid
+naming a product the roster did not, runs the price wall and feeds `price_value` from the
+platform's own row for the product actually offered.
+
+This half is the one with real product content, and it is not a relaxation. **A shop
+counter-proposing a product it thinks fits this buyer better is the behaviour the persuasion
+market wants**, not an error — it is the whole difference between an advocate and a form. What
+D55 buys the shop is control over its own presentation "to a greater degree"; a market that
+punished a shop for saying *"the one you asked about is sold out, this one is better for you"*
+would have bought it a form with the shop's name on it.
+
+**Why letting the offer choose the SUBJECT is not letting the seller choose the FACTS**, which is
+the objection this must survive. The snapshot stays the platform's, still adversarial, still the
+thing the seller cannot write; what moves is only which of the platform's own rows the seller's
+message is checked against. And the seller does not get that for free, because `offer.product_ref`
+is not merely a grading key — **it is the thing the buyer BUYS.** It drives `Offer.checkout_url`
+(`store_agent.runtime.bidding` builds the permalink from the same ref) and the accept path. A
+store that names Q to borrow Q's facts has offered to sell Q, at Q's price. The graded subject and
+the purchased subject become the same object, which is exactly what they were not before.
+
+**(c) — constraining the agent to bid the rostered product — is rejected**, and it is the option
+that looks safest and costs the most. It closes the defect by deleting the behaviour: the shop
+becomes a price quoter for a product the platform picked, and the sponsored slot stops being
+"argue your case in your own voice" and becomes "answer this form". It is also strictly weaker
+than (a)+(b) as a *guard*, because a constraint on the wire is enforced by whoever runs the agent
+— a Tier-2 store does not run our runtime — so the exchange would still have to grade what
+arrived. Having to grade it correctly anyway, the constraint buys nothing and forfeits the
+product.
+
+### The guards, stated because "grade what was offered" is one bad line away from an amnesty
+
+1. **A `product_ref` the platform never crawled resolves against the ROSTER's.**
+   (`verification.snapshot_carries`.) Otherwise naming a ghost ref is the cheapest lie in the
+   system: every claim resolves against nothing, comes back `unsupported` rather than
+   `contradicted`, and the store pays what silence costs instead of what a lie costs. ESC-020's
+   lever — a store choosing which of its catalogue entries its claims resolve against — stays
+   closed; what opened is only the set the platform has independently observed.
+2. **A product the exchange cannot PRICE is refused, not admitted.** With no catalogue wired, a
+   graph that is down, a product the crawl never saw, or a row carrying no usable price, the wall
+   finds no row for the offered product and refuses — `price_unreconcilable:offer.unit_price:
+   list_price_unavailable` — and the store is represented at its rostered list price (R10). Zero
+   and negative are refusals too, never "free": a 0.00 minted here is a rankable free item that
+   beats every real offer, which is the hole `RosterEntry`'s `Field(gt=0.0)` closes at the request
+   door.
+3. **The mismatch is judged uniformly** (`collect._answers_about_another_product` is now a clause
+   of `_is_judged`), so the two rows in the measurement above stop disagreeing. This is read as
+   presence, not readability, and on the string spelling of both refs — `product_ref: 7` against a
+   row pricing `"product-1"` is another product, exactly as `"prod-q"` would be. Reading past an
+   illegible ref would make one pair of quotes decide the outcome, which is the same defect
+   `collect._tier`'s docstring records having already had to fix once on this wall. One repo test
+   moved with this and its justification is recorded at the assertion
+   (`test_ranking_served.py::test_no_offer_a_store_can_write_turns_the_published_shortlist_into_a_500`,
+   the `a product_ref that is not a string` row; that file is not among the manifest's 17 frozen
+   paths).
+4. **The authorized depth still comes from the roster, and the price from the platform.** They are
+   different kinds of fact: a list price is about a PRODUCT, and the exchange holds its own for
+   everything it crawled; `max_discount_pct` is about a STORE — every producer in this tree reads
+   it off that store's approved envelope, one number per merchant — so carrying it across to
+   another of the same merchant's products carries it to the party it was granted to. Neither
+   number ever becomes the bidder's, and C3/S7 is untouched: the exchange still reads no
+   `Envelope`.
+
+### The agent side, and the one thing it is NOT
+
+`AuctionContext.solicited_product_ref` carries the field, and `bidding._chosen` bids the solicited
+product **when it is admissible** — admissible meaning `_gather`'s existing verdict and nothing
+new: priced, hard constraints satisfied, not reported out of stock. Otherwise the agent's own
+cheapest-first pick stands and it counter-proposes.
+
+This is not (c) wearing a different hat. (c) is a constraint on what the wire may carry; this is a
+default about what a well-behaved advocate answers, freely overridable, and the platform grades
+the override on its merits either way. The default points at the solicited product because the
+exchange rostered P after its own retrieval measured P as the best fit for THIS buyer's intent,
+and the buyer is the customer being served (D55); a shop's cheapest-first tie-break is not a
+better answer to the buyer's question. Counter-proposal survives exactly where it is informative —
+when the platform asked about something this shop cannot sell right now.
+
+### What was proven, in both directions, on one served request
+
+The blind spot this repo has here is documented: its gates check that a refusal fires on the
+attack and never that it stays silent on honest traffic. So
+`apps/exchange/tests/test_counter_proposed_product.py` drives one `POST /auctions` with this
+repo's real hosted agents against a graph-shaped roster and asserts, on the same request:
+
+* the honest counter-proposer — asked about a product that is sold out today, answering about
+  another one truthfully — admitted at its own 39.00, **every decidable claim `verified`, zero
+  `contradicted_claim` events, no `policy_penalties` component, `price_value` exactly 0.0**;
+* a store that bid what it was asked about: unchanged in every particular;
+* a genuinely dishonest store on the same request — its live feed says thirty units left, the
+  platform's crawl of the same product says two — **still `contradicted`, still one
+  `contradicted_claim` at the published 0.15, still `policy_penalties: -0.15`.**
+
+If that last one ever goes green with the penalty gone, this ruling has stopped being a correction
+and started being an exemption, and the file goes red.
+
+### Two residuals this ruling does NOT close, named rather than left to be found
+
+* **`intent_match` is keyed by STORE, so a counter-proposal inherits the fit measured for the
+  product it replaced.** `ShopRoster.intent_match_by_store` is `{store_id: intent_match}` and
+  `ranking.serving.with_intent_match` joins on that key, so a shop rostered for P at fit 0.9 that
+  answers about Q keeps 0.9 — on `w_m = 0.35`, the largest published term. It cannot be closed
+  from where D58 sits: `ShopRoster.fit` holds a `FitAssessment` per PRODUCT but only for products
+  the retrieval shortlisted, so a counter-proposed product usually has no measurement at all, and
+  the honest answer would be the published `INTENT_MATCH_WHEN_ABSENT` neutral rather than an
+  inherited number. That is a retrieval-layer change (`exchange/retrieval/roster.py` and
+  `ranking/serving.with_intent_match`), it is a real incentive — counter-propose a worse-fitting
+  product, keep the good product's fit — and it is bounded: the term is wired only when the roster
+  came from the graph, the offer is still priced and graded on its own merits, and the buyer sees
+  the product actually offered in the shortlist slot. **It is a hole, it is stated as one, and it
+  is the next thing to close here.**
+* **The `bid_placed` receipt reads `fit_unavailable` for a counter-proposal.**
+  `retrieval.fit.annotate_bid_payload` joins an assessment to a bid on `offer.product_ref` and
+  `ShopRoster.assessments()` filters to the rostered products, so a bid about another product
+  joins nothing. That is the truthful record — the retrieval did not measure that product — and it
+  is the same `fit_unavailable` a request-stated roster already writes. No change.
