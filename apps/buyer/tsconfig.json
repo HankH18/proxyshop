@@ -12,6 +12,7 @@
   },
   "include": [
     "app/**/*.ts",
-    "app/**/*.tsx"
+    "app/**/*.tsx",
+    "app/**/*.json"
   ]
 }

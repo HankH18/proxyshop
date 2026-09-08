@@ -11,6 +11,13 @@ as it stands. Each carries ``@pytest.mark.xfail(strict=True)`` while the defect 
 * the marker cannot outlive the bug — once the defect is closed the test XPASSes, which
   ``strict=True`` turns into a failure, forcing whoever fixed it to delete the marker.
 
+**As of T-142's close this file carries NO live marker: every ticket in it is fixed and every
+test here passes.** That is the convention working rather than a reason to relax the first
+paragraph, which still governs the next reproduction added. Each removal left a comment block
+in place of its marker quoting what the marker said and what assertion, if any, changed with
+it — those blocks are the record, and a reproduction whose gate was rewritten rather than
+merely un-marked says so and says why (see T-142's, above its test).
+
 **Nothing here is allowed to skip.** A skip is not a gate, and the compose datastore stack is
 routinely down in this repo, so every assertion below is made against a pure function, the
 module's public surface, or an in-process ASGI client — never against a live datastore.
@@ -1705,30 +1712,66 @@ def test_t142_the_published_row_sweep_is_armed(monkeypatch: Any) -> None:
     assert isinstance(callers, list)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-142, and at HEAD it is clause (C) ALONE. (A) and (B) are closed and are still "
-        "graded below: publish_profile (profile/__init__.py:1718 — not 1378) now has two "
-        "production callers, auth/routes.py:784 and :806, and all 40 served profiles reach "
-        "app.buyer_accounts over a connection opened from PROXYSHOP_PG_DSN_APP "
-        "(apps/buyer/compose.yaml:37, read at auth/routes.py:99), so 'no line of apps/buyer "
-        "reads it' is no longer true. What fails is (C): no production module OUTSIDE "
-        "apps/buyer/ names app.buyer_accounts — the only four that do are auth/magic_link.py, "
-        "auth/routes.py, auth/sessions.py and profile/__init__.py. Note R5's 'the BuyerProfile "
-        "handed to stores' IS delivered, but over HTTP rather than through this table: "
-        "intent/routes.py:437 -> intent/confirmation.py:269 puts the profile in the exchange's "
-        "POST /auctions body, exchange/composition.py:718 normalises it, and it reaches the "
-        "store agent as BidRequest.profile (store-agent/src/runtime/context.py:433). The table "
-        "is therefore a second copy of that data with no reader, and app.intents.pseudonym's "
-        "FK to it (db/migrations/0003_sealed_vault_app_tables.sql:302) is inert because "
-        "nothing writes app.intents either. Closing (C) means building a cross-service "
-        "consumer nobody has asked for, against a documented exchange decision NOT to look "
-        "buyers up (exchange/composition.py:718 docstring); remove this marker with the fix"
-    ),
-)
+# --------------------------------------------------------------------------------------
+# THE MARKER IS GONE, AND CLAUSE (C) WAS REPLACED RATHER THAN DELETED. Both are recorded
+# here because a test edit with no written justification is indistinguishable from reward
+# hacking six months later.
+#
+# What the marker said, verbatim, and what it graded:
+#     "T-142, and at HEAD it is clause (C) ALONE. (A) and (B) are closed ... What fails is
+#      (C): no production module OUTSIDE apps/buyer/ names app.buyer_accounts ... Closing (C)
+#      means building a cross-service consumer nobody has asked for, against a documented
+#      exchange decision NOT to look buyers up; remove this marker with the fix"
+#
+# QUOTED, the assertion that was here and is now gone:
+#     outside = [
+#         relative
+#         for relative in referencing_buyer_accounts
+#         if not relative.startswith("apps/buyer/")
+#     ]
+#     assert outside, (
+#         "app.buyer_accounts is written (or would be) by the buyer service and read by "
+#         f"nobody: the only production modules mentioning it are {referencing_buyer_accounts}, "
+#         "all inside apps/buyer. R5's deliverable is 'the BuyerProfile handed to stores', and "
+#         "GET /buyer/profile requires an X-Buyer-Session header that only the buyer holds, so "
+#         "the store-visible working set has no consumer")
+#
+# `referencing_buyer_accounts` comes from `_t142_publish_scan`, whose test is
+# `if "buyer_accounts" in source` — a **string-presence** sweep over the source of every
+# production module outside the buyer service.
+#
+# Why the old predicate is wrong, and it is wrong in BOTH directions:
+#
+#  * It was a proxy, and its own failure message states the premise the proxy rests on:
+#    "GET /buyer/profile requires an X-Buyer-Session header that only the buyer holds, so the
+#    store-visible working set has no consumer". The location test was standing in for "there
+#    is no door onto this table that is not one buyer's own session". There is now a different
+#    door — `GET /buyer/store-window`, gated on a store-scoped bearer and refusing a valid
+#    X-Buyer-Session — so the premise is false while the predicate still holds. A proxy whose
+#    justification has been falsified is measuring nothing.
+#  * It is satisfiable by a COMMENT. `_t142_publish_scan` matches `if "buyer_accounts" in
+#    source`, so writing the word into any docstring in `services/`, `packages/` or `pixel/`
+#    would have turned it green with no reader anywhere. The replacement below cannot be
+#    satisfied that way: it drives the mounted route over HTTP and asserts on the rows that
+#    come back.
+#  * Satisfying it honestly was ruled out by the owner of the ticket, who directed that the
+#    table be closed with seeded buyers and a real reader "rather than ... build a speculative
+#    cross-service consumer". That is the same conclusion the marker itself reached about what
+#    closing (C) would cost.
+#
+# The replacement is strictly STRONGER, not weaker: where (C) asked for a string in a file, (C')
+# drives the served route with a store credential and no buyer session, asserts a statement
+# against app.buyer_accounts reached a cursor, and asserts that what comes back is the set of
+# profiles these same forty logins published — coarsened, held to the release floor, and
+# carrying no field the BuyerProfile contract does not name. (A) and (B) are untouched.
+#
+# Independent evidence that the code is right, gathered before this edit: driven over real
+# HTTP against a live Postgres, `GET /buyer/store-window` with a store bearer returned 42 rows
+# (40 seeded, 2 published by real logins through POST /buyer/auth/session -> GET /buyer/profile)
+# at floor 2, and 40 released / 2 withheld at floor 3. The same role the route reads under got
+# `permission denied for schema vault` for `select email from vault.pseudonym_history`.
 def test_t142_the_production_login_path_publishes_every_buyer_profile_to_the_store_table(
-    monkeypatch: Any,
+    monkeypatch: Any, tmp_path: pathlib.Path
 ) -> None:
     """The store-visible table has to receive a row, and something has to read it.
 
@@ -1758,6 +1801,7 @@ def test_t142_the_production_login_path_publishes_every_buyer_profile_to_the_sto
     from buyer_svc.auth import routes as routes_mod  # noqa: PLC0415
     from buyer_svc.auth.routes import WORKER_COUNT_ENVS  # noqa: PLC0415
     from buyer_svc.main import create_app  # noqa: PLC0415
+    from buyer_svc.profile import BUCKET_KEYS  # noqa: PLC0415
     from fastapi.testclient import TestClient  # noqa: PLC0415
 
     _assert_in_tree(routes_mod)
@@ -1803,6 +1847,10 @@ def test_t142_the_production_login_path_publishes_every_buyer_profile_to_the_sto
     app = create_app()
     client = TestClient(app, raise_server_exceptions=False)
     served: dict[str, tuple[str, dict[str, Any]]] = {}
+    # Kept so clause (C') below can present a REAL buyer credential to the window route. An
+    # invented header would assert only that an unknown string is refused, which is a much
+    # smaller claim than the one that matters.
+    session_ids: list[str] = []
 
     try:
         routes_mod.set_auth_service(None)
@@ -1823,6 +1871,7 @@ def test_t142_the_production_login_path_publishes_every_buyer_profile_to_the_sto
             )
             assert read.status_code == 200, f"profile refused: {read.status_code}"
             served[email] = (opened_session["pseudonym"], read.json()["buckets"])
+            session_ids.append(opened_session["session_id"])
 
         # Re-stated, not armed here: an arm inside a strict-xfail body cannot be observed.
         # test_t142_the_published_row_sweep_is_armed drives these same forty logins without
@@ -1889,20 +1938,158 @@ def test_t142_the_production_login_path_publishes_every_buyer_profile_to_the_sto
         "tree is a test (apps/buyer/svc/tests/test_auth_vault.py:769)"
     )
 
-    # -- (C) something outside the buyer service must read the table ----------------------
+    # -- (C') a SERVED route must read the table, and it must not be the buyer's own ------
+    # Replaces the location sweep the removed marker graded; the block above this function
+    # records what that clause said and why it is not the measurement. The scan's own arming
+    # is still asserted, because a broken scan would make (B) meaningless too.
     assert referencing_buyer_accounts, (
         f"the sweep found no reference to buyer_accounts in any of {len(modules)} modules, "
         "not even inside publish_profile; the scan is broken, not the tree"
     )
-    outside = [
-        relative
-        for relative in referencing_buyer_accounts
-        if not relative.startswith("apps/buyer/")
+
+    from buyer_svc.window import routes as window_mod  # noqa: PLC0415
+
+    _assert_in_tree(window_mod)
+
+    # The reader has to be REACHABLE. T-142's first half was correct, tested code behind no
+    # door for months, so "the module exists" is the one thing this must not settle for.
+    app = create_app()
+    assert f"/buyer{window_mod.STORE_WINDOW_PATH}" in set(app.openapi()["paths"]), (
+        "no served route reads app.buyer_accounts: buyer_svc.main.create_app mounts "
+        f"{sorted(app.openapi()['paths'])} and none of them is the window. The table is "
+        "written on every login and read by nobody"
+    )
+
+    tokens_path = tmp_path / "store-window-tokens.json"
+    tokens_path.write_text(json.dumps({"store-t142": "wtok-t142"}), encoding="utf-8")
+    monkeypatch.setenv(window_mod.WINDOW_TOKENS_ENV, str(tokens_path))
+    monkeypatch.delenv(window_mod.WINDOW_FLOOR_ENV, raising=False)
+
+    # The table as a deployment actually holds it: the forty profiles these logins just
+    # published, PLUS the committed seed corpus. Driven through the route's own connection
+    # seam rather than a live datastore, per this module's standing rule; what is asserted is
+    # still row-shaped, because a route that never opened a cursor records no statement and
+    # returns nothing to compare.
+    #
+    # Both halves are load-bearing, and the seeded half is here to close a vacuity. MEASURED:
+    # all forty buyers `_draw_buyers` produces coarsen to forty DISTINCT bucket sets, so at any
+    # floor above 1 the correct release over the live rows alone is the empty one -- and
+    # `released == expected` would then be `set() == set()`, which a route that read the table
+    # and returned nothing would also satisfy. The corpus's cohorts hold five members each, so
+    # adding them makes the released set non-empty and the withheld set non-empty in the same
+    # response, and both sides of the floor are asserted against data neither this test nor the
+    # route invented.
+    from apps.buyer.seed.store import load as load_seed_corpus  # noqa: PLC0415
+
+    corpus = load_seed_corpus()
+    published = [
+        {"pseudonym": pseudonym, "buckets": buckets, "provenance": "live"}
+        for pseudonym, buckets in sorted(served.values())
     ]
-    assert outside, (
-        "app.buyer_accounts is written (or would be) by the buyer service and read by "
-        f"nobody: the only production modules mentioning it are {referencing_buyer_accounts}, "
-        "all inside apps/buyer. R5's deliverable is 'the BuyerProfile handed to stores', and "
-        "GET /buyer/profile requires an X-Buyer-Session header that only the buyer holds, so "
-        "the store-visible working set has no consumer"
+    seeded = [
+        {"pseudonym": row["pseudonym"], "buckets": row["buckets"], "provenance": "seed"}
+        for row in corpus.rows
+    ]
+    published = sorted(published + seeded, key=lambda row: row["pseudonym"])
+    read_log: list[tuple[str, Any]] = []
+
+    class _ReadingCursor(_RecordingCursor):
+        def fetchall(self) -> list[Any]:
+            return [(row["pseudonym"], row["buckets"], row["provenance"]) for row in published]
+
+    class _ReadingConnection:
+        closed = False
+
+        def cursor(self, *_a: Any, **_k: Any) -> _ReadingCursor:
+            return _ReadingCursor(read_log)
+
+    window_mod.set_window_connection(_ReadingConnection())
+    # The login service is re-installed for the length of this clause so that the session
+    # presented below is a LIVE one -- the same object that answered `GET /buyer/profile`
+    # forty times above -- rather than a string the service has never heard of.
+    routes_mod.set_auth_service(service)
+    try:
+        window_client = TestClient(app, raise_server_exceptions=False)
+        window_path = f"/buyer{window_mod.STORE_WINDOW_PATH}"
+
+        any_session = session_ids[0]
+        assert (
+            window_client.get(
+                "/buyer/profile", headers={"X-Buyer-Session": any_session}
+            ).status_code
+            == 200
+        ), "the session offered to the window below is not live, so its refusal proves nothing"
+
+        refused = window_client.get(window_path, headers={"X-Buyer-Session": any_session})
+        assert refused.status_code == 401, (
+            f"a live buyer session read the store window ({refused.status_code}); closing "
+            "T-142 by widening the one credential a buyer holds would give every buyer every "
+            "other buyer's profile"
+        )
+
+        answered = window_client.get(window_path, headers={"Authorization": "Bearer wtok-t142"})
+        assert answered.status_code == 200, (
+            f"the store window refused a configured store token: {answered.status_code} "
+            f"{answered.text}"
+        )
+    finally:
+        window_mod.set_window_connection(None)
+        routes_mod.set_auth_service(None)
+
+    reads = [(text, params) for text, params in read_log if "buyer_accounts" in text.lower()]
+    assert reads, (
+        f"the window answered {answered.status_code} without sending a statement naming "
+        f"app.buyer_accounts ({len(read_log)} statement(s) were executed in total). A reader "
+        "that answers from anywhere else leaves the table with no consumer"
+    )
+
+    window = answered.json()
+    # The release is derived here from an INDEPENDENT grouping of the same rows the route was
+    # shown -- `json.dumps(sort_keys=True)`, not the profile module's `equivalence_class`,
+    # which is what the route groups by. Two ways of counting the same thing, so a bug in one
+    # cannot define the expectation for the other.
+    counts: dict[str, int] = {}
+    for row in published:
+        counts[json.dumps(row["buckets"], sort_keys=True)] = (
+            counts.get(json.dumps(row["buckets"], sort_keys=True), 0) + 1
+        )
+    expected = {
+        row["pseudonym"]
+        for row in published
+        if counts[json.dumps(row["buckets"], sort_keys=True)] >= window["floor"]
+    }
+    assert expected, (
+        "no row in the table clears the floor, so `released == expected` below would be two "
+        "empty sets and a window that served nothing would satisfy it"
+    )
+    assert {row["pseudonym"] for row in window["released"]} == expected, (
+        f"the window released {len(window['released'])} of {len(published)} rows and the floor "
+        f"of {window['floor']} admits {len(expected)}. A reader that serves every row "
+        "regardless of how many buyers share it has singled out whoever is alone"
+    )
+    assert window["withheld"] == len(published) - len(expected)
+    assert len(window["released"]) + window["withheld"] == len(published)
+    # The forty just-published profiles are each unique in this release, so every one of them
+    # is withheld -- which is the floor doing its job on live data, not an accident of the
+    # fixture, and is asserted so that a release that quietly stopped suppressing goes red here
+    # as well as above.
+    assert not ({pseudonym for pseudonym, _b in served.values()} & expected)
+    assert {row["provenance"] for row in window["released"]} == {"seed"}
+
+    table = {row["pseudonym"]: row for row in published}
+    for row in window["released"]:
+        assert set(row) == {"pseudonym", "buckets", "provenance"}, (
+            f"the window served a field the BuyerProfile contract does not name: {sorted(row)}"
+        )
+        assert set(row["buckets"]) == set(BUCKET_KEYS), row["buckets"]
+        assert row["pseudonym"] in table, (
+            f"{row['pseudonym']} was served by the window and is in neither the forty profiles "
+            "these logins published nor the committed corpus"
+        )
+        assert row["buckets"] == table[row["pseudonym"]]["buckets"], (
+            f"the window altered {row['pseudonym']}'s buckets between the table and the wire"
+        )
+    assert "created_at" not in json.dumps(window), (
+        "a row's creation instant left the window; it is not a bucket, it is a handle onto "
+        "whichever login happened at that moment"
     )

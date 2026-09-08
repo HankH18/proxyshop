@@ -164,6 +164,10 @@ PINNED_ROUTES: tuple[Route, ...] = (
     Route("buyer", "get", "/buyer/auth/session"),
     Route("buyer", "delete", "/buyer/auth/session"),
     Route("buyer", "get", "/buyer/profile"),
+    # The store's read of the buyer window, not the shopper's: it takes a store-scoped
+    # bearer and refuses a live buyer session. D5 already entitled the store side and
+    # left it with no door; T-142 is what closing that gap resolved.
+    Route("buyer", "get", "/buyer/store-window"),
     Route("buyer", "post", "/buyer/feedback/prompt"),
     Route("buyer", "post", "/buyer/feedback"),
     Route("buyer", "post", "/buyer/intent/clarify"),

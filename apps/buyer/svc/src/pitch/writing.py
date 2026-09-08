@@ -73,6 +73,7 @@ The four rules
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -180,6 +181,10 @@ VOICE_PLATFORM = "platform"
 VOICE_STORE = "store"
 
 _EDGE_PUNCTUATION = " \t\r\n.,;:!?'\"()[]{}—–-…*_"
+
+#: This module's logger. Named ``buyer_svc.pitch.writing`` by ``__name__``, so an operator
+#: can raise or silence the "the writer failed, you are reading the template" line on its own.
+_log = logging.getLogger(__name__)
 
 
 def _token(word: str) -> str:
@@ -472,6 +477,13 @@ def compose_case(material: CaseMaterial, *, writer: Any = None) -> tuple[str, st
     A writer that throws, times out, is not a client at all, returns ``None``, returns JSON,
     or returns prose that fails the screen all reach 2 without the caller hearing about it —
     because the alternative is a shopper losing a slot to a model outage.
+
+    **The CALLER does not hear about it; the LOG does.** "Never raises" was being read as
+    "never says anything", and the two are not the same promise: a deployment whose live
+    client raises on every call served the assembled case forever with no evidence anywhere
+    that a model had been configured at all. The exception's TYPE is logged and its message
+    is not — a provider's error text is attacker-influenceable and, on an auth failure, is
+    the one string in this path most likely to carry a credential.
     """
     if not material.facts:
         # The writer is not consulted at all. Handing a model an empty CHECKED FACTS block and
@@ -486,7 +498,12 @@ def compose_case(material: CaseMaterial, *, writer: Any = None) -> tuple[str, st
         try:
             reply = writer.complete(case_prompt(material))
             written = screen(reply, material)
-        except Exception:  # noqa: BLE001 - rule 2: a model must never cost a shopper a slot
+        except Exception as error:  # noqa: BLE001 - rule 2: a model never costs a slot
+            _log.warning(
+                "the platform case writer failed (%s); serving the assembled case for %s",
+                type(error).__name__,
+                material.bid_ref or "an unreferenced slot",
+            )
             written = None
         if written is not None:
             return written, SOURCE_WRITTEN

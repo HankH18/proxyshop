@@ -1,0 +1,77 @@
+{
+  "artifact_version": "1.0.0",
+  "bytes": {
+    "accounts.jsonl": 9465
+  },
+  "captured_at": "2026-09-08T04:48:33.861690Z",
+  "determinism": {
+    "canonical_file": "accounts.jsonl",
+    "chain_genesis": "0000000000000000000000000000000000000000000000000000000000000000",
+    "chain_head": "d59643f16951a6b9f8bb55ca2be2ea2de8018e51e7e3ead6aeb70c3dc8787b61",
+    "reproduce": "python -m apps.buyer.seed run --seed 20260907 --members 5",
+    "reproducible_files": [
+      "accounts.jsonl"
+    ],
+    "scope": "byte-identical across processes and machines at the same source revision. The buckets are produced by buyer_svc.profile.build_buckets, so a change to the coarseners, to BUDGET_BANDS, to FREQUENCY_TIERS or to CATEGORY_LIMIT moves these bytes and the chain head with them, and is meant to. See `source` for the revision these were produced at.",
+    "volatile_files": [
+      "collection.json"
+    ]
+  },
+  "file_sha256": {
+    "accounts.jsonl": "a3e483e863790cb936d25501695d1c730093febe50e4a8477f742d050e006139"
+  },
+  "files": [
+    "collection.json",
+    "accounts.jsonl"
+  ],
+  "kind": "seeded-buyer-store-window",
+  "marker": {
+    "audit": "python -m apps.buyer.seed audit --dsn $PROXYSHOP_PG_DSN_APP",
+    "column": "provenance",
+    "enforced_by": "db/migrations/0005_buyer_accounts_provenance.sql, constraint buyer_accounts_provenance_is_the_key",
+    "field": "pseudonym",
+    "prefix": "psn-seed-",
+    "reader": "apps.buyer.seed.chain.is_seeded_pseudonym",
+    "rows_by_cohort": {
+      "Bay Area home-office outfitters": 5,
+      "Berlin board-game and vinyl collectors": 5,
+      "British Columbia gardeners with pets": 5,
+      "Pacific-Northwest trail regulars": 5,
+      "Paris skincare occasionals": 5,
+      "Sydney first-timers": 5,
+      "Tokyo one-off big-ticket shoppers": 5,
+      "UK camera hobbyists": 5
+    },
+    "seeded_rows": 40,
+    "what_it_does_not_cover": "MEMBERSHIP. The constraint guarantees no caller of a served route can forge the marker; it cannot tell a row this corpus pins from one somebody with the `app` role inserted under a made-up `psn-seed-` key, because the table stores no signature. Run `python -m apps.buyer.seed audit --dsn <dsn>` to compare the table against these rows; it exits non-zero on any seeded row that is unpinned, altered or missing.",
+    "why": "Every row in this corpus is manufactured. The marker is the PRIMARY KEY rather than a column beside it, and the key is a hash chain over the rows themselves, so a seeded row cannot be un-marked and a real buyer's row cannot be marked: the vault mints `psn-` + 32 hex characters and `s` is not a hex digit, and the database refuses any row whose `provenance` and whose pseudonym disagree. See apps/buyer/seed/chain.py."
+  },
+  "notes": [
+    "Seeded buyers have NO entry in vault.pseudonym_history. The pseudonyms here are minted by a digest, not issued by the vault, so nothing anywhere can resolve one to a person -- which is the strongest form of R5 available and is true of the seeded half of the window by construction rather than by policy.",
+    "Going live changes no code on the serving path: GET /buyer/store-window reads app.buyer_accounts and copies the `provenance` column it finds. Stop loading this corpus, delete its rows (`delete from app.buyer_accounts where provenance = 'seed'`), and the window serves only the buyers real logins published.",
+    "The floor the window releases under is a deployment knob (PROXYSHOP_BUYER_STORE_WINDOW_K, default 2) and is NOT part of this corpus. The cohorts hold 5 members each so the same bytes demonstrate any floor up to 5."
+  ],
+  "producer": "python -m apps.buyer.seed run --seed 20260907 --members 5",
+  "producer_module": "apps.buyer.seed.population",
+  "run": {
+    "cohorts": 8,
+    "members_per_cohort": 5,
+    "rows": 40,
+    "seed": 20260907
+  },
+  "simulated": true,
+  "source": {
+    "commit": "ed60aae4948b3f7942b17fadf5afd00a9d05abf4",
+    "dirty": true
+  },
+  "target": {
+    "columns": [
+      "pseudonym",
+      "buckets",
+      "provenance"
+    ],
+    "loader": "python -m apps.buyer.seed load --dsn $PROXYSHOP_PG_DSN_APP",
+    "reader": "GET /buyer/store-window (buyer_svc.window.routes)",
+    "table": "app.buyer_accounts"
+  }
+}

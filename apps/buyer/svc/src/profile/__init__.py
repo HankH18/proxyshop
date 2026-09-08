@@ -1725,11 +1725,25 @@ def publish_profile(connection: Any, profile: BuyerProfile) -> None:
     ``connection`` must be authenticated as ``app``: T-011's grant model gives ``buyer_vault``
     only ``SELECT`` on ``app.*``, so the vault role deliberately cannot write here. Two
     schemas, two roles, and no single connection that can join them.
+
+    ``provenance`` is written as ``'live'`` **explicitly**, on the insert and on the conflict
+    branch alike, rather than left to the column default
+    (``db/migrations/0005_buyer_accounts_provenance.sql``). The default covers the insert; the
+    conflict branch is the case that matters. The window this table feeds
+    (:mod:`buyer_svc.window.routes`) labels every row it serves with this column, and a row
+    that a real login overwrote while keeping a ``'seed'`` label would be a real buyer shown to
+    a store as manufactured — the exact confusion the label exists to prevent, arriving through
+    the one path that does not go near the seeder. Saying ``'live'`` here means such a row
+    would instead violate ``buyer_accounts_provenance_is_the_key`` and raise: a 500 rather than
+    a lie, and a 500 that could only be reached by a vault that had somehow minted a pseudonym
+    in the reserved seed namespace, which is a failure worth being loud about.
     """
     dumped = profile.model_dump()
     with connection.cursor() as cur:
         cur.execute(
-            "insert into app.buyer_accounts (pseudonym, buckets) values (%s, %s::jsonb) "
-            "on conflict (pseudonym) do update set buckets = excluded.buckets",
+            "insert into app.buyer_accounts (pseudonym, buckets, provenance) "
+            "values (%s, %s::jsonb, 'live') "
+            "on conflict (pseudonym) do update set buckets = excluded.buckets, "
+            "provenance = 'live'",
             (dumped["pseudonym"], json.dumps(dumped["buckets"], sort_keys=True)),
         )

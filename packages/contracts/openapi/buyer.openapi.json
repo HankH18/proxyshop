@@ -3073,6 +3073,139 @@
           }
         }
       }
+    },
+    "/buyer/store-window": {
+      "get": {
+        "summary": "The pseudonymous buyer window a store may be shown, held to a k-anonymity floor.",
+        "description": "The store-visible window: pseudonyms and coarse buckets, held to a k-anonymity floor.\n\nNo identity, and not because a list of forbidden field names is checked on the way out —\nbecause the statement reads one table in one schema, and the role it reads under has no\naccess to the schema where identity lives. There is no query this handler could be edited\ninto that returns an email.",
+        "operationId": "readBuyerStoreWindow",
+        "responses": {
+          "200": {
+            "description": "Pseudonyms and coarse buckets for the store this token names. Classes below the k-anonymity floor are withheld and counted, never generalised. Seeded rows are marked `provenance: seed` and their pseudonym is a committed hash chain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "as_of": {
+                      "type": "string",
+                      "title": "As Of"
+                    },
+                    "store_id": {
+                      "type": "string",
+                      "title": "Store Id"
+                    },
+                    "floor": {
+                      "type": "integer",
+                      "title": "Floor",
+                      "description": "The k-anonymity floor this release was held to."
+                    },
+                    "released": {
+                      "items": {
+                        "properties": {
+                          "pseudonym": {
+                            "type": "string",
+                            "title": "Pseudonym"
+                          },
+                          "buckets": {
+                            "additionalProperties": true,
+                            "type": "object",
+                            "title": "Buckets"
+                          },
+                          "provenance": {
+                            "type": "string",
+                            "title": "Provenance"
+                          }
+                        },
+                        "type": "object",
+                        "required": [
+                          "pseudonym",
+                          "buckets",
+                          "provenance"
+                        ],
+                        "title": "StoreWindowRow",
+                        "description": "One buyer as a store may see them. Exactly ``BuyerProfile``, plus where the row came from.\n\n``provenance`` is the ``app.buyer_accounts`` column copied verbatim, and its two values are\nthe vocabulary the table's own CHECK constraint admits. It is published rather than kept\ninternal because a store shown a window that mixes real and manufactured buyers has to be\nable to tell which is which — and because the guarantee behind the label\n(``db/migrations/0005_buyer_accounts_provenance.sql``) is strong enough to be worth\ndepending on."
+                      },
+                      "type": "array",
+                      "title": "Released"
+                    },
+                    "withheld": {
+                      "type": "integer",
+                      "title": "Withheld",
+                      "description": "Rows suppressed because fewer than `floor` buyers share their buckets."
+                    },
+                    "truncated": {
+                      "type": "boolean",
+                      "title": "Truncated",
+                      "description": "True when the table holds more rows than one response may carry."
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "as_of",
+                    "store_id",
+                    "floor",
+                    "released",
+                    "withheld",
+                    "truncated"
+                  ],
+                  "title": "StoreWindowView",
+                  "description": "The whole release, and the two numbers a store needs to read it honestly.\n\n``withheld`` is published for the reason it is counted: a store shown 34 rows and told\nnothing reads the window as the whole population. Told it is 34 of 42, it can reason about\nwhat it is looking at, and about how much of the network it is not being shown."
+                },
+                "example": {
+                  "as_of": "2026-09-08T04:55:50.859721Z",
+                  "store_id": "store-brightbean",
+                  "floor": 2,
+                  "withheld": 0,
+                  "truncated": false,
+                  "released": [
+                    {
+                      "pseudonym": "psn-073c9f6eeceef22ef006e64e0e9af48b",
+                      "buckets": {
+                        "budget_band": null,
+                        "category_affinity": [],
+                        "frequency_tier": "none",
+                        "region": null,
+                        "first_time": true
+                      },
+                      "provenance": "live"
+                    },
+                    {
+                      "pseudonym": "psn-seed-ff1d7a9db518fe2c21a0d9c1",
+                      "buckets": {
+                        "budget_band": "500-1000",
+                        "category_affinity": [
+                          "camera-lenses"
+                        ],
+                        "frequency_tier": "occasional",
+                        "region": "GB",
+                        "first_time": false
+                      },
+                      "provenance": "seed"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No bearer, an unknown token, or a buyer session presented instead."
+          },
+          "503": {
+            "description": "PROXYSHOP_BUYER_STORE_WINDOW_TOKENS is unset; the door is closed by default."
+          }
+        },
+        "parameters": [
+          {
+            "name": "Authorization",
+            "in": "header",
+            "required": true,
+            "description": "`Bearer <token>` from PROXYSHOP_BUYER_STORE_WINDOW_TOKENS, which maps one token to one store_id. Unset in the environment means 503: this door has no default. A live buyer session is NOT a credential here — the window is the store's read, not the shopper's.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
     }
   }
 }
