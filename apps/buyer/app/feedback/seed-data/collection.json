@@ -1,0 +1,49 @@
+{
+  "artifact_version": "1.0.0",
+  "bytes": {
+    "prompt": 912
+  },
+  "determinism": {
+    "reproduce": "python scripts/build_seed_feedback_prompt.py",
+    "reproducible_files": [
+      "prompt.json"
+    ],
+    "scope": "byte-identical across processes and machines at the same source revision. The question, the input type and all five options are read out of buyer_svc.feedback.prompt, so a change to the served prompt legitimately moves these bytes and is meant to; --check is what reports it.",
+    "volatile_files": [
+      "collection.json"
+    ]
+  },
+  "file_sha256": {
+    "prompt": "aa4ca068a930ae2e9b3b4eb0304d77d2dcdb690e048f6d1eb2b6dc922b11bd56"
+  },
+  "files": {
+    "prompt": "prompt.json"
+  },
+  "kind": "seeded-buyer-feedback-prompt",
+  "marker": {
+    "audit": "seed.provenance.is_seeded_event",
+    "field": "order_ref",
+    "on_chain_note": "This reference names no existing ledger event: the order was manufactured for the panel, not simulated through a purchase. What the marker guarantees is that IF the seeded panel is answered, the event the real POST /buyer/feedback seals carries this reference verbatim and is therefore permanently separable from earned feedback. For references that are already on a chain, see services/sim/seed-data/feedback-population/ledger.jsonl.",
+    "on_chain_today": false,
+    "prefix": "sim-fb-",
+    "reader": "apps/buyer/app/journey/seeded-feedback.ts::readSeededPrompt",
+    "why": "apps/buyer/svc/src/feedback/submission.py copies order_ref verbatim onto the sealed ledger event, so the marker is inside the trust chain's hashes: a manufactured observation cannot be un-marked and an earned one cannot be marked without breaking GET /events/verify. A payload flag would instead be a claim any caller could make about somebody else's order."
+  },
+  "notes": [
+    "EVERY FIELD IN prompt.json WAS MANUFACTURED. No person answered anything.",
+    "The question and the five options are the real ones the buyer service publishes.",
+    "Answering the seeded panel posts to the real POST /buyer/feedback.",
+    "Going live: obtain a real order_ref in the journey and delete this directory."
+  ],
+  "producer": "python scripts/build_seed_feedback_prompt.py",
+  "producer_module": "scripts.build_seed_feedback_prompt",
+  "reads": {
+    "marker_prefix": "seed.shoppers.SIMULATED_ORDER_PREFIX",
+    "question_and_options": "buyer_svc.feedback.prompt.FEEDBACK_CHOICES"
+  },
+  "simulated": true,
+  "source": {
+    "commit": "5272dccaf81830b899a836654062355cef3c01b3",
+    "dirty": "true"
+  }
+}

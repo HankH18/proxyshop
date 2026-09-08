@@ -40,7 +40,9 @@
       "title": "Reflux Relief®",
       "brand": "Gaia Herbs",
       "product_type": "Tablets",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "reflux-relief",
+      "variant_ref": "20669295362159"
     },
     "prod_66c5c2954133b21d5f38cd24877d085b": {
       "product_ref": "prod_66c5c2954133b21d5f38cd24877d085b",
@@ -48,7 +50,9 @@
       "title": "Tremella Mushroom Powder",
       "brand": "Gaia Herbs",
       "product_type": "Powders",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "tremella-mushroom-powder",
+      "variant_ref": "46141025255560"
     },
     "prod_4b0f572e9a4473cb12fc96e7b78478ca": {
       "product_ref": "prod_4b0f572e9a4473cb12fc96e7b78478ca",
@@ -56,7 +60,9 @@
       "title": "Employee Wellness Bundle",
       "brand": "Gaia Herbs",
       "product_type": "Bundle",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "gaia-employee-wellness-bundle",
+      "variant_ref": "43151659958408"
     },
     "prod_554c5c0a6b83a0aa7a8f400f5e9af629": {
       "product_ref": "prod_554c5c0a6b83a0aa7a8f400f5e9af629",
@@ -64,7 +70,9 @@
       "title": "Milky Oats & Skullcap",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "milky-oats-skullcap",
+      "variant_ref": "44782844346504"
     },
     "prod_b11ea9e4f9363199262d013d8ffe9cae": {
       "product_ref": "prod_b11ea9e4f9363199262d013d8ffe9cae",
@@ -72,7 +80,9 @@
       "title": "Valerian & Poppy",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "valerian-poppy",
+      "variant_ref": "44782846804104"
     },
     "prod_15d5adcde0a107bef4b7162fb99a6215": {
       "product_ref": "prod_15d5adcde0a107bef4b7162fb99a6215",
@@ -80,7 +90,9 @@
       "title": "Lemon Balm & Ginkgo",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "lemon-balm-ginkgo",
+      "variant_ref": "44782846869640"
     },
     "prod_78899d8540dd08b56d66df96ba2746b7": {
       "product_ref": "prod_78899d8540dd08b56d66df96ba2746b7",
@@ -88,7 +100,9 @@
       "title": "Hawthorn & Ginkgo",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "hawthorn-ginkgo",
+      "variant_ref": "44782847033480"
     },
     "prod_fe931955518347526d6f4b7c2311cec8": {
       "product_ref": "prod_fe931955518347526d6f4b7c2311cec8",
@@ -96,7 +110,9 @@
       "title": "Echinacea Supreme",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "echinacea-supreme-liquid-extract",
+      "variant_ref": "44782851588232"
     },
     "prod_4f44b610d94aa018e943d884b3edba2a": {
       "product_ref": "prod_4f44b610d94aa018e943d884b3edba2a",
@@ -104,7 +120,9 @@
       "title": "Berberine & Milk Thistle",
       "brand": "Gaia Herbs",
       "product_type": "Powder Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "berberine-milk-thistle",
+      "variant_ref": "44260814979208"
     },
     "prod_3faf6851b306332b8fc309299ca3c6f6": {
       "product_ref": "prod_3faf6851b306332b8fc309299ca3c6f6",
@@ -112,7 +130,9 @@
       "title": "Lion's Mane Mushroom Gummies",
       "brand": "Gaia Herbs",
       "product_type": "Gummies",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "lions-mane-mushroom-gummies",
+      "variant_ref": "41568101105800"
     },
     "prod_e8cdd01150a8c0e1ffadd3aea0eb9c59": {
       "product_ref": "prod_e8cdd01150a8c0e1ffadd3aea0eb9c59",
@@ -120,7 +140,9 @@
       "title": "Natural Laxative",
       "brand": "Gaia Herbs",
       "product_type": "Tablets",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "natural-laxative",
+      "variant_ref": "20669259415663"
     },
     "prod_6ccc4057b112533086b018bb1a3778fb": {
       "product_ref": "prod_6ccc4057b112533086b018bb1a3778fb",
@@ -128,7 +150,9 @@
       "title": "Turmeric Supreme® Ache PM",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "turmeric-supreme-ache-pm",
+      "variant_ref": "20669333110895"
     },
     "prod_5259afd6cd2d160af13cbfc28aaed480": {
       "product_ref": "prod_5259afd6cd2d160af13cbfc28aaed480",
@@ -136,7 +160,9 @@
       "title": "Kava Root",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "kava-root",
+      "variant_ref": "20669214621807"
     },
     "prod_12e5a204945147bca2590e2ed5296603": {
       "product_ref": "prod_12e5a204945147bca2590e2ed5296603",
@@ -144,7 +170,9 @@
       "title": "Kava Root",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "kava-50",
+      "variant_ref": "20669217636463"
     },
     "prod_5b3100b381998843c2f732f147e632d0": {
       "product_ref": "prod_5b3100b381998843c2f732f147e632d0",
@@ -152,7 +180,9 @@
       "title": "Milk Thistle Gummies",
       "brand": "Gaia Herbs",
       "product_type": "Gummies",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "milk-thistle-gummies",
+      "variant_ref": "42280407990408"
     },
     "prod_795061189deaba4e904a9937907c6181": {
       "product_ref": "prod_795061189deaba4e904a9937907c6181",
@@ -160,7 +190,9 @@
       "title": "Metabolic Activator",
       "brand": "Gaia Herbs",
       "product_type": "Powder Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "metabolic-activator",
+      "variant_ref": "41634150580360"
     },
     "prod_11002ff8a18d22fc071a2264c6e3f7b1": {
       "product_ref": "prod_11002ff8a18d22fc071a2264c6e3f7b1",
@@ -168,7 +200,9 @@
       "title": "Gut Revival",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "gut-revival",
+      "variant_ref": "41646678671496"
     },
     "prod_c99a85f94daf38feb04f8d0ef234b1dc": {
       "product_ref": "prod_c99a85f94daf38feb04f8d0ef234b1dc",
@@ -176,7 +210,9 @@
       "title": "Sauerkraut Postbiotic",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "sauerkraut-postbiotic",
+      "variant_ref": "41650426511496"
     },
     "prod_4ee51ecc695e77b0c0fb089c566ba974": {
       "product_ref": "prod_4ee51ecc695e77b0c0fb089c566ba974",
@@ -184,7 +220,9 @@
       "title": "Ginger-Turmeric Postbiotic",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ginger-turmeric-postbiotic",
+      "variant_ref": "41651186532488"
     },
     "prod_dacdc7afbb519be2d31eb495fbf53e31": {
       "product_ref": "prod_dacdc7afbb519be2d31eb495fbf53e31",
@@ -192,7 +230,9 @@
       "title": "Period Cramp Relief",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "cramp-relief",
+      "variant_ref": "41564446359688"
     },
     "prod_93a302d76c626f729c648d899a660ca7": {
       "product_ref": "prod_93a302d76c626f729c648d899a660ca7",
@@ -200,7 +240,9 @@
       "title": "Period Cycle Support",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "cycle-support",
+      "variant_ref": "41273402130568"
     },
     "prod_1ed8a98adb91505e84e62bea3ab2a7bb": {
       "product_ref": "prod_1ed8a98adb91505e84e62bea3ab2a7bb",
@@ -208,7 +250,9 @@
       "title": "Cycle Serenity",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "cycle-serenity",
+      "variant_ref": "41270994927752"
     },
     "prod_bd2b844badcadd9121258a5aeea85f44": {
       "product_ref": "prod_bd2b844badcadd9121258a5aeea85f44",
@@ -216,7 +260,9 @@
       "title": "Turmeric Supreme® Gummies Extra Strength",
       "brand": "Gaia Herbs",
       "product_type": "Gummies",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "turmeric-supreme-extra-strength-gummies",
+      "variant_ref": "39318909911176"
     },
     "prod_d16b4cb1c1aacb9cd625427cf092ca80": {
       "product_ref": "prod_d16b4cb1c1aacb9cd625427cf092ca80",
@@ -224,7 +270,9 @@
       "title": "Menopause Support Daytime",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "menopause-support-daytime",
+      "variant_ref": "20669346349167"
     },
     "prod_a72ac89c214df10d68c008e801790e5d": {
       "product_ref": "prod_a72ac89c214df10d68c008e801790e5d",
@@ -232,7 +280,9 @@
       "title": "Quercetin Synergy",
       "brand": "Gaia Herbs",
       "product_type": "Powder Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "quercetin-synergy",
+      "variant_ref": "41199384363144"
     },
     "prod_aed09015b84632cac0d0a6e0bd8bf98c": {
       "product_ref": "prod_aed09015b84632cac0d0a6e0bd8bf98c",
@@ -240,7 +290,9 @@
       "title": "Nausea Gummies",
       "brand": "Gaia Herbs",
       "product_type": "Gummies",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "nausea-gummy",
+      "variant_ref": "41222290178184"
     },
     "prod_2a54527f3143f3c71d866fad5410768c": {
       "product_ref": "prod_2a54527f3143f3c71d866fad5410768c",
@@ -248,7 +300,9 @@
       "title": "Rapid Defense Gummies",
       "brand": "Gaia Herbs",
       "product_type": "Gummies",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "rapid-defense-gummies",
+      "variant_ref": "41190521929864"
     },
     "prod_cf40eb0e89b9cc1b886ccd4b5c667121": {
       "product_ref": "prod_cf40eb0e89b9cc1b886ccd4b5c667121",
@@ -256,7 +310,9 @@
       "title": "Cough Syrup",
       "brand": "Gaia Herbs",
       "product_type": "Syrups",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "cough-syrup",
+      "variant_ref": "40748915196040"
     },
     "prod_5b61ea1bb0eb0264c291528df14494e7": {
       "product_ref": "prod_5b61ea1bb0eb0264c291528df14494e7",
@@ -264,7 +320,9 @@
       "title": "Adrenal Health® Daily Support",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "adrenal-health-daily-support",
+      "variant_ref": "20669088727151"
     },
     "prod_0df23a63be06836e03d59ad352add794": {
       "product_ref": "prod_0df23a63be06836e03d59ad352add794",
@@ -272,7 +330,9 @@
       "title": "Sleep Gummies",
       "brand": "Gaia Herbs",
       "product_type": "Gummies",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "sleep-gummies",
+      "variant_ref": "39781032689800"
     },
     "prod_ab9a9d8304cbb5042da41c1230f1ed2c": {
       "product_ref": "prod_ab9a9d8304cbb5042da41c1230f1ed2c",
@@ -280,7 +340,9 @@
       "title": "Relax Gummies",
       "brand": "Gaia Herbs",
       "product_type": "Gummies",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "relax-gummies",
+      "variant_ref": "39781281824904"
     },
     "prod_315e80bb4ed11bdf51ec442013c5525e": {
       "product_ref": "prod_315e80bb4ed11bdf51ec442013c5525e",
@@ -288,7 +350,9 @@
       "title": "Ashwagandha Gummies",
       "brand": "Gaia Herbs",
       "product_type": "Gummies",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ashwagandha-gummies",
+      "variant_ref": "39774212685960"
     },
     "prod_a96dfdb0292809df1f36b56b3111849a": {
       "product_ref": "prod_a96dfdb0292809df1f36b56b3111849a",
@@ -296,7 +360,9 @@
       "title": "Sinus & Lung Supreme™",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "sinus-lung-supreme",
+      "variant_ref": "34509393625224"
     },
     "prod_80b6d367a9b2beced0580fc428c1299c": {
       "product_ref": "prod_80b6d367a9b2beced0580fc428c1299c",
@@ -304,7 +370,9 @@
       "title": "Turmeric Supreme® Gummies Adult Daily",
       "brand": "Gaia Herbs",
       "product_type": "Gummies",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "turmeric-supreme-r-adult-daily-gummies",
+      "variant_ref": "39318887137416"
     },
     "prod_988f6237d4f8d15b4f92aa54a50b4b30": {
       "product_ref": "prod_988f6237d4f8d15b4f92aa54a50b4b30",
@@ -312,7 +380,9 @@
       "title": "Cordyceps Mushroom",
       "brand": "Gaia Herbs",
       "product_type": "Powder Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "cordyceps-mushroom",
+      "variant_ref": "39264854868104"
     },
     "prod_7e26e1e2e681f02f9b17661b6bede873": {
       "product_ref": "prod_7e26e1e2e681f02f9b17661b6bede873",
@@ -320,7 +390,9 @@
       "title": "Turkey Tail Mushroom",
       "brand": "Gaia Herbs",
       "product_type": "Powder Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "turkey-tail-mushroom",
+      "variant_ref": "39264842776712"
     },
     "prod_ff97ebfa498614748f647be57c6c434f": {
       "product_ref": "prod_ff97ebfa498614748f647be57c6c434f",
@@ -328,7 +400,9 @@
       "title": "Reishi Mushroom",
       "brand": "Gaia Herbs",
       "product_type": "Powder Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "reishi-mushroom",
+      "variant_ref": "39264833011848"
     },
     "prod_6102bca01dc0a94051b94937ab2a2507": {
       "product_ref": "prod_6102bca01dc0a94051b94937ab2a2507",
@@ -336,7 +410,9 @@
       "title": "Reishi & Cordyceps",
       "brand": "Gaia Herbs",
       "product_type": "Powder Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "respiratory-mushroom-blend",
+      "variant_ref": "39264712654984"
     },
     "prod_195d9736493897b2bfc0f1bfc53e6541": {
       "product_ref": "prod_195d9736493897b2bfc0f1bfc53e6541",
@@ -344,7 +420,9 @@
       "title": "Lion's Mane Mushroom",
       "brand": "Gaia Herbs",
       "product_type": "Powder Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "lions-mane-mushroom",
+      "variant_ref": "39264895336584"
     },
     "prod_76aee6418cb3b37030231c2791a84493": {
       "product_ref": "prod_76aee6418cb3b37030231c2791a84493",
@@ -352,7 +430,9 @@
       "title": "Everyday Mushrooms",
       "brand": "Gaia Herbs",
       "product_type": "Powder Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "immune-mushroom-blend",
+      "variant_ref": "39264792543368"
     },
     "prod_07654914729e9d0821e40a5b6492547c": {
       "product_ref": "prod_07654914729e9d0821e40a5b6492547c",
@@ -360,7 +440,9 @@
       "title": "Black Seed Oil",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "black-seed-oil",
+      "variant_ref": "34509361283208"
     },
     "prod_03a22eb85b082fb1241fc4cedae4b012": {
       "product_ref": "prod_03a22eb85b082fb1241fc4cedae4b012",
@@ -368,7 +450,9 @@
       "title": "Mighty Lungs™",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "mighty-lungs",
+      "variant_ref": "34509151600776"
     },
     "prod_f2d33215e32eef3501d657d52d3c86ac": {
       "product_ref": "prod_f2d33215e32eef3501d657d52d3c86ac",
@@ -376,7 +460,9 @@
       "title": "Black Elderberry Gummies Kids Daily",
       "brand": "Gaia Herbs",
       "product_type": "Gummies",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "gaiakids-black-elderberry-kids-daily-gummies",
+      "variant_ref": "34263164551304"
     },
     "prod_58d6e4d926b94e7ba175523b1dae042c": {
       "product_ref": "prod_58d6e4d926b94e7ba175523b1dae042c",
@@ -384,7 +470,9 @@
       "title": "Black Elderberry Gummies Extra Strength",
       "brand": "Gaia Herbs",
       "product_type": "Gummies",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "black-elderberry-extra-strength-gummies",
+      "variant_ref": "34106836451464"
     },
     "prod_abc2b6d2d55e00e43ddc479f21edd032": {
       "product_ref": "prod_abc2b6d2d55e00e43ddc479f21edd032",
@@ -392,7 +480,9 @@
       "title": "Microbiome Cleanse",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "microbiome-cleanse",
+      "variant_ref": "32129869119624"
     },
     "prod_eaa9b04234486f1dc990b361948e0fdf": {
       "product_ref": "prod_eaa9b04234486f1dc990b361948e0fdf",
@@ -400,7 +490,9 @@
       "title": "Menopause Support Nighttime",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "menopause-support-nighttime",
+      "variant_ref": "29389948059759"
     },
     "prod_95a03a62a7c68638592b3d78670a11a4": {
       "product_ref": "prod_95a03a62a7c68638592b3d78670a11a4",
@@ -408,7 +500,9 @@
       "title": "Fertility Support",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "fertility-support",
+      "variant_ref": "29389865713775"
     },
     "prod_7011bfef57f77d2b182bbdd5b7ddd5b3": {
       "product_ref": "prod_7011bfef57f77d2b182bbdd5b7ddd5b3",
@@ -416,7 +510,9 @@
       "title": "Echinacea Goldenseal",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "echinacea-goldenseal",
+      "variant_ref": "20669150494831"
     },
     "prod_6def39a61127a2ad9e941ec425a7a8b5": {
       "product_ref": "prod_6def39a61127a2ad9e941ec425a7a8b5",
@@ -424,7 +520,9 @@
       "title": "Cranberry Concentrate",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "cranberry-concentrate",
+      "variant_ref": "20669122347119"
     },
     "prod_aa079bf7d6d67053050aa43f035cb4c8": {
       "product_ref": "prod_aa079bf7d6d67053050aa43f035cb4c8",
@@ -432,7 +530,9 @@
       "title": "Calm A.S.A.P.®",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "calm-asap",
+      "variant_ref": "20669116252271"
     },
     "prod_d07bfac1843af19d1631194968a0cc96": {
       "product_ref": "prod_d07bfac1843af19d1631194968a0cc96",
@@ -440,7 +540,9 @@
       "title": "Bronchial Wellness Syrup",
       "brand": "Gaia Herbs",
       "product_type": "Syrups",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "bronchial-wellness-syrup",
+      "variant_ref": "20669112582255"
     },
     "prod_ee45c9e84d6d5d6a0d30cead6aa094ee": {
       "product_ref": "prod_ee45c9e84d6d5d6a0d30cead6aa094ee",
@@ -448,7 +550,9 @@
       "title": "Black Elderberry Syrup Extra Strength",
       "brand": "Gaia Herbs",
       "product_type": "Syrups",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "black-elderberry-syrup",
+      "variant_ref": "20669092036719"
     },
     "prod_a9ddfd23a7b8be4c81ea6fb9401af957": {
       "product_ref": "prod_a9ddfd23a7b8be4c81ea6fb9401af957",
@@ -456,7 +560,9 @@
       "title": "Black Elderberry",
       "brand": "Gaia Herbs",
       "product_type": "Powder Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "black-elderberry",
+      "variant_ref": "20669091512431"
     },
     "prod_baceb26dfeb6ea85706fe3192bb9816b": {
       "product_ref": "prod_baceb26dfeb6ea85706fe3192bb9816b",
@@ -464,7 +570,9 @@
       "title": "Black Cohosh",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "black-cohosh",
+      "variant_ref": "20669091020911"
     },
     "prod_e22313245a8c5fcbe2803a011095612c": {
       "product_ref": "prod_e22313245a8c5fcbe2803a011095612c",
@@ -472,7 +580,9 @@
       "title": "Bacopa",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "bacopa",
+      "variant_ref": "20669090791535"
     },
     "prod_62dae668aa90ad76cc72947630a9a68b": {
       "product_ref": "prod_62dae668aa90ad76cc72947630a9a68b",
@@ -480,7 +590,9 @@
       "title": "Astragalus Supreme",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "astragalus-supreme",
+      "variant_ref": "20669090562159"
     },
     "prod_5bf92a7d123f7710d79bd6dff72b2071": {
       "product_ref": "prod_5bf92a7d123f7710d79bd6dff72b2071",
@@ -488,7 +600,9 @@
       "title": "Ashwagandha Root",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ashwagandha-root",
+      "variant_ref": "20669089742959"
     },
     "prod_129096ff8ad505ecab1fe4644b6dbfe1": {
       "product_ref": "prod_129096ff8ad505ecab1fe4644b6dbfe1",
@@ -496,7 +610,9 @@
       "title": "Agile Mind®",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "agile-mind",
+      "variant_ref": "20669089415279"
     },
     "prod_f679823b9b58c1560e3986f00cb9dd8f": {
       "product_ref": "prod_f679823b9b58c1560e3986f00cb9dd8f",
@@ -504,7 +620,9 @@
       "title": "Adrenal Health® Nightly Restore",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "adrenal-health-nightly-restore",
+      "variant_ref": "20669089185903"
     },
     "prod_ac46ffdd648c482ebbbbc257f104189e": {
       "product_ref": "prod_ac46ffdd648c482ebbbbc257f104189e",
@@ -512,7 +630,9 @@
       "title": "Adrenal Health® Jumpstart",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "adrenal-health-jump-start",
+      "variant_ref": "20669088989295"
     },
     "prod_6265d1b6f6f8e2c3719e2e5b121bdf75": {
       "product_ref": "prod_6265d1b6f6f8e2c3719e2e5b121bdf75",
@@ -520,7 +640,9 @@
       "title": "Wormwood Black Walnut Supreme",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "wormwood-black-walnut-supreme",
+      "variant_ref": "20669347004527"
     },
     "prod_0c861056ce22f2644d64f050fff0070a": {
       "product_ref": "prod_0c861056ce22f2644d64f050fff0070a",
@@ -528,7 +650,9 @@
       "title": "Women's Libido",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "womens-libido",
+      "variant_ref": "20669346545775"
     },
     "prod_0e91bb4026ab179e61db02327f716e8a": {
       "product_ref": "prod_0e91bb4026ab179e61db02327f716e8a",
@@ -536,7 +660,9 @@
       "title": "Vitex Berry",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "vitex-berry",
+      "variant_ref": "20669342449775"
     },
     "prod_395f41df5b45d57efe83d721f27bba06": {
       "product_ref": "prod_395f41df5b45d57efe83d721f27bba06",
@@ -544,7 +670,9 @@
       "title": "Valerian Root, Certified Organic",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "valerian-root-certified-organic",
+      "variant_ref": "20669341433967"
     },
     "prod_b3cfc3ad03554fb0ab93328eb9840207": {
       "product_ref": "prod_b3cfc3ad03554fb0ab93328eb9840207",
@@ -552,7 +680,9 @@
       "title": "Valerian Root",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "valerian-root",
+      "variant_ref": "20669340745839"
     },
     "prod_a01f6fa190e7e0da3c3c275e6a4389a4": {
       "product_ref": "prod_a01f6fa190e7e0da3c3c275e6a4389a4",
@@ -560,7 +690,9 @@
       "title": "Turmeric Supreme® Ache",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "turmeric-supreme-ache",
+      "variant_ref": "20669332455535"
     },
     "prod_05cd7a07b58a6ec4038b1e694bf4115d": {
       "product_ref": "prod_05cd7a07b58a6ec4038b1e694bf4115d",
@@ -568,7 +700,9 @@
       "title": "Turmeric Supreme® Joint Health",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "turmeric-supreme-joint",
+      "variant_ref": "20669322526831"
     },
     "prod_d5584d1fcddf17bf111fb7c2bb339571": {
       "product_ref": "prod_d5584d1fcddf17bf111fb7c2bb339571",
@@ -576,7 +710,9 @@
       "title": "Turmeric Supreme® Extra Strength",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "turmeric-supreme-extra-strength",
+      "variant_ref": "20669320921199"
     },
     "prod_3832deaf1d487045eb4daf8ab6f4b494": {
       "product_ref": "prod_3832deaf1d487045eb4daf8ab6f4b494",
@@ -584,7 +720,9 @@
       "title": "Turmeric Supreme® Sinus Support",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "turmeric-supreme-sinus-support",
+      "variant_ref": "20669319118959"
     },
     "prod_e6362c27286b4f62caaf2d458ea87e5c": {
       "product_ref": "prod_e6362c27286b4f62caaf2d458ea87e5c",
@@ -592,7 +730,9 @@
       "title": "Thyroid Support",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "thyroid-support",
+      "variant_ref": "20669317513327"
     },
     "prod_9f52c3eb3f831a8b107cbf55776072c3": {
       "product_ref": "prod_9f52c3eb3f831a8b107cbf55776072c3",
@@ -600,7 +740,9 @@
       "title": "Stress Response®",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "stress-response",
+      "variant_ref": "20669311090799"
     },
     "prod_77ea9c11fd51cedc9f7f4500d9e91f69": {
       "product_ref": "prod_77ea9c11fd51cedc9f7f4500d9e91f69",
@@ -608,7 +750,9 @@
       "title": "St. John's Wort",
       "brand": "Gaia Herbs",
       "product_type": "Powder Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "st-johns-wort",
+      "variant_ref": "20669310140527"
     },
     "prod_963eafe38b3c127c2ddb75637805e547": {
       "product_ref": "prod_963eafe38b3c127c2ddb75637805e547",
@@ -616,7 +760,9 @@
       "title": "Sound Sleep®",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "sound-sleep",
+      "variant_ref": "20669309583471"
     },
     "prod_37a202e5865d3c3ff3d597d17275959a": {
       "product_ref": "prod_37a202e5865d3c3ff3d597d17275959a",
@@ -624,7 +770,9 @@
       "title": "SleepThru®",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "sleepthru",
+      "variant_ref": "20669302210671"
     },
     "prod_a7ed4eac9b3c33f53fdfb11d8a92100a": {
       "product_ref": "prod_a7ed4eac9b3c33f53fdfb11d8a92100a",
@@ -632,7 +780,9 @@
       "title": "Saw Palmetto",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "saw-palmetto",
+      "variant_ref": "20669297655919"
     },
     "prod_4d376345aa5ed1f41642bb7ed02ad3ec": {
       "product_ref": "prod_4d376345aa5ed1f41642bb7ed02ad3ec",
@@ -640,7 +790,9 @@
       "title": "Rhodiola Rosea",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "rhodiola-rosea",
+      "variant_ref": "20669296574575"
     },
     "prod_c3cd92244dc537903c60063bb7004adc": {
       "product_ref": "prod_c3cd92244dc537903c60063bb7004adc",
@@ -648,7 +800,9 @@
       "title": "Resveratrol",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "resveratrol-150",
+      "variant_ref": "20669296443503"
     },
     "prod_dfb1ff55c562d1ba806f695fa57a2466": {
       "product_ref": "prod_dfb1ff55c562d1ba806f695fa57a2466",
@@ -656,7 +810,9 @@
       "title": "Quick Defense®",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "quick-defense",
+      "variant_ref": "20669294870639"
     },
     "prod_c465206280a6512ea5bd278f55ec170a": {
       "product_ref": "prod_c465206280a6512ea5bd278f55ec170a",
@@ -664,7 +820,9 @@
       "title": "Prostate Health",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "prostate-health",
+      "variant_ref": "20669294510191"
     },
     "prod_680b74ad3578ec6c92d83b9c8e8160d3": {
       "product_ref": "prod_680b74ad3578ec6c92d83b9c8e8160d3",
@@ -672,7 +830,9 @@
       "title": "Oregano Leaf, Certified Organic",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "oregano-leaf-certified-organic",
+      "variant_ref": "20669267607663"
     },
     "prod_0916f8575a1c478a7c4ebb72d475e6bb": {
       "product_ref": "prod_0916f8575a1c478a7c4ebb72d475e6bb",
@@ -680,7 +840,9 @@
       "title": "Olive Leaf Extract, Certified Organic",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "olive-leaf-certified-organic",
+      "variant_ref": "20669266853999"
     },
     "prod_207035633db64f0193d50314728cfc7e": {
       "product_ref": "prod_207035633db64f0193d50314728cfc7e",
@@ -688,7 +850,9 @@
       "title": "Olive Leaf",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "olive-leaf",
+      "variant_ref": "20669263904879"
     },
     "prod_717e890e3ad38612eb3a96dc6a0010e0": {
       "product_ref": "prod_717e890e3ad38612eb3a96dc6a0010e0",
@@ -696,7 +860,9 @@
       "title": "Oil of Oregano",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "oil-of-oregano",
+      "variant_ref": "20669263577199"
     },
     "prod_965bffe860aa783ad657c1b58929dc9a": {
       "product_ref": "prod_965bffe860aa783ad657c1b58929dc9a",
@@ -704,7 +870,9 @@
       "title": "Nootropic Focus™",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "nootropic-focus",
+      "variant_ref": "20669262495855"
     },
     "prod_8ae420efc7de6044c6c00e95212aa54a": {
       "product_ref": "prod_8ae420efc7de6044c6c00e95212aa54a",
@@ -712,7 +880,9 @@
       "title": "Nettle Leaf",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "nettle-leaf",
+      "variant_ref": "20669260005487"
     },
     "prod_a75dc416b8e02f5949afa9cd94786d09": {
       "product_ref": "prod_a75dc416b8e02f5949afa9cd94786d09",
@@ -720,7 +890,9 @@
       "title": "Everyday Mushrooms & Herbs",
       "brand": "Gaia Herbs",
       "product_type": "Powder Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "mushrooms-herbs-everyday-immune",
+      "variant_ref": "20669255549039"
     },
     "prod_0b6ac4d521dc87da9eaff906366ae9b7": {
       "product_ref": "prod_0b6ac4d521dc87da9eaff906366ae9b7",
@@ -728,7 +900,9 @@
       "title": "Ashwagandha & Cordyceps",
       "brand": "Gaia Herbs",
       "product_type": "Powder Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "adaptogen-performance-mushrooms-herbs",
+      "variant_ref": "20669255188591"
     },
     "prod_987f79043b18581fc4956be37b8022be": {
       "product_ref": "prod_987f79043b18581fc4956be37b8022be",
@@ -736,7 +910,9 @@
       "title": "Steady Mind™",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "emotional-balance",
+      "variant_ref": "20669253550191"
     },
     "prod_56c4f9d62cb732d653acf62e4235cbab": {
       "product_ref": "prod_56c4f9d62cb732d653acf62e4235cbab",
@@ -744,7 +920,9 @@
       "title": "Milk Thistle",
       "brand": "Gaia Herbs",
       "product_type": "Powder Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "milk-thistle",
+      "variant_ref": "20669243883631"
     },
     "prod_d1e1f88031352b67a7c88f6ba52d7a50": {
       "product_ref": "prod_d1e1f88031352b67a7c88f6ba52d7a50",
@@ -752,7 +930,9 @@
       "title": "Mental Alertness",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "mental-alertness",
+      "variant_ref": "20669241622639"
     },
     "prod_da2266ea6c028c75cdc2c2a8fa9b1aaa": {
       "product_ref": "prod_da2266ea6c028c75cdc2c2a8fa9b1aaa",
@@ -760,7 +940,9 @@
       "title": "Male Libido",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "male-libido",
+      "variant_ref": "20669240082543"
     },
     "prod_cd04ea3ffbc75fdfe1f2b13ad2bc8912": {
       "product_ref": "prod_cd04ea3ffbc75fdfe1f2b13ad2bc8912",
@@ -768,7 +950,9 @@
       "title": "Maca Root",
       "brand": "Gaia Herbs",
       "product_type": "Powder Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "maca-root",
+      "variant_ref": "20669236379759"
     },
     "prod_390271c987e9d664ae07669e4e7acc32": {
       "product_ref": "prod_390271c987e9d664ae07669e4e7acc32",
@@ -776,7 +960,9 @@
       "title": "Maca Powder",
       "brand": "Gaia Herbs",
       "product_type": "Powders",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "maca-powder",
+      "variant_ref": "20669235986543"
     },
     "prod_3f815bc2eedd9ec0712660b138686ed5": {
       "product_ref": "prod_3f815bc2eedd9ec0712660b138686ed5",
@@ -784,7 +970,9 @@
       "title": "Liver Health",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "liver-health",
+      "variant_ref": "20669235658863"
     },
     "prod_816ab44e798854b7070045c6d99c2521": {
       "product_ref": "prod_816ab44e798854b7070045c6d99c2521",
@@ -792,7 +980,9 @@
       "title": "Liver Cleanse",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "liver-cleanse",
+      "variant_ref": "20669235298415"
     },
     "prod_2beacbb133e2acb6dc30fbfe92f26240": {
       "product_ref": "prod_2beacbb133e2acb6dc30fbfe92f26240",
@@ -800,7 +990,9 @@
       "title": "Lactation Support™",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "lactation-support",
+      "variant_ref": "20669231628399"
     },
     "prod_edc3dfd704e8bf140beb21dfff1ce389": {
       "product_ref": "prod_edc3dfd704e8bf140beb21dfff1ce389",
@@ -808,7 +1000,9 @@
       "title": "Holy Basil Leaf",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "holy-basil-leaf",
+      "variant_ref": "20669211181167"
     },
     "prod_658cb92d6a4d28e14dc800832e71c44a": {
       "product_ref": "prod_658cb92d6a4d28e14dc800832e71c44a",
@@ -816,7 +1010,9 @@
       "title": "Hawthorn Supreme",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "hawthorn-supreme",
+      "variant_ref": "20669208887407"
     },
     "prod_7bb593e7549c99253d4e5cd63dd24ac9": {
       "product_ref": "prod_7bb593e7549c99253d4e5cd63dd24ac9",
@@ -824,7 +1020,9 @@
       "title": "Hair, Skin & Nails",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "hair-skin-nail-support",
+      "variant_ref": "20669206691951"
     },
     "prod_113c678748233cc8d237a6d5a62ba183": {
       "product_ref": "prod_113c678748233cc8d237a6d5a62ba183",
@@ -832,7 +1030,9 @@
       "title": "Green Tea",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "green-tea",
+      "variant_ref": "20669203939439"
     },
     "prod_1f6d9411713f6d94fbd4258f0e547b93": {
       "product_ref": "prod_1f6d9411713f6d94fbd4258f0e547b93",
@@ -840,7 +1040,9 @@
       "title": "Ginkgo Leaf",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ginkgo-leaf",
+      "variant_ref": "20669186277487"
     },
     "prod_76fdef8334a826cbf2c39e674b074868": {
       "product_ref": "prod_76fdef8334a826cbf2c39e674b074868",
@@ -848,7 +1050,9 @@
       "title": "Ginger Supreme",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ginger-supreme",
+      "variant_ref": "20669185818735"
     },
     "prod_fe006379facb273770550e8768dc73a7": {
       "product_ref": "prod_fe006379facb273770550e8768dc73a7",
@@ -856,7 +1060,9 @@
       "title": "Gas & Bloating™",
       "brand": "Gaia Herbs",
       "product_type": "Powder Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "gas-bloating",
+      "variant_ref": "20669182673007"
     },
     "prod_b0997ffc915aaf566c900b9f2d4bd188": {
       "product_ref": "prod_b0997ffc915aaf566c900b9f2d4bd188",
@@ -864,7 +1070,9 @@
       "title": "Bronchial Wellness Syrup Kids",
       "brand": "Gaia Herbs",
       "product_type": "Syrups",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "gaiakids-bronchial-wellness-syrup",
+      "variant_ref": "20669164519535"
     },
     "prod_48f059bc44de31dbeb1f23bf56c4bc8d": {
       "product_ref": "prod_48f059bc44de31dbeb1f23bf56c4bc8d",
@@ -872,7 +1080,9 @@
       "title": "Black Elderberry Syrup Kids Daily",
       "brand": "Gaia Herbs",
       "product_type": "Syrups",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "gaiakids-black-elderberry-syrup",
+      "variant_ref": "20669164355695"
     },
     "prod_34e6a9f61059674f44b5fad7eb21f586": {
       "product_ref": "prod_34e6a9f61059674f44b5fad7eb21f586",
@@ -880,7 +1090,9 @@
       "title": "Fenugreek Seed",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "fenugreek-seed",
+      "variant_ref": "20669162356847"
     },
     "prod_33cfd719eb80b174f2b115cd991721c8": {
       "product_ref": "prod_33cfd719eb80b174f2b115cd991721c8",
@@ -888,7 +1100,9 @@
       "title": "Eleuthero Root",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "eleuthero-root",
+      "variant_ref": "20669159080047"
     },
     "prod_258d82e49b657aae59a9a994a9283c5f": {
       "product_ref": "prod_258d82e49b657aae59a9a994a9283c5f",
@@ -896,7 +1110,9 @@
       "title": "Echinacea Supreme",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Phyto-Caps®",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "echinacea-supreme",
+      "variant_ref": "20669154852975"
     },
     "prod_54c0eba5411f3bda4a5c7e4a02c79543": {
       "product_ref": "prod_54c0eba5411f3bda4a5c7e4a02c79543",
@@ -904,7 +1120,9 @@
       "title": "Echinacea Goldenseal Supreme",
       "brand": "Gaia Herbs",
       "product_type": "Liquid Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "echinacea-goldenseal-supreme",
+      "variant_ref": "20669151346799"
     },
     "prod_850cac7274a46af52a70d9d5a068f617": {
       "product_ref": "prod_850cac7274a46af52a70d9d5a068f617",
@@ -912,7 +1130,9 @@
       "title": "Echinacea Goldenseal Propolis Throat Spray",
       "brand": "Gaia Herbs",
       "product_type": "Sprays",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "echinacea-goldenseal-propolis-throat-spray",
+      "variant_ref": "20669151019119"
     },
     "prod_f664161a446cb586281b412b40fa7872": {
       "product_ref": "prod_f664161a446cb586281b412b40fa7872",
@@ -920,7 +1140,9 @@
       "title": "Golden Milk",
       "brand": "Gaia Herbs",
       "product_type": "Powders",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "golden-milk",
+      "variant_ref": "19782590529647"
     }
   },
   "live_state": {

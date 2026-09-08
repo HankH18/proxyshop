@@ -1,0 +1,112 @@
+{
+  "artifact_version": "1.0.0",
+  "bytes": {
+    "page": 14017
+  },
+  "captured_at": "2026-09-08T00:00:00+00:00",
+  "captured_at_is": "stated, not a clock; see determinism.stamped_by_the_producer",
+  "determinism": {
+    "canonical_digest": "0090436c3657e97ef5120fba71b96d04139338037f5aa5c8067100b1d18ca731",
+    "canonical_file": "dashboard-page.json",
+    "check": "python scripts/build_seed_dashboard.py --check",
+    "reproduce": "python scripts/build_seed_dashboard.py --store store-secondchance",
+    "reproducible_files": [
+      "dashboard-page.json"
+    ],
+    "scope": "byte-identical across processes and machines at the same source revision; a change to the merchant service, the envelope algebra, the store agent or the trust scorer moves these bytes and is meant to. See `source`.",
+    "stamped_by_the_producer": [
+      "`generated_at` and each solicitation's `offer.expires_at`, from `merchant_svc.dashboard.routes`'s clock, frozen at `captured_at`",
+      "each solicitation's `recorded_at`, from `merchant_svc.dashboard.journal._now`, frozen at `captured_at`",
+      "each rehearsal `auction_id`, minted live from `uuid.uuid4()` and here from a deterministic uuid5 carrying the `sim-fb-` marker",
+      "the loss window, passed explicitly as `start`/`end` rather than defaulted off `time.time()`"
+    ],
+    "volatile_fields": [
+      "source"
+    ],
+    "volatile_files": [
+      "collection.json"
+    ]
+  },
+  "file_sha256": {
+    "page": "0090436c3657e97ef5120fba71b96d04139338037f5aa5c8067100b1d18ca731"
+  },
+  "files": {
+    "page": "dashboard-page.json"
+  },
+  "kind": "simulated-merchant-dashboard-page",
+  "marker": {
+    "audit": "seed.provenance.posture_split",
+    "corpus": "services/sim/seed-data/feedback-population",
+    "field": "order_ref",
+    "organic_events": 0,
+    "panels": {
+      "bids": {
+        "entries": 3,
+        "how": "each `auction_id` is `dashboard-rehearsal-sim-fb-<uuid5>`. A live dashboard mints that id from `uuid.uuid4()`, which cannot produce this substring, so the prefix does separate these rows from a merchant's own rehearsals. It is NOT a ledger row: nothing hashes it, no chain links it, and an edit to one of these rows is detectable only by the sha256 in this file",
+        "outcomes": [
+          "cluster_not_pursued",
+          "bid",
+          "envelope_not_activated"
+        ],
+        "strength": "reserved id prefix -- WEAKER, and nothing seals it"
+      },
+      "envelope": {
+        "approver": "owner@store-secondchance.simulated.invalid",
+        "how": "the terms are stated here; the version history, the activation state and the approval digest over them are the merchant service's own output",
+        "strength": "none -- stated walls, real algebra"
+      },
+      "losses": {
+        "how": "the loss report is deployment configuration stated in scripts/build_seed_dashboard.py. `LossReport` is additionalProperties: false, so there is nowhere in it to put a marker and none is smuggled into a cluster id. A reader tells it from a real report by the fact that it is in this file",
+        "strength": "none -- stated, and unmarked"
+      },
+      "onboarding": {
+        "how": "merchant_svc.onboarding.script authored every question; the answers carried in the envelope above are stated",
+        "strength": "none -- the service's own script"
+      },
+      "trust": {
+        "as_of": "2026-09-07T22:50:37.358Z",
+        "dimensions": [
+          "catalog_claim_accuracy",
+          "discount_honored",
+          "feedback_match",
+          "not_returned",
+          "price_honored",
+          "shipped_on_time"
+        ],
+        "how": "recomputed from those events by seed.store.replay_postures through the platform's own scorer at the corpus's `as_of`, then projected onto the published property set by trust.snapshot.routes.published_entry. The snapshot itself carries NO marker -- a posture is a number, and it is seeded only because the events under it are",
+        "moved_by_the_corpus": [
+          "feedback_match"
+        ],
+        "note": "five of the six dimensions sit at the neutral Beta(2,2) prior because the only observations in this corpus are post-purchase feedback. That is the corpus being honest, not the panel being incomplete",
+        "strength": "hash-chain fact, inherited"
+      },
+      "trust_events": {
+        "events": 7,
+        "first_event_hash": "a1b1a6098897520ff6b4ca6dd8a344bd344980d36c974a9f87bb8d2093dc1f34",
+        "how": "every event carries `order_ref` beginning `sim-fb-`, and that field is covered by `event_hash`, which `prev_hash` links to the event before it",
+        "last_event_hash": "d8cfc1b77bcdc386f6fec5c2db0b4415c3b1e8404138eb951e5ba5aaf86365c7",
+        "strength": "hash-chain fact"
+      }
+    },
+    "prefix": "sim-fb-",
+    "reader": "seed.provenance.is_seeded_event",
+    "seeded_events": 28,
+    "why": "The observations behind this page's trust panels were manufactured, and the marker for them is inside the hash chain: the buyer service copies `order_ref` verbatim onto the sealed event, so a seeded observation cannot be un-marked and an earned one cannot be marked without breaking GET /events/verify. That is true of the two trust panels and of nothing else on this page, which is what `panels` is for."
+  },
+  "notes": [
+    "SIMULATED MERCHANT DASHBOARD. No merchant has ever looked at this page, and not one auction it reports was ever run.",
+    "The payload is what `GET /stores/{store_id}/dashboard` returned, driven in-process over the real routes: the real envelope algebra, the real approval digest, the real narrowing of a whole-market trust snapshot down to one store, and a real store agent answering three real POST /v1/bid-requests in two activation states.",
+    "The trust and trust_events panels are NOT stated. They are the seeded feedback corpus at services/sim/seed-data/feedback-population/, whose digests are verified before this producer reads it and whose postures are recomputed from the chain offline by seed.store.replay_postures.",
+    "The losses panel IS stated, and carries no marker of any kind -- see `marker`.",
+    "Going live changes no code on the serving path: point MERCHANT_REPORT_TOKENS, TRUST_URL and STORE_AGENT_URL at real services and the same route assembles the same page from real rows. See deploy/demo-seed/README.md."
+  ],
+  "producer": "python scripts/build_seed_dashboard.py --store store-secondchance",
+  "producer_module": "merchant_svc.dashboard.routes.read_dashboard",
+  "producer_script": "scripts.build_seed_dashboard",
+  "simulated": true,
+  "source": {
+    "commit": "b758143477de6468e6bf9cdbb789a00296cfae2c",
+    "dirty": true
+  },
+  "store_id": "store-secondchance"
+}

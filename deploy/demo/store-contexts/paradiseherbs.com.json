@@ -40,7 +40,9 @@
       "title": "Earth's Blend Iron",
       "brand": "Paradise",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "earths-blend-iron",
+      "variant_ref": "44541710303335"
     },
     "prod_cd5cf521a2e1c8a09159e3e0793313c1": {
       "product_ref": "prod_cd5cf521a2e1c8a09159e3e0793313c1",
@@ -48,7 +50,9 @@
       "title": "Earth's Blend - Magnesium",
       "brand": "Paradise",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "earths-blend-magnesium",
+      "variant_ref": "44418497020007"
     },
     "prod_146c3c14800746ca1bd0639243f4053e": {
       "product_ref": "prod_146c3c14800746ca1bd0639243f4053e",
@@ -56,7 +60,9 @@
       "title": "African Mango",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "african-mango-weight-loss",
+      "variant_ref": "44240029581415"
     },
     "prod_68a464dc8b38a7cdf2c11d60fda044c3": {
       "product_ref": "prod_68a464dc8b38a7cdf2c11d60fda044c3",
@@ -64,7 +70,9 @@
       "title": "Amla",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "amla-organic-extract",
+      "variant_ref": "44240029417575"
     },
     "prod_d51f25f42a00ba7eecccea447bc45a81": {
       "product_ref": "prod_d51f25f42a00ba7eecccea447bc45a81",
@@ -72,7 +80,9 @@
       "title": "Arjuna",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "arjuna-10-1-1-arjunolic-acids",
+      "variant_ref": "44240029089895"
     },
     "prod_9773e6fd306835129b4a521ef369c0b6": {
       "product_ref": "prod_9773e6fd306835129b4a521ef369c0b6",
@@ -80,7 +90,9 @@
       "title": "Artichoke",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "artichoke-european",
+      "variant_ref": "44240028991591"
     },
     "prod_7845eb292aa7762b9d804bb45ca43358": {
       "product_ref": "prod_7845eb292aa7762b9d804bb45ca43358",
@@ -88,7 +100,9 @@
       "title": "Astragalus",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "astragalus-herbal-extract",
+      "variant_ref": "44240028631143"
     },
     "prod_22f721233ef03faf44794f1818ed8795": {
       "product_ref": "prod_22f721233ef03faf44794f1818ed8795",
@@ -96,7 +110,9 @@
       "title": "Ashwagandha",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ashwagandha-organic-extract",
+      "variant_ref": "44240028500071"
     },
     "prod_f856b07f8e1464845c9e74d7d14f512c": {
       "product_ref": "prod_f856b07f8e1464845c9e74d7d14f512c",
@@ -104,7 +120,9 @@
       "title": "Andrographis, with Elderberry",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "andrographis-with-elderberry",
+      "variant_ref": "44240028401767"
     },
     "prod_d2ad35c38fac549af1acde44f3d3e753": {
       "product_ref": "prod_d2ad35c38fac549af1acde44f3d3e753",
@@ -112,7 +130,9 @@
       "title": "Bacopa",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "bacopa-organic-extract",
+      "variant_ref": "44240028237927"
     },
     "prod_f61fc5920822b5ab815710ef3279d47c": {
       "product_ref": "prod_f61fc5920822b5ab815710ef3279d47c",
@@ -120,7 +140,9 @@
       "title": "Banaba Leaf",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "banaba-leaf-extract",
+      "variant_ref": "44240028106855"
     },
     "prod_986bf2d3ca6811ed965082a808e93c30": {
       "product_ref": "prod_986bf2d3ca6811ed965082a808e93c30",
@@ -128,7 +150,9 @@
       "title": "Berberine HCL",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "berberine-hcl",
+      "variant_ref": "44240027975783"
     },
     "prod_f71d6a7ecd72feee0da3a3479970f270": {
       "product_ref": "prod_f71d6a7ecd72feee0da3a3479970f270",
@@ -136,7 +160,9 @@
       "title": "Bilberry +",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "bilberry-go-ji-chrys",
+      "variant_ref": "44240027811943"
     },
     "prod_4f4c77b7b1c22b4a523f6a0dfa389794": {
       "product_ref": "prod_4f4c77b7b1c22b4a523f6a0dfa389794",
@@ -144,7 +170,9 @@
       "title": "ThymoQuin® Black Seed Oil",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "black-seed-oil-v-cold-pressed-oil",
+      "variant_ref": "44240027713639"
     },
     "prod_332d533ffe95240d688008da6d50069d": {
       "product_ref": "prod_332d533ffe95240d688008da6d50069d",
@@ -152,7 +180,9 @@
       "title": "Beta Glucans",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "beta-glucans-yeast-free",
+      "variant_ref": "44240024043623"
     },
     "prod_34848967d3ded0ef0a6bbd24309dd445": {
       "product_ref": "prod_34848967d3ded0ef0a6bbd24309dd445",
@@ -160,7 +190,9 @@
       "title": "Brom-E-Mend",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "bromelain-joint-digestive",
+      "variant_ref": "44240023289959"
     },
     "prod_8cf7a4c3eb498c4677d9165ba63aca36": {
       "product_ref": "prod_8cf7a4c3eb498c4677d9165ba63aca36",
@@ -168,7 +200,9 @@
       "title": "CALM - Stress Formula",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "calm-holy-basil-lotus-and-bacopa-stress-formula",
+      "variant_ref": "44240022831207"
     },
     "prod_4362884c411964c5b5c7e7ce17d6d68d": {
       "product_ref": "prod_4362884c411964c5b5c7e7ce17d6d68d",
@@ -176,7 +210,9 @@
       "title": "Cordyceps",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "cordyceps-cs-4-8-1",
+      "variant_ref": "44240022667367"
     },
     "prod_f42ba8a5d60299d3b7ddf5bfdd3daeb0": {
       "product_ref": "prod_f42ba8a5d60299d3b7ddf5bfdd3daeb0",
@@ -184,7 +220,9 @@
       "title": "Coleus Forskolii",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "coleus-forskolii-extract",
+      "variant_ref": "44240022569063"
     },
     "prod_5979cc5c22b40f22de25d801a842536f": {
       "product_ref": "prod_5979cc5c22b40f22de25d801a842536f",
@@ -192,7 +230,9 @@
       "title": "Carnosine (L-Carnosine)",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "carnosine-l-carnosine",
+      "variant_ref": "44240022405223"
     },
     "prod_e1bc72397a318110d6b9a768e15cd369": {
       "product_ref": "prod_e1bc72397a318110d6b9a768e15cd369",
@@ -200,7 +240,9 @@
       "title": "Camu Camu",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "camu-camu-20-vit-c",
+      "variant_ref": "44240022241383"
     },
     "prod_6f1dc072f9d30ac716b68f208bf177fa": {
       "product_ref": "prod_6f1dc072f9d30ac716b68f208bf177fa",
@@ -208,7 +250,9 @@
       "title": "Collagen Extreme",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "collagen-extreme",
+      "variant_ref": "44240022110311"
     },
     "prod_887d5aa8a2fa03a9d1bab46f95d845e5": {
       "product_ref": "prod_887d5aa8a2fa03a9d1bab46f95d845e5",
@@ -216,7 +260,9 @@
       "title": "Creatine Micronized",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "creatine-micronized",
+      "variant_ref": "44240021913703"
     },
     "prod_fd725d173bd024038840259dc9998cc9": {
       "product_ref": "prod_fd725d173bd024038840259dc9998cc9",
@@ -224,7 +270,9 @@
       "title": "Eleuthero",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "eleuthero-siberian-50-extract",
+      "variant_ref": "44240021815399"
     },
     "prod_d00a9ed00d4d20c42d3dd48f10b4d733": {
       "product_ref": "prod_d00a9ed00d4d20c42d3dd48f10b4d733",
@@ -232,7 +280,9 @@
       "title": "Sambuca-Well",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "elderberry-sambuca-well-herbal-extract-75-1",
+      "variant_ref": "44240021717095"
     },
     "prod_c24088b8f1f8bac157cc952b72b9e3f0": {
       "product_ref": "prod_c24088b8f1f8bac157cc952b72b9e3f0",
@@ -240,7 +290,9 @@
       "title": "Elderberry with Zinc",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "elderberry-with-zinc",
+      "variant_ref": "44240021684327"
     },
     "prod_503432e471ead9ac2d08af4ce1a5c567": {
       "product_ref": "prod_503432e471ead9ac2d08af4ce1a5c567",
@@ -248,7 +300,9 @@
       "title": "Earth's Blend - B Complex",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "earths-blend-b-complex",
+      "variant_ref": "44240021422183"
     },
     "prod_d7d25aab182822f8f77093f1f3ed8443": {
       "product_ref": "prod_d7d25aab182822f8f77093f1f3ed8443",
@@ -256,7 +310,9 @@
       "title": "Earths Blend-Biotin",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "earths-blend-biotin",
+      "variant_ref": "44240021258343"
     },
     "prod_b3ba5c535be34cafc3bb44d303c93640": {
       "product_ref": "prod_b3ba5c535be34cafc3bb44d303c93640",
@@ -264,7 +320,9 @@
       "title": "Earth's Blend - Vitamin C",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "earths-blend-vitamin-c",
+      "variant_ref": "44240021094503"
     },
     "prod_f73fbf888b068db58f0723761f961f8e": {
       "product_ref": "prod_f73fbf888b068db58f0723761f961f8e",
@@ -272,7 +330,9 @@
       "title": "Earth's Blend - CAL-MAG",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "earths-blend-bone-booster-cal-mag-zinc-d-k2",
+      "variant_ref": "44240020963431"
     },
     "prod_b68bd03a3b31d330c66e9bdbf09a26f2": {
       "product_ref": "prod_b68bd03a3b31d330c66e9bdbf09a26f2",
@@ -280,7 +340,9 @@
       "title": "Earth's Blend - Vitamin D3",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "earths-blend-vitamin-d3",
+      "variant_ref": "44240019914855"
     },
     "prod_f5ed4deabff65aeb955ef5bf5d759f17": {
       "product_ref": "prod_f5ed4deabff65aeb955ef5bf5d759f17",
@@ -288,7 +350,9 @@
       "title": "Earth's Blend -Vitamin D3+K2",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "earths-blend-vitamin-d3-k2",
+      "variant_ref": "44240019783783"
     },
     "prod_bd67c02efae087e13a6a56c0aedaa7ac": {
       "product_ref": "prod_bd67c02efae087e13a6a56c0aedaa7ac",
@@ -296,7 +360,9 @@
       "title": "Earth's Blend Multi-Vitamin - No Iron",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "earths-blend-multi-no-iron",
+      "variant_ref": "44240019619943"
     },
     "prod_afb8afe4b966c63dd3890f94d042f620": {
       "product_ref": "prod_afb8afe4b966c63dd3890f94d042f620",
@@ -304,7 +370,9 @@
       "title": "Earth's Blend Multi-Vitamin - With Iron",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "earths-blend-multi-w-iron",
+      "variant_ref": "44240019390567"
     },
     "prod_c4ec566d0c3ee5d8038d8ca46384ecde": {
       "product_ref": "prod_c4ec566d0c3ee5d8038d8ca46384ecde",
@@ -312,7 +380,9 @@
       "title": "Earths Blend - Quercetin",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "earths-blend-quercetin",
+      "variant_ref": "44240019161191"
     },
     "prod_7583b527dd2d0d28aa8a3a6e8d28db69": {
       "product_ref": "prod_7583b527dd2d0d28aa8a3a6e8d28db69",
@@ -320,7 +390,9 @@
       "title": "Earths Blend - Zinc",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "earths-blend-zinc-picolinate-30mg",
+      "variant_ref": "44240019030119"
     },
     "prod_952f24523460fb0944188b081221ea85": {
       "product_ref": "prod_952f24523460fb0944188b081221ea85",
@@ -328,7 +400,9 @@
       "title": "Fo Ti",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "fo-ti-traditionally-prepared",
+      "variant_ref": "44240018899047"
     },
     "prod_e6eb3b06cd78090d006630467c691da0": {
       "product_ref": "prod_e6eb3b06cd78090d006630467c691da0",
@@ -336,7 +410,9 @@
       "title": "Garcinia Cambogia",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "garcinia-cambogia-extract-50",
+      "variant_ref": "44240018800743"
     },
     "prod_a3fff02f523a393777fd41ec38642c99": {
       "product_ref": "prod_a3fff02f523a393777fd41ec38642c99",
@@ -344,7 +420,9 @@
       "title": "Ginseng +",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ginseng-extract-panax-red",
+      "variant_ref": "44240018636903"
     },
     "prod_5684593145f06c50451d9b2c88a43b78": {
       "product_ref": "prod_5684593145f06c50451d9b2c88a43b78",
@@ -352,7 +430,9 @@
       "title": "Ginkgo Biloba",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ginkgo-biloba-double-strength-extract-50-1-24-6",
+      "variant_ref": "44240018505831"
     },
     "prod_28527ddf88475d1f16cb9debdabcad78": {
       "product_ref": "prod_28527ddf88475d1f16cb9debdabcad78",
@@ -360,7 +440,9 @@
       "title": "Ginger",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ginger-extract-2-5-gingerols",
+      "variant_ref": "44240018341991"
     },
     "prod_e41f9cad909e1cb25f16cba4e2a60eb7": {
       "product_ref": "prod_e41f9cad909e1cb25f16cba4e2a60eb7",
@@ -368,7 +450,9 @@
       "title": "Whole-Woman Collagen",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "whole-woman-collagen",
+      "variant_ref": "44219416608871"
     },
     "prod_e14706d7841a75c79d9fbd4eee3ede88": {
       "product_ref": "prod_e14706d7841a75c79d9fbd4eee3ede88",
@@ -376,7 +460,9 @@
       "title": "Whole-Woman Sensual Fire",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "whole-woman-sensual-fire",
+      "variant_ref": "44219416576103"
     },
     "prod_6a657696e32b9ca0c5cbdb0424d06f5b": {
       "product_ref": "prod_6a657696e32b9ca0c5cbdb0424d06f5b",
@@ -384,7 +470,9 @@
       "title": "Whole-Man Virility Formula",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "whole-man-virility-formula",
+      "variant_ref": "44219416543335"
     },
     "prod_d97ccd23898529ab48b7f5311e2c385c": {
       "product_ref": "prod_d97ccd23898529ab48b7f5311e2c385c",
@@ -392,7 +480,9 @@
       "title": "Grass-Fed Whey Protein",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "whey-protein-21-gram-with-aminogen",
+      "variant_ref": "44219416477799"
     },
     "prod_e2f873eac112cd1f3a3a28dcf36d77d9": {
       "product_ref": "prod_e2f873eac112cd1f3a3a28dcf36d77d9",
@@ -400,7 +490,9 @@
       "title": "Valerian Root",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "valerian-root-european-extract",
+      "variant_ref": "44219416445031"
     },
     "prod_f1fb5094928fbf14fdb7576d7f8f1b49": {
       "product_ref": "prod_f1fb5094928fbf14fdb7576d7f8f1b49",
@@ -408,7 +500,9 @@
       "title": "V-Glucosamine",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "v-glucosamin",
+      "variant_ref": "44219416412263"
     },
     "prod_bdd6f19e7f29cfdf5037325bfcd9b37a": {
       "product_ref": "prod_bdd6f19e7f29cfdf5037325bfcd9b37a",
@@ -416,7 +510,9 @@
       "title": "Vital Treasures",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "vital-treasures-healthy-hair",
+      "variant_ref": "44219416379495"
     },
     "prod_c75947bc85e07f39bd6f6f13bcaef0ea": {
       "product_ref": "prod_c75947bc85e07f39bd6f6f13bcaef0ea",
@@ -424,7 +520,9 @@
       "title": "Curcumin +",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "turmeric-4-1-extract",
+      "variant_ref": "44219416281191"
     },
     "prod_29c1f6c69feb9a48b741e4a493311c0a": {
       "product_ref": "prod_29c1f6c69feb9a48b741e4a493311c0a",
@@ -432,7 +530,9 @@
       "title": "Turmeric",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "turmeric-organic-extract",
+      "variant_ref": "44219416248423"
     },
     "prod_3ded916342231a2f20a226b42db86d7d": {
       "product_ref": "prod_3ded916342231a2f20a226b42db86d7d",
@@ -440,7 +540,9 @@
       "title": "Triphala",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "triphala-organic-extract",
+      "variant_ref": "44219416182887"
     },
     "prod_be78d74dbee75f6a71ed4fb924bc4ebd": {
       "product_ref": "prod_be78d74dbee75f6a71ed4fb924bc4ebd",
@@ -448,7 +550,9 @@
       "title": "Tongkat Ali",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "tongkat-ali-200-1-extra-strength-extract",
+      "variant_ref": "44219416117351"
     },
     "prod_7539a0bcd99679aabdf9c58dce9c37bd": {
       "product_ref": "prod_7539a0bcd99679aabdf9c58dce9c37bd",
@@ -456,7 +560,9 @@
       "title": "Sun Theanine",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "sun-theanine-once-daily-200-mg-super-potency",
+      "variant_ref": "44219416019047"
     },
     "prod_e1fa5a29ce712da3a74ece4245149839": {
       "product_ref": "prod_e1fa5a29ce712da3a74ece4245149839",
@@ -464,7 +570,9 @@
       "title": "St Johns Wort",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "st-johns-wort-extract",
+      "variant_ref": "44219415986279"
     },
     "prod_9843c447954db347593524f76868a057": {
       "product_ref": "prod_9843c447954db347593524f76868a057",
@@ -472,7 +580,9 @@
       "title": "Shatavari",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "shatavari-organic-10-1",
+      "variant_ref": "44219415953511"
     },
     "prod_74285e97e96b4c63a9c3acc39af97faa": {
       "product_ref": "prod_74285e97e96b4c63a9c3acc39af97faa",
@@ -480,7 +590,9 @@
       "title": "Shilajit",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "shilajit-wild-crafted",
+      "variant_ref": "44219415920743"
     },
     "prod_df027e84573e3eda49f1e9f3d3336f6a": {
       "product_ref": "prod_df027e84573e3eda49f1e9f3d3336f6a",
@@ -488,7 +600,9 @@
       "title": "Schisandra",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "schisandra-10-1",
+      "variant_ref": "44219415887975"
     },
     "prod_2b7d9bc400aca87efe17478acc0d5225": {
       "product_ref": "prod_2b7d9bc400aca87efe17478acc0d5225",
@@ -496,7 +610,9 @@
       "title": "Saffron (Saffr-Tone)",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "saffron-saffr-tone",
+      "variant_ref": "44219415855207"
     },
     "prod_a8a62142039cc132d77d309ca3cd977c": {
       "product_ref": "prod_a8a62142039cc132d77d309ca3cd977c",
@@ -504,7 +620,9 @@
       "title": "ResveraGrape",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "resveragrape",
+      "variant_ref": "44219415822439"
     },
     "prod_76a9bd511c706a8deb2aad1e2541a37a": {
       "product_ref": "prod_76a9bd511c706a8deb2aad1e2541a37a",
@@ -512,7 +630,9 @@
       "title": "Reishi",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "reishi-supreme-red-ling-zhi-extract",
+      "variant_ref": "44219415789671"
     },
     "prod_8a951be90eae8279016250927f682ff2": {
       "product_ref": "prod_8a951be90eae8279016250927f682ff2",
@@ -520,7 +640,9 @@
       "title": "Rhodiola",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "rhodiola-extract-dual-action",
+      "variant_ref": "44219415724135"
     },
     "prod_7aecfe6c80d3f684cef0af11fd5f9291": {
       "product_ref": "prod_7aecfe6c80d3f684cef0af11fd5f9291",
@@ -528,7 +650,9 @@
       "title": "Royal Jelly",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "royal-jelly-golden-emperor",
+      "variant_ref": "44219415691367"
     },
     "prod_cb00f262823dc89461bf022798eca19f": {
       "product_ref": "prod_cb00f262823dc89461bf022798eca19f",
@@ -536,7 +660,9 @@
       "title": "Resveratrol",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "resveratrol-w-ginger-20-1",
+      "variant_ref": "44219415625831"
     },
     "prod_9b1ac717b96983f13d6b1d4f42a4f6e3": {
       "product_ref": "prod_9b1ac717b96983f13d6b1d4f42a4f6e3",
@@ -544,7 +670,9 @@
       "title": "Organic Pea Protein",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "organic-pea-protein",
+      "variant_ref": "44219415560295"
     },
     "prod_f5b7520c0364ee005ff5dfe92db34a4b": {
       "product_ref": "prod_f5b7520c0364ee005ff5dfe92db34a4b",
@@ -552,7 +680,9 @@
       "title": "Passion Flower",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "passion-flower-extract",
+      "variant_ref": "44219415527527"
     },
     "prod_9e95079bd7f30b8af71c5e71b395ce01": {
       "product_ref": "prod_9e95079bd7f30b8af71c5e71b395ce01",
@@ -560,7 +690,9 @@
       "title": "Omega-Sure",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "omega-sure-premium-omega-3-fish-oil",
+      "variant_ref": "44219415429223"
     },
     "prod_a6f41714e050e2f0d65409b3208c7400": {
       "product_ref": "prod_a6f41714e050e2f0d65409b3208c7400",
@@ -568,7 +700,9 @@
       "title": "Omega-3 Fish Oil",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "omega-3-premium-black-label",
+      "variant_ref": "44219415363687"
     },
     "prod_085b9074b6ef6188fcd7068c1efed227": {
       "product_ref": "prod_085b9074b6ef6188fcd7068c1efed227",
@@ -576,7 +710,9 @@
       "title": "Protein & Greens",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "orac-energy-protein-greens",
+      "variant_ref": "44219415298151"
     },
     "prod_55eff0b2ff726ee269a317cd23c370dd": {
       "product_ref": "prod_55eff0b2ff726ee269a317cd23c370dd",
@@ -584,7 +720,9 @@
       "title": "ORAC Energy Greens Capsules",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "orac-energy-greens-capsules",
+      "variant_ref": "44219415265383"
     },
     "prod_d69f9983e13446fb5de9986ced4c8e25": {
       "product_ref": "prod_d69f9983e13446fb5de9986ced4c8e25",
@@ -592,7 +730,9 @@
       "title": "ORAC Energy Greens Flavors",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "orac-energy-greens-1",
+      "variant_ref": "44219415199847"
     },
     "prod_ed1a77bb1083888029b67a17d2433f5e": {
       "product_ref": "prod_ed1a77bb1083888029b67a17d2433f5e",
@@ -600,7 +740,9 @@
       "title": "ORAC Energy Greens",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "orac-energy-greens",
+      "variant_ref": "44219415068775"
     },
     "prod_bf3bedb6b692d5c510642ff69b53982e": {
       "product_ref": "prod_bf3bedb6b692d5c510642ff69b53982e",
@@ -608,7 +750,9 @@
       "title": "OptiMSM",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "optimsm-99-9-pure-distilled",
+      "variant_ref": "44219415003239"
     },
     "prod_f4e7388ed9176d9321e3c71ecf119a1f": {
       "product_ref": "prod_f4e7388ed9176d9321e3c71ecf119a1f",
@@ -616,7 +760,9 @@
       "title": "Olive Leaf",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "olive-leaf-18-oleuropein",
+      "variant_ref": "44219414937703"
     },
     "prod_bab2085864f5654bd77b59473152cdd1": {
       "product_ref": "prod_bab2085864f5654bd77b59473152cdd1",
@@ -624,7 +770,9 @@
       "title": "NAC N-Acetyl-Cysteine",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "nac-n-acetyl-cysteine-600-mg",
+      "variant_ref": "44219414904935"
     },
     "prod_4d3243916b1b34216d6008f994a1b5ff": {
       "product_ref": "prod_4d3243916b1b34216d6008f994a1b5ff",
@@ -632,7 +780,9 @@
       "title": "Nattokinase",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "nattokinase-4000fu",
+      "variant_ref": "44219414872167"
     },
     "prod_c291fc5e86bcca379480c29cf610101e": {
       "product_ref": "prod_c291fc5e86bcca379480c29cf610101e",
@@ -640,7 +790,9 @@
       "title": "Maqui Berry",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "maqui-super-berry-organic-fd",
+      "variant_ref": "44219414839399"
     },
     "prod_0d6101d35e800d947f14006c04bdaf78": {
       "product_ref": "prod_0d6101d35e800d947f14006c04bdaf78",
@@ -648,7 +800,9 @@
       "title": "Mucuna",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "mucuna-organic-extract-15-l-dopa",
+      "variant_ref": "44219414806631"
     },
     "prod_13d1573de501f791de519c5e7ac303b0": {
       "product_ref": "prod_13d1573de501f791de519c5e7ac303b0",
@@ -656,7 +810,9 @@
       "title": "Maca extract",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "maca-extract",
+      "variant_ref": "44219414741095"
     },
     "prod_42c5852cb705a5475f8ffbb032f8333c": {
       "product_ref": "prod_42c5852cb705a5475f8ffbb032f8333c",
@@ -664,7 +820,9 @@
       "title": "Milk Thistle",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "milk-thistle-80-silymarin",
+      "variant_ref": "44219414675559"
     },
     "prod_ac42aca119738002604e1cd49eb8b86f": {
       "product_ref": "prod_ac42aca119738002604e1cd49eb8b86f",
@@ -672,7 +830,9 @@
       "title": "Lemon Balm",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "lemon-balm-8-1",
+      "variant_ref": "44219414642791"
     },
     "prod_bc54208f7d5493f14bbcb5d67cf289a2": {
       "product_ref": "prod_bc54208f7d5493f14bbcb5d67cf289a2",
@@ -680,7 +840,9 @@
       "title": "Jiaogulan",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "jiaogulan-12-1",
+      "variant_ref": "44219414610023"
     },
     "prod_c3a848706644a0a3dfbed0f39d0cbc58": {
       "product_ref": "prod_c3a848706644a0a3dfbed0f39d0cbc58",
@@ -688,7 +850,9 @@
       "title": "Imperial Adaptogen",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "imperial-adaptogen",
+      "variant_ref": "44219414577255"
     },
     "prod_90554a574f9729f61d3ecf785b0ea10a": {
       "product_ref": "prod_90554a574f9729f61d3ecf785b0ea10a",
@@ -696,7 +860,9 @@
       "title": "Hydrate 954® Electrolyte Enhancer",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "hydrate-954®-electrolyte-enhancer-20srv",
+      "variant_ref": "44219414478951"
     },
     "prod_479eb353c11c53f66e9ddd23bd65315d": {
       "product_ref": "prod_479eb353c11c53f66e9ddd23bd65315d",
@@ -704,7 +870,9 @@
       "title": "Hawthorn Berry",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "hawthorn-berry-12-1-extract",
+      "variant_ref": "44219414446183"
     },
     "prod_f0bdf8a84eedb46f109be8509c8ecc61": {
       "product_ref": "prod_f0bdf8a84eedb46f109be8509c8ecc61",
@@ -712,7 +880,9 @@
       "title": "Holy Basil",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "holy-basil-organic-extract",
+      "variant_ref": "44219414413415"
     },
     "prod_dbc3ec1c7f85d2ae60d0571b9ef41f9d": {
       "product_ref": "prod_dbc3ec1c7f85d2ae60d0571b9ef41f9d",
@@ -720,7 +890,9 @@
       "title": "Green Coffee Bean",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "green-coffee-bean",
+      "variant_ref": "44219414380647"
     },
     "prod_4ce3934126f6ae9f06b7aaf055c75257": {
       "product_ref": "prod_4ce3934126f6ae9f06b7aaf055c75257",
@@ -728,7 +900,9 @@
       "title": "Graviola AKA Soursop",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "graviola-max-extract",
+      "variant_ref": "44219414347879"
     },
     "prod_cb26dfb091190f35a0e860b61472f556": {
       "product_ref": "prod_cb26dfb091190f35a0e860b61472f556",
@@ -736,7 +910,9 @@
       "title": "Grape Seed",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "grape-seed-extract-with-amla",
+      "variant_ref": "44219414315111"
     },
     "prod_e25b3d67c86ae95a2f48f298c1db9c69": {
       "product_ref": "prod_e25b3d67c86ae95a2f48f298c1db9c69",
@@ -744,7 +920,9 @@
       "title": "Green Tea",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "green-tea-yellow-mountain-20-1",
+      "variant_ref": "44219414282343"
     },
     "prod_f2fbf385a6a9e7fb908947a497328776": {
       "product_ref": "prod_f2fbf385a6a9e7fb908947a497328776",
@@ -752,7 +930,9 @@
       "title": "GoJi",
       "brand": "Paradise Herbs",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "go-ji-berry-extract",
+      "variant_ref": "44219414249575"
     }
   },
   "live_state": {

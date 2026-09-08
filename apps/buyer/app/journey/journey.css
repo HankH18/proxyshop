@@ -484,3 +484,32 @@ span[data-tone="unknown"] {
   color: var(--ink-soft);
   background: #eef0f3;
 }
+
+/*
+ * The seeded panel. Marked in the CHROME as well as in the copy, because a reader skimming
+ * the page should not have to read a paragraph to learn that a panel is manufactured — and
+ * because a badge that is only a sentence is a badge a later edit deletes without noticing.
+ * The hatched border is deliberately unlike every other card on this page.
+ */
+.step.seeded {
+  border: 1px dashed var(--observed);
+  background: repeating-linear-gradient(
+    135deg,
+    var(--card),
+    var(--card) 14px,
+    #fdfaf2 14px,
+    #fdfaf2 28px
+  );
+}
+
+.seeded-badge {
+  margin-left: auto;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid var(--observed);
+  border-radius: 999px;
+  background: #fbf1de;
+  color: var(--observed);
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}

@@ -125,6 +125,8 @@ import {
   type BuyerProfile,
   type BuyerSession,
 } from '../chat/session'
+import { FeedbackPromptView } from '../feedback/FeedbackPromptView'
+import { submitFeedback, type FeedbackReceipt } from '../feedback/feedback'
 import { IntentConfirm } from '../intent/IntentConfirm'
 import {
   MAX_CLARIFYING_QUESTIONS,
@@ -140,6 +142,12 @@ import {
   type AcceptOutcome,
   type ShortlistSlot,
 } from '../shortlist/shortlist'
+import {
+  SEEDED_PREFIX,
+  SEEDED_PROMPT,
+  SEEDED_REFUSAL,
+  seededOrder,
+} from './seeded-feedback'
 import { SignIn } from './SignIn'
 import { WhyEmpty } from './WhyEmpty'
 import { strippedUrl, tokenFromSearch } from './magic-link'
@@ -235,6 +243,14 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
   // auctions; a remount is therefore a deliberate second attempt by the buyer, and the
   // service's own ledger — not this counter — is what refuses a duplicate.
   const [attempt, setAttempt] = useState(0)
+  // The seeded post-purchase panel's own two pieces of state. Kept beside the journey's
+  // rather than inside `FeedbackPromptView`, because that component is deliberately I/O-free
+  // — it renders a prompt, a receipt or a refusal and owns none of them.
+  const [feedbackReceipt, setFeedbackReceipt] = useState<FeedbackReceipt | undefined>(undefined)
+  const [feedbackError, setFeedbackError] = useState<string | undefined>(undefined)
+  // Its OWN busy flag, not the journey's. The journey's `busy` is true while an auction is
+  // opening, and passing it here would grey out a panel that has nothing to do with that.
+  const [feedbackBusy, setFeedbackBusy] = useState(false)
 
   const run = useCallback(
     async (work: () => Promise<void>) => {
@@ -396,6 +412,38 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
       })
     },
     [run, stage, wire],
+  )
+
+  /**
+   * Answer the seeded prompt through the REAL wire.
+   *
+   * `submitFeedback` is the same function a mounted prompt would call, posting to the same
+   * `POST /buyer/feedback`. Nothing here short-circuits it and nothing pre-cooks a receipt:
+   * the panel shows whatever the service says, including a refusal, because a panel that
+   * cannot fail is not evidence that anything works. The answer that lands carries
+   * `order_ref` beginning `sim-fb-`, so the ledger event it becomes stays marked as
+   * manufactured for the life of the chain.
+   *
+   * Deliberately NOT routed through `run`: `run` owns the journey's own failure banner and
+   * busy flag, and a seeded side-panel must not be able to blank the page a shopper is
+   * reading. Its errors stay inside its own section.
+   */
+  const answerSeededPrompt = useCallback(
+    async (choice: string) => {
+      if (SEEDED_PROMPT === null) return
+      setFeedbackError(undefined)
+      setFeedbackBusy(true)
+      try {
+        setFeedbackReceipt(
+          await submitFeedback(seededOrder(SEEDED_PROMPT), SEEDED_PROMPT, choice, wire.fetcher),
+        )
+      } catch (error) {
+        setFeedbackError(error instanceof Error ? error.message : String(error))
+      } finally {
+        setFeedbackBusy(false)
+      }
+    },
+    [wire],
   )
 
   const answers = turns.slice(1)
@@ -723,6 +771,22 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
               {code ?? 'this permalink carries no discount parameter'}
             </dd>
           </dl>
+          {code !== undefined ? (
+            // Said BEFORE the link, not after it. The store this permalink points at is a real
+            // storefront that Proxyshop has no integration with, so the code above is one this
+            // exchange minted and that storefront has never heard of: the cart will load and
+            // the code will be refused at the discount field. That is the honest state of the
+            // system, and a shopper who meets it as an unexplained error has hit what reads as
+            // a bug. Naming it here — above the button, in the same box as the code — is what
+            // makes it a thing the person running a demo can point at instead of apologise for.
+            <p className="gloss" role="note" data-testid="discount-code-is-a-demonstration">
+              Heads up: <strong>{code}</strong> is a demonstration code. Proxyshop minted it, and{' '}
+              {host ?? 'the store'} is a real storefront we are not integrated with, so it has no
+              record of this code and will reject it at checkout. It shows the shape of what an
+              integrated store would honour. Everything else on the page — the cart, the product
+              and the price — is real.
+            </p>
+          ) : null}
           {refusal === undefined ? (
             <p>
               <a
@@ -753,6 +817,58 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
           </p>
         </section>
       ) : null}
+
+      {/*
+        Step 5 is SEEDED, and unconditional — it does not wait on `accepted`, because the
+        journey it would follow does not exist. R14's prompt needs an order reference that
+        arrives days after delivery, and the served journey ends at the checkout handoff and
+        never obtains one. So the panel below is a manufactured prompt shown in the place the
+        real one will occupy, and every word of that is said on the page rather than left for
+        a reader to discover.
+
+        What is NOT faked: `FeedbackPromptView` is the real component, the options are the
+        five `apps/buyer/svc/src/feedback/prompt.py` publishes, and answering posts to the
+        real `POST /buyer/feedback`. Only the order is manufactured.
+      */}
+      <section aria-label="Step 5 - after your purchase (seeded)" className="step seeded">
+        <h2>
+          <span className="ordinal">5</span> After your purchase{' '}
+          <span className="seeded-badge" data-testid="feedback-seeded-badge">
+            SEEDED
+          </span>
+        </h2>
+        {SEEDED_PROMPT === null ? (
+          <p role="alert" data-testid="feedback-seed-refused">
+            The seeded prompt was refused rather than shown: {SEEDED_REFUSAL}
+          </p>
+        ) : (
+          <>
+            <p data-testid="feedback-seeded-explanation">
+              Nothing on this page reached this panel. Proxyshop asks this question days after
+              delivery, and this session has not bought anything — so the order below was
+              <strong> manufactured</strong> to show the prompt&rsquo;s shape. You can tell it
+              apart from a real one without being told: its order reference is{' '}
+              <code className="mono">{SEEDED_PROMPT.order_ref}</code>, and every manufactured
+              reference begins <code className="mono">{SEEDED_PREFIX}</code>. The buyer service
+              copies that reference verbatim onto the trust ledger&rsquo;s hash chain, so an
+              answer given here stays marked as manufactured for as long as the chain exists,
+              and a real answer could not be marked without breaking the chain.
+            </p>
+            <p className="gloss">
+              The question, the five answers and the form are the real ones. Sending an answer
+              posts to the real <code className="mono">POST /buyer/feedback</code> and shows
+              whatever it replies — including a refusal.
+            </p>
+            <FeedbackPromptView
+              prompt={SEEDED_PROMPT}
+              onSubmit={answerSeededPrompt}
+              receipt={feedbackReceipt}
+              error={feedbackError}
+              busy={feedbackBusy}
+            />
+          </>
+        )}
+      </section>
 
       <section aria-label="What is not wired yet" className="gaps">
         <h2>What is not wired yet</h2>
@@ -791,6 +907,20 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
             message, every slot here shows the organic voice only &mdash; so what a shop buys
             by joining is the one thing this screen cannot yet show you, and this page says so
             rather than letting the platform&rsquo;s voice stand in for the seller&rsquo;s.
+          </li>
+          <li data-testid="gap-feedback-seeded">
+            <strong>Step 5 is seeded, and the real prompt is unreachable</strong> &mdash; the
+            question in step 5 is real, the form is the real{' '}
+            <code>FeedbackPromptView</code>, and answering it posts to the real{' '}
+            <code>POST /buyer/feedback</code>. The <em>order</em> is not: Proxyshop asks that
+            question days after delivery, and this journey ends at the checkout handoff
+            without ever obtaining an order reference, so there is nothing here for a real
+            prompt to be about. Mounting the component was never the missing piece &mdash;
+            the order reference is &mdash; so the panel shows a manufactured one instead of an
+            empty box, and marks it: every seeded reference begins{' '}
+            <code>{SEEDED_PREFIX}</code>, and the buyer service copies that reference verbatim
+            onto the trust ledger&rsquo;s hash chain, which is why a seeded answer cannot
+            later be mistaken for an earned one.
           </li>
           <li data-testid="gap-model">
             <strong>The questions came from no live model</strong> — the buyer service

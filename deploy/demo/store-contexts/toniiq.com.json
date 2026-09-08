@@ -40,7 +40,9 @@
       "title": "Colostrum Complex 5-in-1",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "colostrum-complex",
+      "variant_ref": "48388867064022"
     },
     "prod_a6f8251a13afbfd4352be70bd036c174": {
       "product_ref": "prod_a6f8251a13afbfd4352be70bd036c174",
@@ -48,7 +50,9 @@
       "title": "Creatine for Women",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "creatine-for-women",
+      "variant_ref": "48989889200342"
     },
     "prod_a1a9d0f1d658b0f89e2b05d2ced38b60": {
       "product_ref": "prod_a1a9d0f1d658b0f89e2b05d2ced38b60",
@@ -56,7 +60,9 @@
       "title": "High Flavanol Cocoa Powder",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "high-flavanol-cocoa-powder",
+      "variant_ref": "49045150400726"
     },
     "prod_94986d39e58aeb7e3f5631d42091de5b": {
       "product_ref": "prod_94986d39e58aeb7e3f5631d42091de5b",
@@ -64,7 +70,9 @@
       "title": "Liposomal Glutathione Complex",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "liposomal-glutathione-complex",
+      "variant_ref": "48971656331478"
     },
     "prod_10f7a8429b4b47a7588045e317766b2c": {
       "product_ref": "prod_10f7a8429b4b47a7588045e317766b2c",
@@ -72,7 +80,9 @@
       "title": "Urolithin A Complex 99.4%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "urolithin-a-complex",
+      "variant_ref": "48347175518422"
     },
     "prod_0755351df4b4ade033fa5068b1dfd69d": {
       "product_ref": "prod_0755351df4b4ade033fa5068b1dfd69d",
@@ -80,7 +90,9 @@
       "title": "Liposomal Magnesium Complex 1500",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "liposomal-magnesium-complex",
+      "variant_ref": "48323486154966"
     },
     "prod_0a9a6cb59ec3e2300b0b459717ea6d99": {
       "product_ref": "prod_0a9a6cb59ec3e2300b0b459717ea6d99",
@@ -88,7 +100,9 @@
       "title": "Liposomal D3 + K2 & Magnesium 10,000 IU",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "liposomal-d3-k2-magnesium",
+      "variant_ref": "48255497863382"
     },
     "prod_902ba93a6f2c780cd8e73f25ec35eff6": {
       "product_ref": "prod_902ba93a6f2c780cd8e73f25ec35eff6",
@@ -96,7 +110,9 @@
       "title": "Bacillus Subtilis 100",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "bacillus-subtilis-100",
+      "variant_ref": "48163111829718"
     },
     "prod_7615589564cf78a08c4efc4e61ea6a31": {
       "product_ref": "prod_7615589564cf78a08c4efc4e61ea6a31",
@@ -104,7 +120,9 @@
       "title": "Saffron Complex 1000",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "saffron-complex",
+      "variant_ref": "48015469412566"
     },
     "prod_468fc58aaf307e80537cfd0b9e20ec14": {
       "product_ref": "prod_468fc58aaf307e80537cfd0b9e20ec14",
@@ -112,7 +130,9 @@
       "title": "NMN Complex 12-in-1",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "nmn-complex",
+      "variant_ref": "48021183398102"
     },
     "prod_9fffb8850d93667f584a3fa93bff9992": {
       "product_ref": "prod_9fffb8850d93667f584a3fa93bff9992",
@@ -120,7 +140,9 @@
       "title": "Qova",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "qova",
+      "variant_ref": "47962060456150"
     },
     "prod_f0c32942929d12a3f717f3d07c10b829": {
       "product_ref": "prod_f0c32942929d12a3f717f3d07c10b829",
@@ -128,7 +150,9 @@
       "title": "Premium Daily Stack",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "premium-daily-stack",
+      "variant_ref": "47902191911126"
     },
     "prod_00867b1373489c2d36bcf9d4a7f28a7e": {
       "product_ref": "prod_00867b1373489c2d36bcf9d4a7f28a7e",
@@ -136,7 +160,9 @@
       "title": "Zinc Carnosine Complex",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "zinc-carnosine-complex",
+      "variant_ref": "47880350630102"
     },
     "prod_8e79756c27dd95fc1101d82801ebad15": {
       "product_ref": "prod_8e79756c27dd95fc1101d82801ebad15",
@@ -144,7 +170,9 @@
       "title": "Lactobacillus Plantarum 100",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "lactobacillus-plantarum",
+      "variant_ref": "47871791136982"
     },
     "prod_383f8cf00d1803f32d43e008390a2203": {
       "product_ref": "prod_383f8cf00d1803f32d43e008390a2203",
@@ -152,7 +180,9 @@
       "title": "Cognitive Edge Stack",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "cognitive-edge-stack",
+      "variant_ref": "47883494457558"
     },
     "prod_1a2f6c44b2d73b50767e1710a83d1f38": {
       "product_ref": "prod_1a2f6c44b2d73b50767e1710a83d1f38",
@@ -160,7 +190,9 @@
       "title": "Lactobacillus Reuteri Powder 200",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "lactobacillus-reuteri-powder-200",
+      "variant_ref": "47476755562710"
     },
     "prod_d89211ae0d0455d415423d7bd320beb5": {
       "product_ref": "prod_d89211ae0d0455d415423d7bd320beb5",
@@ -168,7 +200,9 @@
       "title": "Liposomal Berberine 1500 MG",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "liposomal-berberine",
+      "variant_ref": "47695691251926"
     },
     "prod_e51de8c85814ab05b85cac1f07dafb84": {
       "product_ref": "prod_e51de8c85814ab05b85cac1f07dafb84",
@@ -176,7 +210,9 @@
       "title": "Ultra High Purity Immunity Trio",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "immunity-trio",
+      "variant_ref": "47834427949270"
     },
     "prod_c59fd404e4c321ec44714e347e470c0f": {
       "product_ref": "prod_c59fd404e4c321ec44714e347e470c0f",
@@ -184,7 +220,9 @@
       "title": "Ultra High Purity Heart Health Stack",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "heart-health-stack",
+      "variant_ref": "47796749369558"
     },
     "prod_660b9f74b0d1fd6c3212f35ec759909d": {
       "product_ref": "prod_660b9f74b0d1fd6c3212f35ec759909d",
@@ -192,7 +230,9 @@
       "title": "Olive Leaf Triple Extract 85%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "olive-leaf-triple-extract-85",
+      "variant_ref": "47633580359894"
     },
     "prod_ae1e3dc0c53b4a6d42daa2fbafb16c98": {
       "product_ref": "prod_ae1e3dc0c53b4a6d42daa2fbafb16c98",
@@ -200,7 +240,9 @@
       "title": "Daily Balance Bundle",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "foundation-bundle",
+      "variant_ref": "47566223868118"
     },
     "prod_157d8ab23874908e219b5b62afb6aa5f": {
       "product_ref": "prod_157d8ab23874908e219b5b62afb6aa5f",
@@ -208,7 +250,9 @@
       "title": "Senolytic+ 4000",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "senolytic",
+      "variant_ref": "46720932970710"
     },
     "prod_b0d6baed4210d1cf6c028a126440c34b": {
       "product_ref": "prod_b0d6baed4210d1cf6c028a126440c34b",
@@ -216,7 +260,9 @@
       "title": "Resilience Bundle",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "resilience-bundle",
+      "variant_ref": "47593387098326"
     },
     "prod_61a93792ee3e665c71cf05eee4303a5d": {
       "product_ref": "prod_61a93792ee3e665c71cf05eee4303a5d",
@@ -224,7 +270,9 @@
       "title": "Foundation Bundle",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "foundation-bundles",
+      "variant_ref": "47615098355926"
     },
     "prod_ed33c784986bf3117ebff56daa301710": {
       "product_ref": "prod_ed33c784986bf3117ebff56daa301710",
@@ -232,7 +280,9 @@
       "title": "Bacillus Coagulans 50",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "bacillus-coagulans",
+      "variant_ref": "47568987783382"
     },
     "prod_ceffc9b574ef9157b5ffaf9cf1e44cb0": {
       "product_ref": "prod_ceffc9b574ef9157b5ffaf9cf1e44cb0",
@@ -240,7 +290,9 @@
       "title": "Hyaluronic Acid Powder 95%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "hyaluronic-acid-powder",
+      "variant_ref": "47528120385750"
     },
     "prod_1d497c406cd104da0d7bd0fdd21f5377": {
       "product_ref": "prod_1d497c406cd104da0d7bd0fdd21f5377",
@@ -248,7 +300,9 @@
       "title": "Colostrum Powder 2000",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "colostrum-2000",
+      "variant_ref": "47511157866710"
     },
     "prod_3e25d6bc22a26d7dc51613f183755efc": {
       "product_ref": "prod_3e25d6bc22a26d7dc51613f183755efc",
@@ -256,7 +310,9 @@
       "title": "NAD+",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "nad",
+      "variant_ref": "50342602277078"
     },
     "prod_fdeb407cf594f41de5552b009aee3f9b": {
       "product_ref": "prod_fdeb407cf594f41de5552b009aee3f9b",
@@ -264,7 +320,9 @@
       "title": "Lactobacillus Rhamnosus 100",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "lactobacillus-rhamnosus-100",
+      "variant_ref": "47393028014294"
     },
     "prod_685bd510bc348d1714fd6bedc8271c63": {
       "product_ref": "prod_685bd510bc348d1714fd6bedc8271c63",
@@ -272,7 +330,9 @@
       "title": "Synbiotics 200",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "synbiotics-200",
+      "variant_ref": "47366459359446"
     },
     "prod_8fe6b9d8239511621240a8e276045cb5": {
       "product_ref": "prod_8fe6b9d8239511621240a8e276045cb5",
@@ -280,7 +340,9 @@
       "title": "NMN Powder 99.5%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "nmn-powder-100g",
+      "variant_ref": "44297669902550"
     },
     "prod_b77a0f6d52a77b272288198d3d3a9f0f": {
       "product_ref": "prod_b77a0f6d52a77b272288198d3d3a9f0f",
@@ -288,7 +350,9 @@
       "title": "Gymnema Sylvestre 75%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "gymnema-sylvestre",
+      "variant_ref": "47202498609366"
     },
     "prod_c38da6a0d8e689d59b5246fd1f5686b0": {
       "product_ref": "prod_c38da6a0d8e689d59b5246fd1f5686b0",
@@ -296,7 +360,9 @@
       "title": "Ginger Root 20%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ginger-root",
+      "variant_ref": "47139673833686"
     },
     "prod_2a7159cfe58254b94df12f55c315f50f": {
       "product_ref": "prod_2a7159cfe58254b94df12f55c315f50f",
@@ -304,7 +370,9 @@
       "title": "Shilajit Gummies 50%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "shilajit-gummies",
+      "variant_ref": "46892142526678"
     },
     "prod_439acc4d37e85e89a9c1e7c79a6dcf98": {
       "product_ref": "prod_439acc4d37e85e89a9c1e7c79a6dcf98",
@@ -312,7 +380,9 @@
       "title": "Cortisol Support 2000",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "cortisol-support-2000",
+      "variant_ref": "46984081834198"
     },
     "prod_d630fce7181cd116ebdb5e8c41e80c71": {
       "product_ref": "prod_d630fce7181cd116ebdb5e8c41e80c71",
@@ -320,7 +390,9 @@
       "title": "NMNH Complex 4-in-1",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "nmnh-complex",
+      "variant_ref": "46810305593558"
     },
     "prod_1a0f28b82c1e0c8ca89a4f9d61601ea7": {
       "product_ref": "prod_1a0f28b82c1e0c8ca89a4f9d61601ea7",
@@ -328,7 +400,9 @@
       "title": "Lactobacillus Gasseri 50",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "lactobacillus-gasseri50",
+      "variant_ref": "46516714930390"
     },
     "prod_d8d28369f9fb8df2e7eb834afe110ca2": {
       "product_ref": "prod_d8d28369f9fb8df2e7eb834afe110ca2",
@@ -336,7 +410,9 @@
       "title": "Horny Goat Weed 40%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "horny-goat-weed",
+      "variant_ref": "46240888193238"
     },
     "prod_6d7aaac835b8c9f23cbfcc0cc797de0d": {
       "product_ref": "prod_6d7aaac835b8c9f23cbfcc0cc797de0d",
@@ -344,7 +420,9 @@
       "title": "L-Ergothioneine 30MG",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "l-ergothioneine",
+      "variant_ref": "46330679001302"
     },
     "prod_9277feaf137348df76a33a0db30ef5ad": {
       "product_ref": "prod_9277feaf137348df76a33a0db30ef5ad",
@@ -352,7 +430,9 @@
       "title": "Garlic 1%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "garlic",
+      "variant_ref": "46287503982806"
     },
     "prod_cd4e516e5ef41b98ce71690a4922f7fc": {
       "product_ref": "prod_cd4e516e5ef41b98ce71690a4922f7fc",
@@ -360,7 +440,9 @@
       "title": "Akkermansia 50",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "akkermansia",
+      "variant_ref": "46296460787926"
     },
     "prod_560c3ea5cd2f8046bcfaac113efb4551": {
       "product_ref": "prod_560c3ea5cd2f8046bcfaac113efb4551",
@@ -368,7 +450,9 @@
       "title": "Men's Probiotic 200",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "mens-probiotic",
+      "variant_ref": "46290658459862"
     },
     "prod_9421eaf35641051603978631cf0ca14c": {
       "product_ref": "prod_9421eaf35641051603978631cf0ca14c",
@@ -376,7 +460,9 @@
       "title": "Fenugreek 70%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "fenugreek",
+      "variant_ref": "46211910500566"
     },
     "prod_8746c551932c7a0db8a99b1e5cf311c9": {
       "product_ref": "prod_8746c551932c7a0db8a99b1e5cf311c9",
@@ -384,7 +470,9 @@
       "title": "NMNH 95%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "nmnh",
+      "variant_ref": "45834577445078"
     },
     "prod_a8b8e0628f5ff2b73070aa3193fb2807": {
       "product_ref": "prod_a8b8e0628f5ff2b73070aa3193fb2807",
@@ -392,7 +480,9 @@
       "title": "Alpha Lipoic Acid 1000",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "alpha-lipoic-acid",
+      "variant_ref": "43715717628118"
     },
     "prod_fabeb73a89d1138e54366b96580a26ff": {
       "product_ref": "prod_fabeb73a89d1138e54366b96580a26ff",
@@ -400,7 +490,9 @@
       "title": "Lactobacillus Salivarius 100",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "lactobacillus-salivarius",
+      "variant_ref": "45998180892886"
     },
     "prod_435a6c8c927208f5a3f43aac244ce5a7": {
       "product_ref": "prod_435a6c8c927208f5a3f43aac244ce5a7",
@@ -408,7 +500,9 @@
       "title": "Dihydroberberine 1000",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "dihydroberberine",
+      "variant_ref": "50346029088982"
     },
     "prod_b76a40f9191484b4090f5bd6e84e5071": {
       "product_ref": "prod_b76a40f9191484b4090f5bd6e84e5071",
@@ -416,7 +510,9 @@
       "title": "Liposomal CoQ10 400",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "coq10-400",
+      "variant_ref": "45830815645910"
     },
     "prod_7949708e4097e20ddb72974b44e9a000": {
       "product_ref": "prod_7949708e4097e20ddb72974b44e9a000",
@@ -424,7 +520,9 @@
       "title": "Nicotinamide D-Ribose",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "nicotinamide-d-ribose-nad-booster-copy",
+      "variant_ref": "45674214293718"
     },
     "prod_60f5984e3d83fde9b1a5e8fe50686206": {
       "product_ref": "prod_60f5984e3d83fde9b1a5e8fe50686206",
@@ -432,7 +530,9 @@
       "title": "Mushroom Coffee",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "mushroom-coffee",
+      "variant_ref": "45646516388054"
     },
     "prod_61448c5726a2e3d4cf451eec1ab5ed2e": {
       "product_ref": "prod_61448c5726a2e3d4cf451eec1ab5ed2e",
@@ -440,7 +540,9 @@
       "title": "NMN 1200",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "nmn-1200",
+      "variant_ref": "43382007333078"
     },
     "prod_c699d3aa59e488774646a38eaf2c076f": {
       "product_ref": "prod_c699d3aa59e488774646a38eaf2c076f",
@@ -448,7 +550,9 @@
       "title": "NMN + Resveratrol - Elixr",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "nmn-resveratrol",
+      "variant_ref": "43791320776918"
     },
     "prod_16d75a2cdeab49139f4c2d547c7da169": {
       "product_ref": "prod_16d75a2cdeab49139f4c2d547c7da169",
@@ -456,7 +560,9 @@
       "title": "NMN 300",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "nmn",
+      "variant_ref": "43696587800790"
     },
     "prod_19bf906b110d22e20f272009d2f33f0d": {
       "product_ref": "prod_19bf906b110d22e20f272009d2f33f0d",
@@ -464,7 +570,9 @@
       "title": "Resveratrol 98% 1000",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "resveratrol-1000",
+      "variant_ref": "44852238155990"
     },
     "prod_0ac80e140612f6e9411d5a9a3256d9fc": {
       "product_ref": "prod_0ac80e140612f6e9411d5a9a3256d9fc",
@@ -472,7 +580,9 @@
       "title": "Tongkat Ali 200 & Fadogia 30",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "tongkat-ali-200-fadogia-30",
+      "variant_ref": "44878212956374"
     },
     "prod_5be15f5e71353e6554475d9c1fefb20c": {
       "product_ref": "prod_5be15f5e71353e6554475d9c1fefb20c",
@@ -480,7 +590,9 @@
       "title": "PQQ 99% (40mg)",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "pqq-40",
+      "variant_ref": "44836502110422"
     },
     "prod_4261cfb95f296dc23afbc24e71fb16dc": {
       "product_ref": "prod_4261cfb95f296dc23afbc24e71fb16dc",
@@ -488,7 +600,9 @@
       "title": "Tribulus 95%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "tribulus",
+      "variant_ref": "44832302399702"
     },
     "prod_e578908db906d4a46e58255ab2e72ada": {
       "product_ref": "prod_e578908db906d4a46e58255ab2e72ada",
@@ -496,7 +610,9 @@
       "title": "Calcium AKG 1500",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "calcium-akg",
+      "variant_ref": "44747796250838"
     },
     "prod_5249cb66706fa33ff880761824f1eac2": {
       "product_ref": "prod_5249cb66706fa33ff880761824f1eac2",
@@ -504,7 +620,9 @@
       "title": "Testosterone Support",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "testosterone-support",
+      "variant_ref": "44810660708566"
     },
     "prod_a7b4857d67d2abf40baa668e424e9452": {
       "product_ref": "prod_a7b4857d67d2abf40baa668e424e9452",
@@ -512,7 +630,9 @@
       "title": "Black Maca 20:1",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "black-maca",
+      "variant_ref": "44788263321814"
     },
     "prod_ad90c491b86b26eb31c0607b4bbfcf09": {
       "product_ref": "prod_ad90c491b86b26eb31c0607b4bbfcf09",
@@ -520,7 +640,9 @@
       "title": "Lactobacillus Reuteri 50",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "lactobacillus-reuteri",
+      "variant_ref": "47033733841110"
     },
     "prod_fb5b044687e88ee7e3b14b0de0667011": {
       "product_ref": "prod_fb5b044687e88ee7e3b14b0de0667011",
@@ -528,7 +650,9 @@
       "title": "Tongkat Ali 200",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "tongkat-ali-200",
+      "variant_ref": "44463842885846"
     },
     "prod_c376b16ff5e99cad33c721633de0943f": {
       "product_ref": "prod_c376b16ff5e99cad33c721633de0943f",
@@ -536,7 +660,9 @@
       "title": "Milk Thistle 1000",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "milk-thistle-1000",
+      "variant_ref": "44434937839830"
     },
     "prod_351e399e71e73b9b1482a6212222b345": {
       "product_ref": "prod_351e399e71e73b9b1482a6212222b345",
@@ -544,7 +670,9 @@
       "title": "Spermidine +",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "spermidine",
+      "variant_ref": "44434189353174"
     },
     "prod_9bfd11f2e29765bd47464adfb301dad3": {
       "product_ref": "prod_9bfd11f2e29765bd47464adfb301dad3",
@@ -552,7 +680,9 @@
       "title": "Fisetin 500",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "fisetin",
+      "variant_ref": "44234720346326"
     },
     "prod_4b2196a6bd8383be357181be0ecf8152": {
       "product_ref": "prod_4b2196a6bd8383be357181be0ecf8152",
@@ -560,7 +690,9 @@
       "title": "Alpha GPC 90%+",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "alpha-gpc",
+      "variant_ref": "39255623794765"
     },
     "prod_011f246d67d9208c4c5d343679f3dcd5": {
       "product_ref": "prod_011f246d67d9208c4c5d343679f3dcd5",
@@ -568,7 +700,9 @@
       "title": "Glycine 98%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "glycine",
+      "variant_ref": "44139303239894"
     },
     "prod_2b2cfe535e9868b8e7599eeacc79c5d1": {
       "product_ref": "prod_2b2cfe535e9868b8e7599eeacc79c5d1",
@@ -576,7 +710,9 @@
       "title": "Berberine 1500",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "berberine-1500",
+      "variant_ref": "44102994264278"
     },
     "prod_1434b596f5adefa8c21f45e6a6e98315": {
       "product_ref": "prod_1434b596f5adefa8c21f45e6a6e98315",
@@ -584,7 +720,9 @@
       "title": "Pomegranate 90%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "pomegranate",
+      "variant_ref": "44112178479318"
     },
     "prod_16ab4bc4901767d512e2ba34292bb968": {
       "product_ref": "prod_16ab4bc4901767d512e2ba34292bb968",
@@ -592,7 +730,9 @@
       "title": "Fadogia 30:1",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "fadogia",
+      "variant_ref": "43904376996054"
     },
     "prod_b3635185ed437d31d2eb07ce2daa3d2c": {
       "product_ref": "prod_b3635185ed437d31d2eb07ce2daa3d2c",
@@ -600,7 +740,9 @@
       "title": "NAC 1300",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "nac",
+      "variant_ref": "45596435382486"
     },
     "prod_8edf82880db2e790f2e8ecfa77a47c3f": {
       "product_ref": "prod_8edf82880db2e790f2e8ecfa77a47c3f",
@@ -608,7 +750,9 @@
       "title": "Turmeric Curcumin 97%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "turmeric-curcumin",
+      "variant_ref": "43687704658134"
     },
     "prod_5eaf48df7edddf973c68a91954804b50": {
       "product_ref": "prod_5eaf48df7edddf973c68a91954804b50",
@@ -616,7 +760,9 @@
       "title": "DHEA 25",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "dhea-25",
+      "variant_ref": "43583376359638"
     },
     "prod_4102fffb2da9c8c2caaca6d40a2f584b": {
       "product_ref": "prod_4102fffb2da9c8c2caaca6d40a2f584b",
@@ -624,7 +770,9 @@
       "title": "Lion's Mane 20%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "lions-mane",
+      "variant_ref": "28448342769741"
     },
     "prod_b3c29b019fe4202340649332b1898794": {
       "product_ref": "prod_b3c29b019fe4202340649332b1898794",
@@ -632,7 +780,9 @@
       "title": "Cissus Quadrangularis 40%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "cissus-quadrangularis",
+      "variant_ref": "31357001302093"
     },
     "prod_6516996e9317b4bf9fee0edce60b7bf6": {
       "product_ref": "prod_6516996e9317b4bf9fee0edce60b7bf6",
@@ -640,7 +790,9 @@
       "title": "Resveratrol+ 98%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "resveratrol-plus",
+      "variant_ref": "42892320473302"
     },
     "prod_91fa1c1683ee61536e889607d4279829": {
       "product_ref": "prod_91fa1c1683ee61536e889607d4279829",
@@ -648,7 +800,9 @@
       "title": "Magnesium 3000",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "magnesium-glycinate",
+      "variant_ref": "42626217869526"
     },
     "prod_40e70313f608986b6518deda597d3d00": {
       "product_ref": "prod_40e70313f608986b6518deda597d3d00",
@@ -656,7 +810,9 @@
       "title": "PQQ 99% (20mg)",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "pqq",
+      "variant_ref": "33211087552589"
     },
     "prod_35eee5f59c6410ad82dba9b6fdd62bbf": {
       "product_ref": "prod_35eee5f59c6410ad82dba9b6fdd62bbf",
@@ -664,7 +820,9 @@
       "title": "Glutathione 98%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "glutathione-98",
+      "variant_ref": "45537671839958"
     },
     "prod_8ce0844eede389a4f6b0484896a3f9a7": {
       "product_ref": "prod_8ce0844eede389a4f6b0484896a3f9a7",
@@ -672,7 +830,9 @@
       "title": "Bacopa 75%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "bacopa",
+      "variant_ref": "31357206626381"
     },
     "prod_0b514d2c07be43dbca3867028547a59e": {
       "product_ref": "prod_0b514d2c07be43dbca3867028547a59e",
@@ -680,7 +840,9 @@
       "title": "Ashwagandha 10%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ashwagandha",
+      "variant_ref": "29181222191181"
     },
     "prod_4e876fa82c228f2912f846ee1c5c4f57": {
       "product_ref": "prod_4e876fa82c228f2912f846ee1c5c4f57",
@@ -688,7 +850,9 @@
       "title": "Berberine 97%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "berberine",
+      "variant_ref": "21319000522829"
     },
     "prod_182c8cf8805d83be55213ad6f481742f": {
       "product_ref": "prod_182c8cf8805d83be55213ad6f481742f",
@@ -696,7 +860,9 @@
       "title": "Liposomal Apigenin 100 MG",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "apigenin",
+      "variant_ref": "43034360119510"
     },
     "prod_7c1b7d5ce102615e6553cc7ce7a560bb": {
       "product_ref": "prod_7c1b7d5ce102615e6553cc7ce7a560bb",
@@ -704,7 +870,9 @@
       "title": "Spermidine 5MG",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "spermidine-11x",
+      "variant_ref": "42530887598294"
     },
     "prod_3010e979dccfeb3f36bfa40f7b9e7c39": {
       "product_ref": "prod_3010e979dccfeb3f36bfa40f7b9e7c39",
@@ -712,7 +880,9 @@
       "title": "Ashwagandha+ 25%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ashwagandha-plus",
+      "variant_ref": "45496652726486"
     },
     "prod_005a84f2014e13f481268eef8fe67af0": {
       "product_ref": "prod_005a84f2014e13f481268eef8fe67af0",
@@ -720,7 +890,9 @@
       "title": "Turkey Tail 20%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "turkey-tail",
+      "variant_ref": "39494389989453"
     },
     "prod_faee9823a9d6d860ccdf328ed78e02c6": {
       "product_ref": "prod_faee9823a9d6d860ccdf328ed78e02c6",
@@ -728,7 +900,9 @@
       "title": "Probiotic 200",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "probiotic",
+      "variant_ref": "46327547789526"
     },
     "prod_67183fe47ee0f52080894d4c76880429": {
       "product_ref": "prod_67183fe47ee0f52080894d4c76880429",
@@ -736,7 +910,9 @@
       "title": "DHEA 99%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "dhea",
+      "variant_ref": "39459814408269"
     },
     "prod_911acafa0ed996dd66751f04d0564a9c": {
       "product_ref": "prod_911acafa0ed996dd66751f04d0564a9c",
@@ -744,7 +920,9 @@
       "title": "Olive Leaf 50%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "olive-leaf-120",
+      "variant_ref": "39371329699917"
     },
     "prod_bc7cd74a078365d5b1cb9913933b9473": {
       "product_ref": "prod_bc7cd74a078365d5b1cb9913933b9473",
@@ -752,7 +930,9 @@
       "title": "Phosphatidylserine 50%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "phosphatidylserine-50",
+      "variant_ref": "33149181558861"
     },
     "prod_a3d9302618695631e18d484b891cf284": {
       "product_ref": "prod_a3d9302618695631e18d484b891cf284",
@@ -760,7 +940,9 @@
       "title": "Valerian Root 4:1",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "valerian-root",
+      "variant_ref": "32616671182925"
     },
     "prod_834aecee205b187a720fae30c7342ed7": {
       "product_ref": "prod_834aecee205b187a720fae30c7342ed7",
@@ -768,7 +950,9 @@
       "title": "Quercetin 95%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "quercetin",
+      "variant_ref": "46284950569174"
     },
     "prod_7fb9a01a6aa3c344174494d88fd4e9f9": {
       "product_ref": "prod_7fb9a01a6aa3c344174494d88fd4e9f9",
@@ -776,7 +960,9 @@
       "title": "Resveratrol 98%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "resveratrol",
+      "variant_ref": "43672318836950"
     },
     "prod_d2082c6af961fc58a99c37901c06247f": {
       "product_ref": "prod_d2082c6af961fc58a99c37901c06247f",
@@ -784,7 +970,9 @@
       "title": "Hyaluronic Acid 95%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "hyaluronic-acid",
+      "variant_ref": "43696559194326"
     },
     "prod_a1774084691d8790b0e6f1720a250d1e": {
       "product_ref": "prod_a1774084691d8790b0e6f1720a250d1e",
@@ -792,7 +980,9 @@
       "title": "Bromelain 3600",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "bromelain",
+      "variant_ref": "46193340776662"
     },
     "prod_b06aee340849513bda7a2bee3bdab0f1": {
       "product_ref": "prod_b06aee340849513bda7a2bee3bdab0f1",
@@ -800,7 +990,9 @@
       "title": "Rhodiola 5%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "rhodiola",
+      "variant_ref": "21318999801933"
     },
     "prod_3ea4a5e36172643758f21a4ca01d7f02": {
       "product_ref": "prod_3ea4a5e36172643758f21a4ca01d7f02",
@@ -808,7 +1000,9 @@
       "title": "Apple Cider Vinegar 20%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "apple-cider-vinegar",
+      "variant_ref": "30263673585741"
     },
     "prod_a14883be272fa43961e7537151de5879": {
       "product_ref": "prod_a14883be272fa43961e7537151de5879",
@@ -816,7 +1010,9 @@
       "title": "St. John's Wort 0.3%",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "st-johns-wort",
+      "variant_ref": "28813929480269"
     },
     "prod_ac2a212ec934a521bb910db4d29e2b07": {
       "product_ref": "prod_ac2a212ec934a521bb910db4d29e2b07",
@@ -824,7 +1020,9 @@
       "title": "Tart Cherry 52:1",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "tart-cherry",
+      "variant_ref": "28798850400333"
     },
     "prod_cbbdd873e5a3f07c8c21427d0cb4767f": {
       "product_ref": "prod_cbbdd873e5a3f07c8c21427d0cb4767f",
@@ -832,7 +1030,9 @@
       "title": "Ease 50:1",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ease",
+      "variant_ref": "28448375472205"
     },
     "prod_4bb09acebfa04fc34f0f66fc9d5fe48b": {
       "product_ref": "prod_4bb09acebfa04fc34f0f66fc9d5fe48b",
@@ -840,7 +1040,9 @@
       "title": "Maca 20:1",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "maca",
+      "variant_ref": "21319001636941"
     },
     "prod_f7098a5d96b0ea4f7026d3ef731337f0": {
       "product_ref": "prod_f7098a5d96b0ea4f7026d3ef731337f0",
@@ -848,7 +1050,9 @@
       "title": "Milk Thistle 50:1",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "milk-thistle",
+      "variant_ref": "21319000227917"
     },
     "prod_a8a13ad0e47af7c228ecb3e33ed33d8e": {
       "product_ref": "prod_a8a13ad0e47af7c228ecb3e33ed33d8e",
@@ -856,7 +1060,9 @@
       "title": "5-HTP 99%+",
       "brand": "Toniiq - Elevated Nutrients",
       "product_type": "",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "5-htp",
+      "variant_ref": "21318998786125"
     }
   },
   "live_state": {

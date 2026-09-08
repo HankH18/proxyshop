@@ -47,6 +47,7 @@ import {
 import { CLARIFY_PATH, CONFIRM_PATH, type Intent } from '../intent/intent'
 import { ACCEPT_PATH } from '../shortlist/shortlist'
 import { Journey } from './Journey'
+import { SEEDED_PREFIX, SEEDED_PROMPT } from './seeded-feedback'
 import { UNRECOGNISED_GLOSS, explainFallbackReason, glossedReasons } from './WhyEmpty'
 // The whole module, so a test can assert what it does NOT export. `mintPseudonym` was
 // deleted with this change and a re-added one must fail a test rather than a review.
@@ -2177,5 +2178,176 @@ describe('the case each candidate makes, and in whose voice', () => {
     // coarsener answered with. Neither is composed here.
     expect(body.intent).toEqual(INTENT)
     expect(body.profile).toEqual({ pseudonym: VAULT_PSEUDONYM, buckets: BUCKETS })
+  })
+})
+
+/**
+ * What the page says about the code it hands over, and the seeded beat that follows it.
+ *
+ * Two additions to the four beats above, and each one is about a sentence being in the right
+ * place rather than merely existing:
+ *
+ *  * Step 4's permalink carries a discount code this exchange minted for a storefront it is not
+ *    integrated with, so the code WILL be refused at that store's checkout. The page says so.
+ *    Presence is not enough — the warning has to be above the button, because a shopper who
+ *    reads it after clicking has already met the refusal as what looks like a bug. The order
+ *    assertions below are the whole point of these tests; a presence-only check would stay green
+ *    if the copy moved underneath the link.
+ *  * Step 5 is SEEDED and unconditional. The journey it would follow does not exist — R14's
+ *    prompt needs an order reference that arrives days after delivery, and the served journey
+ *    ends at the checkout handoff — so the panel shows a manufactured order in the place a real
+ *    one will occupy. What is NOT manufactured is asserted here: the component is the real
+ *    `FeedbackPromptView`, and the question and the five options are the ones
+ *    `apps/buyer/svc/src/feedback/prompt.py` publishes, spelled out below rather than read back
+ *    off the artifact, so a seed file that quietly shipped four options or reworded one fails.
+ */
+describe('the demonstration code, and the seeded beat after the handoff', () => {
+  /** The four-beats walk, driven to the point where the exchange has minted a permalink. */
+  async function walkToCheckout(): Promise<void> {
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Shortlist')
+    fireEvent.click(screen.getByRole('button', { name: /accept this one/i }))
+    await screen.findByTestId('permalink-url')
+  }
+
+  /** The five, in order, from `prompt.py::FEEDBACK_CHOICES`. Written out, not derived. */
+  const CHOICE_LABELS = [
+    'Yes — it was what the store described',
+    'Yes, but it arrived later than promised',
+    'No — it was not what the store described',
+    'No — a different item arrived',
+    'It never arrived',
+  ]
+  const CHOICE_IDS = [
+    'yes_as_described',
+    'as_described_but_late',
+    'not_as_described',
+    'wrong_item',
+    'never_arrived',
+  ]
+
+  it('names the discount code and says the store will reject it, ABOVE the button', async () => {
+    const { fetcher } = demoService()
+    const { container } = render(<Journey fetcher={fetcher} />)
+
+    await walkToCheckout()
+
+    const warning = screen.getByTestId('discount-code-is-a-demonstration')
+    const said = warning.textContent ?? ''
+    // The actual code off the actual permalink, not the word "code".
+    expect(said).toContain('PSX-MC4DM9A1')
+    expect(said).toContain('demonstration')
+    // What will happen, in the future tense, about the store the link really points at.
+    expect(said).toMatch(/reject/i)
+    expect(said).toContain('demo-woolworks.example.com')
+
+    // ORDER, twice, two ways. This is the assertion the test exists for: a warning below the
+    // button is a warning the shopper meets after the refusal it was written to prevent.
+    const link = screen.getByTestId('permalink-link')
+    expect(
+      warning.compareDocumentPosition(link) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    const inDocumentOrder = Array.from(
+      container.querySelectorAll(
+        '[data-testid="discount-code-is-a-demonstration"], [data-testid="permalink-link"]',
+      ),
+    ).map((element) => element.getAttribute('data-testid'))
+    expect(inDocumentOrder).toEqual(['discount-code-is-a-demonstration', 'permalink-link'])
+  })
+
+  it('says nothing about a demonstration code while there is no code to warn about', async () => {
+    const { fetcher } = demoService()
+    render(<Journey fetcher={fetcher} />)
+
+    expect(screen.queryByTestId('discount-code-is-a-demonstration')).toBeNull()
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Shortlist')
+
+    // The shortlist is on the page and nothing has been accepted, so no permalink and no code
+    // exist yet. A warning about a code that has not been minted would be the page inventing a
+    // fact about a checkout that has not happened.
+    expect(screen.queryByTestId('discount-code')).toBeNull()
+    expect(screen.queryByTestId('discount-code-is-a-demonstration')).toBeNull()
+  })
+
+  it('renders the seeded Step 5 on arrival, with no walk and nothing bought', async () => {
+    const { fetcher } = demoService()
+    render(<Journey fetcher={fetcher} />)
+    await screen.findByTestId('signed-in')
+
+    // Nothing was said, confirmed, shortlisted or accepted — and the panel is there anyway,
+    // because it is not waiting on a journey that cannot reach it.
+    expect(screen.queryByTestId('permalink-url')).toBeNull()
+    expect(screen.getByTestId('feedback-seeded-badge').textContent).toContain('SEEDED')
+    // The artifact passed its own marker check, so this is a prompt and not a refusal notice.
+    expect(screen.queryByTestId('feedback-seed-refused')).toBeNull()
+
+    expect(SEEDED_PROMPT).not.toBeNull()
+    const explanation = screen.getByTestId('feedback-seeded-explanation').textContent ?? ''
+    // The reference itself is on the page, beside the prefix that makes it recognisable — so a
+    // reader can tell this row apart from an earned one from the page alone, without being told.
+    expect(explanation).toContain(SEEDED_PROMPT!.order_ref)
+    expect(explanation).toContain(SEEDED_PREFIX)
+    expect(SEEDED_PREFIX).toBe('sim-fb-')
+    expect(SEEDED_PROMPT!.order_ref.startsWith('sim-fb-')).toBe(true)
+    // And it says what is manufactured about it, rather than leaving SEEDED to carry the load.
+    expect(explanation).toMatch(/manufactured/i)
+  })
+
+  it('shows the real question and the five real options the buyer service publishes', async () => {
+    const { fetcher } = demoService()
+    render(<Journey fetcher={fetcher} />)
+    await screen.findByTestId('signed-in')
+
+    const step5 = screen.getByLabelText('Step 5 - after your purchase (seeded)')
+
+    // `PROMPT_QUESTION` in `apps/buyer/svc/src/feedback/prompt.py`, verbatim.
+    expect(screen.getByTestId('feedback-question').textContent).toBe(
+      'Did what arrived match what the store pitched?',
+    )
+
+    const radios = Array.from(step5.querySelectorAll('input[type="radio"]'))
+    expect(radios).toHaveLength(5)
+    // The option ids are what the ledger records as `reason`, so they are asserted too — a
+    // relabelled option with an invented id would put a value in the trust ledger that the
+    // service's own closed vocabulary does not contain.
+    expect(radios.map((radio) => (radio as HTMLInputElement).value)).toEqual(CHOICE_IDS)
+    // One radio group, named for the question, which is also the ledger payload key.
+    expect(new Set(radios.map((radio) => (radio as HTMLInputElement).name))).toEqual(
+      new Set(['matched_pitch']),
+    )
+
+    const labels = Array.from(step5.querySelectorAll('label')).map(
+      (label) => label.textContent ?? '',
+    )
+    expect(labels).toEqual(CHOICE_LABELS)
+    // Named individually as well, so a failure says which of the five moved.
+    expect(labels).toContain('Yes, but it arrived later than promised')
+    expect(labels).toContain('No — a different item arrived')
+
+    // R14 read literally: no free-text field reached the page by way of the seeded panel.
+    expect(step5.querySelectorAll('textarea')).toHaveLength(0)
+    expect(step5.querySelectorAll('input:not([type="radio"])')).toHaveLength(0)
+  })
+
+  it('adds no link of its own: after accept the permalink is still the only href on the page', async () => {
+    const { fetcher } = demoService()
+    const { container } = render(<Journey fetcher={fetcher} />)
+
+    await walkToCheckout()
+
+    // Step 4 and Step 5 are both on the page at once...
+    expect(screen.getByTestId('permalink-link').getAttribute('href')).toBe(PERMALINK)
+    expect(screen.getByTestId('feedback-seeded-badge')).toBeTruthy()
+    // ...and the seeded panel contributed nothing a browser can be sent to. The one-href
+    // assertion in `the four beats` is the guard; this restates it beside the section that
+    // would break it, so a future link added to Step 5 fails a test that names Step 5.
+    expect(container.querySelectorAll('a[href]')).toHaveLength(1)
+    expect(
+      screen.getByLabelText('Step 5 - after your purchase (seeded)').querySelectorAll('a[href]'),
+    ).toHaveLength(0)
   })
 })

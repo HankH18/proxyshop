@@ -40,7 +40,9 @@
       "title": "Vitamin B12 with Apple Cider Vinegar Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "vitamin-b12-with-apple-cider-vinegar",
+      "variant_ref": "41448367751231"
     },
     "prod_da6d5ba9f8c0480b1efde2d43c057bf6": {
       "product_ref": "prod_da6d5ba9f8c0480b1efde2d43c057bf6",
@@ -48,7 +50,9 @@
       "title": "Folate with Vitamin B12 Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "folate-with-vitamin-b12-capsules",
+      "variant_ref": "41448376893503"
     },
     "prod_4c66e87a3026cb92e7a6d484b12708f3": {
       "product_ref": "prod_4c66e87a3026cb92e7a6d484b12708f3",
@@ -56,7 +60,9 @@
       "title": "B Complex Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "b-complex-capsules",
+      "variant_ref": "41448346157119"
     },
     "prod_9dddee753f636c2898d11c4a690ae5d8": {
       "product_ref": "prod_9dddee753f636c2898d11c4a690ae5d8",
@@ -64,7 +70,9 @@
       "title": "Ginger 2 oz, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ginger-2-oz-organic-extract",
+      "variant_ref": "41888399884351"
     },
     "prod_ff717a3912a96cb01720d4ee58066c82": {
       "product_ref": "prod_ff717a3912a96cb01720d4ee58066c82",
@@ -72,7 +80,9 @@
       "title": "Passionflower 2 oz, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "passionflower-2-oz-organic-extract",
+      "variant_ref": "41888398737471"
     },
     "prod_07f71e1f5bee1d1bfa2a8f2286baa51b": {
       "product_ref": "prod_07f71e1f5bee1d1bfa2a8f2286baa51b",
@@ -80,7 +90,9 @@
       "title": "Kava 2 oz Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "kava-2-oz-extract",
+      "variant_ref": "41888394444863"
     },
     "prod_a1d8a01bbe073b0d4ce80656ea1c382f": {
       "product_ref": "prod_a1d8a01bbe073b0d4ce80656ea1c382f",
@@ -88,7 +100,9 @@
       "title": "Hawthorn 2 oz, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "hawthorn-2-oz-organic-extract",
+      "variant_ref": "41888387563583"
     },
     "prod_f446525aeab0903ade976f7ef817ef86": {
       "product_ref": "prod_f446525aeab0903ade976f7ef817ef86",
@@ -96,7 +110,9 @@
       "title": "Lemon Balm 2 oz, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "lemon-balm-2-oz-organic-extract",
+      "variant_ref": "41888371736639"
     },
     "prod_2371f0e8907c4b8c2fd737510ec5ad96": {
       "product_ref": "prod_2371f0e8907c4b8c2fd737510ec5ad96",
@@ -104,7 +120,9 @@
       "title": "Garlic 180ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "garlic-180ct-capsules",
+      "variant_ref": "41483537711167"
     },
     "prod_c4c7723ddaed15c91eefe3833208cd9d": {
       "product_ref": "prod_c4c7723ddaed15c91eefe3833208cd9d",
@@ -112,7 +130,9 @@
       "title": "Ginger 180ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ginger-180ct-capsules",
+      "variant_ref": "41484161581119"
     },
     "prod_0ec39cf1e24ca9d5cd754f6aff60c5b0": {
       "product_ref": "prod_0ec39cf1e24ca9d5cd754f6aff60c5b0",
@@ -120,7 +140,9 @@
       "title": "Hawthorn 180ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "hawthorn-180ct-capsules",
+      "variant_ref": "41484186058815"
     },
     "prod_de490d3cce8d0249e2d9b2ad78420288": {
       "product_ref": "prod_de490d3cce8d0249e2d9b2ad78420288",
@@ -128,7 +150,9 @@
       "title": "Nettle Quercetin 120ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "nettle-quercetin-120ct-capsules",
+      "variant_ref": "41499604877375"
     },
     "prod_11334ce319c2f3ce86d3a5119d7798c0": {
       "product_ref": "prod_11334ce319c2f3ce86d3a5119d7798c0",
@@ -136,7 +160,9 @@
       "title": "Ashwagandha 2 oz, Organic Alcohol-Free Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Alcohol-Free Glycerites",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ashwagandha-2oz-organic-alcohol-free-extract",
+      "variant_ref": "41713229660223"
     },
     "prod_d220641ebfbedc6b635225bb9161408d": {
       "product_ref": "prod_d220641ebfbedc6b635225bb9161408d",
@@ -144,7 +170,9 @@
       "title": "Cranberry 120ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "cranberry-120ct-capsules",
+      "variant_ref": "41483390713919"
     },
     "prod_01d7ae3078c9659aa04f8e64320750f8": {
       "product_ref": "prod_01d7ae3078c9659aa04f8e64320750f8",
@@ -152,7 +180,9 @@
       "title": "Wormwood 180ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "wormwood-180ct-capsules",
+      "variant_ref": "41499725135935"
     },
     "prod_a7ac654c93ced35c830cbb9faa34dbaf": {
       "product_ref": "prod_a7ac654c93ced35c830cbb9faa34dbaf",
@@ -160,7 +190,9 @@
       "title": "Muscle Relax™  180ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "muscle-relax™-180ct-capsules",
+      "variant_ref": "41495460708415"
     },
     "prod_9919281ad2a2e5b985d79d8680c3dc71": {
       "product_ref": "prod_9919281ad2a2e5b985d79d8680c3dc71",
@@ -168,7 +200,9 @@
       "title": "Kelp 180ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "kelp-180ct-capsules",
+      "variant_ref": "41484215975999"
     },
     "prod_fcfc07519a0577505cab5f65e5c35807": {
       "product_ref": "prod_fcfc07519a0577505cab5f65e5c35807",
@@ -176,7 +210,9 @@
       "title": "Rhodiola 120ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "rhodiola-120ct-capsules",
+      "variant_ref": "41499676409919"
     },
     "prod_2990b8104ebc011b857347fd191163b1": {
       "product_ref": "prod_2990b8104ebc011b857347fd191163b1",
@@ -184,7 +220,9 @@
       "title": "Slippery Elm 180ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "slippery-elm-180ct-capsules",
+      "variant_ref": "41499703181375"
     },
     "prod_ef8d7c7ab1ee912ca0ba58b0d6d9c889": {
       "product_ref": "prod_ef8d7c7ab1ee912ca0ba58b0d6d9c889",
@@ -192,7 +230,9 @@
       "title": "Aller-Aid™ 180ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "aller-aid™-180ct-capsules",
+      "variant_ref": "41483300831295"
     },
     "prod_9ad6602d723b686c3fd66ad4cae80563": {
       "product_ref": "prod_9ad6602d723b686c3fd66ad4cae80563",
@@ -200,7 +240,9 @@
       "title": "Yellow Dock, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "yellow-dock-organic-extract",
+      "variant_ref": "41482743578687"
     },
     "prod_e2c3c1618a9a4b9881949122ac46ab0d": {
       "product_ref": "prod_e2c3c1618a9a4b9881949122ac46ab0d",
@@ -208,7 +250,9 @@
       "title": "Zinc Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "zinc-capsules",
+      "variant_ref": "41406711005247"
     },
     "prod_6a9fa3d8577f6f59b9bd498cb2d201a2": {
       "product_ref": "prod_6a9fa3d8577f6f59b9bd498cb2d201a2",
@@ -216,7 +260,9 @@
       "title": "Vitamin D3 & K2 Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "vitamin-d3-k2-capsules",
+      "variant_ref": "41412675633215"
     },
     "prod_5d114bf091fbe72fd3aa83a102015dfb": {
       "product_ref": "prod_5d114bf091fbe72fd3aa83a102015dfb",
@@ -224,7 +270,9 @@
       "title": "Vitamin C Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "vitamin-c-capsules",
+      "variant_ref": "41406668308543"
     },
     "prod_7d188e56fc293de9854394aef1f3a453": {
       "product_ref": "prod_7d188e56fc293de9854394aef1f3a453",
@@ -232,7 +280,9 @@
       "title": "Biotin & Silica Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "biotin-silica",
+      "variant_ref": "41412722163775"
     },
     "prod_fafd0ea27be8c317641acfc3b16a4d16": {
       "product_ref": "prod_fafd0ea27be8c317641acfc3b16a4d16",
@@ -240,7 +290,9 @@
       "title": "Beet Root Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "beet-root-capsules",
+      "variant_ref": "41168434921535"
     },
     "prod_22d79bfc110311771d28f7df64d13801": {
       "product_ref": "prod_22d79bfc110311771d28f7df64d13801",
@@ -248,7 +300,9 @@
       "title": "Ashwagandha Root, Organic Powder",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ashwagandha-root-organic-powder",
+      "variant_ref": "39694993653823"
     },
     "prod_8a082c14b29c60493b4b12fbd5a6def1": {
       "product_ref": "prod_8a082c14b29c60493b4b12fbd5a6def1",
@@ -256,7 +310,9 @@
       "title": "Ashwagandha Root, Organic Cut-and-Sift",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ashwagandha-root-organic-cut-and-sift",
+      "variant_ref": "39694993588287"
     },
     "prod_911d567c8a80ca50364fe15f69420601": {
       "product_ref": "prod_911d567c8a80ca50364fe15f69420601",
@@ -264,7 +320,9 @@
       "title": "Ashwagandha Ginkgo Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ashwagandha-ginkgo",
+      "variant_ref": "39694947352639"
     },
     "prod_eab3f3649ce9af4c368bc6203be29a5c": {
       "product_ref": "prod_eab3f3649ce9af4c368bc6203be29a5c",
@@ -272,7 +330,9 @@
       "title": "Ashwagandha, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ashwagandha-extract",
+      "variant_ref": "39694947319871"
     },
     "prod_495f9f4bbfaace1a0e33da3159546af3": {
       "product_ref": "prod_495f9f4bbfaace1a0e33da3159546af3",
@@ -280,7 +340,9 @@
       "title": "Ashwagandha, Biodynamic Herbal Tonic 1 oz",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Biodynamic Herbal Tonics",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ashwagandha-biodynamic-herbal-tonic-1-oz",
+      "variant_ref": "39694947287103"
     },
     "prod_db37ed7ab75037706f181a016fa97bad": {
       "product_ref": "prod_db37ed7ab75037706f181a016fa97bad",
@@ -288,7 +350,9 @@
       "title": "Ashwagandha, Biodynamic Herbal Tonic 2 oz",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Biodynamic Herbal Tonics",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ashwagandha-biodynamic",
+      "variant_ref": "39694947254335"
     },
     "prod_8dee89102b8cce127ef13d7e70426378": {
       "product_ref": "prod_8dee89102b8cce127ef13d7e70426378",
@@ -296,7 +360,9 @@
       "title": "Ashwagandha 180ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ashwagandha-180ct-organic-capsules",
+      "variant_ref": "39694947221567"
     },
     "prod_89e3a5064423711ec42dcf1bd7073f08": {
       "product_ref": "prod_89e3a5064423711ec42dcf1bd7073f08",
@@ -304,7 +370,9 @@
       "title": "Ashwagandha 90ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ashwagandha",
+      "variant_ref": "39694947188799"
     },
     "prod_ec3f5c4c9b4932c388bd02fe8e11faa7": {
       "product_ref": "prod_ec3f5c4c9b4932c388bd02fe8e11faa7",
@@ -312,7 +380,9 @@
       "title": "St. John's Wort Extract 2 oz | Organic Alcohol-Removed",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Alcohol-Free Glycerites",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "st-johns-wort-2oz-organic-alcohol-removed",
+      "variant_ref": "14967803412543"
     },
     "prod_bf23fa6c05517eddc095535ad43707f9": {
       "product_ref": "prod_bf23fa6c05517eddc095535ad43707f9",
@@ -320,7 +390,9 @@
       "title": "LiverLove™, Biodynamic Herbal Tonic 1 oz",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Biodynamic Herbal Tonics",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "liverlove-biodynamic-herbal-tonic-1-oz",
+      "variant_ref": "39370249633855"
     },
     "prod_b9979a856dd67edf75ba5844c01e558c": {
       "product_ref": "prod_b9979a856dd67edf75ba5844c01e558c",
@@ -328,7 +400,9 @@
       "title": "ToTheRescue™, Biodynamic Herbal Tonic 1 oz",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Biodynamic Herbal Tonics",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "totherescue™-biodynamic-herbal-tonic-1-oz",
+      "variant_ref": "39370246815807"
     },
     "prod_f2637e5cc1eee3fe8b6ab061206e6510": {
       "product_ref": "prod_f2637e5cc1eee3fe8b6ab061206e6510",
@@ -336,7 +410,9 @@
       "title": "SawLogs™, Biodynamic Herbal Tonic 1 oz",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Biodynamic Herbal Tonics",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "sawlogs™-biodynamic-herbal-tonic-1-oz",
+      "variant_ref": "39370242785343"
     },
     "prod_76747218efe5d1f076b930f1a558d42e": {
       "product_ref": "prod_76747218efe5d1f076b930f1a558d42e",
@@ -344,7 +420,9 @@
       "title": "Namaste™, Biodynamic Herbal Tonic 1 oz",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Biodynamic Herbal Tonics",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "namaste™-biodynamic-herbal-tonic-1oz",
+      "variant_ref": "39369026469951"
     },
     "prod_25bade6697f3c16db2adf1f6facfa78a": {
       "product_ref": "prod_25bade6697f3c16db2adf1f6facfa78a",
@@ -352,7 +430,9 @@
       "title": "CountToZen™, Biodynamic Herbal Tonic 1 oz",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Biodynamic Herbal Tonics",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "counttozen™-biodynamic-herbal-tonic-1-oz",
+      "variant_ref": "39369022144575"
     },
     "prod_0b3e0de050d1b18d0c4ff0e32cbcd5e7": {
       "product_ref": "prod_0b3e0de050d1b18d0c4ff0e32cbcd5e7",
@@ -360,7 +440,9 @@
       "title": "Astragalus, Biodynamic Herbal Tonic 1 oz",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Biodynamic Herbal Tonics",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "astragalus-biodynamic-herbal-tonic-1-oz",
+      "variant_ref": "39369018277951"
     },
     "prod_b408ccb48eff425235fc707a8c5d7f3c": {
       "product_ref": "prod_b408ccb48eff425235fc707a8c5d7f3c",
@@ -368,7 +450,9 @@
       "title": "Holy Basil, Biodynamic Herbal Tonic 1 oz",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Biodynamic Herbal Tonics",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "holy-basil-biodynamic-herbal-tonic-1oz",
+      "variant_ref": "39369012969535"
     },
     "prod_fec919de87a255d54d365f9222c5b6ff": {
       "product_ref": "prod_fec919de87a255d54d365f9222c5b6ff",
@@ -376,7 +460,9 @@
       "title": "Lemon Balm, Biodynamic Herbal Tonic 1 oz",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Biodynamic Herbal Tonics",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "lemon-balm-biodynamic-herbal-tonic-1-oz",
+      "variant_ref": "39369011855423"
     },
     "prod_0c8c0b9f8754fa8a8702e125d758ab32": {
       "product_ref": "prod_0c8c0b9f8754fa8a8702e125d758ab32",
@@ -384,7 +470,9 @@
       "title": "Valerian, Biodynamic Herbal Tonic 1 oz",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Biodynamic Herbal Tonics",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "valerian-biodynamic-1-oz",
+      "variant_ref": "39369009168447"
     },
     "prod_4e1959541268142274a531f1395a4db3": {
       "product_ref": "prod_4e1959541268142274a531f1395a4db3",
@@ -392,7 +480,9 @@
       "title": "Black Elderberry Honey, Organic Alcohol-Removed 1 oz",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Alcohol-Free Glycerites",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "black-elderberry-honey-alcohol-removed-1oz",
+      "variant_ref": "39265865007167"
     },
     "prod_1bcf5e5b8f64d793f5ad9ee76480f8ef": {
       "product_ref": "prod_1bcf5e5b8f64d793f5ad9ee76480f8ef",
@@ -400,7 +490,9 @@
       "title": "Lemon Balm 180ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "lemon-balm-180ct-organic-capsules",
+      "variant_ref": "31990558883903"
     },
     "prod_bfb955c2f5ced9bdd1bb2d4ed0c53cb6": {
       "product_ref": "prod_bfb955c2f5ced9bdd1bb2d4ed0c53cb6",
@@ -408,7 +500,9 @@
       "title": "Lion's Mane Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "lions-mane-organic-capsules",
+      "variant_ref": "31990618161215"
     },
     "prod_283c9ab15038c1161238da7c268e3fa6": {
       "product_ref": "prod_283c9ab15038c1161238da7c268e3fa6",
@@ -416,7 +510,9 @@
       "title": "Saw Palmetto 180ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "saw-palmetto-value-size",
+      "variant_ref": "31990546989119"
     },
     "prod_3b3f4a0d276d5ac274503af4120a6d32": {
       "product_ref": "prod_3b3f4a0d276d5ac274503af4120a6d32",
@@ -424,7 +520,9 @@
       "title": "Echinacea Goldenseal 2 oz, Organic Alcohol-Removed Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Alcohol-Free Glycerites",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "echinacea-goldenseal-2oz-organic-alcohol-removed",
+      "variant_ref": "39548213919807"
     },
     "prod_45135cbf7edb92e71318a8baeb0b1180": {
       "product_ref": "prod_45135cbf7edb92e71318a8baeb0b1180",
@@ -432,7 +530,9 @@
       "title": "Milk Thistle Dandelion 180ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "milk-thistle-dandelion-180ct-organic-capsules",
+      "variant_ref": "14948583931967"
     },
     "prod_36c1f3909d28efc6f8aef07dae577c1e": {
       "product_ref": "prod_36c1f3909d28efc6f8aef07dae577c1e",
@@ -440,7 +540,9 @@
       "title": "Astragalus 180ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "astragalus-180ct-organic-capsules",
+      "variant_ref": "14948573446207"
     },
     "prod_cb5acb0c18b17f5eee38f326cbc719bc": {
       "product_ref": "prod_cb5acb0c18b17f5eee38f326cbc719bc",
@@ -448,7 +550,9 @@
       "title": "Valerian 180ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "valerian-180ct-organic-capsules",
+      "variant_ref": "39464567177279"
     },
     "prod_06a8518779bee50a0b302053fa6ed80d": {
       "product_ref": "prod_06a8518779bee50a0b302053fa6ed80d",
@@ -456,7 +560,9 @@
       "title": "Turmeric 120ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "turmeric-120ct-capsules",
+      "variant_ref": "14948548476991"
     },
     "prod_512962991c263f6e18e17482d67819cd": {
       "product_ref": "prod_512962991c263f6e18e17482d67819cd",
@@ -464,7 +570,9 @@
       "title": "Milk Thistle 180ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "milk-thistle-180ct-organic-capsules",
+      "variant_ref": "39464567242815"
     },
     "prod_0482376551949c218488f44192c64e66": {
       "product_ref": "prod_0482376551949c218488f44192c64e66",
@@ -472,7 +580,9 @@
       "title": "Fenugreek 180ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "fenugreek-180ct-organic-capsules",
+      "variant_ref": "14948442210367"
     },
     "prod_facc2691ae837dd1bd7fa242d0664101": {
       "product_ref": "prod_facc2691ae837dd1bd7fa242d0664101",
@@ -480,7 +590,9 @@
       "title": "Cinnamon \"True\" (Ceylon) 120ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "cinnamon-true-ceylon-120ct-organic-capsules",
+      "variant_ref": "39548213592127"
     },
     "prod_10b13d1aebe0b7b3a75289104fb1be87": {
       "product_ref": "prod_10b13d1aebe0b7b3a75289104fb1be87",
@@ -488,7 +600,9 @@
       "title": "Rene's \"Essiac\" Tea, Organic Cut-and-Sift",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "renes-essiac-tea-organic-cut-and-sift",
+      "variant_ref": "14588550905919"
     },
     "prod_e48f85ed8157507fb8ec7b71a01716fd": {
       "product_ref": "prod_e48f85ed8157507fb8ec7b71a01716fd",
@@ -496,7 +610,9 @@
       "title": "Immuni-Tea™, Organic Cut-and-Sift",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "immuni-tea-organic-cut-and-sift",
+      "variant_ref": "14588351184959"
     },
     "prod_45ca9616d7f19d026f8f347086b4c841": {
       "product_ref": "prod_45ca9616d7f19d026f8f347086b4c841",
@@ -504,7 +620,9 @@
       "title": "Turmeric Root, Organic Powder",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "turmeric-root-organic-powder",
+      "variant_ref": "14565863981119"
     },
     "prod_01da4fcdf25701dd1306617c1abb3576": {
       "product_ref": "prod_01da4fcdf25701dd1306617c1abb3576",
@@ -512,7 +630,9 @@
       "title": "Slippery Elm Bark, Organic Powder",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "slippery-elm-bark-organic-powder",
+      "variant_ref": "14565821317183"
     },
     "prod_4b0fb9419dbb4c96f33684a24ab39d49": {
       "product_ref": "prod_4b0fb9419dbb4c96f33684a24ab39d49",
@@ -520,7 +640,9 @@
       "title": "Saw Palmetto Berry, Organic Powder",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "saw-palmetto-berry-organic-powder",
+      "variant_ref": "14565802377279"
     },
     "prod_8aaa947296aaacc0c3f65b0e59e74725": {
       "product_ref": "prod_8aaa947296aaacc0c3f65b0e59e74725",
@@ -528,7 +650,9 @@
       "title": "Rose Hips Fruit, Organic Powder",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "rose-hips-fruit-organic-powder",
+      "variant_ref": "14565756928063"
     },
     "prod_7c6bb6b224b8064b42528b3636df1ce0": {
       "product_ref": "prod_7c6bb6b224b8064b42528b3636df1ce0",
@@ -536,7 +660,9 @@
       "title": "Rose Hips Fruit, Organic Cut-and-Sift",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "rose-hips-fruit-organic-cut-and-sift",
+      "variant_ref": "14565740773439"
     },
     "prod_e155bc3fdcae96e5f9cd95e12e5e5452": {
       "product_ref": "prod_e155bc3fdcae96e5f9cd95e12e5e5452",
@@ -544,7 +670,9 @@
       "title": "Red Raspberry Leaf, Organic Cut-and-Sift",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "red-raspberry-leaf-organic-cut-and-sift",
+      "variant_ref": "14565731565631"
     },
     "prod_46ee4bc95a89c70e2d9f325014bbc22c": {
       "product_ref": "prod_46ee4bc95a89c70e2d9f325014bbc22c",
@@ -552,7 +680,9 @@
       "title": "Peppermint Leaf, Organic Cut-and-Sift",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "peppermint-leaf-organic-cut-and-sift",
+      "variant_ref": "14565678809151"
     },
     "prod_8f5e7bd604fd0471f438be905b27926f": {
       "product_ref": "prod_8f5e7bd604fd0471f438be905b27926f",
@@ -560,7 +690,9 @@
       "title": "Nettle Leaf, Organic Cut-and-Sift",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "nettle-leaf-organic-cut-and-sift",
+      "variant_ref": "14565562581055"
     },
     "prod_4072b4197639f031782fa99c285a1dcd": {
       "product_ref": "prod_4072b4197639f031782fa99c285a1dcd",
@@ -568,7 +700,9 @@
       "title": "Marshmallow Root, Organic Cut-and-Sift",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "marshmallow-root-organic-cut-and-sift",
+      "variant_ref": "14565503041599"
     },
     "prod_071f0a972f7cfe37f977ec3160c010e0": {
       "product_ref": "prod_071f0a972f7cfe37f977ec3160c010e0",
@@ -576,7 +710,9 @@
       "title": "Maca Root, Organic Powder",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "maca-root-organic-powder",
+      "variant_ref": "14565494718527"
     },
     "prod_e41cd47f55b35a0ed230b14d0ec3a06b": {
       "product_ref": "prod_e41cd47f55b35a0ed230b14d0ec3a06b",
@@ -584,7 +720,9 @@
       "title": "Licorice Root, Organic Cut-and-Sift",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "licorice-root-organic-cut-and-sift",
+      "variant_ref": "14565484036159"
     },
     "prod_b8ed1997ba949dad38402d87cb7ae765": {
       "product_ref": "prod_b8ed1997ba949dad38402d87cb7ae765",
@@ -592,7 +730,9 @@
       "title": "Lemon Balm Leaf, Organic Cut-and-Sift",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "lemon-balm-leaf-organic-cut-and-sift",
+      "variant_ref": "14565443272767"
     },
     "prod_2cc097446483a8d08a2eebeaa876b833": {
       "product_ref": "prod_2cc097446483a8d08a2eebeaa876b833",
@@ -600,7 +740,9 @@
       "title": "Hawthorn Berry, Organic Whole",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "hawthorn-berry-organic-whole",
+      "variant_ref": "14565373542463"
     },
     "prod_9c333010b72780791cca75ca7024f8c7": {
       "product_ref": "prod_9c333010b72780791cca75ca7024f8c7",
@@ -608,7 +750,9 @@
       "title": "Ginger Root, Organic Powder",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ginger-root-organic-powder",
+      "variant_ref": "14561978318911"
     },
     "prod_d8a5926a66a7015db7f7c6cd34eeb8f2": {
       "product_ref": "prod_d8a5926a66a7015db7f7c6cd34eeb8f2",
@@ -616,7 +760,9 @@
       "title": "Ginger Root, Organic Cut-and-Sift",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ginger-root-organic-cut-and-sift",
+      "variant_ref": "14561969799231"
     },
     "prod_6d06023aa6009c0938826577e86baf3b": {
       "product_ref": "prod_6d06023aa6009c0938826577e86baf3b",
@@ -624,7 +770,9 @@
       "title": "Garlic Cloves, Organic Powder",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "garlic-cloves-organic-powder",
+      "variant_ref": "14561961443391"
     },
     "prod_41ca371ba85f5462ebc71c9c8ba3aa65": {
       "product_ref": "prod_41ca371ba85f5462ebc71c9c8ba3aa65",
@@ -632,7 +780,9 @@
       "title": "Elderberry, Organic Whole",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "elderberry-organic-whole",
+      "variant_ref": "14561920024639"
     },
     "prod_92d6708aef760b9b9cddb27695a47c59": {
       "product_ref": "prod_92d6708aef760b9b9cddb27695a47c59",
@@ -640,7 +790,9 @@
       "title": "Dandelion Root, Organic Cut-and-Sift",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "dandelion-root-organic-cut-and-sift",
+      "variant_ref": "14561777745983"
     },
     "prod_89e334f11095002cf41110136c9037dd": {
       "product_ref": "prod_89e334f11095002cf41110136c9037dd",
@@ -648,7 +800,9 @@
       "title": "Cinnamon \"True\" (Ceylon), Organic Powder",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "cinnamon-true-ceylon-organic-powder",
+      "variant_ref": "14561453965375"
     },
     "prod_7b0562a493b31726a35e51f25dfa7549": {
       "product_ref": "prod_7b0562a493b31726a35e51f25dfa7549",
@@ -656,7 +810,9 @@
       "title": "Chamomile flower, Organic Whole",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "chamomile-flower-organic-whole",
+      "variant_ref": "14561340031039"
     },
     "prod_2e39eff5dab598fee9adbe3cebeb00d7": {
       "product_ref": "prod_2e39eff5dab598fee9adbe3cebeb00d7",
@@ -664,7 +820,9 @@
       "title": "Catnip Leaf and Flower, Organic Cut-and-Sift",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "catnip-leaf-and-flower-organic-cut-and-sift",
+      "variant_ref": "14519161978943"
     },
     "prod_6abba2ed41a53eaea5a47923e6231faf": {
       "product_ref": "prod_6abba2ed41a53eaea5a47923e6231faf",
@@ -672,7 +830,9 @@
       "title": "Burdock Root, Organic Cut-and-Sift",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "burdock-root-organic-cut-and-sift",
+      "variant_ref": "14519149035583"
     },
     "prod_a54d08342262c23ab2d41a8aadf13d48": {
       "product_ref": "prod_a54d08342262c23ab2d41a8aadf13d48",
@@ -680,7 +840,9 @@
       "title": "Calendula Flowers, Organic Whole",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "calendula-flowers-organic-whole",
+      "variant_ref": "14519131635775"
     },
     "prod_d0c56e11837d80456585ae17c360dc79": {
       "product_ref": "prod_d0c56e11837d80456585ae17c360dc79",
@@ -688,7 +850,9 @@
       "title": "Beet Root, Organic Powder",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "beet-root-organic-powder",
+      "variant_ref": "14519099654207"
     },
     "prod_392ebb8da20e723600b8dba69ca1c126": {
       "product_ref": "prod_392ebb8da20e723600b8dba69ca1c126",
@@ -696,7 +860,9 @@
       "title": "Astragalus Root, Organic Powder",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "astragalus-root-organic-powder",
+      "variant_ref": "14519090020415"
     },
     "prod_f3d0cc72ef01dc0bdfe6dfa4b40a1c5e": {
       "product_ref": "prod_f3d0cc72ef01dc0bdfe6dfa4b40a1c5e",
@@ -704,7 +870,9 @@
       "title": "American Ginseng Powder",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Bulk Herbs",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "american-ginseng-powder",
+      "variant_ref": "14519025401919"
     },
     "prod_aa15e6d4fa75ee41bf9b71a557237128": {
       "product_ref": "prod_aa15e6d4fa75ee41bf9b71a557237128",
@@ -712,7 +880,9 @@
       "title": "Valerian, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "valerian-extract-1",
+      "variant_ref": "14489386942527"
     },
     "prod_1fff396ccd21b46d2c6ec4867df59347": {
       "product_ref": "prod_1fff396ccd21b46d2c6ec4867df59347",
@@ -720,7 +890,9 @@
       "title": "Oregon Grape Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "oregon-grape-organic-capsules",
+      "variant_ref": "14478879424575"
     },
     "prod_8c321746b49f1017afe9ed681a78da87": {
       "product_ref": "prod_8c321746b49f1017afe9ed681a78da87",
@@ -728,7 +900,9 @@
       "title": "Lion's Mane Plus™ Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "lions-mane-plus-organic-capsules",
+      "variant_ref": "39464567308351"
     },
     "prod_5bcb02afff0e24933cd2ad17d03e24e2": {
       "product_ref": "prod_5bcb02afff0e24933cd2ad17d03e24e2",
@@ -736,7 +910,9 @@
       "title": "Dandelion Root, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "dandelion-root-extract",
+      "variant_ref": "14031288565823"
     },
     "prod_cebe6c8b4a8584f4d941283d1b75fdc4": {
       "product_ref": "prod_cebe6c8b4a8584f4d941283d1b75fdc4",
@@ -744,7 +920,9 @@
       "title": "Milk Thistle Dandelion, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "milk-thistle-dandelion-extract",
+      "variant_ref": "12718321991743"
     },
     "prod_4e692900a51cc5d8e39cc10acb425815": {
       "product_ref": "prod_4e692900a51cc5d8e39cc10acb425815",
@@ -752,7 +930,9 @@
       "title": "Premium Echinacea, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "premium-echinacea-extract",
+      "variant_ref": "12718321860671"
     },
     "prod_7fd178511688b164764cf9ade268e7bd": {
       "product_ref": "prod_7fd178511688b164764cf9ade268e7bd",
@@ -760,7 +940,9 @@
       "title": "Echinacea Goldenseal Plus, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "echinacea-goldenseal-plus-extract",
+      "variant_ref": "39548213952575"
     },
     "prod_93db05f62dd64f4d2c29f006ad13d1b9": {
       "product_ref": "prod_93db05f62dd64f4d2c29f006ad13d1b9",
@@ -768,7 +950,9 @@
       "title": "Echinacea Goldenseal, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "echinacea-goldenseal-extract",
+      "variant_ref": "39548213985343"
     },
     "prod_1fe79d2366de8e2413d4f333cdc4e2fb": {
       "product_ref": "prod_1fe79d2366de8e2413d4f333cdc4e2fb",
@@ -776,7 +960,9 @@
       "title": "Bilberry Eyebright, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "bilberry-eyebright-extract",
+      "variant_ref": "12718321762367"
     },
     "prod_7e8c8a237fd4a046628607372558b982": {
       "product_ref": "prod_7e8c8a237fd4a046628607372558b982",
@@ -784,7 +970,9 @@
       "title": "Valerian 90ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "valerian-extract",
+      "variant_ref": "39464567439423"
     },
     "prod_c5986e518427c757bf7f654c717aabbe": {
       "product_ref": "prod_c5986e518427c757bf7f654c717aabbe",
@@ -792,7 +980,9 @@
       "title": "Turmeric, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "turmeric-extract",
+      "variant_ref": "12718321565759"
     },
     "prod_8294cf57cd99d5bf354b3c7a0598910f": {
       "product_ref": "prod_8294cf57cd99d5bf354b3c7a0598910f",
@@ -800,7 +990,9 @@
       "title": "St. John's Wort, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "st-johns-wort-extract",
+      "variant_ref": "12718321500223"
     },
     "prod_b1755e049234235894cbbaba62f3ddbf": {
       "product_ref": "prod_b1755e049234235894cbbaba62f3ddbf",
@@ -808,7 +1000,9 @@
       "title": "Slippery Elm, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "slippery-elm-extract",
+      "variant_ref": "12718321205311"
     },
     "prod_afeb49f6be9c90b7303407f5b1dcd456": {
       "product_ref": "prod_afeb49f6be9c90b7303407f5b1dcd456",
@@ -816,7 +1010,9 @@
       "title": "Rhodiola, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "rhodiola-extract",
+      "variant_ref": "12718321107007"
     },
     "prod_511748c7fb72f52638e4ec6e3c770791": {
       "product_ref": "prod_511748c7fb72f52638e4ec6e3c770791",
@@ -824,7 +1020,9 @@
       "title": "Passionflower, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "passionflower-extract",
+      "variant_ref": "12718321074239"
     },
     "prod_ef511418f75e0b78133b46a4355a957b": {
       "product_ref": "prod_ef511418f75e0b78133b46a4355a957b",
@@ -832,7 +1030,9 @@
       "title": "Milk Thistle, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "milk-thistle-extract",
+      "variant_ref": "12718321041471"
     },
     "prod_ece302da554462009b9d0542f81145f1": {
       "product_ref": "prod_ece302da554462009b9d0542f81145f1",
@@ -840,7 +1040,9 @@
       "title": "Maca, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "maca-extract",
+      "variant_ref": "12718320975935"
     },
     "prod_4b15f298cf355cbe54b70762b9822305": {
       "product_ref": "prod_4b15f298cf355cbe54b70762b9822305",
@@ -848,7 +1050,9 @@
       "title": "Licorice, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "licorice-extract",
+      "variant_ref": "12718320943167"
     },
     "prod_b66431ac382fe94bdf653b7792f39899": {
       "product_ref": "prod_b66431ac382fe94bdf653b7792f39899",
@@ -856,7 +1060,9 @@
       "title": "Lemon Balm, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "lemon-balm-extract",
+      "variant_ref": "39464567472191"
     },
     "prod_ea49e286d43a9df7bcbd3ecb3586a5fb": {
       "product_ref": "prod_ea49e286d43a9df7bcbd3ecb3586a5fb",
@@ -864,7 +1070,9 @@
       "title": "Kava Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "kava-extract",
+      "variant_ref": "39464562360383"
     },
     "prod_a9bddf4292b87eab9b9de4d1d8656217": {
       "product_ref": "prod_a9bddf4292b87eab9b9de4d1d8656217",
@@ -872,7 +1080,9 @@
       "title": "Holy Basil, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "holy-basil-extract",
+      "variant_ref": "12718320615487"
     },
     "prod_53f137d7427bb49a8715f4fcb6934888": {
       "product_ref": "prod_53f137d7427bb49a8715f4fcb6934888",
@@ -880,7 +1090,9 @@
       "title": "Hawthorn, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "hawthorn-extract",
+      "variant_ref": "12718320582719"
     },
     "prod_7c23a9c21aab69a36033edeea68b7eb9": {
       "product_ref": "prod_7c23a9c21aab69a36033edeea68b7eb9",
@@ -888,7 +1100,9 @@
       "title": "Goldenseal, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "goldenseal-extract",
+      "variant_ref": "12718320549951"
     },
     "prod_99a584065e5ea347d345e752ee218e8d": {
       "product_ref": "prod_99a584065e5ea347d345e752ee218e8d",
@@ -896,7 +1110,9 @@
       "title": "Ginkgo, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ginkgo-extract",
+      "variant_ref": "12718320418879"
     },
     "prod_38b6f18010f587b4e78a304ed92f7bfc": {
       "product_ref": "prod_38b6f18010f587b4e78a304ed92f7bfc",
@@ -904,7 +1120,9 @@
       "title": "Ginger, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ginger-extract",
+      "variant_ref": "12718319665215"
     },
     "prod_e2b97155852a86df4c942bd593cdf37e": {
       "product_ref": "prod_e2b97155852a86df4c942bd593cdf37e",
@@ -912,7 +1130,9 @@
       "title": "Echinacea purpurea, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "echinacea-purpurea-extract",
+      "variant_ref": "12718318092351"
     },
     "prod_fceae2742ef8df7fcb82b1a71609c9bf": {
       "product_ref": "prod_fceae2742ef8df7fcb82b1a71609c9bf",
@@ -920,7 +1140,9 @@
       "title": "Damiana, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "damiana-extract",
+      "variant_ref": "12718317568063"
     },
     "prod_8404367df559855246b11d3c93dac71f": {
       "product_ref": "prod_8404367df559855246b11d3c93dac71f",
@@ -928,7 +1150,9 @@
       "title": "Cinnamon \"True\" (Ceylon), Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "cinnamon-extract",
+      "variant_ref": "39548213657663"
     },
     "prod_911cd3b353682ef3d83a6780c3c903c2": {
       "product_ref": "prod_911cd3b353682ef3d83a6780c3c903c2",
@@ -936,7 +1160,9 @@
       "title": "Chamomile Flowers, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "chamomile-flower-extract",
+      "variant_ref": "12718317502527"
     },
     "prod_093716c0b540b63f2a9a90c0b3589d01": {
       "product_ref": "prod_093716c0b540b63f2a9a90c0b3589d01",
@@ -944,7 +1170,9 @@
       "title": "California Poppy, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "califorina-poppy-extract",
+      "variant_ref": "12718317469759"
     },
     "prod_95a0b1de63f52e3424fe557d37b3b532": {
       "product_ref": "prod_95a0b1de63f52e3424fe557d37b3b532",
@@ -952,7 +1180,9 @@
       "title": "Black Cohosh, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "black-cohosh-extract",
+      "variant_ref": "12718317305919"
     },
     "prod_37610cb2ff20996b1481d04b4c9dd7d3": {
       "product_ref": "prod_37610cb2ff20996b1481d04b4c9dd7d3",
@@ -960,7 +1190,9 @@
       "title": "Astragalus, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "astragalus-extract",
+      "variant_ref": "12718317273151"
     },
     "prod_2c750f6d4ee5e84ecdb323ec48c94b9b": {
       "product_ref": "prod_2c750f6d4ee5e84ecdb323ec48c94b9b",
@@ -968,7 +1200,9 @@
       "title": "Artichoke, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "artichoke-extract",
+      "variant_ref": "12718317174847"
     },
     "prod_72da6063feb10fc1d8502691ca6e0301": {
       "product_ref": "prod_72da6063feb10fc1d8502691ca6e0301",
@@ -976,7 +1210,9 @@
       "title": "American Ginseng Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "american-ginseng-extract",
+      "variant_ref": "12718317076543"
     },
     "prod_65de566ec27034bb982111781e3cf919": {
       "product_ref": "prod_65de566ec27034bb982111781e3cf919",
@@ -984,7 +1220,9 @@
       "title": "TurmeriPro™ Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "turmeripro",
+      "variant_ref": "12718317011007"
     },
     "prod_2194cbe24b19d36379c6feb52eb41dbf": {
       "product_ref": "prod_2194cbe24b19d36379c6feb52eb41dbf",
@@ -992,7 +1230,9 @@
       "title": "Stress Guard™ Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "stress-guard",
+      "variant_ref": "33281900871743"
     },
     "prod_a444938df84ccd7f98a8193cfa82e582": {
       "product_ref": "prod_a444938df84ccd7f98a8193cfa82e582",
@@ -1000,7 +1240,9 @@
       "title": "Sleep Better™ Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "sleep-better",
+      "variant_ref": "39464567504959"
     },
     "prod_a0cdd5cbd7cc38a8c7f13ff6f5189af3": {
       "product_ref": "prod_a0cdd5cbd7cc38a8c7f13ff6f5189af3",
@@ -1008,7 +1250,9 @@
       "title": "Prostate Health™* Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "prostate-health-lycopene",
+      "variant_ref": "12718315700287"
     },
     "prod_08390c4f2736e2a7185ec3ce12d67ce9": {
       "product_ref": "prod_08390c4f2736e2a7185ec3ce12d67ce9",
@@ -1016,7 +1260,9 @@
       "title": "Muscle Relax™  Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "muscle-relax",
+      "variant_ref": "39464567570495"
     },
     "prod_f1ac7d2ebee8c6ad7061b4e591dfdf41": {
       "product_ref": "prod_f1ac7d2ebee8c6ad7061b4e591dfdf41",
@@ -1024,7 +1270,9 @@
       "title": "Eyes Love Lutein™ Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "eyes-love-lutein",
+      "variant_ref": "12718313340991"
     },
     "prod_f9d211ca493da092068defb897cb3c94": {
       "product_ref": "prod_f9d211ca493da092068defb897cb3c94",
@@ -1032,7 +1280,9 @@
       "title": "Aller-Aid™ 90ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "aller-aid™",
+      "variant_ref": "12718313308223"
     },
     "prod_0d9a0a1731895471a9309bf22af6e2ac": {
       "product_ref": "prod_0d9a0a1731895471a9309bf22af6e2ac",
@@ -1040,7 +1290,9 @@
       "title": "Saw Palmetto Pygeum Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "saw-palmetto-pygeum",
+      "variant_ref": "12718313209919"
     },
     "prod_5141602c544e0c7504625ea307d8c9c8": {
       "product_ref": "prod_5141602c544e0c7504625ea307d8c9c8",
@@ -1048,7 +1300,9 @@
       "title": "Nettle Quercetin Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "nettle-quercetin",
+      "variant_ref": "12718313177151"
     },
     "prod_56f14982634dd983344b0da08aa90b97": {
       "product_ref": "prod_56f14982634dd983344b0da08aa90b97",
@@ -1056,7 +1310,9 @@
       "title": "Milk Thistle Dandelion 90ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "milk-thistle-dandelion",
+      "variant_ref": "39464567603263"
     },
     "prod_846f101ee9d6dc81e7464229181719cb": {
       "product_ref": "prod_846f101ee9d6dc81e7464229181719cb",
@@ -1064,7 +1320,9 @@
       "title": "Echinacea with Zinc & Vitamin C Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "echinacea-zinc-vitc",
+      "variant_ref": "12718313111615"
     },
     "prod_9973acb31b94a2850faba575cb01b481": {
       "product_ref": "prod_9973acb31b94a2850faba575cb01b481",
@@ -1072,7 +1330,9 @@
       "title": "Echinacea Goldenseal Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "echinacea-goldenseal",
+      "variant_ref": "12718313078847"
     },
     "prod_7dcb5fb59227498a29e0e296f59251d4": {
       "product_ref": "prod_7dcb5fb59227498a29e0e296f59251d4",
@@ -1080,7 +1340,9 @@
       "title": "Astragalus Reishi Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "astragalus-reishi",
+      "variant_ref": "12718312947775"
     },
     "prod_3848ddd62fcbe364325d02ca272857f3": {
       "product_ref": "prod_3848ddd62fcbe364325d02ca272857f3",
@@ -1088,7 +1350,9 @@
       "title": "Wormwood Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "wormwood",
+      "variant_ref": "12718312685631"
     },
     "prod_7c20bde381a56600f852108408e16463": {
       "product_ref": "prod_7c20bde381a56600f852108408e16463",
@@ -1096,7 +1360,9 @@
       "title": "St. John's Wort Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "st-johns-wort",
+      "variant_ref": "39464567668799"
     },
     "prod_480e8bdd214ce176e4bbd10b0413f25b": {
       "product_ref": "prod_480e8bdd214ce176e4bbd10b0413f25b",
@@ -1104,7 +1370,9 @@
       "title": "Slippery Elm Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "slippery-elm",
+      "variant_ref": "12718312292415"
     },
     "prod_2b740ea179fce8d3ec85a9484793d8f3": {
       "product_ref": "prod_2b740ea179fce8d3ec85a9484793d8f3",
@@ -1112,7 +1380,9 @@
       "title": "Skullcap Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "skullcap",
+      "variant_ref": "12718312063039"
     },
     "prod_e0d2bd9507feaeefa71a336bbc682b6f": {
       "product_ref": "prod_e0d2bd9507feaeefa71a336bbc682b6f",
@@ -1120,7 +1390,9 @@
       "title": "Schisandra Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "schisandra",
+      "variant_ref": "12718310752319"
     },
     "prod_0e12a14d02b170f4ddc025898cf5cd85": {
       "product_ref": "prod_0e12a14d02b170f4ddc025898cf5cd85",
@@ -1128,7 +1400,9 @@
       "title": "Saw Palmetto 90ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "saw-palmetto",
+      "variant_ref": "12718309474367"
     },
     "prod_6e311b63545e82b99478736ce8cbcca0": {
       "product_ref": "prod_6e311b63545e82b99478736ce8cbcca0",
@@ -1136,7 +1410,9 @@
       "title": "Rhodiola Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "rhodiola",
+      "variant_ref": "12718309441599"
     },
     "prod_372cd40fd6c9ff7adc8669648d4eaf17": {
       "product_ref": "prod_372cd40fd6c9ff7adc8669648d4eaf17",
@@ -1144,7 +1420,9 @@
       "title": "Red Clover Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "red-clover",
+      "variant_ref": "12718309343295"
     },
     "prod_e980aae2ef1ec265939babd6ff1895f6": {
       "product_ref": "prod_e980aae2ef1ec265939babd6ff1895f6",
@@ -1152,7 +1430,9 @@
       "title": "Passionflower Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "passionflower",
+      "variant_ref": "12718309310527"
     },
     "prod_5256c7750eac6df2ee5128202426130e": {
       "product_ref": "prod_5256c7750eac6df2ee5128202426130e",
@@ -1160,7 +1440,9 @@
       "title": "Olive Leaf Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "olive-leaf",
+      "variant_ref": "12718309244991"
     },
     "prod_7a783b366d0bb8503b88576f9d6e3e0e": {
       "product_ref": "prod_7a783b366d0bb8503b88576f9d6e3e0e",
@@ -1168,7 +1450,9 @@
       "title": "Nettle Freeze-Dried Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "nettle",
+      "variant_ref": "12718309146687"
     },
     "prod_7e5272db57f55b8f9ddefaf2c06e2265": {
       "product_ref": "prod_7e5272db57f55b8f9ddefaf2c06e2265",
@@ -1176,7 +1460,9 @@
       "title": "Milk Thistle 90ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "milk-thistle",
+      "variant_ref": "39464567701567"
     },
     "prod_bd3b45c467e6bbf2eec84cd81b51e6cd": {
       "product_ref": "prod_bd3b45c467e6bbf2eec84cd81b51e6cd",
@@ -1184,7 +1470,9 @@
       "title": "Marshmallow Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "marshmallow",
+      "variant_ref": "12718309015615"
     },
     "prod_c600646adca997c9f50d7226bac59e45": {
       "product_ref": "prod_c600646adca997c9f50d7226bac59e45",
@@ -1192,7 +1480,9 @@
       "title": "Maca Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "maca",
+      "variant_ref": "39548214083647"
     },
     "prod_5167297b9e4e678a8b0c4745725c61f3": {
       "product_ref": "prod_5167297b9e4e678a8b0c4745725c61f3",
@@ -1200,7 +1490,9 @@
       "title": "Licorice Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "licorice",
+      "variant_ref": "12718308884543"
     },
     "prod_5520722c4276f4c3219b2f246520c068": {
       "product_ref": "prod_5520722c4276f4c3219b2f246520c068",
@@ -1208,7 +1500,9 @@
       "title": "Lemon Balm 90ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "lemon-balm",
+      "variant_ref": "39548214050879"
     },
     "prod_24f161a7f132197795d7920755f9e681": {
       "product_ref": "prod_24f161a7f132197795d7920755f9e681",
@@ -1216,7 +1510,9 @@
       "title": "Kelp Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "kelp",
+      "variant_ref": "12718308819007"
     },
     "prod_e7594a7610b715cb4bd10102d4f6e4e4": {
       "product_ref": "prod_e7594a7610b715cb4bd10102d4f6e4e4",
@@ -1224,7 +1520,9 @@
       "title": "Kava Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "kava",
+      "variant_ref": "12718308786239"
     },
     "prod_838bfd1646862926f3f203a99ca7a96c": {
       "product_ref": "prod_838bfd1646862926f3f203a99ca7a96c",
@@ -1232,7 +1530,9 @@
       "title": "Holy Basil Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "holy-basil",
+      "variant_ref": "39464567767103"
     },
     "prod_df5b320fcd67b524032b46c70a20091a": {
       "product_ref": "prod_df5b320fcd67b524032b46c70a20091a",
@@ -1240,7 +1540,9 @@
       "title": "Hawthorn Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "hawthorn",
+      "variant_ref": "12718308655167"
     },
     "prod_29936f8b21ccfb2205f91bf1b062f1d5": {
       "product_ref": "prod_29936f8b21ccfb2205f91bf1b062f1d5",
@@ -1248,7 +1550,9 @@
       "title": "Gymnema Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "gymnema",
+      "variant_ref": "12718308622399"
     },
     "prod_80a7baf5b629d281d42c39399cb4a452": {
       "product_ref": "prod_80a7baf5b629d281d42c39399cb4a452",
@@ -1256,7 +1560,9 @@
       "title": "Ginkgo Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ginkgo",
+      "variant_ref": "12718308524095"
     },
     "prod_6ddaa1bfa13cec714ce392a6736d76ff": {
       "product_ref": "prod_6ddaa1bfa13cec714ce392a6736d76ff",
@@ -1264,7 +1570,9 @@
       "title": "Ginger Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "ginger",
+      "variant_ref": "12718308425791"
     },
     "prod_411f976eae2cee79395b4469e47df16a": {
       "product_ref": "prod_411f976eae2cee79395b4469e47df16a",
@@ -1272,7 +1580,9 @@
       "title": "Garlic Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "garlic",
+      "variant_ref": "12718308393023"
     },
     "prod_ca1406d814bd17fb0e17309f6122e340": {
       "product_ref": "prod_ca1406d814bd17fb0e17309f6122e340",
@@ -1280,7 +1590,9 @@
       "title": "Feverfew Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "feverfew",
+      "variant_ref": "12718308360255"
     },
     "prod_f4b4ece676587e35e8ecb1a0743976f7": {
       "product_ref": "prod_f4b4ece676587e35e8ecb1a0743976f7",
@@ -1288,7 +1600,9 @@
       "title": "Eleuthero Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "eleuthero",
+      "variant_ref": "12718308163647"
     },
     "prod_d55190948e8b12a86eb679a5ed443ba5": {
       "product_ref": "prod_d55190948e8b12a86eb679a5ed443ba5",
@@ -1296,7 +1610,9 @@
       "title": "Echinacea Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "echinacea",
+      "variant_ref": "39548214018111"
     },
     "prod_9f4ac0d7b36b25265143c8b1b66238e3": {
       "product_ref": "prod_9f4ac0d7b36b25265143c8b1b66238e3",
@@ -1304,7 +1620,9 @@
       "title": "Dandelion Root Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "dandelion",
+      "variant_ref": "12718307999807"
     },
     "prod_b7e0a3946693e4a6cced5bdc52c773f4": {
       "product_ref": "prod_b7e0a3946693e4a6cced5bdc52c773f4",
@@ -1312,7 +1630,9 @@
       "title": "Damiana Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "damiana",
+      "variant_ref": "12718307475519"
     },
     "prod_2c555f555b8d345b7c66bf02a41bb7a1": {
       "product_ref": "prod_2c555f555b8d345b7c66bf02a41bb7a1",
@@ -1320,7 +1640,9 @@
       "title": "Cranberry Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "cranberry",
+      "variant_ref": "39464567799871"
     },
     "prod_791d10641f3007f33d168f5075819866": {
       "product_ref": "prod_791d10641f3007f33d168f5075819866",
@@ -1328,7 +1650,9 @@
       "title": "Cordyceps Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "cordyceps",
+      "variant_ref": "12718307344447"
     },
     "prod_8468cc92cc9917e96f564a89dc0d46ee": {
       "product_ref": "prod_8468cc92cc9917e96f564a89dc0d46ee",
@@ -1336,7 +1660,9 @@
       "title": "Cloves Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "cloves",
+      "variant_ref": "12718307311679"
     },
     "prod_7997d09122b7c64ab6ac9d2ca67269ab": {
       "product_ref": "prod_7997d09122b7c64ab6ac9d2ca67269ab",
@@ -1344,7 +1670,9 @@
       "title": "Cinnamon \"True\" (Ceylon) 60ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "true-cinnamon",
+      "variant_ref": "39548213624895"
     },
     "prod_034143385df4e6a3a1f5567cb792b61f": {
       "product_ref": "prod_034143385df4e6a3a1f5567cb792b61f",
@@ -1352,7 +1680,9 @@
       "title": "Chaste Tree Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "chaste-tree",
+      "variant_ref": "12718307213375"
     },
     "prod_c762569a333150abfba1bfbd03155cc3": {
       "product_ref": "prod_c762569a333150abfba1bfbd03155cc3",
@@ -1360,7 +1690,9 @@
       "title": "Cayenne Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "cayenne",
+      "variant_ref": "12718307180607"
     },
     "prod_9647f6850d0d692dbef84c9cd9fcf98a": {
       "product_ref": "prod_9647f6850d0d692dbef84c9cd9fcf98a",
@@ -1368,7 +1700,9 @@
       "title": "Cascara Sagrada Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "cascara-sagrada",
+      "variant_ref": "12718307082303"
     },
     "prod_5bbf6db6785b5924ef6da814762b622c": {
       "product_ref": "prod_5bbf6db6785b5924ef6da814762b622c",
@@ -1376,7 +1710,9 @@
       "title": "Burdock Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "burdock",
+      "variant_ref": "12718307049535"
     },
     "prod_6278e2d0d9cd2e715754b62f7d4aacb9": {
       "product_ref": "prod_6278e2d0d9cd2e715754b62f7d4aacb9",
@@ -1384,7 +1720,9 @@
       "title": "Bladderwrack Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "bladderwrack",
+      "variant_ref": "12718307016767"
     },
     "prod_ab84fa199b2c6972277fa2480ab06318": {
       "product_ref": "prod_ab84fa199b2c6972277fa2480ab06318",
@@ -1392,7 +1730,9 @@
       "title": "Black Cohosh Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "black-cohosh",
+      "variant_ref": "12718306983999"
     },
     "prod_483c4b85cf398bc5ea20a073f4bdc204": {
       "product_ref": "prod_483c4b85cf398bc5ea20a073f4bdc204",
@@ -1400,7 +1740,9 @@
       "title": "Bilberry Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "bilberry",
+      "variant_ref": "12718306951231"
     },
     "prod_083f304a8a024be9a86c7d8bc18b6917": {
       "product_ref": "prod_083f304a8a024be9a86c7d8bc18b6917",
@@ -1408,7 +1750,9 @@
       "title": "Artichoke Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "artichoke",
+      "variant_ref": "12718305345599"
     },
     "prod_bde02912755f5bf9d2075946aa178d3e": {
       "product_ref": "prod_bde02912755f5bf9d2075946aa178d3e",
@@ -1416,7 +1760,9 @@
       "title": "American Ginseng Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "american-ginseng",
+      "variant_ref": "12718304821311"
     },
     "prod_bf0c94f2f414ebf41acc0d99cd9adb18": {
       "product_ref": "prod_bf0c94f2f414ebf41acc0d99cd9adb18",
@@ -1424,7 +1770,9 @@
       "title": "Alfalfa Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "alfalfa",
+      "variant_ref": "12718304329791"
     },
     "prod_8fb202f51e1bc07a06adf24266ae0091": {
       "product_ref": "prod_8fb202f51e1bc07a06adf24266ae0091",
@@ -1432,7 +1780,9 @@
       "title": "Astragalus 90ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "astragalus",
+      "variant_ref": "12718306721855"
     },
     "prod_03aa19e89a81de68e3e0ab835793fa01": {
       "product_ref": "prod_03aa19e89a81de68e3e0ab835793fa01",
@@ -1440,7 +1790,9 @@
       "title": "SuperSinus™, Organic Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Liquid Herbal Extracts",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "supersinus",
+      "variant_ref": "12718071382079"
     },
     "prod_9c63eb775315b259a70d81ebf165269c": {
       "product_ref": "prod_9c63eb775315b259a70d81ebf165269c",
@@ -1448,7 +1800,9 @@
       "title": "Stomach Soother™",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Specialty Product",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "stomach-soother",
+      "variant_ref": "12718071349311"
     },
     "prod_c1a370241b1b4fafdb8efe566c80f079": {
       "product_ref": "prod_c1a370241b1b4fafdb8efe566c80f079",
@@ -1456,7 +1810,9 @@
       "title": "Black Elderberry Elixir, Organic Herbal Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Specialty Product",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "black-elderberry-elixir",
+      "variant_ref": "39464567898175"
     },
     "prod_9b3901e969a2debb1783ba6570470042": {
       "product_ref": "prod_9b3901e969a2debb1783ba6570470042",
@@ -1464,7 +1820,9 @@
       "title": "KIDS Tranquil Child™, Organic, Alcohol-Removed",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Alcohol-Free Glycerites",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "kids-tranquil-child",
+      "variant_ref": "12718071087167"
     },
     "prod_bde308335f82ba36309ac0bd509783e5": {
       "product_ref": "prod_bde308335f82ba36309ac0bd509783e5",
@@ -1472,7 +1830,9 @@
       "title": "KIDS Echinacea, Organic, Alcohol-Removed",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Alcohol-Free Glycerites",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "kids-echinacea",
+      "variant_ref": "12718071054399"
     },
     "prod_d4f55c2a6c85324687d6eec2207bc2b8": {
       "product_ref": "prod_d4f55c2a6c85324687d6eec2207bc2b8",
@@ -1480,7 +1840,9 @@
       "title": "KIDS Echinacea Goldenseal, Organic, Alcohol-Removed",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Alcohol-Free Glycerites",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "kids-echinacea-goldenseal",
+      "variant_ref": "12718070956095"
     },
     "prod_f3c00fdd3f0754d75a14b4d07eb36eed": {
       "product_ref": "prod_f3c00fdd3f0754d75a14b4d07eb36eed",
@@ -1488,7 +1850,9 @@
       "title": "Valerian Hops, Organic Alcohol-Removed Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Alcohol-Free Glycerites",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "alcohol-removed-valerian-hops",
+      "variant_ref": "12718070923327"
     },
     "prod_cb64daee404f8eb0ce8ed55758cd7baa": {
       "product_ref": "prod_cb64daee404f8eb0ce8ed55758cd7baa",
@@ -1496,7 +1860,9 @@
       "title": "St. John's Wort Extract | Organic Alcohol-Removed",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Alcohol-Free Glycerites",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "alcohol-removed-st-johns-wort",
+      "variant_ref": "12718070857791"
     },
     "prod_18eab134b08c2c9ab9aa6a85b461ab09": {
       "product_ref": "prod_18eab134b08c2c9ab9aa6a85b461ab09",
@@ -1504,7 +1870,9 @@
       "title": "Premium Echinacea, Alcohol-Removed",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Alcohol-Free Glycerites",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "alcohol-free-premium-echinacea",
+      "variant_ref": "39548214116415"
     },
     "prod_979ba1bbb5582eb93e31190d5061f58e": {
       "product_ref": "prod_979ba1bbb5582eb93e31190d5061f58e",
@@ -1512,7 +1880,9 @@
       "title": "Echinacea Goldenseal 1 oz, Organic Alcohol-Removed Extract",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Alcohol-Free Glycerites",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "alcohol-removed-echinacea-goldenseal",
+      "variant_ref": "39548213887039"
     },
     "prod_be9a1e3890fc417e6f53ac6aabe6ce79": {
       "product_ref": "prod_be9a1e3890fc417e6f53ac6aabe6ce79",
@@ -1520,7 +1890,9 @@
       "title": "Black Elderberry Honey, Organic Alcohol-Removed Extract 4 oz",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Alcohol-Free Glycerites",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "black-elderberry-honey-organic-alcohol-removed-extract-4-oz",
+      "variant_ref": "39548213559359"
     },
     "prod_b78ab8212aaa95538aaf5cb5de226a91": {
       "product_ref": "prod_b78ab8212aaa95538aaf5cb5de226a91",
@@ -1528,7 +1900,9 @@
       "title": "Astragalus, Organic Alcohol-Removed",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Alcohol-Free Glycerites",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "alcohol-removed-astragalus",
+      "variant_ref": "12718068727871"
     },
     "prod_1a853c7f6b04651d11335d5d37469c7b": {
       "product_ref": "prod_1a853c7f6b04651d11335d5d37469c7b",
@@ -1536,7 +1910,9 @@
       "title": "Turmeric 60ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "turmeric",
+      "variant_ref": "33281901461567"
     },
     "prod_f8ef32f6e600a7f874366edf302450a4": {
       "product_ref": "prod_f8ef32f6e600a7f874366edf302450a4",
@@ -1544,7 +1920,9 @@
       "title": "Fenugreek 90ct Capsules",
       "brand": "Oregon's Wild Harvest",
       "product_type": "Capsules",
-      "currency": "USD"
+      "currency": "USD",
+      "handle": "fenugreek",
+      "variant_ref": "12718308229183"
     }
   },
   "live_state": {

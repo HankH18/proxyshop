@@ -200,22 +200,45 @@ def _read_products(host: str) -> list[dict[str, Any]]:
     return out
 
 
-def _list_price(entry: dict[str, Any]) -> float | None:
-    """The cheapest readable variant price, which is what the graph's Offer carries.
+def _priced_variant(entry: dict[str, Any]) -> tuple[str | None, float] | None:
+    """``(variant_id, price)`` for the cheapest readable variant, which is what the Offer carries.
 
     ``None`` when the storefront published no usable price -- and such a product is dropped
     rather than priced at zero. Zero is the cheapest number there is, so a product priced at
     nothing wins every ranking it enters; the exchange refuses a roster row spelled that way
     (``RosterEntry.list_price`` is ``Field(gt=0.0)``) and so does this.
+
+    The id and the price come from the SAME variant, and that pairing is the whole point of
+    returning them together. A cart permalink is variant-scoped (D25), so a permalink built on
+    one variant while the bid quotes another's price sends the shopper to a cart whose total
+    disagrees with the offer they accepted -- a worse failure than the missing id it replaced,
+    because it is wrong rather than merely inert.
+
+    Ties keep the first variant in document order: ``min`` is stable, and a storefront that
+    prices two variants identically must still produce the same document on every run.
+
+    ``variant_id`` is ``None`` when the storefront published a price but no usable id. That is
+    a real Shopify shape, and it degrades to the pre-existing behaviour (a product-scoped
+    permalink) rather than dropping a priced product from the catalogue.
     """
-    prices = [
-        price
-        for variant in entry.get("variants") or []
-        if isinstance(variant, dict)
-        for price in (coerce_price(variant.get("price")),)
-        if price is not None and price > 0
-    ]
-    return min(prices) if prices else None
+    best_price: float | None = None
+    best_id: str | None = None
+    for variant in entry.get("variants") or []:
+        if not isinstance(variant, dict):
+            continue
+        price = coerce_price(variant.get("price"))
+        if price is None or price <= 0:
+            continue
+        if best_price is not None and price >= best_price:
+            continue  # `>=` keeps the FIRST of equally-priced variants, so ties are stable
+        raw = variant.get("id")
+        # `id` is an int in every Shopify `products.json` this corpus holds. Anything that is
+        # not a bare scalar -- a dict, a list -- names no variant a URL can carry, and
+        # `str()` of it would build a permalink pointing at nothing.
+        scalar = isinstance(raw, (str, int)) and not isinstance(raw, bool)
+        best_price = price
+        best_id = (str(raw).strip() or None) if scalar else None
+    return None if best_price is None else (best_id, best_price)
 
 
 def _relevance(entry: dict[str, Any]) -> int:
@@ -231,8 +254,27 @@ def _relevance(entry: dict[str, Any]) -> int:
     return sum(1 for term in CLUSTER_TERMS if term in blob)
 
 
-def _catalog_row(host: str, entry: dict[str, Any], price: float) -> tuple[str, dict[str, Any]]:
-    """One ``{product_ref: row}`` pair for a store agent's own catalogue."""
+def _catalog_row(
+    host: str, entry: dict[str, Any], price: float, variant_id: str | None
+) -> tuple[str, dict[str, Any]]:
+    """One ``{product_ref: row}`` pair for a store agent's own catalogue.
+
+    ``variant_ref`` carries the storefront's OWN variant id, and it is the field that decides
+    whether accepting a slot hands the shopper a checkout that exists. The chain is short and
+    entirely downstream of this dict: ``store-agent``'s ``bidding._variant_ref`` reads it out
+    of this row (``VARIANT_REF_KEYS = ("variant_ref", "variant_id")``), puts it on the bid's
+    Offer, and ``exchange.checkout.provider.default_permalink`` spends it on
+    ``build_cart_permalink(variant_id=offer.get("variant_ref") or ... or 1)``.
+
+    Omitting it is what produced ``https://<store>/cart/1:1?discount=...`` -- the literal
+    fallback ``1``, a variant id no storefront in this corpus issues, on a URL that resolves
+    to an empty cart. The corpus always had the real id; this generator dropped it, so the
+    store agent had nothing to put on the offer and the exchange fell back.
+
+    ``handle`` rides along because it is the only field that names the product's own page
+    (``https://<host>/products/<handle>``). Nothing consumes it today; it is recorded rather
+    than re-derived later, since the raw entry it comes from is not shipped.
+    """
     product_ref = product_id_for(host, entry)
     row = {
         "product_ref": product_ref,
@@ -241,7 +283,12 @@ def _catalog_row(host: str, entry: dict[str, Any], price: float) -> tuple[str, d
         "brand": str(entry.get("vendor") or "").strip(),
         "product_type": str(entry.get("product_type") or "").strip(),
         "currency": "USD",
+        "handle": str(entry.get("handle") or "").strip(),
     }
+    # Absent rather than null when the storefront named none: `_variant_ref` skips a `None`
+    # anyway, and a key that is sometimes null invites a reader to treat it as always present.
+    if variant_id:
+        row["variant_ref"] = variant_id
     return product_ref, row
 
 
@@ -250,11 +297,12 @@ def _store_catalog(host: str) -> tuple[dict[str, dict[str, Any]], list[str]]:
     catalog: dict[str, dict[str, Any]] = {}
     scored: list[tuple[int, float, str]] = []
     for entry in _read_products(host):
-        price = _list_price(entry)
-        if price is None:
+        priced = _priced_variant(entry)
+        if priced is None:
             continue
+        variant_id, price = priced
         try:
-            product_ref, row = _catalog_row(host, entry, price)
+            product_ref, row = _catalog_row(host, entry, price, variant_id)
         except ValueError:
             continue  # an entry naming no id/handle: the loader skips it too
         catalog[product_ref] = row

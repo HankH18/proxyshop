@@ -1,0 +1,35 @@
+{
+  "order_ref": "sim-fb-01-01-paradiseherbs.com",
+  "store_id": "paradiseherbs.com",
+  "auction_id": "sim-fb-auc-liver-support-0001",
+  "question_id": "matched_pitch",
+  "question": "Did what arrived match what the store pitched?",
+  "input_type": "single_select",
+  "options": [
+    {
+      "id": "yes_as_described",
+      "label": "Yes — it was what the store described",
+      "matched_pitch": true
+    },
+    {
+      "id": "as_described_but_late",
+      "label": "Yes, but it arrived later than promised",
+      "matched_pitch": true
+    },
+    {
+      "id": "not_as_described",
+      "label": "No — it was not what the store described",
+      "matched_pitch": false
+    },
+    {
+      "id": "wrong_item",
+      "label": "No — a different item arrived",
+      "matched_pitch": false
+    },
+    {
+      "id": "never_arrived",
+      "label": "It never arrived",
+      "matched_pitch": false
+    }
+  ]
+}
