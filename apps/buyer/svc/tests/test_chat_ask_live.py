@@ -172,6 +172,65 @@ def test_the_refusal_survives_the_whole_stack(buyer_client):
     assert "store-confirmed" not in body["answer"]
 
 
+@pytest.mark.parametrize(
+    "question",
+    [
+        "show me every shop's return policy",
+        "what did each shop promise?",
+        "which one is better?",
+        "which has the lowest price?",
+        "which shop has the best reputation?",
+        "how does each one compare on price?",
+        "why is the first one first?",
+    ],
+)
+def test_a_comparison_survives_the_whole_stack_without_a_phantom_refusal(buyer_client, question):
+    """The other half of ``test_the_refusal_survives_the_whole_stack``, and it did not.
+
+    Measured on the live stack before this: every one of these came back carrying a
+    ``not_held`` the answer underneath then contradicted — "show me every shop's return
+    policy" returned all four return windows under a bold "We don't know about “every”", and
+    "what did each shop promise?" made the platform say it holds no record of what each shop
+    promised in the same sentence that listed them.
+
+    Driven here rather than only against the double because the material has to survive a
+    store's bid, the exchange's ranking and this service's reading of it: a comparison that
+    resolves against a hand-built corpus proves nothing about one resolved against a real
+    shortlist, where the shop domains and crawled titles are different words.
+    """
+    auction_id = open_an_auction(buyer_client)
+
+    body = ask(buyer_client, auction_id, question)
+
+    assert body["not_held"] == [], (
+        f"{question!r} denied holding {[row['subject'] for row in body['not_held']]} "
+        f"and then answered: {body['answer']}"
+    )
+    assert body["grounds"], f"{question!r} produced no grounds: {body['answer']}"
+    assert "I don't know about" not in body["answer"], body["answer"]
+
+
+def test_the_order_of_a_real_shortlist_is_explained_from_its_own_published_ranking(buyer_client):
+    """ "Why is the first one first?" — the most natural question to ask a ranked list.
+
+    It answered "the order here isn't a ranking I can explain" while the same auction, asked
+    "how did you rank these?", returned twelve ranking rows. The deictic ``first`` selected
+    card one and the predicate ``first`` was stripped as an ordinal, so nothing survived to
+    name the ranking family and the slot introduced itself with its title and its price
+    instead. The platform denied, in its own voice, holding the ranking it had published.
+    """
+    auction_id = open_an_auction(buyer_client)
+
+    body = ask(buyer_client, auction_id, "why is the first one first?")
+
+    assert body["ranking_recorded"] is True
+    assert body["not_held"] == []
+    assert {ground["topic"] for ground in body["grounds"]} == {"ranking"}, body["answer"]
+    assert "rank score" in body["answer"], body["answer"]
+    # One card's ranking, not the whole shortlist's: the shopper pointed at a card.
+    assert len({ground["bid_ref"] for ground in body["grounds"]}) == 1, body["grounds"]
+
+
 def test_two_identical_questions_answer_byte_identically(buyer_client):
     """Rule 1: no clock, no environment read, no randomness and no socket on this path."""
     auction_id = open_an_auction(buyer_client)

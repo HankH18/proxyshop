@@ -70,9 +70,11 @@ import {
   NO_AGENT_FALLBACK_FAMILY,
   VOICE_PLATFORM,
   VOICE_STORE,
+  askedAndSilent,
   fallbackReasonFamily,
   labelTone,
   loadRecordedAuction,
+  neverAsked,
   slotLabels,
   voiceOrder,
   type AcceptOutcome,
@@ -222,17 +224,23 @@ function productLine(product: ShortlistProduct | null | undefined): string {
  * WHY `true` IS TWO SENTENCES AND NOT ONE, which is the correction this function most needed.
  * It used to branch on the flag and the price alone, so every stand-in read "**The shop did
  * not answer this auction**" — byte-identical for a shop whose agent was solicited and stayed
- * silent and for a shop that has no agent at all. The second of those is an ORGANIC result: a
- * shop Proxyshop found by crawling, on the roster from its catalogue alone, which was never
- * spoken to and declined nothing. Telling a shopper it did not answer is the platform putting
- * a refusal in a shop's mouth, and D55's whole asymmetry is that the platform may state only
- * what it can check. The exchange has told the two apart all along —
- * {@link NO_AGENT_FALLBACK_FAMILY} is the family it writes for the second, measured live on
- * this stack as `tier_0_no_agent:no_bid_endpoint` — and only this line was collapsing them.
+ * silent and for a shop nobody dialled at all. The second of those is a shop that declined
+ * nothing: telling a shopper it did not answer is the platform putting a refusal in a shop's
+ * mouth, and D55's whole asymmetry is that the platform may state only what it can check.
+ *
+ * A CLASS, not a family word. The exchange has told the two apart all along and it does so with
+ * TWO families, not one — {@link NEVER_ASKED_FALLBACK_FAMILIES} — and the first repair of this
+ * line split on `tier_0_no_agent` alone, which left `fan_out_capacity_exhausted` (the
+ * exchange's own words for "the exchange never asked, because it had no worker free to ask
+ * with") still reading "the shop did not answer this auction" on a healthy in-network shop.
+ * {@link neverAsked} is the class; the no-agent family is the one member this line says more
+ * about, because "this shop has no bidding agent" is a fact about the SHOP that holds beyond
+ * this auction, while the exchange running out of workers is a fact about one busy minute and
+ * is left to the exchange's own token below.
  *
  * ONE distinction and not nine. Past "was there anybody to ask?", the exchange's token is
  * printed unchanged; the nine-family gloss lives in `journey/WhyEmpty.tsx` and is not forked
- * here (see {@link NO_AGENT_FALLBACK_FAMILY}).
+ * here (see {@link NEVER_ASKED_FALLBACK_FAMILIES}).
  */
 function priceProvenanceLine(
   fallback: boolean | null | undefined,
@@ -246,17 +254,37 @@ function priceProvenanceLine(
       named === ''
         ? 'The exchange did not say why it stood in.'
         : `The exchange gives its reason as ${named}.`
-    // "Nobody asked" is not a weaker version of "nobody answered" — it is about a different
-    // party. Only the second sentence is about the shop at all.
-    const neverAsked = fallbackReasonFamily(named) === NO_AGENT_FALLBACK_FAMILY
-    const what = neverAsked
+    // WHOSE ACT IT WAS. "Nobody asked" is not a weaker version of "nobody answered" — it is
+    // about a different party, and only the asked branch is about the shop at all.
+    const nobodyAsked = neverAsked(named)
+    const noAgent = fallbackReasonFamily(named) === NO_AGENT_FALLBACK_FAMILY
+    const who = nobodyAsked
+      ? noAgent
+        ? 'This shop has no bidding agent on the exchange, so nobody asked it for a price and it turned nothing down.'
+        : 'Nobody asked this shop for a price for this auction, so it turned nothing down.'
+      : askedAndSilent(named)
+        ? 'This shop did not answer this auction.'
+        : // THE THIRD STATEMENT, and the second half of the same repair: eight of the exchange's
+          // twelve families mean the shop ANSWERED, and this line called every one of them
+          // silence. `store_declined` is the store-agent contract's 204, and this app's own
+          // gloss for it — `journey/WhyEmpty.tsx::describeDecline`, one screen away — reads
+          // "that store was asked, it answered, and its answer was no". See
+          // {@link NO_RESPONSE_FALLBACK_FAMILY} for why the safe default asserts nothing about
+          // the shop rather than guessing which of the eight this was.
+          'The exchange could not use a price from this shop for this auction, and this page will not say more about what the shop did than the exchange did.'
+    // WHERE THE NUMBER CAME FROM, or that there is none. "Found it by crawling" is said only
+    // for the no-agent family, where it is what being on the roster MEANS; a shop the exchange
+    // had no worker free to dial may well be in-network, and describing it as a crawl result
+    // would be the same overclaim in the other direction.
+    const whence = noAgent
       ? priced
-        ? 'This price is Proxyshop’s, not this shop’s. This shop has no bidding agent on the exchange, so nobody asked it for a price and it turned nothing down — Proxyshop found it by crawling and is showing it to you at the list price on its own roster row for the shop.'
-        : 'This shop has no bidding agent on the exchange, so nobody asked it for a price and it turned nothing down. Proxyshop found it by crawling and is showing it to you rather than leaving it out, and its roster row carried no list price either, so there is no number here that anyone quoted.'
+        ? 'Proxyshop found it by crawling and is showing it to you at the list price on its own roster row for the shop.'
+        : 'Proxyshop found it by crawling and is showing it to you rather than leaving it out, and its roster row carried no list price either, so there is no number here that anyone quoted.'
       : priced
-        ? 'This price is Proxyshop’s, not this shop’s. The shop did not answer this auction, so the exchange stood in for it at the list price on its own roster row — nobody at this shop quoted the number above.'
-        : 'This shop did not answer this auction. The exchange stood in for it rather than dropping it, and its roster row carried no list price to show you either, so there is no number here that anyone quoted.'
-    return `${what} ${because}`
+        ? 'The exchange stood in for it at the list price on its own roster row — nobody at this shop quoted the number above.'
+        : 'The exchange stood in for it rather than dropping it, and its roster row carried no list price to show you either, so there is no number here that anyone quoted.'
+    const whose = priced ? 'This price is Proxyshop’s, not this shop’s. ' : ''
+    return `${whose}${who} ${whence} ${because}`
   }
   if (!priced) return null
   return 'The exchange did not say whose price this is: whether this shop quoted it, or Proxyshop stood in for a shop that did not answer and used a list price instead. This page will not guess.'
@@ -334,6 +362,29 @@ function commitmentText(commitment: SlotCommitment): string {
   const spelled = typeof value === 'string' || typeof value === 'number' ? String(value) : ''
   if (spelled === '') return promise
   return unit ? `${promise} — ${spelled} ${unit}` : `${promise} — ${spelled}`
+}
+
+/**
+ * NO PROMISES ON THIS CARD — and whose non-promise it is, which is the same three states
+ * `priceProvenanceLine` keeps and for the same reason.
+ *
+ * This line read "No commitments — this store promised nothing alongside the price." for every
+ * slot, and a stand-in has an empty claims list BY CONSTRUCTION: the exchange rebuilds the offer
+ * from the roster row, so the sentence fired on every fallback and told a shopper that a shop
+ * nobody had asked anything of had promised nothing. That is the same D55 mis-attribution the
+ * price line beneath it was already repaired for, one paragraph higher on the same card.
+ *
+ * The unknown state gets its own sentence rather than the confident one: with no flag, whether
+ * there was a shop's offer here at all is exactly what the exchange did not say.
+ */
+function noCommitmentsLine(fallback: boolean | null | undefined): string {
+  if (fallback === true) {
+    return 'No commitments — this price is a stand-in the exchange wrote from its own roster row, and a stand-in carries no promises from the store.'
+  }
+  if (fallback === false) {
+    return 'No commitments — this store promised nothing alongside the price.'
+  }
+  return 'No commitments — no promises came with this slot, and the exchange did not say whether this store quoted the price or Proxyshop stood in for it.'
 }
 
 /**
@@ -538,11 +589,29 @@ function recordValue(value: unknown): string {
   }
 }
 
-/** How strong the network rates this kind of evidence, in the published semantics (D30). */
+/**
+ * THE RANK THE CLAIM GAVE ITS OWN EVIDENCE — the producer's number, said to be the producer's.
+ *
+ * The SCALE is the network's and D30 pins it: `contracts.labels.PROVENANCE_AUTHORITY_RANK`
+ * publishes a canonical rank per source, 1 most authoritative and larger weaker. The NUMBER is
+ * not: `contracts.protocol.Provenance` validates `authority_rank` as `ge=1` and says why —
+ * "validated as `>= 1` rather than pinned to that table, because a hook may legitimately
+ * down-rank a stale observation" — so it is whatever the bid wrote, and the identifier
+ * `authority_rank` appears nowhere in `apps/exchange/src` or `apps/buyer/svc/src`: nothing
+ * between the store's hook and this page compares it against the table.
+ *
+ * This line used to read "how strongly this network rates the evidence", which handed a
+ * shop-written number the platform's authority — the same mis-attribution D55 forbids in the
+ * other direction, and worse here because the whole point of the fold is deciding whom to
+ * believe. It says whose number it is instead. Normalising it against the table is the other
+ * sound answer and is NOT taken here: this app imports nothing from `packages/contracts` (D30
+ * puts the map there so the exchange and the buyer cannot drift into two answers), and a second
+ * copy of that table in a renderer is exactly the drift D30 exists to prevent.
+ */
 function authorityRankText(rank: number | null): string {
   return rank === null
-    ? 'the claim named no authority rank, so how strongly this network rates the evidence is not stated'
-    : `${rank} — 1 is the strongest evidence this network records, and larger numbers are weaker`
+    ? 'the claim stated no rank for its own evidence, and Proxyshop does not fill one in'
+    : `${rank} — the claim’s own number for its own evidence, on the scale this network publishes: 1 is the strongest evidence this network records, and larger numbers are weaker. Proxyshop does not re-derive it and does not check it against the rank published for that kind of evidence`
 }
 
 /**
@@ -582,9 +651,12 @@ function PlatformRecord({
         of this shop and this product &mdash; its crawl, its trust engine and its own auction
         &mdash; and no shop wrote a word of any of them. The one line a shop had a hand in is
         the catalogue reference: that is the exchange&rsquo;s reading of which product this bid
-        was for, and it is published beside the roster row the shop was solicited on. Every
-        other line here is reachable from no bid at all, so a shop cannot move one of them by
-        what it says.
+        was for, and it is published beside the roster row the shop was solicited on. The
+        crawled name above it is joined on that same reference and is shown only where
+        Proxyshop&rsquo;s snapshot resolves against it &mdash; so a bid naming some other
+        product cannot change the name here, but it can take the name away and leave the line
+        saying Proxyshop holds no snapshot. Every other line is reachable from no bid at all,
+        and the words in none of these lines are a shop&rsquo;s.
       </p>
 
       <dl className="facts">
@@ -684,27 +756,84 @@ function PlatformRecord({
 }
 
 /**
- * ONE PROMISE AND THE EVIDENCE BEHIND IT.
+ * WHICH BADGE BELONGS TO WHICH PROMISE — joined by POSITION, and the position is CHECKED.
  *
- * The promise and its value are the SHOP's, in the shop's own field names. The evidence rows
- * beneath are PROXYSHOP's record of how that promise was obtained, and the two are labelled as
- * two things inside one row rather than run together, because a shopper who reads "envelope
- * rule, authority rank 1" as something the shop said has been handed the platform's weight
- * under the seller's name.
+ * The two lists are two projections of ONE array. `offer["commitments"]` is what a store wrote;
+ * `buyer_svc.accept.labels.slot_commitments` projects it down to `{key, value, unit, label}` for
+ * the card, `shortlist.ts::readSlotClaims` reads the same array off `GET /buyer/auctions/{id}`
+ * for this fold, and both keep the source order and both drop exactly the rows with no readable
+ * key. So position *i* in one is position *i* in the other.
+ *
+ * WHY NOT `find` ON THE KEY, which is what this did and is the defect being repaired: nothing
+ * dedupes keys anywhere upstream. `exchange.ranking.serving.shortlist_commitments` appends every
+ * schema-valid `Claim` and its own docstring says `offer["commitments"]` is whatever the store
+ * wrote; `slot_commitments` keeps them all. MEASURED on the served render route: a bid with two
+ * `free_returns` claims, `owner_statement` first and `seller_asserted` second, came back as two
+ * commitments labelled `store-confirmed` and `unverified` — and the fold's `find` gave BOTH rows
+ * the first one's badge, so the shop's unverified promise wore the store-confirmed badge, in the
+ * one place a shopper goes to decide whom to believe. A shop chooses the order of its own claims
+ * array, so a shop chose which badge the weak one inherited.
+ *
+ * THE ALIGNMENT IS CHECKED WHOLE, never one row at a time, and that is not fastidiousness — a
+ * per-row positional check passes BY COINCIDENCE on exactly the shape that matters. Measured
+ * while writing this: a card carrying `[ships_in_days, free_returns A, free_returns B]` against
+ * a record carrying `[free_returns A, free_returns B]` mismatches at row 0 and then MATCHES at
+ * row 1, so the weak promise would still have inherited the strong one's badge, which is the
+ * defect wearing a check. Either the two lists line up end to end or they do not line up at all.
+ *
+ * They can drift, which is why it is checked: the card's shortlist and this fold's record are
+ * two reads, and the Python reader keeps a non-string key (`text(123)` is `"123"`) where the
+ * TypeScript one drops it. Unaligned, this falls back to a key that names exactly ONE promise on
+ * the card — a sound join, just not a positional one — and past that it shows no badge and says
+ * why. A badge is a verification signal, and a wrong one is worse than none.
+ */
+function claimLabelJoins(
+  claims: readonly SlotClaim[],
+  labelled: readonly SlotCommitment[],
+): readonly { readonly label?: string; readonly ambiguity?: string }[] {
+  const aligned =
+    claims.length === labelled.length &&
+    claims.every((claim, index) => labelled[index]?.key === claim.key)
+  return claims.map((claim, index) => {
+    if (aligned) return { label: labelled[index]!.label }
+    const sameKey = labelled.filter((commitment) => commitment.key === claim.key)
+    if (sameKey.length === 1) return { label: sameKey[0]!.label }
+    if (sameKey.length === 0) return {}
+    return {
+      ambiguity: `This shop sent ${sameKey.length} promises under the name ${claim.key} and the card’s badges did not line up with them in order, so Proxyshop cannot say which of those badges belongs to this one and shows none of them here. The badges are all on the card above, beside the promises they were issued for.`,
+    }
+  })
+}
+
+/**
+ * ONE PROMISE AND THE EVIDENCE THE SHOP CITED FOR IT.
+ *
+ * WHOSE ROWS THESE ARE, corrected: all of them are the SHOP's except the badge. The promise,
+ * its value, the evidence `source`, the rank, the observation stamp and the evidence reference
+ * all arrive on the bid's own `Claim.provenance` — `contracts.protocol.Provenance` is what a
+ * store's hook fills in, and the exchange validates its shape without rewriting its contents.
+ * This docstring used to call the evidence rows "PROXYSHOP's record of how that promise was
+ * obtained", which is the mis-attribution that put "how strongly this network rates" over a
+ * number the seller chose. What Proxyshop adds is one thing: the BADGE.
  *
  * `label` is NOT derived here. D30 puts the source&rarr;label map in `packages/contracts` so the
  * exchange and the buyer app cannot answer differently, and this component prints the label the
  * buyer service already attached to this promise on the card. `provenance.source` beside it is
- * the exchange's own token, rendered and never mapped &mdash; which is exactly what lets a
+ * the token the shop named, rendered and never mapped &mdash; which is exactly what lets a
  * reader see the derivation instead of taking the badge on faith.
+ *
+ * `ambiguity` is what the badge says when the join could not be made &mdash; see
+ * {@link claimLabelJoins}. A badge is a verification signal, so a wrong one is worse than none.
  */
 function ClaimRecord({
   claim,
   label,
+  ambiguity,
   bidRef,
 }: {
   claim: SlotClaim
   label: string | undefined
+  ambiguity: string | undefined
   bidRef: string
 }) {
   const provenance = claim.provenance
@@ -721,20 +850,25 @@ function ClaimRecord({
         )}
       </p>
       <dl className="facts">
+        {ambiguity === undefined ? null : (
+          <RecordRow term="Badge">
+            <span data-testid={`record-claim-unjoined-${bidRef}`}>{ambiguity}</span>
+          </RecordRow>
+        )}
         <RecordRow term="Kind of claim">
           {claim.claim_type ?? 'the exchange did not type this one'}
         </RecordRow>
         {provenance === null ? (
-          <RecordRow term="Evidence">
+          <RecordRow term="Evidence the shop cited">
             This promise arrived with no provenance at all, so there is nothing Proxyshop can
             show for it. That is why it reads unverified rather than being hidden.
           </RecordRow>
         ) : (
           <>
-            <RecordRow term="Evidence">
+            <RecordRow term="Evidence the shop cited">
               <span className="mono">{provenance.source}</span>
             </RecordRow>
-            <RecordRow term="How strongly it is rated">
+            <RecordRow term="How strongly the shop rates that evidence">
               {authorityRankText(provenance.authority_rank)}
             </RecordRow>
             <RecordRow term="When it was observed">
@@ -759,8 +893,8 @@ function ClaimRecord({
  *
  * The sponsored half of the record. The shop's prose is not repeated here &mdash; `PitchPanel`
  * above owns it and owns its attribution &mdash; because this block is about the shop's
- * CHECKABLE assertions: the promises it made beside its price, each with the evidence the
- * platform holds for it.
+ * CHECKABLE assertions: the promises it made beside its price, each with the evidence the shop
+ * cited for it and the one thing Proxyshop adds, the badge for the KIND of evidence named.
  *
  * What is deliberately NOT here, said out loud so a reader does not assume the badge is more
  * than it is: the exchange decides a `verified` / `contradicted` / `unsupported` / `ambiguous`
@@ -780,16 +914,20 @@ function StoreRecord({
   const record = auction?.slots[slot.bid_ref]
   const claims = record?.claims ?? null
   const labelled = slot.commitments ?? []
+  // WHICH BADGE BELONGS TO WHICH PROMISE, decided for the list as a whole — see
+  // `claimLabelJoins`, which is why this cannot be answered one row at a time.
+  const joins = claimLabelJoins(claims ?? [], labelled)
   const discount = slot.price?.discount ?? null
   const discountProvenance = record?.discount_provenance ?? null
   return (
     <div className="voice" data-voice="store" data-testid={`record-store-${slot.bid_ref}`}>
       <p className="voice-attribution">
         <strong>What this shop says about itself.</strong> Each promise below is the
-        shop&rsquo;s, in the shop&rsquo;s own words for it. Proxyshop did not write any of them
-        and does not vouch for them &mdash; what it adds is the evidence line under each one,
-        which says where the promise came from and how strongly this network rates that kind of
-        evidence.
+        shop&rsquo;s, in the shop&rsquo;s own words for it &mdash; and so is the evidence line
+        under it: the shop names where the promise came from, what it points at, when it was
+        observed and what weight it puts on it. Proxyshop did not write any of that and does not
+        vouch for it. What Proxyshop adds is the badge: its own reading of the KIND of evidence
+        the shop named, from the one table the exchange and this page are held to.
       </p>
 
       {auction === undefined ? (
@@ -815,10 +953,19 @@ function StoreRecord({
           show the evidence for. What is on the card above still came from the exchange.
         </p>
       ) : claims === null ? (
+        // WHOSE SILENCE THIS ONE IS, and the flag on the card is what says. This branch used to
+        // assert "that is the ordinary answer for a shop the exchange stood in for" for EVERY
+        // slot, without consulting `slot.fallback` — so a shop that really bid, and whose card
+        // (correctly) prints no price-provenance line at all, was described in its own record as
+        // a shop the exchange stood in for. It bid; saying otherwise is false about a shop that
+        // participated, and the two surfaces then contradicted each other two inches apart.
+        // Three states, the same three `priceProvenanceLine` keeps, and absence is its own.
         <p className="gloss" data-testid={`record-no-claims-${slot.bid_ref}`}>
-          The exchange published no commitments for this slot. That is the ordinary answer for a
-          shop the exchange stood in for: a stand-in offer is rebuilt from the roster row with an
-          empty claims list, so there is nothing here the shop promised and nothing to evidence.
+          {slot.fallback === true
+            ? 'The exchange published no commitments for this slot. That is the ordinary answer for a shop the exchange stood in for: a stand-in offer is rebuilt from the roster row with an empty claims list, so there is nothing here the shop promised and nothing to evidence.'
+            : slot.fallback === false
+              ? 'The exchange published no commitments for this slot. This shop did bid — the price on the card is its own — and its bid carried no promises alongside it, so there is nothing here to evidence. That is a shop that quoted and promised nothing, not a stand-in the exchange wrote.'
+              : 'The exchange published no commitments for this slot, and it did not say whether this shop quoted the price or Proxyshop stood in for it. So this page cannot tell you whether the shop promised nothing or there was no shop’s offer here to promise anything, and it will not guess.'}
         </p>
       ) : claims.length === 0 ? (
         <p className="gloss" data-testid={`record-no-claims-${slot.bid_ref}`}>
@@ -827,14 +974,21 @@ function StoreRecord({
           if it were.
         </p>
       ) : (
-        claims.map((claim) => (
-          <ClaimRecord
-            key={claim.key}
-            claim={claim}
-            bidRef={slot.bid_ref}
-            label={labelled.find((commitment) => commitment.key === claim.key)?.label}
-          />
-        ))
+        claims.map((claim, index) => {
+          const join = joins[index] ?? {}
+          return (
+            // Keyed by POSITION and not by `claim.key`: a store may send two promises under one
+            // name — that is the whole reason `claimLabelJoins` exists — and two children under
+            // one React key is a rendering bug on top of the attribution one.
+            <ClaimRecord
+              key={`${index}-${claim.key}`}
+              claim={claim}
+              bidRef={slot.bid_ref}
+              label={join.label}
+              ambiguity={join.ambiguity}
+            />
+          )
+        })
       )}
 
       {discount === null ? null : (
@@ -844,17 +998,20 @@ function StoreRecord({
           </p>
           <dl className="facts">
             {discountProvenance === null ? (
-              <RecordRow term="What authorised it">
+              <RecordRow term="What the shop says authorised it">
                 The exchange published no provenance for this discount, so the rule behind the
                 depth is not on this page. It is a depth the shop states, not one Proxyshop can
                 show a rule for.
               </RecordRow>
             ) : (
               <>
-                <RecordRow term="What authorised it">
+                {/* The same correction as the claim rows above, and for the same reason: a
+                    discount's `provenance` rides on the bid, so `envelope_rule` is what the SHOP
+                    says authorised the depth and the rank beside it is the shop's own. */}
+                <RecordRow term="What the shop says authorised it">
                   <span className="mono">{discountProvenance.source}</span>
                 </RecordRow>
-                <RecordRow term="How strongly it is rated">
+                <RecordRow term="How strongly the shop rates that authority">
                   {authorityRankText(discountProvenance.authority_rank)}
                 </RecordRow>
                 <RecordRow term="The rule">
@@ -951,26 +1108,43 @@ export function ShortlistView({
   const [record, setRecord] = useState<RecordedAuction | undefined>(undefined)
   const [recordFailure, setRecordFailure] = useState<string | undefined>(undefined)
   const [readingRecord, setReadingRecord] = useState(false)
-  // ONE read per mount, whatever a reader opens. `useRef` and not state, for the reason
-  // `acceptedOnce` is one: React batches nothing across an await, so two folds opened before
-  // the first response lands would otherwise be two requests for the same record.
-  const recordAsked = useRef(false)
+  // WHICH AUCTION'S RECORD THIS MOUNT HAS ASKED FOR, and not merely *whether* it has asked.
+  // `useRef` and not state, for the reason `acceptedOnce` is one: React batches nothing across
+  // an await, so two folds opened before the first response lands would otherwise be two
+  // requests for the same record. Holding the ID rather than a boolean is what keeps that guard
+  // agreeing with this callback's own dependency — `shortlist.auction_id` is in the dependency
+  // list, so a mount that outlived one auction would otherwise answer questions about a record
+  // it never requested. Unreachable through `Journey` today, which keys this component on the
+  // attempt and so remounts, and the guard does not rest on that keying staying true.
+  const recordAsked = useRef<string | undefined>(undefined)
 
   const readRecord = useCallback(async () => {
-    if (recordAsked.current) return
-    recordAsked.current = true
+    const auctionId = shortlist.auction_id
+    if (recordAsked.current === auctionId) return
+    recordAsked.current = auctionId
     const fetcher = recordFetcher ?? browserFetcher()
     if (fetcher === undefined) {
       setRecordFailure('there is no browser here to read the record with')
       return
     }
+    // Whatever is on screen belongs to the previous auction, and a record from another auction
+    // is worse than none: the panel would say this bid reference names no candidate.
+    setRecord(undefined)
+    setRecordFailure(undefined)
     setReadingRecord(true)
     try {
-      setRecord(await loadRecordedAuction(shortlist.auction_id, fetcher))
+      setRecord(await loadRecordedAuction(auctionId, fetcher))
     } catch (failure) {
       // The service's own words, kept. A fold that said only "could not be read" would leave a
       // reader unable to tell an expired auction from a service that is down.
       setRecordFailure(failure instanceof Error ? failure.message : String(failure))
+      // A FAILED READ IS NOT AN ANSWER, so it does not stand in for one. The guard used to be
+      // set before the await and never cleared, so one 503 — a restarted service, a dropped
+      // connection — killed the fold for the whole session: MEASURED, reopening the fold made
+      // no further request and the "could not be read" banner then sat on every card's record
+      // with no way to try again. Cleared here, the next fold a reader opens asks again, and
+      // nothing retries on its own: every attempt is a gesture somebody made.
+      recordAsked.current = undefined
     } finally {
       setReadingRecord(false)
     }
@@ -1105,8 +1279,14 @@ export function ShortlistView({
                 aria-label={`What this store commits to: ${slot.bid_ref}`}
                 data-testid={`commitments-${slot.bid_ref}`}
               >
-                {slot.commitments.map((commitment) => (
-                  <li key={commitment.key} data-testid={`commitment-${slot.bid_ref}`}>
+                {/* Keyed by POSITION: nothing upstream dedupes a store's own claim keys, so
+                    two `free_returns` promises under one React key is a real shape here — see
+                    `claimLabelJoins`, which is the same duplicate in the fold. */}
+                {slot.commitments.map((commitment, index) => (
+                  <li
+                    key={`${index}-${commitment.key}`}
+                    data-testid={`commitment-${slot.bid_ref}`}
+                  >
                     {commitmentText(commitment)}{' '}
                     {/* The label rides beside the promise, not in a tooltip. It is the only
                         thing telling a buyer whether anyone checked this one, and a promise
@@ -1122,7 +1302,7 @@ export function ShortlistView({
               </ul>
             ) : (
               <p data-testid={`commitments-${slot.bid_ref}`}>
-                No commitments — this store promised nothing alongside the price.
+                {noCommitmentsLine(slot.fallback)}
               </p>
             )}
 

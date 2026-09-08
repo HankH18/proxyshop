@@ -22,9 +22,23 @@ has no organic side at all.
 
 The four rules this module keeps
 --------------------------------
-1. **An explicit roster is untouched.** This module is consulted only when the request body
-   names no store. That is enforced at the call site (``auction/routes.py``), and it is why a
-   deployment with no graph, or with an empty one, serves exactly what it served before.
+1. **An explicit roster's SHOPS are untouched.** Who competes is the caller's statement and
+   this module never adds a shop to it, never removes one, and never reorders it —
+   :meth:`GraphShopRoster.solicit` is consulted for the shop set only when the request body
+   names no store, and that is enforced at the call site (``auction/routes.py``).
+
+   What a stated roster does NOT get to fix is which PRODUCT of a shop answers a question it
+   was written before anybody asked. :func:`repoint_organic_products` re-points a stated row
+   onto the platform's own on-topic product for that same shop, and only where the platform's
+   own retrieval refused to vouch for the one the caller pinned; see that function for the
+   before/after measurement and for why both of its conditions fail closed.
+
+   **That is opt-in and the graph is not otherwise touched.** A source built by hand, and every
+   deployment that has not set ``EXCHANGE_REPOINT_ORGANIC_PRODUCTS`` alongside
+   ``EXCHANGE_SHOP_ROSTER=graph``, carries ``repoints_stated_rosters=False`` and is never even
+   called for a stated roster — so this rule stays literally true, connection included, for
+   every caller that already works. A deployment with no graph, or with an empty one, serves
+   exactly what it served before either way.
 
 2. **"No shops" is an ANSWER, never a failure.** The graph is empty until somebody seeds it,
    and every way of failing to reach it — an unreachable driver, an empty vector index, a
@@ -111,6 +125,7 @@ __all__ = [
     "SolicitedShop",
     "graph_roster_from_env",
     "graph_sessions_from_env",
+    "repoint_organic_products",
 ]
 
 #: How many shops one graph-sourced solicitation may name.
@@ -304,6 +319,7 @@ class GraphShopRoster:
         product_limit: int = DEFAULT_ROSTER_PRODUCTS,
         oversample: int = DEFAULT_OVERSAMPLE,
         clock: Callable[[], float] = time.perf_counter,
+        repoints_stated_rosters: bool = False,
     ) -> None:
         """
         Args:
@@ -318,6 +334,15 @@ class GraphShopRoster:
                 the roster.
             oversample: index rows fetched per requested product, passed straight through.
             clock: monotonic clock, injectable so a test can drive it.
+            repoints_stated_rosters: whether :func:`repoint_organic_products` may consult this
+                source for a request that named its own stores. **Defaults to ``False``, and
+                the default is the compatibility guarantee** this module's rule 1 states: a
+                caller that brings its own roster is served exactly what it was served before
+                the graph seam existed, and the graph is not connected to at all. Deployments
+                turn it on through :func:`graph_roster_from_env`; a source built by hand — every
+                test double in this tree included — is off, and the sabotage test
+                ``test_graph_auction.py::test_a_stated_roster_never_consults_the_graph`` is what
+                holds that.
         """
         self.sessions = sessions
         self.provider = provider
@@ -325,6 +350,7 @@ class GraphShopRoster:
         self.product_limit = int(product_limit)
         self.oversample = int(oversample)
         self.clock = clock
+        self.repoints_stated_rosters = bool(repoints_stated_rosters)
 
     @contextmanager
     def _session(self) -> Iterator[Any]:
@@ -454,19 +480,40 @@ def _nothing_retrieved_reason(result: RetrievalResult) -> str:
     """Why this retrieval named no product, in the shopper's terms rather than the pipeline's.
 
     Three emptinesses reach the same ``if not fit``, and reporting them with one sentence was
-    the reason a shopper could not tell "we searched and this catalogue is about something else"
+    the reason a shopper could not tell "we searched and what came back is about something else"
     from "we could not search". They are ordered by what the shopper can act on: an OFF-TOPIC
-    catalogue is the answer to their question, so it is named first even when a hard constraint
+    result is the answer to their question, so it is named first even when a hard constraint
     also excluded somebody — the constraint is not why they are being shown nothing.
+
+    **THE SENTENCE IS BOUNDED TO WHAT WAS JUDGED, and that bound is a repair.** It used to end
+    "This is an answer about the catalogue, not a failure to search it — the products this
+    exchange holds are about something else", which is a claim about all 3,093 products
+    composed after looking at ``result.considered`` = 25 of them. Measured live on ``POST
+    /auctions``: the query ``"something to help my joints"`` served that sentence while the
+    catalogue held four ACTIVE products whose platform-crawled name carries ``Joint`` —
+    ``Advanced Joint Support``, ``Advanced Joint Support Bulk``, ``Turmeric Supreme® Joint
+    Health``, ``Nutricost Pets Hip & Joint Support`` — and this module's own rule accepts them
+    (``TopicalRelevance().judge('something to help my joints', 'Advanced Joint Support')`` ->
+    ``about=True, matched=('joint',)``). The retriever's top-25 window simply missed them. So
+    the exchange asserted a fact about its own catalogue, in the platform's own voice, on a
+    served response, and the fact was false — the D55 defect class, made worse by being the
+    exact opposite of what this module's own header says about those two queries ("RECALL
+    failures of the retriever rather than refusals by this rule").
+
+    What is true, and all that is claimed now, is that the products this SEARCH reached are
+    about something else. A shopper reading it can tell the difference between "there is
+    nothing here" and "nothing this search reached matched", which is the difference that
+    decides whether rephrasing is worth their time.
     """
     if result.off_topic:
         names = ", ".join(row.canonical_name for row in result.off_topic[:3])
         return (
-            f"nothing in this exchange's catalogue is about what was asked. "
-            f"{result.considered} product(s) were retrieved and {len(result.off_topic)} of them "
-            f"were judged off-topic by {result.relevance} (nearest: {names}), so there is no "
-            f"shop to solicit. This is an answer about the catalogue, not a failure to search "
-            f"it — the products this exchange holds are about something else"
+            f"nothing this search reached is about what was asked. {result.considered} "
+            f"product(s) were retrieved from this exchange's catalogue and "
+            f"{len(result.off_topic)} of them were judged off-topic by {result.relevance} "
+            f"(nearest: {names}), so there is no shop to solicit. That is a statement about "
+            f"those {result.considered} products, not about the whole catalogue: the index "
+            f"returns its top matches and a product it did not surface was never judged"
         )
     if result.excluded:
         return (
@@ -512,6 +559,134 @@ def _solicited(shops: Sequence[ShopCandidate], *, fit: Mapping[str, float]) -> l
             )
         )
     return rows
+
+
+def repoint_organic_products(
+    source: Any,
+    stated: Sequence[Mapping[str, Any]],
+    intent: Any,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Re-point a STATED roster's products at the platform's own answer for this intent.
+
+    The caller says WHICH SHOPS compete. This says which of a shop's products answers the
+    question — for the rows where the platform's own retrieval will not vouch for the one the
+    caller pinned, and only for those.
+
+    Why it had to exist, measured
+    -----------------------------
+    A stated roster is a fixed candidate set: one row per shop, each naming one product,
+    chosen before the shopper typed anything. The demo's is exactly that — ``deploy/demo/
+    buyer-roster.json``, six shops each pinned to their liver-cluster lead — and the buyer
+    service sends it on every confirmation, because it refuses to open an auction with no
+    candidate set at all (``buyer_svc.composition.NoRosterBound``).
+
+    Add :mod:`~exchange.retrieval.relevance` to that and the shopper gets a blank screen for
+    anything outside the cluster the roster was built around, because every row on it is
+    honestly off-topic. Driven on this exchange over 24 queries the corpus genuinely serves —
+    creatine, magnesium, whey, collagen, turmeric, zinc, melatonin, elderberry, glucosamine,
+    lion's mane, biotin, NMN and the rest — against the recorded 3,093-product corpus::
+
+        stated roster, before this function:  3 of 24 queries returned any slot at all
+        the same exchange's own graph roster: 24 of 24, and 0 of 10 off-corpus queries
+
+    So the exchange's organic half already answered every one of them; the fixed roster was
+    what emptied the screen. Showing the pinned rows anyway is not the alternative — that is
+    the confidently-wrong shortlist the relevance rule exists to replace.
+
+    The rule, and why it is this one
+    --------------------------------
+    A row moves only when BOTH halves hold:
+
+    1. **The platform's own retrieval did not vouch for the pinned product.** ``ShopRoster.fit``
+       carries one :class:`~exchange.retrieval.fit.FitAssessment` per product that survived the
+       intent's hard constraints AND was judged about the query, so a pinned ref present there
+       is a product this exchange has just said is relevant. It is left exactly as stated —
+       which is why this is a no-op on the auctions that already work: measured on ``"milk
+       thistle liver support"``, four of the demo's six rows are vouched and do not move.
+    2. **The platform holds a PRICED alternative from that same shop.** An unpriced row would
+       mint a fallback with no ``unit_price`` and no ``expires_at`` (``collect.py``'s
+       ``_list_price_bid``), which every downstream filter refuses — so re-pointing onto one
+       would turn a wrong answer into no answer. A shop the graph does not roster at all, or
+       rosters without a provenanced offer, keeps its stated row and is refused on it, which
+       is the honest outcome for a shop that stocks nothing on the subject.
+
+    Both halves fail closed on an off-corpus query, and that is the direction that matters:
+    measured over the same 10 furniture/electronics/travel queries, ZERO rows move, because
+    the graph rosters no shop for them at all. This function cannot manufacture a shortlist
+    the catalogue does not support; it can only put a shop's own on-topic product in front of
+    the shopper instead of its liver supplement.
+
+    **The price moves with the product, or neither moves.** ``list_price`` and ``currency`` are
+    replaced from the same :class:`SolicitedShop` that supplied the new ``product_ref`` — the
+    cheapest provenanced offer the platform observed FOR that product — so the row never states
+    a price for one product beside the reference of another. ``tier`` and ``max_discount_pct``
+    are the caller's statements about the SHOP, not about the product, and are carried through
+    untouched.
+
+    It runs before ``machine.create``, so the re-pointed row is what the whole auction is held
+    on: the record, the ledger payload, the ``BidRequest`` each agent is handed, and the
+    fallback offer ``collect_bids`` mints. There is no seam here at which a re-pointed product
+    and a stated price can disagree.
+
+    **THE SOURCE HAS TO HAVE OPTED IN, and it is not asked otherwise.** A source that does not
+    carry a truthy ``repoints_stated_rosters`` is never called — not to ask and fail, *not
+    called* — which is what keeps this module's rule 1 literally true for every deployment and
+    every caller that has not asked for it. That is asserted by sabotage, not by inspection:
+    ``test_graph_auction.py::test_a_stated_roster_never_consults_the_graph`` wires a source that
+    RAISES on every call and asserts it was never reached, and
+    ``test_organic_relevance.py::test_a_source_that_has_not_opted_in_is_never_even_asked``
+    asserts the same thing about this function directly. Deployments opt in through
+    :func:`graph_roster_from_env`, whose ``EXCHANGE_REPOINT_ORGANIC_PRODUCTS`` defaults on with
+    ``EXCHANGE_SHOP_ROSTER=graph``.
+
+    Args:
+        source: the roster source to ask — anything with ``solicit(intent)`` AND a truthy
+            ``repoints_stated_rosters``. The wired default is :class:`NoShopRoster`, which has
+            neither, so an exchange with no graph serves exactly what it served before.
+        stated: the roster rows off the request body, already validated by ``RosterEntry``.
+        intent: the intent, as the route holds it.
+
+    Returns:
+        ``(rows, reason)`` — the rows to run the auction on, and a sentence naming what moved
+        for the response's ``roster_source``, or ``None`` when nothing did.
+    """
+    rows = [dict(row) for row in stated]
+    if not rows or not getattr(source, "repoints_stated_rosters", False):
+        return rows, None
+    try:
+        found = source.solicit(intent)
+    except Exception:  # noqa: BLE001 — rule 2: a roster source that raises finds nobody
+        return rows, None
+    if not isinstance(found, ShopRoster) or not found.shops:
+        return rows, None
+    # The platform's own verdict on each product it retrieved: present means "this exchange
+    # has just judged this product both eligible and about the query".
+    vouched = {assessment.product_id for assessment in found.fit}
+    best: dict[str, SolicitedShop] = {}
+    for shop in found.shops:
+        best.setdefault(str(shop.store_id), shop)
+    moved: list[str] = []
+    for row in rows:
+        pinned = row.get("product_ref")
+        if pinned is not None and str(pinned) in vouched:
+            continue
+        candidate = best.get(str(row.get("store_id") or ""))
+        if candidate is None or not candidate.priced or candidate.product_ref == pinned:
+            continue
+        shop = candidate
+        row["product_ref"] = shop.product_ref
+        row["list_price"] = float(shop.list_price or 0.0)
+        if shop.currency:
+            row["currency"] = shop.currency
+        moved.append(str(row.get("store_id") or ""))
+    if not moved:
+        return rows, None
+    return rows, (
+        f"the roster was stated by the caller and its shops are unchanged; the platform "
+        f"re-pointed {len(moved)} of {len(rows)} row(s) onto the product its own crawl says "
+        f"answers this intent, because the product each named was not one this retrieval "
+        f"vouched for ({', '.join(sorted(set(moved)))})"
+    )
 
 
 #: One lazily-built ``neo4j.Driver`` per distinct connection, shared by every graph-backed
@@ -595,10 +770,27 @@ def graph_roster_from_env(env: Mapping[str, str] | None = None) -> GraphShopRost
     everything it imports and only this path would notice. The env var makes "this deployment
     reads the graph" an operator's statement rather than a silent consequence of a wheel
     being present.
+
+    **``EXCHANGE_REPOINT_ORGANIC_PRODUCTS`` is the second power, and it defaults ON with the
+    first.** It decides whether :func:`repoint_organic_products` may re-point a STATED roster's
+    products; ``EXCHANGE_SHOP_ROSTER`` decides who is asked when a request names nobody. They
+    are separate variables because they are separate statements — an operator can want organic
+    discovery and still want a stated roster served verbatim — and the default is the roster's
+    own setting for the reason ``EXCHANGE_RANKING_CATALOG`` defaults to it one module over: a
+    deployment that turned the graph on and left this off gets a blank shortlist for every
+    question its fixed roster predates, which is the working configuration nobody asked for.
+    Measured on the demo's own six-shop roster, 24 in-corpus queries: 3 of 24 returned any slot
+    with this off, 24 of 24 with it on, 0 of 10 off-corpus queries either way.
+    ``EXCHANGE_REPOINT_ORGANIC_PRODUCTS=none`` (or ``0``/``off``/``false``) states the old
+    behaviour explicitly and keeps it.
     """
     import os  # noqa: PLC0415 — read at call time so a test can drive `env`
 
     source = dict(os.environ if env is None else env)
     if str(source.get("EXCHANGE_SHOP_ROSTER", "")).strip().lower() != "graph":
         return None
-    return GraphShopRoster(graph_sessions_from_env(source))
+    stated = str(source.get("EXCHANGE_REPOINT_ORGANIC_PRODUCTS", "")).strip().lower()
+    return GraphShopRoster(
+        graph_sessions_from_env(source),
+        repoints_stated_rosters=stated not in {"none", "0", "off", "false", "no"},
+    )

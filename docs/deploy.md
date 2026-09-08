@@ -642,11 +642,32 @@ $ curl :8085/er/config
 The buyer `503` belongs in this list rather than being tidied out of it: it is what a
 byte-identical `.env.example` **must** produce. That file leaves
 `PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT` empty and names no MTA — `..._SMTP_URL` and
-`..._SENDER` are both blank — so `buyer_svc.auth.delivery.magic_link_is_mailed` answers
-`False` and the door refuses instead of promising a mail nothing will send. The transcript
-recorded a `202` here until this line was corrected, which no clean `cp .env.example .env`
-can produce. The same fact reaches the SPA through `GET /buyer/auth/sign-in`
-(`{"offered": false}`), which is why the shipped demo renders no login form at all.
+`..._SENDER` are both blank — so `buyer_svc.auth.delivery.build_magic_link_delivery`, which
+`build_auth_service` calls once at boot, returns its refusing transport `_undeliverable`
+instead of an SMTP sender. The POST then mints a link, hands it to that callable, and the
+`MagicLinkUndeliverable` it raises is caught in `buyer_svc.auth.routes` and answered as this
+`503` with a `Retry-After`. The door refuses rather than promising a mail nothing will send.
+The transcript recorded a `202` here until this line was corrected, which no clean
+`cp .env.example .env` can produce.
+
+Two log lines are the whole mechanism, from a buyer service run on loopback with those three
+variables unset — the builder's decision at boot, then the route's refusal on the request:
+
+```
+WARNING buyer_svc.auth.delivery PROXYSHOP_BUYER_MAGIC_LINK_SMTP_URL is unset: this service
+        will REFUSE magic-link logins rather than accept ones it cannot deliver ...
+ERROR   buyer_svc.auth.routes   magic-link refused: no magic-link mail transport is
+        configured, so this service cannot deliver a login link; set
+        PROXYSHOP_BUYER_MAGIC_LINK_SMTP_URL, ..._SENDER and ..._BASE_URL
+```
+
+The same two variables reach the SPA, but **not through that function** — chase the right one
+or the trail goes cold. `GET /buyer/auth/sign-in` answers `{"offered": false}` from
+`magic_link_is_mailed`, which is the *only* thing that function gates; nothing on the POST
+path calls it. The two agree here because they read the same variables, and they are separate
+because they answer different questions: one decides whether a form is drawn, the other
+decides what this process does with a link. That is why the shipped demo renders no login
+form at all.
 
 The trust POST is the one that goes all the way through. Read back with `psql`:
 

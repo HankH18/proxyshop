@@ -284,10 +284,13 @@ export const UNREACHABLE_SOURCES: readonly UnreachableSource[] = [
     service: 'trust',
     port: '8084',
     why:
-      'Same origin barrier. It is the only route that lists every store WITH its score — ' +
-      'not the only one that lists stores at all: `GET /schedule` below enumerates them ' +
-      'too, as refresh plans, and the merchant’s `GET /install/shops` lists the shops ' +
-      'it holds a token for behind an admin bearer.',
+      'Same origin barrier. It is the only route that lists every store WITH its score, and ' +
+      'on a default deployment the only one that lists stores at all. Two others have the ' +
+      'shape and do not fill it here: `GET /schedule` below enumerates refresh plans, but ' +
+      'from `PROXYSHOP_INGEST_STORES`, which `.env.example` ships blank — measured on the ' +
+      'compose demo it answers `"stores": []`. The merchant’s `GET /install/shops` lists ' +
+      'the shops it holds an offline token for, behind an admin bearer, and a demo that ' +
+      'installs no shop gets `{"shops":[]}` from it.',
     remedy: 'the same /trust/ proxy block.',
     openable: true,
   },

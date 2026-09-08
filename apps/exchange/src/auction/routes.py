@@ -87,7 +87,7 @@ from ..reports.routes import loss_log_of
 from ..retrieval.clusters import assign_cluster, configure_clusters, intent_clusters_of
 from ..retrieval.criteria import MAX_CANDIDATE_LIMIT
 from ..retrieval.fit import FitLogError, annotate_bid_payload
-from ..retrieval.roster import NoShopRoster, ShopRoster
+from ..retrieval.roster import NoShopRoster, ShopRoster, repoint_organic_products
 from .collect import (
     FAN_OUT_CAPACITY_REASON,
     NO_AGENT_REASON,
@@ -2731,16 +2731,34 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
     # always owned and never called (`exchange/retrieval/` shipped with ZERO production call
     # sites; `GraphCandidateSource`, this repo's only Neo4j reader, was called by nobody).
     #
-    # A request that DOES name a roster is untouched — the graph is not consulted, not
-    # connected to, and cannot change the answer. That is what keeps this additive for every
-    # caller that already works, including every existing test and the whole e2e suite.
+    # A request that DOES name a roster keeps its SHOPS exactly as it stated them — the graph
+    # never adds a store, removes one or reorders them, which is what keeps this additive for
+    # every caller that already works, including every existing test and the whole e2e suite.
+    # A source that has not opted in is not even CALLED here, so "a stated roster does not
+    # consult the graph" stays true, connection included, wherever it was true before; see
+    # `repoint_organic_products` and `graph_roster_from_env`'s second switch.
+    #
+    # What it does not keep is a PRODUCT the platform's own retrieval will not vouch for, and
+    # that is `repoint_organic_products`. A stated roster is written before the shopper types
+    # anything — the demo's is six shops each pinned to their liver-cluster lead — so with the
+    # relevance filter in front of it every row is honestly off-topic for any other question
+    # and the shopper gets a blank screen. Measured on this exchange over 24 queries the
+    # 3,093-product corpus genuinely serves: 3 of 24 returned any slot through the stated
+    # roster, against 24 of 24 through the exchange's own graph roster, with 0 of 10
+    # off-corpus queries served either way. See that function for both conditions and for why
+    # nothing moves on an off-corpus query.
     #
     # `found` is always a `ShopRoster`, never an exception: an exchange whose graph is empty,
     # down, or absent answers 201 with an empty auction naming the reason rather than 5xx. The
     # reasoning is in `_found_roster` and in `retrieval/roster.py`'s header — "no shops" is a
     # real outcome, and a failure here must not take down a door that needs no graph at all.
-    found = ShopRoster(source="request") if roster else _found_roster(request, intent)
-    if not roster:
+    # `repoint_organic_products` keeps that contract: it swallows a raising source and answers
+    # the stated rows unchanged.
+    if roster:
+        roster, repointed = repoint_organic_products(_shop_roster(request), roster, intent)
+        found = ShopRoster(source="request", reason=repointed)
+    else:
+        found = _found_roster(request, intent)
         roster = found.rows
 
     opened_at = time.time()

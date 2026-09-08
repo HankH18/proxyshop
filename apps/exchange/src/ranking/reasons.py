@@ -68,8 +68,17 @@ REASON_PRICE_UNREADABLE = "offer_price_unreadable"
 #: that BID was solicited because the platform assigned this intent to a cluster that store
 #: pursues, chose which of its own products to put forward, and made its case in its own voice
 #: against a message the platform adversarially checks — it is accountable for the row and its
-#: trust record moves on it. A fallback row has no such author: the platform picked the product
-#: and wrote the pitch, so the platform's own crawl is the only thing that can vouch for it.
+#: trust record moves on it. A fallback row has no such author: no shop bid for it and no shop
+#: wrote a word of it, so the platform's own crawl is the only thing that can vouch for it.
+#:
+#: **Who picked the PRODUCT depends on where the roster came from**, and this constant used to
+#: say "the platform picked the product" flatly. It is the platform's pick on a graph-sourced
+#: roster, and on a stated row that :func:`~exchange.retrieval.roster.repoint_organic_products`
+#: re-pointed; it is the CALLER's pick on a stated row the platform left alone, because ``POST
+#: /auctions`` accepts a ``roster`` in the request body and ``collect_bids`` mints the fallback
+#: offer from it. What holds in every case, and what the served sentence
+#: (:data:`~exchange.retrieval.relevance.OFF_TOPIC_DETAIL`) now claims, is that no shop bid and
+#: no shop wrote the pitch.
 REASON_OFF_TOPIC_ORGANIC = "organic_result_off_topic"
 
 #: NOT an exclusion reason, and deliberately outside :data:`EXCLUSION_REASON_PREFIXES`: it

@@ -461,6 +461,35 @@ discount their agents bid. The graph path — the one at the top of this page, w
 actually picks the shops — is reached by `make demo-check` and by any `POST /auctions` with no
 `roster` key, not by the browser. `roster_source` on the response says which happened every time.
 
+**Two controls sit on the shortlist itself**, and a demo that stops at the four cards misses
+both.
+
+- **"Ask about these options"** — a question box under the cards, and the one place a follow-up
+  can go. `POST /buyer/chat/ask` answers it, and its subject is fixed: the rows this auction
+  already put on screen, read back off the exchange's own live shortlist rather than off
+  anything the browser sent. It has no catalogue, no search and no memory, so *"which of these
+  is actually third-party tested?"* is in scope and *"find me something cheaper elsewhere"* is
+  not. **D55 survives the answer**, which is the whole reason it is a separate module. The
+  platform's sentence renders in the platform's block under an attribution line saying whether
+  it was assembled from the record or written by the shopping agent and checked against it;
+  each shop's own message renders verbatim in that shop's block under that shop's domain; and
+  the writer is never shown a shop's prose, its reply screened for any six-word run of one
+  (`screen_reasons` in `buyer_svc.chat.answering`) and refused if it shares one — then refused a
+  second time in the browser by `readAnswer` in `apps/buyer/app/chat/ask.ts`. A question the
+  record cannot answer gets its refusal printed **above** the grounds rather than under them,
+  because burying "no shop here has published a claim for that" beneath a fluent paragraph
+  would make the guess the more prominent option.
+- **"See the record behind this one"** — a fold at the bottom of every card. It is *additive*,
+  and that word is load-bearing: nothing that was on the card moved into it, because provenance
+  a shopper has to go looking for is provenance they did not have when they chose. What is
+  inside is what had been reaching the browser and being rendered by nobody — the crawl
+  snapshot's id and stamp, the whole trust snapshot rather than the two numbers on the card, the
+  published rank score with what each term of the formula contributed, every promise's
+  provenance and authority rank, and the rule that authorised a discount. Opening it is what
+  starts the read: the fold fetches `GET /buyer/auctions/{auction_id}` on the click, so it
+  renders the card's own half in full while the record is still arriving, and says which half is
+  missing if that read fails.
+
 Two other pages sit on the same origin behind a hash route, so they work on a static host and on
 the launcher alike:
 
@@ -546,16 +575,23 @@ transport configured"}`.
 ## The services
 
 Every service is a FastAPI app imported as `<namespace>.main:create_app` unless noted; the port
-is what its Dockerfile CMD binds. **The six product services serve 58 routes between them, and
-every one of the 58 is driven by at least one test** — measured by
+is what its Dockerfile CMD binds. **The six product services serve 59 routes between them, and
+every one of the 59 is driven by at least one test** — measured by
 `./.venv/bin/python -m proxyshop_support.route_census`, which also checks each service against
-its published OpenAPI contract and currently reports no drift in either direction. Run it rather
-than believing that sentence; it is the fastest way to find a route somebody built and nobody
-reached.
+its published OpenAPI contract. Its last line is one of two sentences, and today it is the
+second: `census disagrees with the published contract:` followed by the offenders, or `every
+service with a published contract agrees with it`. Run it rather than believing this paragraph;
+it is the fastest way to find a route somebody built and nobody reached.
+
+**Count the six `GET /openapi.json` documents instead and you will get 58, and neither number
+is wrong.** The 59th is the merchant console at `/dashboard`, which is a `router.mount` of a
+static bundle rather than an operation, so it is served and driven while appearing in no
+OpenAPI document. The newest route here is `POST /buyer/chat/ask`, which arrived with the
+shortlist's question box and took the buyer from 17 to 18.
 
 | Path | Port | Routes | What it owns |
 |---|---|---|---|
-| `apps/buyer` | 8081 | 17 | The Vite/React SPA (`@proxyshop/buyer`), the FastAPI buyer service, and `devstack/run.py`. Clarify, confirm, read an auction, render and accept a shortlist, magic-link auth and session, the sign-in offer the SPA asks before it draws a login form, profile, feedback and its prompt, a live-check pair, and the store-visible window. |
+| `apps/buyer` | 8081 | 18 | The Vite/React SPA (`@proxyshop/buyer`), the FastAPI buyer service, and `devstack/run.py`. Clarify, confirm, read an auction, render and accept a shortlist, answer a follow-up question about the options already on screen (`POST /buyer/chat/ask`), magic-link auth and session, the sign-in offer the SPA asks before it draws a login form, profile, feedback and its prompt, a live-check pair, and the store-visible window. |
 | `apps/exchange` | 8083 | 7 | The auction, the ranker, the checkout port. `POST /auctions`, `GET /auctions/{id}`, `GET /auctions/{id}/shortlist`, `POST /auctions/{id}/accept`, the external Tier-2 bid door `POST /v1/auctions/{id}/bids`, `POST /internal/outcomes`, `GET /reports/losses`. |
 | `apps/merchant` | 8082 | 13 | Install and OAuth callback, the Shopify webhook door, the pixel collector, code minting, envelope read/write, the kill switch, and the merchant console at `/dashboard`. |
 | `apps/trust` | 8084 | 10 | The hash-chained append-only ledger, plus scoring, reconciliation and snapshots. Exactly the ten `trust.openapi.json` declares. |

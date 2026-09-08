@@ -23,10 +23,8 @@ import {
   type ProfileReading,
   type Reading,
   type SessionReading,
-  auctionPath,
   directUrl,
   forget,
-  livecheckPath,
   readAuctionTrace,
   readLiveCheck,
   readProfile,
@@ -36,6 +34,8 @@ import {
   reasonFamily,
   remembered,
   REMEMBERED_AUCTION_KEY,
+  AUCTION_PATH_PREFIX,
+  LIVECHECK_PATH_PREFIX,
   SESSION_PATH,
   PROFILE_PATH,
 } from './telemetry'
@@ -124,6 +124,15 @@ export function MetricsPage({
   const [submitted, setSubmitted] = useState(
     () => initialAuctionId ?? remembered(REMEMBERED_AUCTION_KEY),
   )
+  /**
+   * Whether this browser still holds a remembered id — kept in state rather than re-read on
+   * every render, because `remembered()` reads `sessionStorage` and nothing in React
+   * re-renders when storage changes. The case that forces it into state is the one where
+   * `onForget` changes nothing else: both fields already empty over a live key, where
+   * `setAuctionId('')`/`setSubmitted('')` are no-ops, React skips the re-render, and a
+   * button read straight off storage would keep offering a key that is already gone.
+   */
+  const [rememberedId, setRememberedId] = useState(() => remembered(REMEMBERED_AUCTION_KEY))
 
   const [trace, setTrace] = useState<Reading<AuctionTrace>>({ state: 'idle' })
   const [checks, setChecks] = useState<Reading<LiveCheckReading>>({ state: 'idle' })
@@ -190,9 +199,17 @@ export function MetricsPage({
    *
    * Clearing the field alone would not do it. `remembered()` is read in the initial state of
    * both `auctionId` and `submitted`, so the next mount would put the id straight back.
+   *
+   * WHICH IS ALSO WHY THE BUTTON CANNOT BE OFFERED ON THE TWO FIELDS ALONE. A demo driver who
+   * empties the seeded field by hand and presses "Trace it" — the most natural reset gesture
+   * on the page — leaves `auctionId` and `submitted` both empty while the key is still in
+   * `sessionStorage`, and the next visit to `#/metrics` seeds the field from it all over
+   * again. So the control asks `rememberedId` too, and is dark only when there is genuinely
+   * nothing on screen and nothing in storage to clear.
    */
   const onForget = useCallback(() => {
     forget(REMEMBERED_AUCTION_KEY)
+    setRememberedId('')
     setAuctionId('')
     setSubmitted('')
   }, [])
@@ -219,7 +236,7 @@ export function MetricsPage({
 
       <Panel
         title="One auction, as this service recorded it"
-        route={`GET ${auctionPath('{auction_id}')}`}
+        route={`GET ${AUCTION_PATH_PREFIX}{auction_id}`}
       >
         <p>
           The richest real trace this origin can reach: who was solicited, what each store
@@ -229,8 +246,10 @@ export function MetricsPage({
           trust ledger linked below does name auction ids inside its events, but they are not
           a shortcut: this route answers 404 unless one of two sources still knows the
           auction &mdash; this buyer service&rsquo;s own in-process record of opening it, or
-          a shortlist the exchange has not yet dropped. An id from the ledger that this
-          service never opened satisfies neither and 404s.
+          a shortlist the exchange has not yet dropped. An id lifted from the ledger clears
+          the first only if this very process opened that auction, and the second only while
+          the exchange is still holding its shortlist &mdash; so one from an earlier run, or
+          from a journey driven anywhere but here, 404s.
         </p>
         <form onSubmit={onSubmit} className="metrics-form">
           <label htmlFor="metrics-auction">Auction id</label>
@@ -246,7 +265,7 @@ export function MetricsPage({
           <button
             type="button"
             onClick={onForget}
-            disabled={auctionId === '' && submitted === ''}
+            disabled={auctionId === '' && submitted === '' && rememberedId === ''}
             title={
               'Clears the id this browser remembered from your last confirm, so a fresh ' +
               'demo does not open on the previous run’s trace.'
@@ -265,7 +284,7 @@ export function MetricsPage({
 
       <Panel
         title="What the platform checked against the stores' own pages"
-        route={`GET ${livecheckPath('{auction_id}')}`}
+        route={`GET ${LIVECHECK_PATH_PREFIX}{auction_id}`}
       >
         <p>
           What was checked, and what was declined. The service keeps those apart and so does

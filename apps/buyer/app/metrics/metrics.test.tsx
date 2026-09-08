@@ -194,6 +194,45 @@ describe('the remembered auction id can be cleared from this page', () => {
     render(<MetricsPage fetcher={stack()} location={HERE} initialAuctionId="" />)
     expect(screen.getByRole('button', { name: 'Forget it' })).toBeDisabled()
   })
+
+  it('stays offered while the key is still there, however empty the field looks', () => {
+    // The state the previous case does NOT cover, and the one a demo driver reaches by the
+    // most natural "reset" gesture there is: select the seeded id, delete it, press "Trace
+    // it". Both component states are now empty while `sessionStorage` still holds the key,
+    // and this page is the only control that can remove it. Asking the two states alone
+    // switches the button off over a live key, and the next visit to `#/metrics` re-seeds
+    // the field from that key — the exact dead end "Forget it" was added to close.
+    window.sessionStorage.setItem(REMEMBERED_AUCTION_KEY, 'auc-stale')
+    render(<MetricsPage fetcher={stack()} location={HERE} />)
+    const input = screen.getByLabelText('Auction id')
+    expect(input).toHaveValue('auc-stale')
+
+    fireEvent.change(input, { target: { value: '' } })
+    fireEvent.submit(input.closest('form')!)
+
+    expect(input).toHaveValue('')
+    expect(window.sessionStorage.getItem(REMEMBERED_AUCTION_KEY)).toBe('auc-stale')
+    const forgetIt = screen.getByRole('button', { name: 'Forget it' })
+    expect(forgetIt).toBeEnabled()
+
+    // And it still works from there: pressing it empties the key rather than only the field.
+    fireEvent.click(forgetIt)
+    expect(window.sessionStorage.getItem(REMEMBERED_AUCTION_KEY)).toBeNull()
+    expect(forgetIt).toBeDisabled()
+  })
+})
+
+describe('the route beside a panel is the route, spelled the way a reader can use it', () => {
+  // `auctionPath`/`livecheckPath` build a FETCH path and therefore `encodeURIComponent` their
+  // argument — correct there, and wrong for a heading, where it printed
+  // `GET /buyer/auctions/%7Bauction_id%7D` on the served page. A page whose whole thesis is
+  // "every figure names the served route it was read from" cannot name it in percent-encoding.
+  it('prints the auction and live-check templates unescaped', () => {
+    render(<MetricsPage fetcher={stack()} location={HERE} initialAuctionId="" />)
+    expect(screen.getByText('GET /buyer/auctions/{auction_id}')).toBeInTheDocument()
+    expect(screen.getByText('GET /buyer/livecheck/{auction_id}')).toBeInTheDocument()
+    expect(document.body.textContent).not.toContain('%7B')
+  })
 })
 
 describe('what it cannot source, it names', () => {

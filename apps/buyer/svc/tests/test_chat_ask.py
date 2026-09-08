@@ -27,6 +27,11 @@ without:
 6. **And it does not refuse honest traffic.** Every gate here is also driven in the
    silent-on-honest direction: a question the corpus DOES hold must be answered, and the
    same words must not be reported as unheld.
+7. **A comparison is the shape of a question, not a hole in the record.** Every comparative
+   and superlative phrasing — "which is better", "what did each shop promise", "why is the
+   first one first" — used to come back with a `not_held` that the answer underneath it then
+   contradicted. Section 7 drives the phrasings that broke, and drives the refusals beside
+   them, because widening what counts as answerable is how a refusal gate stops refusing.
 """
 
 from __future__ import annotations
@@ -53,6 +58,14 @@ AUCTION = "auction-chat-1"
 SHOP_PITCH = (
     "We have knitted these in Yorkshire since 1974 and we will take it back for any reason "
     "inside a month, no questions asked and no restocking fee."
+)
+
+#: A second store's own words. Used only by :func:`both_in_network`, and it exists because
+#: ``shop_messages`` is the only field on the wire that says how many slots an answer covered
+#: — with one message on the shortlist it reads ``1`` whether the answer narrowed or not.
+SECOND_PITCH = (
+    "Ours are made to a price and we say so: pick us if the number matters more than the "
+    "wool does, and send it back within the fortnight if it does not."
 )
 
 
@@ -157,6 +170,19 @@ def shortlist() -> dict:
             ),
         ],
     }
+
+
+def both_in_network() -> dict:
+    """The same two options, with the SECOND one carrying a message as well.
+
+    A witness, not a variation: an answer carries the message of every slot it covers, so on
+    this shortlist ``len(shop_messages)`` is 2 for an answer about the whole screen and 1 for
+    one that narrowed to a card. On :func:`shortlist` it is 1 either way, which is why the
+    ordinal gate below could not tell the difference and passed with its rule deleted.
+    """
+    payload = shortlist()
+    payload["slots"][1]["message"] = SECOND_PITCH
+    return payload
 
 
 def recorded() -> dict:
@@ -609,23 +635,229 @@ def test_a_question_the_corpus_holds_is_answered_and_not_reported_as_unheld(
     assert body["not_held"] == [], f"{question!r} wrongly refused {body['not_held']}"
 
 
-def test_a_hyphenated_ordinal_does_not_narrow_the_question_to_one_card(app_with):
+@pytest.mark.parametrize(
+    "question",
+    [
+        # The measured original, and the spelling that first broke it.
+        "is any of this third-party tested?",
+        "is any of this third party tested?",
+        # The same two with no widener in them, so the ordinal loop is actually REACHED.
+        "is this third-party tested?",
+        "is this third party tested?",
+        # And an ordinal a two-slot shortlist can actually resolve. "third" is index 2 and
+        # falls off the end of a shortlist of two, so it could never have narrowed here
+        # however broken the rule was; "first party" is the same compound at index 0.
+        "is this first party data?",
+        "was this first party audited?",
+    ],
+)
+def test_an_ordinal_inside_a_compound_does_not_narrow_the_question_to_one_card(app_with, question):
     """ "third-party" is not the ordinal "third", and neither is "third party".
 
     Measured while building this: the spaced spelling narrowed the question this whole
     feature was asked for down to the third card, so a shortlist of two answered about one
     shop and the refusal covered one shop instead of the shortlist.
+
+    This test used to pass with the rule deleted, and it is worth saying exactly why, because
+    both halves are traps a test of a narrowing rule falls into. Its only question said "is
+    ANY of this", and ``any`` is a widener, so ``_selected_slots`` returned every slot before
+    the ordinal loop ran at all; and its ordinal was ``third`` against a shortlist of two,
+    which resolves out of range and narrows to nothing whatever the guard says. It is
+    parametrized over both fixes, and driven against a shortlist where both shops are in the
+    network so that ``shop_messages`` counts the slots the answer covered.
+    """
+    client = app_with(StubExchange(both_in_network(), recorded()))
+
+    body = client.post(ASK, json={"auction_id": AUCTION, "question": question}).json()
+
+    assert body["not_held"], f"{question!r} was answered rather than refused"
+    # Both slots are covered, so the refusal is about the shortlist and not one card.
+    assert len(body["shop_messages"]) == 2, (
+        f"{question!r} narrowed to {len(body['shop_messages'])} card(s): {body['answer']}"
+    )
+    assert "either" in body["answer"] or "What I can answer from" in body["answer"]
+
+
+# ------------------------------------------------------------------------------------------
+# 7. the phantom refusal — a comparison is the SHAPE of a question, not a gap in the record
+# ------------------------------------------------------------------------------------------
+#
+# The parametrisation above is every phrasing this feature was built against, and every one
+# of them is a plain "what is X". Driven on the live stack, EVERY comparative and superlative
+# phrasing produced a `not_held` the answer then went on to contradict: "show me every shop's
+# return policy" returned all four return windows underneath a bold "We don't know about
+# “every”", and "what did each shop promise?" made the platform state, in its own voice, that
+# it holds no record of what each shop promised — in the same sentence that listed them.
+#
+# That is the worst thing this surface can do. It exists to show that the platform's voice
+# can be trusted about what it does and does not hold, and a denial its own next clause
+# refutes costs more than either the denial or the answer would have alone.
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        # The nine measured on the served route, plus the two the verdict called worst.
+        "show me every shop's return policy",
+        "what did each shop promise?",
+        "which one is better?",
+        "what is the difference between these?",
+        "compare these for me",
+        "which has the lowest price?",
+        "which shop has the best reputation?",
+        "which store is most trustworthy?",
+        "how does each one compare on price?",
+        "what is the highest rated shop?",
+        "which one is cheapest?",
+        "which of these did you scrape?",
+    ],
+)
+def test_a_comparison_is_not_reported_as_something_the_platform_does_not_hold(app_with, question):
+    """A widener is not a subject, so it may not come back as one the platform lacks."""
+    client = app_with(StubExchange(shortlist(), recorded()))
+
+    body = client.post(ASK, json={"auction_id": AUCTION, "question": question}).json()
+
+    assert body["not_held"] == [], (
+        f"{question!r} denied holding {[row['subject'] for row in body['not_held']]} "
+        f"and then answered: {body['answer']}"
+    )
+    assert body["grounds"], f"{question!r} produced no grounds at all: {body['answer']}"
+    assert "I don't know about" not in body["answer"], body["answer"]
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        # The single most natural question to ask a ranked list, and the one that made the
+        # platform answer "the order here isn't a ranking I can explain" while holding the
+        # rank score and all four of its components.
+        "why is the first one first?",
+        "why did the first one win?",
+        "why is the first one the winner?",
+    ],
+)
+def test_a_question_about_the_order_is_answered_from_the_ranking(app_with, question):
+    """The correctness of this may not turn on which synonym the shopper reached for.
+
+    "Why did the first one come **top**?" already worked, because ``top`` happens to be in
+    ``FAMILY_WORDS``. Every other spelling of the same question fell through to the slot
+    introducing itself with its title and its price — an answer to something nobody asked,
+    with a sentence in it denying the platform could explain the order.
     """
     client = app_with(StubExchange(shortlist(), recorded()))
 
-    for spelling in ("third-party tested", "third party tested"):
-        body = client.post(
-            ASK, json={"auction_id": AUCTION, "question": f"is any of this {spelling}?"}
-        ).json()
-        assert body["not_held"], spelling
-        # Both slots are covered, so the refusal is about the shortlist and not one card.
-        assert len(body["shop_messages"]) == 1  # only one slot HAS a message
-        assert "either" in body["answer"] or "What I can answer from" in body["answer"]
+    body = client.post(ASK, json={"auction_id": AUCTION, "question": question}).json()
+
+    assert body["not_held"] == [], body["not_held"]
+    assert {row["topic"] for row in body["grounds"]} == {"ranking"}, body["answer"]
+    assert "rank score" in body["answer"], body["answer"]
+
+
+@pytest.mark.parametrize(
+    ("question", "subject"),
+    [
+        ("is it in stock?", "stock"),
+        ("are these vegan?", "vegan"),
+        ("is any of this organic?", "organic"),
+        ("what is the shipping weight?", "shipping weight"),
+        ("do any of them have a warranty?", "warranty"),
+        ("which one ships fastest?", "ships fastest"),
+    ],
+)
+def test_a_subject_nobody_published_is_still_refused_by_name(app_with, question, subject):
+    """The other direction of the same rule, and the reason it is not just "stop refusing".
+
+    Widening what counts as answerable is how a refusal gate stops refusing anything. Every
+    one of these names something no shop on this shortlist published and the platform's crawl
+    did not record, and every one of them has to keep coming back by name.
+    """
+    client = app_with(StubExchange(shortlist(), recorded()))
+
+    body = client.post(ASK, json={"auction_id": AUCTION, "question": question}).json()
+
+    assert [row["subject"] for row in body["not_held"]] == [subject], body["not_held"]
+    assert body["not_held"][0]["detail"] == NOT_HELD_DETAIL
+    assert body["answer"].startswith("I don't know about"), body["answer"]
+
+
+def test_a_family_this_shortlist_holds_nothing_in_is_refused_rather_than_answered_with_another(
+    app_with,
+):
+    """An auction whose recorded ranking has aged out of this service says so.
+
+    ``Corpus.ranking_recorded`` documents this case as one an answer "says so rather than
+    guessing" about. It did not: with no ranked rows the slot fell through to introducing
+    itself, and "how did you rank these?" came back as a product title and a price, with
+    nothing anywhere admitting the question had gone unanswered. A confident answer to a
+    question nobody asked is the same failure as a denial over an answer — the platform's
+    voice saying something that is not so.
+    """
+    client = app_with(StubExchange(shortlist(), None))
+
+    body = client.post(
+        ASK, json={"auction_id": AUCTION, "question": "how did you rank these?"}
+    ).json()
+
+    assert body["ranking_recorded"] is False
+    assert body["grounds"] == [], body["grounds"]
+    assert "don’t hold" in body["answer"] or "don't hold" in body["answer"], body["answer"]
+    assert "ranking" in body["answer"], body["answer"]
+    # Not answered with the price instead, and the catalogue does not offer back the family
+    # the same answer has just said it does not have.
+    assert "72.00" not in body["answer"] and "19.00" not in body["answer"], body["answer"]
+    assert body["answer"].count("the ranking and what went into it") == 1, body["answer"]
+
+
+def test_the_shoppers_own_superlative_is_answerable_only_scoped_to_this_shortlist():
+    """``UNSUPPORTABLE_WORDS`` was written for a shop's pitch and refused the platform's answer.
+
+    Measured on the live service: ``a written follow-up answer was refused (unsupportable:
+    lowest); serving the assembled floor``, for a question whose literal subject was the
+    lowest price and whose four prices the platform published itself. Scoped to this
+    shortlist the comparison is a fact about the record; unscoped it is a claim about every
+    shop there is, and that half of the rule keeps its teeth.
+    """
+    reading = read_question(
+        "which has the lowest price?", corpus_for(shortlist(), recorded=recorded())
+    )
+
+    scoped = (
+        "The lowest price of these two is 19.00 USD for the Acrylic Beanie at "
+        "fastfashion.example; the Merino Beanie at woolworks.example is 72.00 USD."
+    )
+    assert screen_reasons(scoped, reading) == ()
+
+    unscoped = "The Acrylic Beanie at fastfashion.example has the lowest price, 19.00 USD."
+    assert any("unsupportable: lowest" in reason for reason in screen_reasons(unscoped, reading))
+
+
+@pytest.mark.parametrize(
+    ("question", "reply", "word"),
+    [
+        # Volunteered rather than asked for: the platform does not reach for a superlative
+        # on its own, however carefully it scopes it.
+        (
+            "what is the return policy?",
+            "Of these two, woolworks.example published the best returns policy: a 30 day "
+            "window, as its own owner statement.",
+            "best",
+        ),
+        # Asked for, scoped, and still not a comparison any published number settles. A
+        # promise about the future is not the same kind of word as "cheapest".
+        (
+            "is the return window guaranteed?",
+            "Of these two, the 30 day window is guaranteed by woolworks.example.",
+            "guaranteed",
+        ),
+    ],
+)
+def test_an_unsupportable_word_the_record_cannot_settle_is_still_refused(question, reply, word):
+    reading = read_question(question, corpus_for(shortlist(), recorded=recorded()))
+
+    reasons = screen_reasons(reply, reading)
+
+    assert any(f"unsupportable: {word}" in reason for reason in reasons), reasons
 
 
 # ------------------------------------------------------------------------------------------

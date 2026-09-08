@@ -244,11 +244,34 @@ MAX_DISCOUNT_PCT = {
     "oregonswildharvest.com": 18.0,
 }
 
-#: How many of a hosted store's products reach the exchange's `catalog` snapshot. The
-#: document is capped at 4 MiB across every store and a snapshot at 1000 products
-#: (``MAX_CATALOG_PRODUCTS``); the agents' own catalogues below are NOT trimmed, because an
-#: agent that cannot find the product the graph rostered declines the auction.
-SNAPSHOT_PRODUCTS_PER_STORE = 60
+#: How many of a store's products reach the exchange's `catalog` snapshot. The document is
+#: capped at 4 MiB across every store (``composition.MAX_DEPLOYMENT_BYTES``) and one store's
+#: snapshot at 1000 products (``ranking.verification.MAX_CATALOG_PRODUCTS``); the agents' own
+#: catalogues are NOT trimmed either, because an agent that cannot find the product the graph
+#: rostered declines the auction.
+#:
+#: **1000 means "every product", and the trim it replaces was costing shoppers a NAME.** At 60
+#: this snapshot held the sixty most liver-relevant products per store, which is fine for
+#: grading the four bidding agents (their claims resolve against the one product the auction
+#: names, and that product is their lead) and wrong for everything the platform picks itself.
+#: `catalogue_readings` resolves a shortlist slot's `product.identity` out of this same
+#: document, so any organic row pointing outside the window came back with **`identity: null`**
+#: — a row a shopper is shown and the platform cannot name. Measured on the served route at 60:
+#: over 32 in-corpus queries through the exchange's own graph roster, 63 of 101 shortlist slots
+#: carried a null identity, and `ranking.filters.organic_relevance_reason` — which reads that
+#: same identity and treats an absent one as "unchecked" — refused nothing at all on that
+#: route, so 62% of graph-route rows were unfilterable. The same hole opened on the buyer route
+#: the moment `retrieval.roster.repoint_organic_products` began pointing a stated roster's rows
+#: at the product the crawl says answers the query, which is usually not in the top sixty.
+#:
+#: The cost is document size, and it is measured rather than asserted: the ten storefronts hold
+#: 3,086 priced products (largest store 805, under the 1000-per-store cap), and
+#: `exchange-deployment.json` goes from 575,663 bytes to 2,950,154 — 70% of the 4 MiB ceiling,
+#: parsed once when the composition root runs on the first served request. Nothing about
+#: RANKING moves: `_narrowed_to` cuts the list to the one row an auction can resolve against
+#: before any claim is graded, the attribute vocabulary is the same six keys every row already
+#: declared, and a store that never bid states no claim.
+SNAPSHOT_PRODUCTS_PER_STORE = 1000
 
 #: A fixed observation stamp. The corpus is a point-in-time snapshot and every document
 #: built from it must be byte-identical on every machine, so nothing here reads a clock.
@@ -620,9 +643,17 @@ def build() -> dict[str, Any]:
         #    stores unfilterable: `"a walnut coffee table for the lounge"` came back with four
         #    slots before this and TWO after, and the two survivors were the two nameless ones.
         #
+        # WHICH STORES, not which products, and that is all this line closed. Naming every
+        # seller fixed the nameless row for the fixed six-store `buyer-roster.json`, whose rows
+        # point at each store's lead product; it did NOT fix it for the graph route, where the
+        # rostered product is whatever answers the query and was usually outside the trimmed
+        # window — measured at the old `SNAPSHOT_PRODUCTS_PER_STORE = 60`, 63 of 101 graph-route
+        # shortlist slots still carried `identity: null`. That half is closed by the constant
+        # itself; see its docstring for the measurement and for what the size now is.
+        #
         # The cost is document size and it is bounded: `SNAPSHOT_PRODUCTS_PER_STORE` products
-        # per store, ten stores, ~575 KiB against `composition.MAX_DEPLOYMENT_BYTES` of 4 MiB.
-        # Nothing else about ranking moves — a store that never bid states no claim, so
+        # per store, ten stores, 2,950,154 bytes against `composition.MAX_DEPLOYMENT_BYTES` of
+        # 4 MiB. Nothing else about ranking moves — a store that never bid states no claim, so
         # `verified_claim_ratio` is unchanged, and the attribute vocabulary these snapshots
         # declare is the same six keys the hosted four already declared.
         "catalog": {host: _snapshot(host, catalogs[host], ranked[host]) for host in hosts},

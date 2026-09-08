@@ -455,7 +455,8 @@ export function slotLabels(slot: Pick<ShortlistSlot, 'provenance_labels'>): read
  * A SECOND COPY of `journey/wire.ts::fallbackReasonFamily`, and deliberately so rather than an
  * import: `wire.ts` imports this module, so the dependency between the two runs one way and
  * importing it back would close a cycle. What is copied is one published splitting rule, not a
- * vocabulary — {@link NO_AGENT_FALLBACK_FAMILY} below is the only family word this file names.
+ * vocabulary — {@link NEVER_ASKED_FALLBACK_FAMILIES} below names two of the exchange's twelve
+ * families, which is the whole of what this screen has to tell apart.
  */
 export function fallbackReasonFamily(reason: string | null | undefined): string {
   if (typeof reason !== 'string') return ''
@@ -463,26 +464,106 @@ export function fallbackReasonFamily(reason: string | null | undefined): string 
 }
 
 /**
- * The one `fallback_reason` family that means NOBODY WAS ASKED.
+ * The `fallback_reason` family for a shop that HAS NO BIDDING AGENT for anyone to solicit.
  *
  * `exchange.auction.collect.NO_AGENT_REASON` is `tier_0_no_agent:<detail>`, and it is the
- * exchange's word for a shop that is on the roster from its crawled catalogue alone and has no
- * bidding agent for anyone to solicit. Every other family in that vocabulary describes
- * something that happened AFTER a solicitation went out — silence, a late reply, an unreadable
- * answer, an explicit decline.
+ * exchange's word for a shop that is on the roster from its crawled catalogue alone. It is one
+ * MEMBER of {@link NEVER_ASKED_FALLBACK_FAMILIES}, and it is named on its own because it is the
+ * only member whose cause this screen can state in the shop's own terms: the shop has no agent,
+ * which is a durable fact about the shop rather than about one auction.
+ */
+export const NO_AGENT_FALLBACK_FAMILY = 'tier_0_no_agent'
+
+/**
+ * The `fallback_reason` family for a store the exchange HAD NO WORKER FREE TO ASK.
  *
- * That distinction is the whole reason this constant exists, and it is a D55 rule rather than a
- * copywriting preference: a scraped shop is an ORGANIC result, and telling a shopper it "did
- * not answer this auction" puts a refusal in the mouth of a shop that was never spoken to.
+ * `exchange.auction.collect.FAN_OUT_CAPACITY_REASON`, a bare family word with no detail half:
+ * "**The exchange never asked, because it had no worker free to ask with** … Both are R10's
+ * bounded degradation and both are the EXCHANGE's condition, not the store's". Reachable on any
+ * busy auction — `collect.py::_unusable_because` returns it whenever the fan-out stamped
+ * `NOT_ASKED_FIELD`, which `BoundedFanOutPool` does when every worker is held and which the
+ * per-call `max_workers` cap does when it ends the roster.
+ */
+export const FAN_OUT_CAPACITY_FALLBACK_FAMILY = 'fan_out_capacity_exhausted'
+
+/**
+ * EVERY `fallback_reason` family that means NOBODY WAS ASKED — the class, not two instances.
  *
- * ONE family word and not nine. The nine-family gloss lives in
+ * The exchange's vocabulary splits in two at one joint, and this is the joint a shopper-facing
+ * sentence has to respect: these families describe something that happened BEFORE any
+ * solicitation went out, and every other family in `collect.py::FALLBACK_REASONS` describes
+ * something that happened after one did — silence, a late reply, an unreadable answer, an
+ * explicit decline. Telling a shopper a never-dialled shop "did not answer this auction" puts a
+ * refusal in the mouth of a shop nobody spoke to, and D55's whole asymmetry is that the platform
+ * may state only what it can check. That is a rule about a CLASS, so it is written as one: a
+ * screen that split on `tier_0_no_agent` alone said the same false thing about the other member.
+ *
+ * Both members were checked against `collect.py` one by one, and the other ten were checked the
+ * same way and are NOT here: `response_timed_out` is documented "**the store was solicited** and
+ * was still answering when the window shut", and `no_response`, `response_after_deadline`, the
+ * three `MALFORMED_RESPONSE_REASONS`, `bid_price_unreconcilable`, `bid_claim_unprovenanced`,
+ * `store_declined` and `store_refused` are each a verdict on something a solicited store did.
+ *
+ * A COPY, so it can go stale: the exchange grew this vocabulary twice already
+ * (`response_timed_out` and `fan_out_capacity_exhausted` were both added after the first split),
+ * and a family this list has not caught up with falls to the ASKED sentence — which is the safe
+ * direction only because that sentence names the exchange's own token beside it. Adding a family
+ * to `FALLBACK_REASONS` that means "never dialled" means adding it here.
+ *
+ * ONE distinction and not nine. The nine-family gloss lives in
  * `journey/WhyEmpty.tsx::explainFallbackReason` and this file does not fork it — it cannot
  * import it (see {@link fallbackReasonFamily}), and a second copy of a vocabulary that has
  * already grown twice would go stale where a splitting rule cannot. What this screen needs is
  * not nine sentences; it is the answer to one question — was there anybody to ask? — and past
  * that it prints the exchange's own token unchanged.
  */
-export const NO_AGENT_FALLBACK_FAMILY = 'tier_0_no_agent'
+export const NEVER_ASKED_FALLBACK_FAMILIES: readonly string[] = [
+  NO_AGENT_FALLBACK_FAMILY,
+  FAN_OUT_CAPACITY_FALLBACK_FAMILY,
+]
+
+/**
+ * Was this stand-in minted WITHOUT the shop ever being solicited?
+ *
+ * `false` for an unreadable reason and for a family this copy of the vocabulary does not carry —
+ * which lands on the sentence that asserts nothing about the shop, see {@link askedAndSilent}.
+ */
+export function neverAsked(reason: string | null | undefined): boolean {
+  return NEVER_ASKED_FALLBACK_FAMILIES.includes(fallbackReasonFamily(reason))
+}
+
+/**
+ * The ONE family that means the shop was asked and NOTHING CAME BACK.
+ *
+ * `journey/wire.ts::NO_RESPONSE_REASON`, whose own doc comment is "nothing came back from that
+ * store's agent at all … It used to cover three different facts … It now means only the last of
+ * those, and the other two have words of their own". It is the only family in the exchange's
+ * twelve that licenses the sentence "this shop did not answer this auction".
+ *
+ * WHY IT IS ONE FAMILY AND NOT EIGHT, which is the second half of the never-asked repair. The
+ * card had exactly two sentences, so every family that was not `tier_0_no_agent` read "the shop
+ * did not answer this auction" — and eight of those families mean the shop ANSWERED.
+ * `store_declined` is the store-agent contract's 204 and this app's own gloss for it says so in
+ * as many words ("means that store was asked, it answered, and its answer was no"), so the
+ * shortlist card and the empty-shortlist panel one screen away made opposite statements about
+ * the same shop. `store_refused`, `response_carried_no_bid`, `response_not_stamped`,
+ * `arrival_stamp_unparseable`, `bid_price_unreconcilable`, `bid_claim_unprovenanced` and
+ * `response_after_deadline` are all verdicts on something that ARRIVED. Two of the twelve are
+ * neither silence nor an answer — `response_timed_out` is a store "still answering when the
+ * window shut", which is the distinction the exchange minted that word to stop collapsing, and
+ * a shop nobody dialled is handled above.
+ *
+ * So this screen makes three statements and no more: nobody asked, nothing came back, or — for
+ * every other family AND for a family this copy has not caught up with — the exchange could not
+ * use what it got, which asserts nothing about the shop's own conduct. Under-claiming is the
+ * safe direction and the exchange's own token is printed beside all three.
+ */
+export const NO_RESPONSE_FALLBACK_FAMILY = 'no_response'
+
+/** Was this shop asked, with nothing coming back at all? See {@link NO_RESPONSE_FALLBACK_FAMILY}. */
+export function askedAndSilent(reason: string | null | undefined): boolean {
+  return fallbackReasonFamily(reason) === NO_RESPONSE_FALLBACK_FAMILY
+}
 
 /**
  * WHERE THIS SLOT'S EVIDENCE CAME FROM, as the exchange published it (D30).

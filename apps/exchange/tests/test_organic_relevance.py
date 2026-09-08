@@ -47,6 +47,15 @@ from exchange.retrieval import (
     TopicalRelevance,
     content_terms,
 )
+from exchange.retrieval.fit import FitAssessment, FitFeatures
+from exchange.retrieval.relevance import OFF_TOPIC_DETAIL
+from exchange.retrieval.roster import (
+    ShopRoster,
+    SolicitedShop,
+    _nothing_retrieved_reason,
+    repoint_organic_products,
+)
+from exchange.retrieval.service import ExcludedCandidate, RetrievalResult
 from fastapi.testclient import TestClient
 
 RULE = TopicalRelevance()
@@ -137,9 +146,10 @@ def test_one_coincidental_word_is_not_agreement_and_two_is() -> None:
     """The threshold itself, on the pair that decided it.
 
     ``Nutricost Frother`` and ``an espresso machine with a milk frother`` share exactly one
-    content word. Measured over 30 off-corpus queries through the real vector index, a rule that
-    accepted ONE shared word served 12 of them where this rule serves 2, and bought exactly one
-    extra honest query for it — the full ablation is in ``exchange.retrieval.relevance``'s
+    content word. Measured over 30 off-corpus queries through the real vector index against the
+    recorded corpus alone, a rule that accepted ONE shared word served 7 of them where this rule
+    serves 0, and bought exactly one extra honest query for it — the full ablation is in
+    ``exchange.retrieval.relevance``'s
     header. A single word in common is what an unrelated query and a catalogue of 3,093 products
     share by accident.
     """
@@ -166,9 +176,97 @@ def test_a_stopword_in_common_is_not_a_reason_to_show_a_product() -> None:
 
 
 def test_a_plural_query_still_finds_a_singular_catalogue() -> None:
-    """``joints``/``joint`` and ``capsules``/``capsule``: morphology is not a topic change."""
+    """``joints``/``joint`` and ``capsules``/``capsule``: morphology is not a topic change.
+
+    The two whole-query assertions are the shipped shape, and neither of them ISOLATES the
+    morphology: ``milk thistle capsule`` against ``Milk Thistle Capsules`` passes on ``milk``
+    and ``thistle`` whatever the stemmer does with the third word. The isolated pair below is
+    what actually pins it, and it was red before the ``-es`` rule was made conditional —
+    ``capsules`` stemmed to ``capsul`` while ``capsule`` stayed whole, so the singular and its
+    own plural were different words.
+    """
     assert RULE.judge("something to help my joints", "Nutricost Joint Support Capsules").about
     assert RULE.judge("milk thistle capsule", "Milk Thistle Capsules").about
+    assert RULE.judge("capsule", "Capsules").about, "the plural of the query's own word"
+    assert RULE.judge("joints", "Joint").about
+
+
+#: Singular/plural pairs the rule must treat as one word. The second column is the class the
+#: blanket ``-es`` rule split apart — every English noun whose singular ends in ``-e`` — and
+#: the third is the sibilant class that genuinely takes ``-es`` and must still fold.
+@pytest.mark.parametrize(
+    ("singular", "plural"),
+    [
+        ("joint", "joints"),
+        ("gummy", "gummies"),
+        ("vitamin", "vitamins"),
+        ("capsule", "capsules"),
+        ("peptide", "peptides"),
+        ("lozenge", "lozenges"),
+        ("tincture", "tinctures"),
+        ("bottle", "bottles"),
+        ("table", "tables"),
+        ("machine", "machines"),
+        ("box", "boxes"),
+        ("dish", "dishes"),
+        ("church", "churches"),
+        ("glass", "glasses"),
+    ],
+)
+def test_a_singular_and_its_own_plural_are_one_content_word(singular: str, plural: str) -> None:
+    """One word, whichever way the shopper or the storefront spells it."""
+    assert content_terms(singular) == content_terms(plural), (singular, plural)
+
+
+@pytest.mark.parametrize("word", ["was", "its", "gas", "this", "yes", "mass", "gras", "news"])
+def test_a_short_word_that_merely_ends_in_s_is_not_treated_as_a_plural(word: str) -> None:
+    """The length guard, and the ``-ss`` guard that keeps ``mass`` from becoming ``mas``."""
+    assert content_terms(word) in ((word,), ()), word
+
+
+def test_a_genuinely_relevant_product_is_not_refused_over_a_plural() -> None:
+    """The concrete refusal the ``-es`` rule cost, isolated.
+
+    Measured on the served route before the fix, against the recorded corpus: ``"bovine
+    collagen peptides"`` returned 4 slots from 6 shops and ``"bovine collagen peptide"`` — the
+    same question, singular — returned 2 from 2, because the query folded to ``peptide`` and
+    the catalogue folded to ``peptid``.
+    """
+    verdict = RULE.judge("collagen peptide powder tub", "Collagen Peptides")
+    assert verdict.about, verdict
+    assert set(verdict.matched) == {"collagen", "peptide"}, verdict
+
+
+def test_the_plural_of_a_stopword_is_still_a_stopword() -> None:
+    """``STOPWORDS`` says it drops from BOTH sides; the plural used to survive as content.
+
+    ``type`` is a stopword and ``types`` was not, so ``"types of collagen"`` carried a ``type``
+    term that ``"type of collagen"`` did not, and the rule's answer depended on the shopper's
+    plural. The membership test runs on the typed word AND on the stemmed one now.
+    """
+    assert content_terms("types ii collagen") == content_terms("type ii collagen")
+    assert "type" not in content_terms("what types of collagen")
+
+
+def test_a_stopword_that_stems_to_a_non_stopword_is_still_dropped() -> None:
+    """The reason the typed spelling is tested first and on its own.
+
+    ``these`` stems to ``thes``, which is in no list. Testing only the stemmed form would have
+    let every ``these`` through as a content word.
+    """
+    assert content_terms("these gummies") == ("gummy",)
+
+
+def test_the_refusal_does_not_say_who_chose_the_product() -> None:
+    """D55: the served sentence claims what is true of every organic row, and no more.
+
+    ``POST /auctions`` takes a ``roster`` in the request body — that is how buyer-svc drives it
+    — so "the platform, not the shop, chose it" is false for a caller-supplied row. What is
+    true of every row this fires on is that no shop bid for it.
+    """
+    assert "chose it" not in OFF_TOPIC_DETAIL, OFF_TOPIC_DETAIL
+    assert "no shop bid for it" in OFF_TOPIC_DETAIL, OFF_TOPIC_DETAIL
+    assert OFF_TOPIC_DETAIL in RULE.judge("a walnut coffee table", "Milk Thistle").detail
 
 
 def test_a_query_with_no_content_words_refuses_nothing() -> None:
@@ -589,3 +687,358 @@ def test_a_sponsored_shortlist_keeps_all_four_slots(query: str) -> None:
         for row in body["excluded"]
         for reason in row["exclusion_reasons"]
     ), body["excluded"]
+
+
+# =====================================================================================
+# 5. The empty answer's own sentence, and the roster that made it necessary
+# =====================================================================================
+def _retrieval_result(*, considered: int, off_topic: int) -> RetrievalResult:
+    """A retrieval that reached ``considered`` products and refused ``off_topic`` of them."""
+    return RetrievalResult(
+        intent_id="int-1",
+        assessments=(),
+        excluded=(),
+        considered=considered,
+        eligible_count=0,
+        elapsed_ms=1.0,
+        budget_ms=100.0,
+        source="graph",
+        reranker="identity",
+        off_topic=tuple(
+            ExcludedCandidate(f"p-{index}", f"Product {index}", ("off topic",))
+            for index in range(off_topic)
+        ),
+        relevance=RULE.name,
+    )
+
+
+def test_the_empty_answer_claims_only_what_the_search_actually_reached() -> None:
+    """A statement about 25 rows must not be served as a statement about 3,093.
+
+    MEASURED on ``POST /auctions`` against the recorded corpus before this: the query
+    ``"something to help my joints"`` was answered "This is an answer about the catalogue, not
+    a failure to search it — the products this exchange holds are about something else", while
+    the catalogue held four ACTIVE products whose platform-crawled name carries ``Joint`` and
+    this module's own rule accepts them. The retriever's top-25 window missed them, which is a
+    recall failure and not a fact about the catalogue — and the exchange asserted the opposite
+    in the platform's own voice, on a served response.
+    """
+    sentence = _nothing_retrieved_reason(_retrieval_result(considered=25, off_topic=25))
+
+    assert "not a failure to search it" not in sentence, sentence
+    assert "the products this exchange holds are about something else" not in sentence, sentence
+    assert "nothing this search reached" in sentence, sentence
+    assert "not about the whole catalogue" in sentence, sentence
+    assert "25 product(s)" in sentence, sentence
+    # The rule that produced the verdict is still named, because an audit has to be able to say
+    # WHICH rule refused. That half was right and is not being loosened here.
+    assert RULE.name in sentence, sentence
+
+
+def _solicited_roster(
+    *shops: SolicitedShop, vouched: tuple[str, ...] = ()
+) -> ShopRoster:
+    """A graph solicitation naming ``shops``, having vouched for ``vouched`` product refs."""
+    return ShopRoster(
+        shops=shops,
+        source="neo4j",
+        considered=25,
+        fit=tuple(
+            FitAssessment(
+                product_id=ref,
+                canonical_name=ref,
+                fit_score=0.5,
+                features=FitFeatures(similarity=0.5, preference_alignment=0.5),
+                reranker="identity",
+            )
+            for ref in vouched
+        ),
+    )
+
+
+class _Source:
+    """A roster source that answers one prepared roster, or raises.
+
+    ``repoints_stated_rosters`` is the deployment's opt-in, and it defaults to ``True`` HERE
+    only because every test in this section is about the opt-in path. A source built anywhere
+    else in this tree carries the shipped default of ``False``.
+    """
+
+    name = "double"
+
+    def __init__(self, answer: Any, *, repoints_stated_rosters: bool = True) -> None:
+        self.answer = answer
+        self.calls = 0
+        self.repoints_stated_rosters = repoints_stated_rosters
+
+    def solicit(self, intent: Any, *, limit: int | None = None) -> ShopRoster:
+        self.calls += 1
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+
+STATED = (
+    {"store_id": "gaiaherbs.com", "tier": 1, "product_ref": "prod-milk", "list_price": 25.49,
+     "max_discount_pct": 15.0},
+    {"store_id": "toniiq.com", "tier": 1, "product_ref": "prod-glutathione", "list_price": 20.97},
+)
+
+
+def test_a_stated_row_the_platform_cannot_vouch_for_is_repointed_at_one_it_can() -> None:
+    """THE BLANK SHORTLIST, at its root: a fixed roster answering a question it predates.
+
+    The demo's roster is six shops each pinned to their liver-cluster lead, sent on every
+    confirmation. Measured on this exchange over 24 queries the 3,093-product corpus genuinely
+    serves, 3 of 24 returned any slot at all through that roster, against 24 of 24 through the
+    exchange's own graph roster. The shops are the caller's statement and are untouched; which
+    of a shop's products answers the question is the platform's.
+    """
+    source = _Source(
+        _solicited_roster(
+            SolicitedShop(
+                store_id="gaiaherbs.com",
+                tier=1,
+                product_ref="prod-creatine",
+                intent_match=0.8,
+                list_price=19.99,
+                currency="USD",
+            ),
+            vouched=("prod-creatine",),
+        )
+    )
+
+    rows, reason = repoint_organic_products(source, STATED, _intent("creatine monohydrate"))
+
+    assert [row["store_id"] for row in rows] == [row["store_id"] for row in STATED]
+    assert rows[0]["product_ref"] == "prod-creatine", rows[0]
+    # The PRICE moves with the product, or the row would state one product's price beside
+    # another's reference.
+    assert rows[0]["list_price"] == 19.99, rows[0]
+    assert rows[0]["currency"] == "USD", rows[0]
+    # A statement about the SHOP, not about the product, and it survives.
+    assert rows[0]["max_discount_pct"] == 15.0, rows[0]
+    # The shop the graph said nothing about keeps its stated row and is refused on it.
+    assert rows[1] == dict(STATED[1]), rows[1]
+    assert reason is not None and "gaiaherbs.com" in reason, reason
+
+
+def test_a_stated_row_the_platform_vouched_for_is_left_exactly_as_stated() -> None:
+    """A no-op on every auction that already works, which is what keeps this additive.
+
+    Measured on ``"milk thistle liver support"`` against the demo roster: four of six rows are
+    products the exchange's own retrieval just judged relevant, and none of them moves.
+    """
+    source = _Source(
+        _solicited_roster(
+            SolicitedShop(
+                store_id="gaiaherbs.com",
+                tier=1,
+                product_ref="prod-other-thistle",
+                intent_match=0.9,
+                list_price=9.99,
+            ),
+            vouched=("prod-milk", "prod-other-thistle"),
+        )
+    )
+
+    rows, reason = repoint_organic_products(source, STATED, _intent("milk thistle"))
+
+    assert rows == [dict(row) for row in STATED], rows
+    assert reason is None, reason
+
+
+def test_an_alternative_the_platform_never_priced_is_not_substituted() -> None:
+    """An unpriced row mints no offer at all, so re-pointing onto one trades wrong for nothing.
+
+    ``_list_price_bid`` reads an absent ``list_price`` as "no offer to mint": no ``unit_price``
+    and no ``expires_at``, which every downstream filter refuses. The stated row is kept and
+    refused honestly instead.
+    """
+    source = _Source(
+        _solicited_roster(
+            SolicitedShop(
+                store_id="gaiaherbs.com",
+                tier=1,
+                product_ref="prod-creatine",
+                intent_match=0.8,
+                list_price=None,
+            ),
+            vouched=("prod-creatine",),
+        )
+    )
+
+    rows, reason = repoint_organic_products(source, STATED, _intent("creatine monohydrate"))
+
+    assert rows == [dict(row) for row in STATED], rows
+    assert reason is None, reason
+
+
+def test_an_off_corpus_query_moves_nothing() -> None:
+    """The direction that matters: this cannot manufacture a shortlist the corpus cannot back.
+
+    A graph that rosters nobody for a furniture query leaves every stated row alone, so the
+    honest empty answer survives. Measured over 10 off-corpus queries against the recorded
+    corpus: zero rows moved on any of them.
+    """
+    source = _Source(_solicited_roster())
+
+    rows, reason = repoint_organic_products(
+        source, STATED, _intent("a walnut coffee table for the lounge")
+    )
+
+    assert rows == [dict(row) for row in STATED], rows
+    assert reason is None, reason
+
+
+def test_a_roster_source_that_raises_leaves_the_roster_exactly_as_stated() -> None:
+    """Rule 2 of ``retrieval.roster``: a source that fails finds nobody, it does not 5xx.
+
+    A caller who brought its own roster needs no graph at all, and an unreachable one must not
+    take down a door that was working for them.
+    """
+    source = _Source(RuntimeError("bolt://nowhere"))
+
+    rows, reason = repoint_organic_products(source, STATED, _intent("creatine monohydrate"))
+
+    assert rows == [dict(row) for row in STATED], rows
+    assert reason is None, reason
+    assert source.calls == 1
+
+
+def test_a_source_that_has_not_opted_in_is_never_even_asked() -> None:
+    """THE COMPATIBILITY GUARANTEE, asserted by sabotage rather than by inspection.
+
+    ``retrieval.roster``'s rule 1 says a stated roster does not consult the graph, and
+    ``test_graph_auction.py::test_a_stated_roster_never_consults_the_graph`` holds it for the
+    route. This holds it here: a source whose ``solicit`` would RAISE is not reached at all,
+    because it never carried the deployment's opt-in. The shipped default of
+    ``GraphShopRoster.repoints_stated_rosters`` is ``False``; ``graph_roster_from_env`` is the
+    only thing in this tree that turns it on.
+    """
+    source = _Source(RuntimeError("this must never be called"), repoints_stated_rosters=False)
+
+    rows, reason = repoint_organic_products(source, STATED, _intent("creatine monohydrate"))
+
+    assert rows == [dict(row) for row in STATED], rows
+    assert reason is None, reason
+    assert source.calls == 0, "a source that did not opt in was consulted anyway"
+
+
+def test_the_graph_roster_built_from_the_environment_opts_in_with_the_graph() -> None:
+    """And the switch is SET by the deployment that already asks for organic discovery.
+
+    A capability nothing turns on is a capability that does not exist; this is the read that
+    makes ``EXCHANGE_SHOP_ROSTER=graph`` — which ``apps/exchange/compose.yaml`` already sets —
+    enough, and ``EXCHANGE_REPOINT_ORGANIC_PRODUCTS=none`` the way back to the old behaviour.
+    """
+    from exchange.retrieval.roster import graph_roster_from_env
+
+    graph = {"EXCHANGE_SHOP_ROSTER": "graph", "NEO4J_URI": "bolt://127.0.0.1:1"}
+    assert graph_roster_from_env({}) is None
+    built = graph_roster_from_env(graph)
+    assert built is not None and built.repoints_stated_rosters is True
+    off = graph_roster_from_env({**graph, "EXCHANGE_REPOINT_ORGANIC_PRODUCTS": "none"})
+    assert off is not None and off.repoints_stated_rosters is False
+
+
+def test_an_unwired_exchange_moves_nothing_and_asks_nobody() -> None:
+    """``NoShopRoster`` is the wired default; a deployment with no graph is unchanged."""
+    from exchange.retrieval.roster import NoShopRoster
+
+    rows, reason = repoint_organic_products(
+        NoShopRoster(), STATED, _intent("creatine monohydrate")
+    )
+
+    assert rows == [dict(row) for row in STATED], rows
+    assert reason is None, reason
+
+
+def test_the_served_route_answers_a_query_outside_the_rosters_cluster() -> None:
+    """END TO END: the blank screen becomes a real shortlist, over ``POST /auctions``.
+
+    The request is the demo's own — a stated roster of four liver products — and the query is
+    one the roster predates. Without the re-pointing every row is honestly off-topic and the
+    shopper sees nothing; with it, the one shop whose catalogue the platform can answer from
+    is shown its own creatine product at the price the platform observed, and the other three
+    are still refused because their shops stock nothing on the subject.
+    """
+    app = _served_app(bidding=False)
+    # The demo's own snapshots, plus the one product the platform would re-point gaiaherbs onto.
+    # A snapshot that held ONLY the substitute would leave the other three stores unnameable,
+    # and an absent identity is the filter's fail-open — every row would be kept and this test
+    # would pass for the wrong reason.
+    snapshots: dict[str, Any] = {
+        store: {
+            "snapshot_id": f"snap-{store}",
+            "products": [
+                {
+                    "product_ref": ref,
+                    "canonical_name": name,
+                    "evidence_ref": f"snap-{store}#{ref}",
+                    "attributes": {},
+                }
+            ],
+        }
+        for store, ref, name, _ in DEMO_ROSTER
+    }
+    snapshots["gaiaherbs.com"]["products"].append(
+        {
+            "product_ref": "prod-creatine",
+            "canonical_name": "Creatine Monohydrate Powder",
+            "evidence_ref": "snap-gaiaherbs.com#prod-creatine",
+            "attributes": {},
+        }
+    )
+    configure_ranking(app, catalog=StaticCatalogSnapshots(snapshots))
+    configure_auctions(
+        app,
+        shop_roster=_Source(
+            _solicited_roster(
+                SolicitedShop(
+                    store_id="gaiaherbs.com",
+                    tier=1,
+                    product_ref="prod-creatine",
+                    intent_match=0.8,
+                    list_price=19.99,
+                    currency="USD",
+                ),
+                vouched=("prod-creatine",),
+            )
+        ),
+    )
+
+    body = _serve(app, "creatine monohydrate powder")
+
+    slots = body["shortlist"]["slots"]
+    assert len(slots) == 1, body["shortlist"]
+    assert slots[0]["product"]["identity"]["title"] == "Creatine Monohydrate Powder", slots[0]
+    assert slots[0]["price"]["unit_price"] == 19.99, slots[0]
+    # The other three shops stock nothing the platform can answer this with, so they are still
+    # refused — the honest half of the same change.
+    refusals = [
+        reason
+        for row in body["excluded"]
+        for reason in row["exclusion_reasons"]
+        if reason.startswith(REASON_OFF_TOPIC_ORGANIC)
+    ]
+    assert len(refusals) == len(DEMO_ROSTER) - 1, body["excluded"]
+    # The response says the platform re-chose a product, so a reader is not left to infer it.
+    assert "re-pointed" in str(body["roster_source"]["reason"]), body["roster_source"]
+    assert body["roster_source"]["source"] == "request", body["roster_source"]
+
+
+def test_the_served_route_still_answers_a_furniture_query_with_nothing() -> None:
+    """The same wiring, the off-corpus direction: nothing is manufactured.
+
+    The graph rosters nobody, so no row moves, every stated row is refused and the screen is
+    honestly empty — which is the answer the whole stream exists to produce.
+    """
+    app = _served_app(bidding=False)
+    configure_auctions(app, shop_roster=_Source(_solicited_roster()))
+
+    body = _serve(app, "a walnut coffee table for the lounge")
+
+    assert body["shortlist"]["slots"] == [], body["shortlist"]
+    assert len(body["entries"]) == len(DEMO_ROSTER), body["entries"]
+    assert body["roster_source"]["reason"] is None, body["roster_source"]

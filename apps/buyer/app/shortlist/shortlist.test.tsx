@@ -16,20 +16,24 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ShortlistView } from './ShortlistView'
 import {
   ACCEPT_PATH,
+  FAN_OUT_CAPACITY_FALLBACK_FAMILY,
   RecordedAuctionUnreadable,
   LABEL_FROM_THEIR_WEBSITE,
   LABEL_STORE_CONFIRMED,
   LABEL_UNVERIFIED,
   MissingAuctionReferenceError,
+  NEVER_ASKED_FALLBACK_FAMILIES,
   NO_AGENT_FALLBACK_FAMILY,
   NoPermalinkError,
   UnsafePermalinkError,
   acceptSlot,
+  askedAndSilent,
   assertFollowable,
   fallbackReasonFamily,
   followPermalink,
   labelTone,
   loadRecordedAuction,
+  neverAsked,
   permalinkRefusal,
   readRecordedAuction,
   slotLabels,
@@ -1595,5 +1599,651 @@ describe('a shop that was never asked', () => {
     expect(line).toContain('no bidding agent')
     expect(line).not.toContain('did not answer')
     expect(line).not.toContain('the number above')
+  })
+})
+
+/**
+ * THE OTHER SHOP NOBODY DIALLED — the half of the never-asked class the first repair missed.
+ *
+ * `tier_0_no_agent` was fixed and `fan_out_capacity_exhausted` was not, so the same false
+ * sentence went on being printed in the same slot: `collect.py::FAN_OUT_CAPACITY_REASON` is
+ * documented "**The exchange never asked, because it had no worker free to ask with** … Both are
+ * the EXCHANGE's condition, not the store's", and the card said the shop did not answer. It is
+ * reachable on any busy auction — `_unusable_because` mints it whenever the fan-out stamped
+ * `exchange_not_asked`, which a bounded pool with every worker held and a per-call `max_workers`
+ * cap both do — and `collect_bids` then makes a list-price stand-in out of it (`_list_price_bid`,
+ * `fallback=True`, `fallback_reason=reason`) for EVERY non-`None` reason, exactly as it does for
+ * a shop with no agent.
+ */
+describe('a shop the exchange had no worker free to ask', () => {
+  const CAPACITY_SLOT: ShortlistSlot = {
+    ...NO_AGENT_SLOT,
+    fallback_reason: FAN_OUT_CAPACITY_FALLBACK_FAMILY,
+  }
+
+  it('does not say a shop nobody dialled declined to answer', () => {
+    render(<ShortlistView shortlist={one(CAPACITY_SLOT)} onAccept={vi.fn()} />)
+    const line = screen.getByTestId(`price-provenance-${CAPACITY_SLOT.bid_ref}`).textContent ?? ''
+    expect(line).not.toContain('did not answer')
+    expect(line).toContain('Nobody asked this shop for a price')
+    expect(line).toContain('turned nothing down')
+    // Still Proxyshop's price, and still the exchange's own token, unchanged.
+    expect(line).toContain('Proxyshop’s, not this shop’s')
+    expect(line).toContain('fan_out_capacity_exhausted')
+  })
+
+  it('does not call an in-network shop a crawl result either', () => {
+    // The other direction of the same rule. A shop with no bidding agent is on the roster from
+    // its catalogue alone, and saying so is true of it. A shop the exchange simply had no worker
+    // free to dial may hold a bid endpoint and answer every other auction, so "Proxyshop found
+    // it by crawling" would be the same overclaim pointed the other way.
+    render(<ShortlistView shortlist={one(CAPACITY_SLOT)} onAccept={vi.fn()} />)
+    const line = screen.getByTestId(`price-provenance-${CAPACITY_SLOT.bid_ref}`).textContent ?? ''
+    expect(line).not.toContain('found it by crawling')
+    expect(line).not.toContain('no bidding agent')
+    expect(line).toContain('at the list price on its own roster row')
+  })
+
+  it('says the same thing when the stand-in carried no price to attribute', () => {
+    render(
+      <ShortlistView shortlist={one({ ...CAPACITY_SLOT, price: null })} onAccept={vi.fn()} />,
+    )
+    const line = screen.getByTestId(`price-provenance-${CAPACITY_SLOT.bid_ref}`).textContent ?? ''
+    expect(line).not.toContain('did not answer')
+    expect(line).toContain('Nobody asked this shop for a price')
+    expect(line).not.toContain('the number above')
+  })
+
+  it('holds the class and nothing but the class', () => {
+    // The membership rule itself, driven directly, because the sentence above is only as good
+    // as this list. Both members of the never-asked class, and the ten families that mean a
+    // solicitation DID go out — `collect.py::FALLBACK_REASONS`, checked one by one.
+    expect(NEVER_ASKED_FALLBACK_FAMILIES).toEqual([
+      NO_AGENT_FALLBACK_FAMILY,
+      FAN_OUT_CAPACITY_FALLBACK_FAMILY,
+    ])
+    expect(neverAsked('tier_0_no_agent:no_bid_endpoint')).toBe(true)
+    expect(neverAsked('fan_out_capacity_exhausted')).toBe(true)
+    for (const asked of [
+      'no_response',
+      'response_timed_out',
+      'response_after_deadline',
+      'response_carried_no_bid',
+      'response_not_stamped',
+      'arrival_stamp_unparseable',
+      'bid_price_unreconcilable',
+      'bid_claim_unprovenanced',
+      'store_declined:no_matching_product',
+      'store_refused:422',
+    ]) {
+      expect(neverAsked(asked)).toBe(false)
+    }
+    // A family this copy has not caught up with falls to the asked sentence, which is the one
+    // that names the exchange's own token beside it rather than inventing a cause.
+    expect(neverAsked('a_word_this_app_has_never_seen')).toBe(false)
+    expect(neverAsked(null)).toBe(false)
+  })
+})
+
+/**
+ * WHICH BADGE BELONGS TO WHICH PROMISE.
+ *
+ * Nothing dedupes a store's own claim keys: `exchange.ranking.serving.shortlist_commitments`
+ * appends every schema-valid `Claim` ("`offer["commitments"]` is whatever the store wrote") and
+ * `buyer_svc.accept.labels.slot_commitments` keeps them all. So two promises under one name is a
+ * shape a shop can send today, and the fold joined its rows to the card's badges with
+ * `find(key === key)` — which gave every promise under that name the FIRST one's badge. A shop
+ * chooses the order of its own claims array, so a shop chose which badge its weakest promise
+ * inherited, in the one place a shopper goes to decide whom to believe.
+ */
+describe('two promises under one name', () => {
+  const TWO_CLAIMS = [
+    {
+      claim_id: null,
+      key: 'free_returns',
+      claim_type: 'return_policy',
+      value: '30 day window',
+      unit: null,
+      source_span: null,
+      provenance: {
+        source: 'owner_statement',
+        ref: 'envelope:gaiaherbs.com:demo-1#free_returns',
+        observed_at: '2026-01-01T00:00:00Z',
+        authority_rank: 1,
+      },
+    },
+    {
+      claim_id: null,
+      key: 'free_returns',
+      claim_type: 'return_policy',
+      value: 'lifetime, no questions',
+      unit: null,
+      source_span: null,
+      provenance: {
+        source: 'seller_asserted',
+        ref: 'pitch:gaiaherbs.com:1#free_returns',
+        observed_at: '2026-09-08T19:23:18Z',
+        authority_rank: 5,
+      },
+    },
+  ]
+
+  /** The card's half of the same two rows, labelled as the service labels them. */
+  const TWO_COMMITMENTS = [
+    { key: 'free_returns', value: '30 day window', unit: null, label: LABEL_STORE_CONFIRMED },
+    { key: 'free_returns', value: 'lifetime, no questions', unit: null, label: LABEL_UNVERIFIED },
+  ]
+
+  it('does not hand the unverified one the verified one’s badge', async () => {
+    const { fetcher } = recordingFetcher(recordBodyWith({ commitments: TWO_CLAIMS }))
+    render(
+      <ShortlistView
+        shortlist={one({ ...LIVE_SLOT, commitments: TWO_COMMITMENTS })}
+        onAccept={vi.fn()}
+        recordFetcher={fetcher}
+      />,
+    )
+    await openTheRecord(LIVE_BID)
+    const badges = screen
+      .getAllByTestId(`record-claim-label-${LIVE_BID}`)
+      .map((badge) => badge.textContent)
+    expect(badges).toEqual([LABEL_STORE_CONFIRMED, LABEL_UNVERIFIED])
+    // And the weak promise's own row carries the weak badge, beside the evidence that earned it.
+    const rows = screen.getAllByTestId(`record-claim-${LIVE_BID}`)
+    expect(rows).toHaveLength(2)
+    const asserted = rows[1]!.textContent ?? ''
+    expect(asserted).toContain('lifetime, no questions')
+    expect(asserted).toContain('seller_asserted')
+    expect(asserted).toContain(LABEL_UNVERIFIED)
+    expect(asserted).not.toContain(LABEL_STORE_CONFIRMED)
+  })
+
+  it('shows no badge at all, and says why, when the two lists do not line up', async () => {
+    // The join is by POSITION and the position is CHECKED. Here the card carries a third
+    // promise the record's reader dropped, so position 0 on one side is not position 0 on the
+    // other and the key is not unique — the one shape where no sound join exists. A badge is a
+    // verification signal, so the panel shows none and says so rather than guessing.
+    const { fetcher } = recordingFetcher(recordBodyWith({ commitments: TWO_CLAIMS }))
+    render(
+      <ShortlistView
+        shortlist={one({
+          ...LIVE_SLOT,
+          commitments: [
+            { key: 'ships_in_days', value: 2, unit: 'days', label: LABEL_UNVERIFIED },
+            ...TWO_COMMITMENTS,
+          ],
+        })}
+        onAccept={vi.fn()}
+        recordFetcher={fetcher}
+      />,
+    )
+    await openTheRecord(LIVE_BID)
+    expect(screen.queryAllByTestId(`record-claim-label-${LIVE_BID}`)).toHaveLength(0)
+    const said = screen.getAllByTestId(`record-claim-unjoined-${LIVE_BID}`)
+    expect(said).toHaveLength(2)
+    expect(said[0]!.textContent ?? '').toContain('2 promises under the name free_returns')
+    expect(said[0]!.textContent ?? '').toContain('shows none of them here')
+  })
+
+  it('still joins by a key that is unique, when the positions disagree — the honest direction', async () => {
+    // A join that refused whenever the positions disagreed would be no more useful than one
+    // that never checked: the ordinary drift is one row dropped on one side, and a key that
+    // names exactly one promise on the card is still a sound join. This must not go silent.
+    const { fetcher } = recordingFetcher(
+      recordBodyWith({ commitments: [RECORD_BODY.shortlist.slots[0]!.commitments[1]] }),
+    )
+    render(
+      <ShortlistView
+        shortlist={one({ ...LIVE_SLOT })}
+        onAccept={vi.fn()}
+        recordFetcher={fetcher}
+      />,
+    )
+    await openTheRecord(LIVE_BID)
+    const badges = screen
+      .getAllByTestId(`record-claim-label-${LIVE_BID}`)
+      .map((badge) => badge.textContent)
+    expect(badges).toEqual([LABEL_UNVERIFIED])
+    expect(screen.queryAllByTestId(`record-claim-unjoined-${LIVE_BID}`)).toHaveLength(0)
+  })
+})
+
+/**
+ * WHOSE NUMBER THE AUTHORITY RANK IS.
+ *
+ * `contracts.protocol.Provenance` validates `authority_rank` as `ge=1` and says why —
+ * "validated as `>= 1` rather than pinned to that table, because a hook may legitimately
+ * down-rank a stale observation" — and the identifier appears nowhere in `apps/exchange/src` or
+ * `apps/buyer/svc/src`. So the number is the BID's, and the fold printed it under "how strongly
+ * this network rates that kind of evidence": the platform's authority, over a seller's number,
+ * on the surface where a shopper decides whom to believe.
+ */
+describe('the rank a claim gives its own evidence', () => {
+  const SELLER_RANKED_ONE = [
+    {
+      claim_id: null,
+      key: 'free_returns',
+      claim_type: 'return_policy',
+      value: 'lifetime',
+      unit: null,
+      source_span: null,
+      provenance: {
+        source: 'seller_asserted',
+        ref: 'pitch:gaiaherbs.com:1#free_returns',
+        observed_at: '2026-09-08T19:23:18Z',
+        // The shop's own hook, writing the rank the contract publishes for `owner_statement`
+        // onto a claim it asserts itself. Nothing between that hook and this page compares the
+        // two, which is precisely why the page may not call it the network's rating.
+        authority_rank: 1,
+      },
+    },
+  ]
+
+  it('does not print a bid-written rank as the network’s own rating', async () => {
+    const { fetcher } = recordingFetcher(recordBodyWith({ commitments: SELLER_RANKED_ONE }))
+    render(
+      <ShortlistView
+        shortlist={one({
+          ...LIVE_SLOT,
+          commitments: [{ key: 'free_returns', value: 'lifetime', unit: null, label: LABEL_UNVERIFIED }],
+        })}
+        onAccept={vi.fn()}
+        recordFetcher={fetcher}
+      />,
+    )
+    await openTheRecord(LIVE_BID)
+    const store = screen.getByTestId(`record-store-${LIVE_BID}`).textContent ?? ''
+    expect(store).not.toContain('how strongly this network rates')
+    expect(store).toContain('How strongly the shop rates that evidence')
+    expect(store).toContain('the claim’s own number for its own evidence')
+    // The SCALE is still the network's and is still stated: D30 publishes it, and a number with
+    // no direction on it is unreadable.
+    expect(store).toContain('1 is the strongest evidence this network records')
+    expect(store).toContain('does not check it against the rank published')
+  })
+
+  it('says the shop stated none rather than that the network did not rate it', async () => {
+    const { fetcher } = recordingFetcher(
+      recordBodyWith({
+        commitments: [
+          {
+            ...SELLER_RANKED_ONE[0],
+            provenance: { ...SELLER_RANKED_ONE[0]!.provenance, authority_rank: 0 },
+          },
+        ],
+      }),
+    )
+    render(
+      <ShortlistView
+        shortlist={one({
+          ...LIVE_SLOT,
+          commitments: [{ key: 'free_returns', value: 'lifetime', unit: null, label: LABEL_UNVERIFIED }],
+        })}
+        onAccept={vi.fn()}
+        recordFetcher={fetcher}
+      />,
+    )
+    await openTheRecord(LIVE_BID)
+    const store = screen.getByTestId(`record-store-${LIVE_BID}`).textContent ?? ''
+    expect(store).not.toContain('how strongly this network rates')
+    expect(store).toContain('the claim stated no rank for its own evidence')
+  })
+})
+
+/**
+ * A SLOT WITH NO PROMISES, and whose non-promise it is.
+ *
+ * The fold asserted "that is the ordinary answer for a shop the exchange stood in for" for every
+ * slot with no claims, without ever consulting `slot.fallback` — so a shop that really bid, and
+ * whose card correctly prints no price-provenance line at all, was described in its own record
+ * as a shop the exchange stood in for. It bid. The two surfaces contradicted each other two
+ * inches apart, and the card's own no-commitments line had the mirror-image defect.
+ */
+describe('a slot that promised nothing', () => {
+  const bare = (patch: Partial<ShortlistSlot>): ShortlistSlot => ({
+    ...LIVE_SLOT,
+    commitments: null,
+    ...patch,
+  })
+
+  it('does not call a shop that bid a shop the exchange stood in for', async () => {
+    const { fetcher } = recordingFetcher(recordBodyWith({ commitments: null }))
+    render(
+      <ShortlistView
+        shortlist={one(bare({ fallback: false }))}
+        onAccept={vi.fn()}
+        recordFetcher={fetcher}
+      />,
+    )
+    await openTheRecord(LIVE_BID)
+    const said = screen.getByTestId(`record-no-claims-${LIVE_BID}`).textContent ?? ''
+    expect(said).toContain('published no commitments')
+    expect(said).not.toContain('stood in for')
+    expect(said).toContain('This shop did bid')
+    // And the card agrees with the fold: `fallback: false` prints no provenance line at all.
+    expect(screen.queryByTestId(`price-provenance-${LIVE_BID}`)).toBeNull()
+  })
+
+  it('still says a stand-in is a stand-in — the honest direction', async () => {
+    const { fetcher } = recordingFetcher(recordBodyWith({ commitments: null }))
+    render(
+      <ShortlistView
+        shortlist={one(bare({ fallback: true, fallback_reason: 'no_response' }))}
+        onAccept={vi.fn()}
+        recordFetcher={fetcher}
+      />,
+    )
+    await openTheRecord(LIVE_BID)
+    const said = screen.getByTestId(`record-no-claims-${LIVE_BID}`).textContent ?? ''
+    expect(said).toContain('a shop the exchange stood in for')
+    expect(said).not.toContain('This shop did bid')
+  })
+
+  it('will not guess whose it was when the exchange did not say', async () => {
+    const { fetcher } = recordingFetcher(recordBodyWith({ commitments: null }))
+    const unstated = bare({})
+    delete (unstated as { fallback?: boolean | null }).fallback
+    render(<ShortlistView shortlist={one(unstated)} onAccept={vi.fn()} recordFetcher={fetcher} />)
+    await openTheRecord(LIVE_BID)
+    const said = screen.getByTestId(`record-no-claims-${LIVE_BID}`).textContent ?? ''
+    expect(said).toContain('did not say')
+    // The hypothetical is allowed and the assertion is not: what may not appear is the sentence
+    // that settles it, which is the one the fold printed for every slot.
+    expect(said).not.toContain('a shop the exchange stood in for')
+    expect(said).not.toContain('This shop did bid')
+  })
+
+  it('does not tell a shopper a stand-in’s shop promised nothing', () => {
+    // The card, one paragraph above the fold's sentence and with the same defect: a stand-in is
+    // rebuilt from the roster row with an empty claims list, so "this store promised nothing"
+    // fired on every fallback — including the shop nobody had asked anything of.
+    render(
+      <ShortlistView
+        shortlist={one(bare({ fallback: true, fallback_reason: NO_AGENT_FALLBACK_FAMILY }))}
+        onAccept={vi.fn()}
+      />,
+    )
+    const line = screen.getByTestId(`commitments-${LIVE_BID}`).textContent ?? ''
+    expect(line).toContain('No commitments')
+    expect(line).not.toContain('promised nothing')
+    expect(line).toContain('stand-in')
+  })
+
+  it('still says a bidder that promised nothing promised nothing — the honest direction', () => {
+    render(<ShortlistView shortlist={one(bare({ fallback: false }))} onAccept={vi.fn()} />)
+    const line = screen.getByTestId(`commitments-${LIVE_BID}`).textContent ?? ''
+    expect(line).toContain('this store promised nothing alongside the price')
+  })
+})
+
+/**
+ * A FAILED READ IS NOT AN ANSWER.
+ *
+ * The guard that keeps the fold to one request per mount was set before the await and never
+ * cleared, so a single 503 — a restarted service, a dropped connection — ended the feature for
+ * the session: every card's fold then carried the "could not be read" banner with no way to try
+ * again.
+ */
+describe('reading the record again after a failure', () => {
+  function flakyFetcher(body: unknown): { asked: string[]; fetcher: Fetcher } {
+    const asked: string[] = []
+    const fetcher: Fetcher = async (input) => {
+      asked.push(input)
+      return asked.length === 1
+        ? jsonResponse({ detail: 'the service is restarting' }, 503)
+        : jsonResponse(body, 200)
+    }
+    return { asked, fetcher }
+  }
+
+  it('asks again when a reader opens another fold', async () => {
+    const { asked, fetcher } = flakyFetcher(RECORD_BODY)
+    render(
+      <ShortlistView
+        shortlist={{ auction_id: RECORD_BODY.auction_id, slots: [LIVE_SLOT] }}
+        onAccept={vi.fn()}
+        recordFetcher={fetcher}
+      />,
+    )
+    await openTheRecord(LIVE_BID)
+    await waitFor(() =>
+      expect(screen.getByTestId(`record-failed-${LIVE_BID}`).textContent ?? '').toContain(
+        'HTTP 503',
+      ),
+    )
+    expect(asked).toHaveLength(1)
+
+    // Shut it and open it again: the same gesture that started the first read.
+    fireEvent.click(screen.getByTestId(`record-toggle-${LIVE_BID}`))
+    await waitFor(() => expect(screen.queryByTestId(`record-platform-${LIVE_BID}`)).toBeNull())
+    await openTheRecord(LIVE_BID)
+    await waitFor(() => expect(asked).toHaveLength(2))
+    // The record arrived, the banner is gone, and the panel is showing what it could not before.
+    await waitFor(() => expect(screen.queryByTestId(`record-failed-${LIVE_BID}`)).toBeNull())
+    expect(screen.getByTestId(`record-store-${LIVE_BID}`).textContent ?? '').toContain(
+      'owner_statement',
+    )
+  })
+
+  it('still reads once when the read succeeded, however many folds are opened', async () => {
+    // The honest direction: the retry must not turn one read per mount into one per click.
+    const { asked, fetcher } = recordingFetcher(RECORD_BODY)
+    render(
+      <ShortlistView
+        shortlist={{ auction_id: RECORD_BODY.auction_id, slots: [LIVE_SLOT] }}
+        onAccept={vi.fn()}
+        recordFetcher={fetcher}
+      />,
+    )
+    await openTheRecord(LIVE_BID)
+    fireEvent.click(screen.getByTestId(`record-toggle-${LIVE_BID}`))
+    await waitFor(() => expect(screen.queryByTestId(`record-platform-${LIVE_BID}`)).toBeNull())
+    await openTheRecord(LIVE_BID)
+    expect(asked).toHaveLength(1)
+  })
+})
+
+/**
+ * A SECOND AUCTION UNDER A LIVE MOUNT — the guard and its own dependency, made to agree.
+ *
+ * `readRecord` lists `shortlist.auction_id` in its dependency array, so the callback follows the
+ * auction; the guard beside it used to be a boolean, so the READ did not. A mount that outlived
+ * one auction therefore answered questions about a record it never requested: the panel asserts
+ * "the record names no candidate with this bid reference" and "The record carries no ranking for
+ * this candidate", which are statements about the PREVIOUS auction's body.
+ *
+ * Not reachable through `Journey` today — `Journey.tsx` keys `ShortlistView` on the attempt, so a
+ * second auction remounts — and that is exactly why it is pinned here rather than left to the
+ * keying: nothing in `ShortlistView` can see that key, and the correctness of a guard should not
+ * rest on a caller's prop nobody in this file can check.
+ */
+describe('a second auction under the same mount', () => {
+  const SECOND_AUCTION = 'auction-11111111-2222-3333-4444-555555555555'
+  const SECOND_BID = `${SECOND_AUCTION}:otherherbs.com`
+
+  /** `RECORD_BODY` re-keyed to a second auction, as the service would answer for one. */
+  function secondBody(): unknown {
+    const body = JSON.parse(JSON.stringify(RECORD_BODY)) as {
+      auction_id: string
+      shortlist: { auction_id: string; slots: Record<string, unknown>[] }
+      ranked: Record<string, unknown>[]
+    }
+    body.auction_id = SECOND_AUCTION
+    body.shortlist.auction_id = SECOND_AUCTION
+    body.shortlist.slots[0] = { ...body.shortlist.slots[0], bid_ref: SECOND_BID }
+    body.ranked[0] = { ...body.ranked[0], bid_ref: SECOND_BID }
+    return body
+  }
+
+  /** Answers each auction path with that auction's own body, and records what it was asked. */
+  function perAuctionFetcher(): { fetcher: Fetcher; asked: string[] } {
+    const asked: string[] = []
+    const fetcher: Fetcher = async (input) => {
+      asked.push(input)
+      return jsonResponse(input.includes(SECOND_AUCTION) ? secondBody() : RECORD_BODY, 200)
+    }
+    return { fetcher, asked }
+  }
+
+  it('reads the new auction’s record rather than answering from the old one', async () => {
+    const { asked, fetcher } = perAuctionFetcher()
+    const { rerender } = render(
+      <ShortlistView
+        shortlist={{ auction_id: RECORD_BODY.auction_id, slots: [LIVE_SLOT] }}
+        onAccept={vi.fn()}
+        recordFetcher={fetcher}
+      />,
+    )
+    await openTheRecord(LIVE_BID)
+    expect(asked).toEqual([`/buyer/auctions/${RECORD_BODY.auction_id}`])
+
+    rerender(
+      <ShortlistView
+        shortlist={{
+          auction_id: SECOND_AUCTION,
+          slots: [{ ...LIVE_SLOT, auction_id: SECOND_AUCTION, bid_ref: SECOND_BID }],
+        }}
+        onAccept={vi.fn()}
+        recordFetcher={fetcher}
+      />,
+    )
+    await openTheRecord(SECOND_BID)
+    await waitFor(() => expect(asked).toHaveLength(2))
+    expect(asked[1]).toBe(`/buyer/auctions/${SECOND_AUCTION}`)
+
+    // And it says what the second record holds, not that it holds nothing about this bid.
+    const platform = screen.getByTestId(`record-platform-${SECOND_BID}`).textContent ?? ''
+    expect(platform).not.toContain('names no candidate with this bid reference')
+    expect(platform).not.toContain('carries no ranking for this candidate')
+    expect(screen.getByTestId(`record-store-${SECOND_BID}`).textContent ?? '').toContain(
+      'owner_statement',
+    )
+  })
+
+  it('still reads once across a rerender of the same auction — the honest direction', async () => {
+    // The guard holds an auction id so that it can tell two auctions apart, not so that it can
+    // forget: a mount re-rendered for any other reason (a `busy` flip, an accept landing) must
+    // not turn one read per auction into one per render.
+    const { asked, fetcher } = perAuctionFetcher()
+    const view = (busy: boolean) => (
+      <ShortlistView
+        shortlist={{ auction_id: RECORD_BODY.auction_id, slots: [LIVE_SLOT] }}
+        onAccept={vi.fn()}
+        busy={busy}
+        recordFetcher={fetcher}
+      />
+    )
+    const { rerender } = render(view(false))
+    await openTheRecord(LIVE_BID)
+    expect(asked).toHaveLength(1)
+
+    rerender(view(true))
+    fireEvent.click(screen.getByTestId(`record-toggle-${LIVE_BID}`))
+    await waitFor(() => expect(screen.queryByTestId(`record-platform-${LIVE_BID}`)).toBeNull())
+    await openTheRecord(LIVE_BID)
+    expect(asked).toHaveLength(1)
+  })
+})
+
+/**
+ * A SHOP THAT ANSWERED IS NOT A SHOP THAT WAS SILENT — the other half of the same sweep.
+ *
+ * The card had two sentences for twelve families, so everything that was not `tier_0_no_agent`
+ * read "the shop did not answer this auction". Eight of those families mean the shop ANSWERED:
+ * `store_declined` is the store-agent contract's published 204, and this app's own gloss for it
+ * — `journey/WhyEmpty.tsx::describeDecline`, one screen away from this card — says "that store
+ * was asked, it answered, and its answer was no". The two surfaces made opposite statements
+ * about the same shop, and the false one was on the card a shopper decides from.
+ */
+describe('a shop whose answer the exchange could not use', () => {
+  const declined: ShortlistSlot = {
+    ...NO_AGENT_SLOT,
+    fallback_reason: 'store_declined:no_matching_product',
+  }
+
+  it('does not say a shop that answered stayed silent', () => {
+    render(<ShortlistView shortlist={one(declined)} onAccept={vi.fn()} />)
+    const line = screen.getByTestId(`price-provenance-${declined.bid_ref}`).textContent ?? ''
+    expect(line).not.toContain('did not answer')
+    expect(line).not.toContain('Nobody asked this shop')
+    expect(line).toContain('could not use a price from this shop')
+    // Still Proxyshop's number, still the exchange's own token, and still no invented cause.
+    expect(line).toContain('Proxyshop’s, not this shop’s')
+    expect(line).toContain('nobody at this shop quoted the number above')
+    expect(line).toContain('store_declined:no_matching_product')
+  })
+
+  it('says the same for a family this copy of the vocabulary has never seen', () => {
+    // The exchange grew this vocabulary twice already. An unrecognised family must land on the
+    // sentence that asserts nothing about the shop — never on "it did not answer", which is the
+    // direction the old two-way split failed in.
+    render(
+      <ShortlistView
+        shortlist={one({ ...declined, fallback_reason: 'some_word_added_after_this_page' })}
+        onAccept={vi.fn()}
+      />,
+    )
+    const line = screen.getByTestId(`price-provenance-${declined.bid_ref}`).textContent ?? ''
+    expect(line).not.toContain('did not answer')
+    expect(line).not.toContain('Nobody asked this shop')
+    expect(line).toContain('could not use a price from this shop')
+    expect(line).toContain('some_word_added_after_this_page')
+  })
+
+  it('does not call a shop that was still answering when the window shut a silent one', () => {
+    // `response_timed_out` exists because a slow store was indistinguishable from a dead one —
+    // "24 samples across 4 live agents answered in 1.97 s – 4.73 s against a 3.0 s window …
+    // every entry read `no_response`". Collapsing it back into silence on the card would undo
+    // that fix one layer further out.
+    render(
+      <ShortlistView
+        shortlist={one({ ...declined, fallback_reason: 'response_timed_out' })}
+        onAccept={vi.fn()}
+      />,
+    )
+    const line = screen.getByTestId(`price-provenance-${declined.bid_ref}`).textContent ?? ''
+    expect(line).not.toContain('did not answer')
+    expect(line).toContain('could not use a price from this shop')
+  })
+
+  it('still says the one family that really means nothing came back — the honest direction', () => {
+    // `no_response` is the only family in the twelve that licenses that sentence, and it must
+    // keep it: a page that refused to say anything about any shop would be no more honest than
+    // one that said the wrong thing about all of them.
+    expect(askedAndSilent('no_response')).toBe(true)
+    expect(askedAndSilent('store_declined:no_matching_product')).toBe(false)
+    expect(askedAndSilent('response_timed_out')).toBe(false)
+    expect(askedAndSilent(null)).toBe(false)
+    render(
+      <ShortlistView shortlist={one({ ...declined, fallback_reason: 'no_response' })} onAccept={vi.fn()} />,
+    )
+    const line = screen.getByTestId(`price-provenance-${declined.bid_ref}`).textContent ?? ''
+    expect(line).toContain('did not answer this auction')
+    expect(line).not.toContain('could not use a price from this shop')
+  })
+})
+
+/**
+ * WHAT THE PLATFORM BLOCK MAY CLAIM ABOUT ITSELF.
+ *
+ * The block asserted "every other line here is reachable from no bid at all, so a shop cannot
+ * move one of them by what it says", and the crawled-name rows do not meet that bar:
+ * `exchange.ranking.serving.shortlist_product` publishes `identity` only under
+ * `if identity and _text(identity_ref) == product_ref`, and `product_ref` on that same line is
+ * `read(offer, "product_ref", None)` — the STORE's own offer. So a bid naming a different
+ * product cannot change the crawled name, but it can decide whether there is one, which is a
+ * weaker claim than the one the block was making about itself.
+ */
+describe('the platform block’s claim about its own rows', () => {
+  it('does not say a bid can move nothing here, and says what a bid can move', async () => {
+    const { fetcher } = recordingFetcher(RECORD_BODY)
+    render(<ShortlistView shortlist={one(LIVE_SLOT)} onAccept={vi.fn()} recordFetcher={fetcher} />)
+    await openTheRecord(LIVE_BID)
+    const platform = screen.getByTestId(`record-platform-${LIVE_BID}`).textContent ?? ''
+    expect(platform).not.toContain('a shop cannot move one of them')
+    expect(platform).toContain('joined on that same reference')
+    expect(platform).toContain('can take the name away')
+    // The attribution that IS true of every row survives: none of this is a shop's prose.
+    expect(platform).toContain('no shop wrote a word of any of them')
   })
 })

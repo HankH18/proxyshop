@@ -281,6 +281,32 @@ this market is tuned for. The clarifier asks up to three questions and stops, th
 opens a real auction on the exchange, the store agents price from their own approved
 envelopes, and the shortlist comes back with each slot's reason on it.
 
+**Do not stop at the four cards — two controls on the shortlist are where the demo actually
+lands.**
+
+*"Ask about these options"*, the box under the cards, is the only place a follow-up can go.
+It posts to `POST /buyer/chat/ask`, and the subject is fixed to the rows already on screen:
+the service re-reads this auction's live shortlist off the exchange rather than trusting
+anything the browser sent, and it has no catalogue, no search and no memory. So *"which of
+these is actually third-party tested?"* is in scope and *"find me something cheaper
+elsewhere"* is not. Watch what the answer is laid out as, because it is D55 on one screen:
+the platform's sentence sits in the platform's block under a line saying whether it was
+assembled from the record or written by the shopping agent and checked against it, and each
+shop's own message sits verbatim in that shop's block under that shop's domain. The writer is
+never shown a shop's prose, and a reply that shares a six-word run with one is refused by
+`screen_reasons` in `buyer_svc.chat.answering` and refused again in the browser by
+`readAnswer`. Ask something the record cannot settle and the refusal prints **above** the
+grounds rather than below them — that is deliberate, and it is the answer worth demoing.
+
+*"See the record behind this one"*, the fold at the bottom of each card, is additive: nothing
+that was on the card moved into it. Inside is what had been reaching the browser and being
+rendered by nobody — the crawl snapshot's id and stamp, the whole trust snapshot rather than
+the card's two numbers, the published rank score broken into what each term of the formula
+contributed, every promise's provenance and authority rank, and the rule that authorised a
+discount. The click that opens it is the click that starts the read of
+`GET /buyer/auctions/{auction_id}`, so the card's own half is there immediately and the panel
+says which half is missing if that read fails.
+
 **On this stack there is no sign-in and no gate — type and go.** The SPA asks
 `GET /buyer/auth/sign-in` on load and draws a login form only where the deployment can really
 deliver mail; `.env.example` leaves `PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT` empty and names no
@@ -557,11 +583,19 @@ Re-run it after the corpus moves, and `--check` reports drift instead of writing
 - **The claim grading here is as good as the shipped catalogue snapshots.** They are trimmed
   to sixty products per hosted store; a `product_ref` the graph rosters from outside that
   window grades `ambiguous`, which R19 will not let satisfy a hard constraint.
-- **The shopper journey in §5 supplies its own roster.** The buyer service refuses to open an
-  auction with no candidate set — that is its own fail-closed posture — so the browser path
-  sends `buyer-roster.json` and the exchange uses it rather than the graph. §4 is where the
-  graph is proved, and it is the same exchange, the same request shape and the same auction
-  machine, minus one key in the body.
+- **The shopper journey in §5 supplies its own roster, and the graph still picks the
+  products.** The buyer service refuses to open an auction with no candidate set — that is its
+  own fail-closed posture — so the browser path sends `buyer-roster.json`, and WHICH SHOPS
+  compete is that file's word, not the graph's. Which of a shop's products answers the question
+  is the platform's: `retrieval.roster.repoint_organic_products` re-points a stated row onto the
+  product this exchange's own retrieval says is relevant, wherever it will not vouch for the one
+  the file pinned. Without that, a fixed roster written around the liver cluster answers every
+  other question with a blank screen — measured on this stack over 24 queries the corpus
+  genuinely serves, 3 of 24 returned any slot with it off and 24 of 24 with it on, and 0 of 10
+  off-corpus queries either way. It is on because `EXCHANGE_SHOP_ROSTER=graph` is;
+  `EXCHANGE_REPOINT_ORGANIC_PRODUCTS=none` states the older behaviour and keeps it. §4 is still
+  where the graph picking the SHOPS is proved, and it is the same exchange, the same request
+  shape and the same auction machine, minus one key in the body.
 - **A green container list is not a working demo.** Every container here can report
   healthy while the market is dead, which is why `make demo-check` drives a real auction
   instead of asking the containers how they feel.

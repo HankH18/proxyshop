@@ -1130,9 +1130,11 @@ def rank_auction(
         # declares nothing, and then nothing is ever relaxed (ESC-020's direction).
         network_attributes=readings.attributes,
         # THE SAME PASS, spent on the organic half's honesty check. `readings.identities` is the
-        # platform's own crawled name for each store's rostered product, already fetched two
-        # lines above for the shortlist's product block, and `rank()` uses it to ask whether a
-        # row the PLATFORM manufactured is about what the shopper asked at all.
+        # platform's own crawled name for each store's rostered product — one `catalogue_readings`
+        # call serves both this argument and the shortlist's product block, which reads
+        # `readings.identities` and `readings.product_refs` through `_with_offer_fields` on the
+        # return statement below — and `rank()` uses it to ask whether a row the PLATFORM
+        # manufactured is about what the shopper asked at all.
         #
         # It is the served route's answer to a defect a green ranking could not see. Measured
         # through the buyer service before this argument existed, on the demo roster:

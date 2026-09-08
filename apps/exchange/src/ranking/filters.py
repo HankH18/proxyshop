@@ -821,6 +821,29 @@ def organic_relevance_reason(
        words, or an identity that folds to none, answers ``about=True, decidable=False`` and
        nothing is refused on it.
 
+    ONE RULE NAME, TWO SURFACES, and it is written down here rather than left to be discovered
+    from the audit trail. This layer judges :func:`~exchange.retrieval.relevance.identity_surface`
+    — ``title`` and ``brand``, which is all :func:`~.verification.catalog_identity` returns.
+    The retrieval layer judges :func:`~exchange.retrieval.relevance.candidate_surface`, which is
+    the canonical name, brand, categories, ingredients and attribute keys the graph holds. Both
+    record the verdict under one name, ``content-word-agreement/1``, so a reader of an exclusion
+    reason cannot tell which surface produced it, and the two CAN disagree: a product retrieval
+    kept on a category word can be refused here on its title alone.
+
+    Measured rather than asserted, on the recorded corpus (3,093 products, ten storefronts) with
+    every store's whole catalogue in the snapshot: over 24 in-corpus queries through the graph
+    roster, 89 shortlist slots, this layer refused **one** of them (``"nmn supplement"``), and
+    over the same 24 queries through a stated roster it refused nothing that retrieval had
+    vouched for. The gap is small because this corpus carries no ``Ingredient`` or
+    ``AttributeValue`` nodes at all (measured: 0 and 0) — categories are the only component
+    ``candidate_surface`` adds — so a corpus that DID carry them would widen it. The fix if it
+    ever matters is to judge both layers on one surface, not to loosen this one: a title-only
+    refusal of a product the platform's own retrieval vouched for is this layer overturning a
+    decision made with more evidence.
+
+    It is also, on the graph route, mostly a formality: every row there was already judged by
+    the retrieval layer on the fuller surface before it reached a roster at all.
+
     Args:
         candidate: the projected candidate, carrying ``fallback``.
         query_text: the shopper's own words, off the intent.

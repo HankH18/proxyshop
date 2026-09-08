@@ -58,29 +58,32 @@ index, and the same ablation for the alternatives that were considered:
 
     rule                                       honest served   off-corpus served
     ------------------------------------------ --------------  -----------------
-    shipped (>= 2 content words, or >= half)    35 / 37             2 / 30
-    one shared content word is enough           36 / 37            12 / 30
-    the count arm alone (no share arm)          32 / 37             2 / 30
-    the share arm alone (no count arm)          30 / 37             2 / 30
-    the shipped rule with no stopword list      36 / 37             5 / 30
+    shipped (>= 2 content words, or >= half)    35 / 37             0 / 30
+    one shared content word is enough           36 / 37             7 / 30
+    the count arm alone (no share arm)          32 / 37             0 / 30
+    the share arm alone (no count arm)          30 / 37             0 / 30
+    the shipped rule with no stopword list      36 / 37             3 / 30
+
+**Every cell is the recorded corpus and nothing else**, verified at ``MATCH (p:Product) RETURN
+count(p)`` = 3,093 immediately before the run. An earlier printing of this table read ``2/30``,
+``12/30``, ``2/30``, ``2/30``, ``5/30`` down that column, measured on a shared Neo4j that also
+held another lane's 24-product fixture — keyboards, skillets, scarves, espresso machines and
+trail running shoes (D37: the graph is one database) — so ``"running shoes for trail marathons"``
+and ``"an espresso machine with a milk frother"`` were served by a catalogue that really did
+carry them. That contamination inflated the WHOLE column, not just the shipped row it was
+annotated on. The arguments below are the ones that survived the re-measurement; only the
+numbers moved.
 
 Read the columns together, because each alternative is cheap on one of them and ruinous on the
-other. Accepting ONE shared content word costs six times as many wrong answers for one honest
-query — the single words it lets through are ``coffee`` (from ``Caffeine Powder Pure (Natural
-Coffee Bean)``), ``frother``, ``kids``, ``winter``, ``focus``, ``baking``, ``support`` — which is
-why :data:`MIN_SHARED_TERMS` is two. Dropping the stopword list is the same trade smaller: the
-extra three are queries agreeing with a product on ``for`` and ``a``. And each arm alone loses
-honest queries the other keeps: three and five of them respectively.
+other. Accepting ONE shared content word answers seven off-corpus queries wrongly for one extra
+honest query — the single words it lets through are ``coffee`` (from ``Caffeine Powder Pure
+(Natural Coffee Bean)``), ``frother``, ``kids``, ``winter``, ``focus``, ``baking``, ``support``
+— which is why :data:`MIN_SHARED_TERMS` is two. Dropping the stopword list is the same trade
+smaller: the extra three are queries agreeing with a product on ``for`` and ``a``. And each arm
+alone loses honest queries the other keeps: three and five of them respectively.
 
-**The two off-corpus queries that survive are the rule working, not failing**, and they are left
-in the table rather than tidied away. They are ``"running shoes for trail marathons"`` and ``"an
-espresso machine with a milk frother"``, measured on a shared Neo4j that also held another test
-lane's 24-product fixture — a catalogue of keyboards, skillets, scarves, espresso machines and
-trail running shoes (D37: the graph is one database). Against a graph that really does carry
-``Trail Running Shoe`` and ``Espresso Machine with Steam Wand``, those two queries are served,
-and should be. On the recorded corpus alone the number is 0 of 30. That is the positive control
-this rule most needed: it refuses a query the CATALOGUE has nothing for, not a query about
-another market.
+Zero of thirty is the positive control this rule most needed, and it is the number to re-take
+after any change here: it refuses a query the CATALOGUE has nothing for.
 
 The two honest queries that are not served are ``"something to help my joints"`` and ``"a
 supplement for hair growth"``, and they are RECALL failures of the retriever rather than
@@ -159,9 +162,11 @@ __all__ = [
 #: How many of the query's content words the platform's observed identity must carry for the
 #: product to be about the query, when the query has that many to give.
 #:
-#: **Two, and the second one is the whole guard.** Measured over 30 off-corpus queries: accepting
-#: ONE shared content word serves 12 of them where this rule serves 2, and buys exactly one extra
-#: honest query for it (see the ablation in this module's header). The single words it lets
+#: **Two, and the second one is the whole guard.** Measured over 30 off-corpus queries against
+#: the recorded corpus alone: accepting ONE shared content word serves 7 of them where this rule
+#: serves 0, and buys exactly one extra honest query for it (see the ablation in this module's
+#: header, and the note there about the contaminated column this number used to be read off).
+#: The single words it lets
 #: through are a coffee-bean caffeine powder for a walnut coffee table, a "Nutricost Frother" for
 #: an espresso machine, "Winter Wellness Trio" for winter tyres. One word in common is what an
 #: unrelated query and a catalogue of 3,093 products share by accident; two is not.
@@ -182,7 +187,8 @@ MIN_SHARED_SHARE = 0.5
 #: English and hand-written; the cost of NOT having it is that ``"a walnut coffee table for the
 #: lounge"`` and ``"Nutricost Protein for Women"`` agree on ``for``, and two rows agreeing on a
 #: preposition is the noise this module exists to refuse. Measured on the same 30 off-corpus
-#: queries: with the list, 2 keep rows; without it, 5 do, for one extra honest query.
+#: queries against the recorded corpus alone: with the list, 0 keep rows; without it, 3 do, for
+#: one extra honest query.
 STOPWORDS: frozenset[str] = frozenset(
     """
     a an the and or but of for with without to from in into on at by as is are was were be been
@@ -204,13 +210,30 @@ STOPWORDS: frozenset[str] = frozenset(
 )
 
 #: The detail written on a refusal, before the words are appended. Read by tests and by the
-#: buyer-facing exclusion label, so it is published once here rather than composed at each call
-#: site.
+#: buyer-facing exclusion label (``WhyEmpty.tsx`` prints it verbatim), so it is published once
+#: here rather than composed at each call site.
+#:
+#: **It says who VOUCHES for the row, not who chose it**, and the difference is a claim this
+#: sentence used to make and could not check. It read "so the platform — not the shop — chose
+#: it", which is true when the platform built the roster and false when the caller supplied
+#: one: ``POST /auctions`` accepts a ``roster`` in the request body — that is exactly how
+#: buyer-svc drives it — and ``collect_bids`` mints the fallback offer from the caller's row,
+#: so for a stated roster the platform chose the OFFER and wrote the PITCH but did not
+#: necessarily pick the PRODUCT. What is true of every row this fires on, whatever the roster
+#: source, is that no shop bid for it: ``fallback`` is ``collect_bids``' own verdict, so there
+#: is no seller's voice behind the row and the platform's crawl is the only thing that could
+#: vouch for it. That is what the sentence asserts now.
 OFF_TOPIC_DETAIL = (
     "the platform's own record of this product is not about what was asked. This is an "
-    "organic result, so the platform — not the shop — chose it, and the platform's crawl "
-    "does not connect it to this query"
+    "organic result — no shop bid for it, so the platform's own crawl is the only thing "
+    "vouching for it, and that crawl does not connect it to this query"
 )
+
+
+#: The singular endings that take ``-es`` in English: ``boxes``, ``dishes``, ``churches``,
+#: ``buzzes``, ``glasses``. Every OTHER singular takes a bare ``-s``, and that includes the
+#: whole class this module trips over — a singular ending in ``-e``.
+ES_PLURAL_STEM_ENDINGS: tuple[str, ...] = ("s", "x", "z", "ch", "sh")
 
 
 def _stem(token: str) -> str:
@@ -222,10 +245,54 @@ def _stem(token: str) -> str:
     a wrong shortlist, not a wrong ranking. The retrieval measure this rule sits beside handles
     the rest of the morphology through its trigram half; this only has to stop a plural query
     from missing a singular catalogue.
+
+    **The ``-es`` rule is CONDITIONAL, and that condition is the whole of a measured repair.**
+    It used to fire on any word ending ``es``, stripping two characters from every noun whose
+    singular ends in ``-e`` — so the singular and its own plural landed on different tokens and
+    this function did the one thing its last sentence promises it will not::
+
+        _stem('capsule')  -> 'capsule'      _stem('capsules')  -> 'capsul'
+        _stem('peptide')  -> 'peptide'      _stem('peptides')  -> 'peptid'
+        _stem('lozenge')  -> 'lozenge'      _stem('lozenges')  -> 'lozeng'
+
+    That is not a docstring defect, it is a refusal of honest traffic, and it was reachable
+    through the served route: ``TopicalRelevance().judge('collagen peptide powder tub',
+    'Collagen Peptides')`` answered ``about=False`` on one shared word out of four, while the
+    same question with the plural spelled the same on both sides is served. Measured on the
+    recorded corpus through ``POST /auctions``, before this fix: ``'bovine collagen peptides'``
+    -> 4 slots / 6 shops, ``'bovine collagen peptide'`` -> 2 slots / 2 shops. English adds
+    ``-es`` only after a sibilant (:data:`ES_PLURAL_STEM_ENDINGS`); everywhere else the plural
+    is a bare ``-s``, which the third rule already handles correctly.
+
+    The three guards, and why each length is what it is:
+
+    * ``-ies`` and the bare ``-s`` keep the original four-character floor, which is what keeps
+      ``was``/``its``/``gas``/``this`` intact.
+    * the sibilant ``-es`` gets a THREE-character floor instead, because the sibilant itself is
+      the evidence: nothing in English ends ``-xes`` or ``-ches`` by accident, so ``boxes`` ->
+      ``box`` is safe where a blanket two-character strip is not. At four it would have missed
+      ``boxes`` and then handed it to the ``-s`` rule, which answers ``boxe``.
+    * the bare ``-s`` refuses a word ending ``-ss``, because a doubled s is never a plural
+      marker: ``glass``, ``mass``, ``grass`` keep their s and meet ``glasses`` -> ``glass``
+      through the rule above.
+
+    What it still does not do, stated rather than left to be discovered: irregular plurals are
+    untouched (``feet``, ``mice``), and a stem this leaves is not a word (``gummies`` and
+    ``gummy`` agree on ``gummy``; ``studies`` answers ``study``, which is right, and ``series``
+    answers ``sery``, which is not). Both are the cost of a suffix rule with no lexicon. What
+    matters here is that they are symmetric noise, not a systematic split of one word from its
+    own plural, which is what the ``-es`` rule was.
     """
-    for suffix, replacement in (("ies", "y"), ("es", ""), ("s", "")):
-        if token.endswith(suffix) and len(token) - len(suffix) >= 4:
-            return token[: -len(suffix)] + replacement
+    if token.endswith("ies") and len(token) - 3 >= 4:
+        return token[:-3] + "y"
+    if (
+        token.endswith("es")
+        and len(token) - 2 >= 3
+        and token[:-2].endswith(ES_PLURAL_STEM_ENDINGS)
+    ):
+        return token[:-2]
+    if token.endswith("s") and not token.endswith("ss") and len(token) - 1 >= 4:
+        return token[:-1]
     return token
 
 
@@ -241,6 +308,17 @@ def content_terms(text: str) -> tuple[str, ...]:
     agreeing about the product; a number ATTACHED to a word (``d3``, ``b12``, ``omega3``)
     survives, because that is a name.
 
+    **The stopword test runs on both spellings of a token — as typed and as stemmed** — and
+    the second half is a repair. It used to run on the typed word only, so the PLURAL of a
+    stopword survived as a content word: ``top`` is in :data:`STOPWORDS` and ``tops`` is not,
+    and ``tops`` stems to ``top``, so ``"tank tops"`` contributed a ``top`` term that ``"tank
+    top"`` did not. Same for ``types`` against ``type``. Harmless on the recorded corpus —
+    checked, only ``same`` and ``love`` occur as whole product words — but it made this rule's
+    answer depend on the shopper's plural, which is exactly what :data:`STOPWORDS`' own
+    "dropped from BOTH sides before anything is compared" says it does not. The typed spelling
+    is still tested FIRST and on its own, because a stopword can stem to a non-stopword
+    (``these`` -> ``thes``) and dropping only the stemmed form would have let it through.
+
     Args:
         text: any text — a shopper's query, or a product's observed identity.
 
@@ -253,8 +331,9 @@ def content_terms(text: str) -> tuple[str, ...]:
         if token in STOPWORDS or token.isdigit():
             continue
         stemmed = _stem(token)
-        if stemmed and stemmed not in terms:
-            terms.append(stemmed)
+        if not stemmed or stemmed in STOPWORDS or stemmed in terms:
+            continue
+        terms.append(stemmed)
     return tuple(terms)
 
 
