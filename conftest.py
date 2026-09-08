@@ -44,6 +44,18 @@ What this file guarantees for every pytest run in the repo:
   database. A database that cannot be created is a **failure**, never a skip: a skipped
   datastore test is indistinguishable from a passing one in the metrics.
 
+* **Process-wide wiring seams are put back after every test** (``_process_wide_wiring_seams``
+  below, autouse). ``configure_accept`` writes ``accept.offer._platform_domains`` for the
+  whole process on purpose (T-169), so a pytest session — which configures hundreds of apps
+  where a deployment configures one — used to hand the *next* test whatever the last one
+  wired. Measured at ``5ded118``: that flipped **six** tests of the frozen acceptance suite
+  from green to red purely on collection order, and a gate whose answer depends on what ran
+  before it is not a gate. ``checkout.registry._REGISTRY`` is the second one, found by
+  shuffling the combined suite once the first was closed: hostile test providers registered
+  into it outlive their test and turn ``test_fallback_handoff.py``'s sweep red. The
+  mechanism, the writers and the demonstration live in
+  :mod:`proxyshop_support.process_seams`.
+
 The shared fixtures, in the order they are defined below:
 
 ===================  =========  ==========================================================
@@ -64,6 +76,8 @@ Fixture              Scope      Yields
 ``llm_double``       function   ``LLMDouble`` — deterministic offline LLM (D19).
 ``hash_embedding``   session    ``Callable[[str], list[float]]`` — 1024-d unit vector (D6).
 ===================  =========  ==========================================================
+
+Plus one autouse fixture nothing has to request: ``_process_wide_wiring_seams``.
 """
 
 from __future__ import annotations
@@ -74,7 +88,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from proxyshop_support import reachability, service_markers
+from proxyshop_support import process_seams, reachability, service_markers
 from proxyshop_support.clock import EPOCH, ManualClock
 from proxyshop_support.embedding import EMBEDDING_DIM, hash_embed
 from proxyshop_support.llm_double import LLMDouble
@@ -197,6 +211,40 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
                 item.stash[_DOCKER_SKIP_KEY] = docker_reason
         if model_reason and item.get_closest_marker("needs_model"):
             item.add_marker(pytest.mark.skip(reason=model_reason))
+
+
+# --------------------------------------------------------------------------------------
+# process-wide wiring seams
+# --------------------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _process_wide_wiring_seams() -> Iterator[None]:
+    """Every test leaves the exchange's process-wide wiring seams as it found them.
+
+    Autouse and unconditional, because the writer is *product* code and no test opts in to
+    it: ``configure_accept`` — and ``composition.py`` through it — writes
+    ``accept.offer._platform_domains`` for the whole process by design (T-169), so any test
+    that configures an app is a writer whether its author knew it or not, and
+    ``register_provider`` fills a process-global table the same way. A per-test
+    ``try/finally`` in each of them is the fix that is one forgotten call site away from being
+    no fix at all, which is the same argument that made the seam global in the first place.
+
+    Measured at ``5ded118``, this is worth six tests: the frozen acceptance suite passed 120/120
+    alone and failed six of them behind ``apps/exchange``, entirely because the last app
+    configured before it left a registry that knew nothing about ``store-a``. See
+    :mod:`proxyshop_support.process_seams` for the writer, the reader and the demonstration,
+    and ``apps/exchange/tests/test_process_seam_isolation.py`` for the regression test that
+    drives a real two-suite ordering in a subprocess and proves it can still go red.
+
+    Nothing is imported to do this: a seam whose module is not already in ``sys.modules`` is
+    left alone, so a buyer or trust session pays a dict lookup and nothing else.
+    """
+    taken = process_seams.snapshot()
+    try:
+        yield
+    finally:
+        process_seams.restore(taken)
 
 
 # --------------------------------------------------------------------------------------
