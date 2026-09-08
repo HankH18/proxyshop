@@ -417,12 +417,42 @@ class AcceptedOfferResponse(BaseModel):
 
 
 class AcceptDeniedResponse(BaseModel):
-    """409 — the accept was refused, and ``denial_reason`` names the condition."""
+    """409 — the accept was refused, and ``denial_reason`` names the condition.
+
+    Two fields say the same thing at two different widths, and both are published because
+    they have different readers (T-204).
+
+    ``denial_code`` is the BARE declared code and nothing else — one of the nine members of
+    :data:`~.reasons.DENIAL_REASONS`, which is the same closed vocabulary as
+    ``protocol.schema.json#/$defs/DenialCode``. It is what a client branches on. Until it
+    existed, the only machine-readable form of a refusal was *the token before the first
+    colon of a prose string*, which every consumer had to re-derive with a parser that
+    disagrees with the exchange's on U+001C–U+001F (Python's ``strip`` removes them,
+    JavaScript's ``trim`` keeps them) — a published contract whose correct parsing was a
+    footnote in a description field.
+
+    ``denial_reason`` keeps its exact existing value, ``"<code>: <prose>"``, and is NOT
+    narrowed to the bare code. It is the diagnosis: the host that failed the domain check,
+    the exception the merchant's minting raised, the auction state that made the transition
+    illegal. Tests and operators read it for exactly those words, so replacing it with the
+    code would have thrown the diagnosis away to publish something already published beside
+    it.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     accepted: bool = False
+    #: The composite ``"<code>: <prose>"``. Unchanged, and still the human-readable one.
     denial_reason: str
+    #: The bare declared code — always a member of :data:`~.reasons.DENIAL_REASONS`.
+    #:
+    #: Typed ``str`` rather than an enum ON PURPOSE: this model is constructed on the
+    #: refusal path, and a validation error there would turn a 409 into a 500 — an
+    #: eligibility source's unexpected prose must never be able to take the door down. The
+    #: vocabulary is guaranteed instead by :func:`_denied`, which republishes anything it
+    #: does not recognise as ``unspecified``, and it is PUBLISHED as an ``enum`` on the 409
+    #: in ``packages/contracts/openapi/exchange.openapi.json``.
+    denial_code: str = DENIAL_UNSPECIFIED
 
 
 # =====================================================================================
@@ -713,7 +743,7 @@ def _record_checkout_bridge(machine: AuctionStateMachine, result: Any) -> None:
 
 
 def _denied(reason: str) -> JSONResponse:
-    """The 409 body the contract publishes: ``{accepted, denial_reason}`` and nothing else.
+    """The 409 body the contract publishes: ``{accepted, denial_reason, denial_code}``.
 
     This is where the declared vocabulary becomes a property of the **published surface**
     rather than only of ``accept()`` (T-204). A reason arriving here with a code nothing
@@ -721,6 +751,17 @@ def _denied(reason: str) -> JSONResponse:
     through — is re-published under ``unspecified`` with its words kept intact, so a client
     parsing ``denial_reason`` never has to handle a token outside
     :data:`~.reasons.DENIAL_REASONS`, and no diagnosis is thrown away to achieve that.
+
+    **``denial_code`` is that same token, published as its own field** — the closure T-204
+    asked for. The code was always computed here (it is how the ``unspecified`` republish
+    decides) and was then discarded back into the composite string, so every client had to
+    re-derive it from prose with a parser of its own. Splitting it out costs nothing and is
+    the difference between a machine-readable refusal and a documented convention.
+
+    ``denial_reason`` is deliberately unchanged rather than narrowed to the bare code: the
+    prose after the colon names the host, the exception or the auction state that caused
+    this refusal, and callers — including ``apps/exchange/tests/test_accept_routes.py``,
+    which asserts a rival domain appears in it — legitimately read it for those words.
     """
     # Redacted here as well as at the two places a reason is BUILT, because this function is
     # the published surface's last frame and it is reachable with a string neither of them
@@ -728,13 +769,17 @@ def _denied(reason: str) -> JSONResponse:
     # a locally formatted transition message. A 409 body is the one sink a client reads, so
     # the invariant is asserted where it is published, not only where it is composed.
     text = redact_addresses(reason).strip()
-    if denial_code(text) is None:
+    code = denial_code(text)
+    if code is None:
         text = denial_reason(
             DENIAL_UNSPECIFIED, text or "the accept was refused and named no reason"
         )
+        code = DENIAL_UNSPECIFIED
     return JSONResponse(
         status_code=409,
-        content=AcceptDeniedResponse(accepted=False, denial_reason=text).model_dump(),
+        content=AcceptDeniedResponse(
+            accepted=False, denial_reason=text, denial_code=code
+        ).model_dump(),
     )
 
 

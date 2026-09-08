@@ -21,6 +21,7 @@ it would turn every improved diagnostic into a test failure. Only the token is t
 from __future__ import annotations
 
 import json
+import pathlib
 import re
 from collections.abc import Iterator
 from typing import Any
@@ -355,11 +356,17 @@ def test_describe_keeps_the_reprs_that_carry_information() -> None:
 # The published boundary normalises, so a client never sees an undeclared token
 # =====================================================================================
 def test_the_route_republishes_an_undeclared_reason_under_unspecified() -> None:
-    """A future refusal that invents a token cannot reach a client as one."""
+    """A future refusal that invents a token cannot reach a client as one.
+
+    The key set is asserted EXACTLY, which is why `denial_code` had to be added here in the
+    change that published it (T-204). That is the point of an exact comparison on a published
+    body: a field cannot appear on the wire without someone writing it down.
+    """
     body = json.loads(_denied("teapot: something nobody declared").body)
     assert body == {
         "accepted": False,
         "denial_reason": f"{DENIAL_UNSPECIFIED}: teapot: something nobody declared",
+        "denial_code": DENIAL_UNSPECIFIED,
     }
     assert json.loads(_denied("").body)["denial_reason"].startswith(DENIAL_UNSPECIFIED)
 
@@ -367,7 +374,100 @@ def test_the_route_republishes_an_undeclared_reason_under_unspecified() -> None:
 def test_the_route_leaves_a_declared_reason_exactly_as_it_found_it() -> None:
     """The positive control: normalising everything would satisfy the test above."""
     declared = denial_reason(DENIAL_AUCTION_NOT_ACCEPTABLE, "auction 'a-1' is 'open'")
-    assert json.loads(_denied(declared).body)["denial_reason"] == declared
+    body = json.loads(_denied(declared).body)
+    assert body["denial_reason"] == declared
+    assert body["denial_code"] == DENIAL_AUCTION_NOT_ACCEPTABLE
+
+
+# =====================================================================================
+# T-204 — the 409 publishes the bare code, and the published schema is true of it
+# =====================================================================================
+#
+# Measured before the fix, by DRIVING the built exchange over HTTP: the body carried
+# `{"accepted": false, "denial_reason": "unknown_bid: auction '…' carries no bid '…'; there
+# is nothing to accept"}` and nothing else. The only machine-readable form of the refusal was
+# the token before the first colon of that prose, which every client had to re-derive with a
+# parser of its own — and the two obvious parsers disagree: `str.strip()` removes U+001C-U+001F
+# and JavaScript's `trim()` does not, so `blacklisted: x` reads as `blacklisted` in
+# Python and as nothing in a browser.
+#
+# `denial_reason` is deliberately UNCHANGED. The prose after the colon names the host that
+# failed the domain check, the exception the merchant's minting raised, the auction state that
+# made the transition illegal, and three assertions in `test_accept_routes.py` read it for
+# exactly those words. The code is published BESIDE it, not instead of it.
+def test_every_declared_code_is_served_with_the_bare_code_beside_the_prose() -> None:
+    """Every one of the nine, through the published boundary, prose and code together."""
+    for code in DENIAL_REASONS:
+        body = json.loads(_denied(denial_reason(code, "diagnostic prose")).body)
+        assert body["denial_code"] == code, (
+            f"the 409 for {code!r} published denial_code={body['denial_code']!r}"
+        )
+        assert body["denial_reason"] == f"{code}: diagnostic prose", (
+            "the composite reason lost its prose; the diagnosis is the half a human reads"
+        )
+
+
+def test_every_served_409_validates_against_the_published_contract() -> None:
+    """The check whose absence was the reason an `enum` could not be published honestly.
+
+    ``packages/contracts/tests/test_repro_open_tickets.py``'s T-204 gate used to say, of an
+    ``enum`` on this response: *nothing in this repo validates a live response against this
+    schema, so it would go green while being false.* This is that validation. Every declared
+    code is driven through ``_denied`` — the published surface's last frame, and the only
+    thing that builds this body — and each resulting body is checked against the schema
+    ``exchange.openapi.json`` publishes for the 409, ``additionalProperties: false`` included.
+    A field the service adds and the document does not declare fails here.
+    """
+    from jsonschema import Draft202012Validator
+
+    document = json.loads(
+        (
+            pathlib.Path(__file__).resolve().parents[3]
+            / "packages/contracts/openapi/exchange.openapi.json"
+        ).read_text(encoding="utf-8")
+    )
+    schema = document["paths"]["/auctions/{auction_id}/accept"]["post"]["responses"]["409"][
+        "content"
+    ]["application/json"]["schema"]
+    validator = Draft202012Validator(schema)
+
+    problems: list[str] = []
+    for code in DENIAL_REASONS:
+        for reason in (denial_reason(code), denial_reason(code, "prose: with a second colon")):
+            body = json.loads(_denied(reason).body)
+            for error in validator.iter_errors(body):
+                where = ".".join(str(part) for part in error.absolute_path) or "<root>"
+                problems.append(f"{body} -> {where}: {error.message}")
+
+    assert problems == [], (
+        "the exchange serves 409 bodies its own published contract refuses:\n" + "\n".join(problems)
+    )
+
+
+def test_the_published_409_schema_would_refuse_a_body_with_an_undeclared_code() -> None:
+    """Negative control. The validation above must be able to say no.
+
+    Without this, a schema that had lost its `enum` — or a validator handed the wrong
+    fragment — would pass the test above while enforcing nothing.
+    """
+    from jsonschema import Draft202012Validator
+
+    document = json.loads(
+        (
+            pathlib.Path(__file__).resolve().parents[3]
+            / "packages/contracts/openapi/exchange.openapi.json"
+        ).read_text(encoding="utf-8")
+    )
+    schema = document["paths"]["/auctions/{auction_id}/accept"]["post"]["responses"]["409"][
+        "content"
+    ]["application/json"]["schema"]
+    validator = Draft202012Validator(schema)
+
+    forged = {"accepted": False, "denial_reason": "teapot: x", "denial_code": "teapot"}
+    assert list(validator.iter_errors(forged)), (
+        "the published 409 schema admits an undeclared denial_code, so its vocabulary is "
+        "decoration rather than a constraint"
+    )
 
 
 # =====================================================================================

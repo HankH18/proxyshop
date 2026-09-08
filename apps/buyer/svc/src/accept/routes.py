@@ -179,7 +179,18 @@ class RenderedSlot(BaseModel):
     provenance_labels: list[str]
     labels_source: str
     trust_summary: dict[str, Any] = Field(default_factory=dict)
-    store_domain: str = ""
+    #: The platform's registered domain for this store, or ``null``. **Never ``""``.**
+    #:
+    #: This is the value a page pins the checkout host against, and ``null`` is a real
+    #: answer with a real meaning: *the exchange published no registered domain for this
+    #: store, so this slot's permalink cannot be pinned to a named host.* It used to default
+    #: to ``""``, which a client reads as a present-and-blank domain and skips the check on
+    #: — measured on a devstack run, every rendered slot carried ``store_domain: ""``, the
+    #: page's host cross-check was skipped because the value was falsy, and accept sent
+    #: ``expected_domain: null``. The guarantee could not fire on any deployment and nothing
+    #: said so. ``null`` is loud in the one way that matters: it is not a domain, and no
+    #: comparison against it can silently succeed.
+    store_domain: str | None = None
     #: R2's PRODUCT: ``{"product_ref": ..., "variant_ref": ... | null}``, or ``null``.
     product: dict[str, Any] | None = None
     #: R2's PRICE: both prices, the currency, the stated discount and the expiry, or ``null``.
@@ -216,6 +227,18 @@ class AcceptResponse(BaseModel):
     bid_ref: str
     slot: str
     accepted_at: str
+    #: The domain ``permalink_url``'s host was pinned to, or ``null`` when nothing pinned it.
+    #:
+    #: Published because a caller cannot otherwise tell a checked redirect from an unchecked
+    #: one, and those are different products: with a domain, the host was compared by exact
+    #: lower-cased equality and a mismatch would have been a 502; with ``null``, the permalink
+    #: was checked for scheme and host presence only and could be any host the exchange named.
+    #:
+    #: ``null`` is what a deployment whose exchange publishes no ``store_domain`` gets on every
+    #: accept, which is the state this field exists to make visible rather than to punish — see
+    #: :func:`~buyer_svc.accept.handoff.accept` for why an absent domain is reported loudly
+    #: instead of refused.
+    pinned_to_domain: str | None = None
 
 
 @router.post("/render", response_model=RenderResponse)
@@ -331,6 +354,7 @@ async def accept_route(body: AcceptBody, request: Request) -> AcceptResponse:
         bid_ref=accepted.bid_ref,
         slot=accepted.slot,
         accepted_at=accepted.accepted_at,
+        pinned_to_domain=accepted.pinned_to_domain,
     )
 
 

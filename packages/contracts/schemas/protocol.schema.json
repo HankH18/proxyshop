@@ -478,6 +478,11 @@
           "type": ["array", "null"],
           "items": { "$ref": "#/$defs/Claim" },
           "description": "What this store is promising alongside the price — free returns, a shipping window, a warranty. Every entry is a published `Claim` with real provenance, which is what makes it gradeable later; a commitment the exchange cannot read as one is dropped rather than shown, because the buyer is being told this is a promise somebody can be held to. `null` is spelled out rather than left to `--strict-nullable` to widen (T-195): an optional non-nullable array generates as `list[Claim] | None` in Python regardless, and a schema that did not also say `null` would have pydantic accepting a payload ajv refuses."
+        },
+        "store_domain": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "description": "The host the buyer's browser may be sent to for THIS slot, and the only value the buyer's redirect guard is allowed to pin the exchange's checkout permalink against (R3/D22/C10).\n\nIt is the PLATFORM's registered domain for the store — `exchange.ranking.candidates` writes it from the registry, explicitly never from the bid — because a store that wrote its own domain would be supplying both halves of its own host check. That is why publishing it here is safe and why publishing the slot's `checkout_url` in its place would not be: `checkout_url` is authority for nothing, and a spoofed slot would otherwise certify its own spoofed permalink.\n\nOptional and nullable for the reason `product`, `price` and `commitments` are: `additionalProperties: false` means a required field would break every existing producer on the same commit, and a deployment whose exchange has no `store_id -> domain` registry configured genuinely has no domain to publish.\n\n`null` and ABSENT both mean *the platform holds no registered domain for this store*, and a consumer must treat that as \"this permalink's host cannot be pinned to a store\", never as \"any host is fine\". `\"\"` is NOT a spelling of that — `minLength: 1` makes it invalid — because an empty string is exactly the silent default that made this guarantee inert: a buyer defaulting the field to `\"\"` skipped the host cross-check on every slot of every deployment and nothing said so."
         }
       }
     },

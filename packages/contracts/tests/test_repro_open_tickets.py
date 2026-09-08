@@ -371,32 +371,59 @@ def test_the_python_door_enforces_the_date_time_format_the_typescript_door_enfor
 # =============================================================================================
 
 
-# The marker below is KEPT, and its text was corrected rather than removed — twice now. The
-# assertion is untouched both times; only the `reason` prose changed, because it named bytes
-# that have since moved (T-267 replaced the `"blacklist"` example and the schema stopped being
-# bare; this lane published the code vocabulary as an enum of its own). Keeping a strict-xfail
-# whose stated reason is false is how a gate stops being readable evidence.
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "T-204: exchange.openapi.json still declares NO `enum` on the 409 denial_reason ITSELF, "
-        "and this gate asks for one on that property specifically. Everything that CAN be "
-        "published truthfully now is: a `description`, a `pattern` pinning the nine declared "
-        "codes, an `x-vocabulary` (T-267's lane), and — new — the enumeration itself as "
-        "`protocol.schema.json#/$defs/DenialCode`, generated into both languages, with "
-        "`x-denial-code-schema` on the 409 pointing at it and `contracts/ts/vocabulary.ts` "
-        "publishing the runtime list and the parser. What is left is the composite shape: "
-        "booted and driven over HTTP the field really answers `blacklisted: chargeback fraud` "
-        "and `checkout_refused: RuntimeError: merchant declined to mint`, so an `enum` of the "
-        "bare codes here would be a constraint essentially every real 409 violates. Closing "
-        "this needs the SERVICE to publish a bare code (a `denial_code` field beside this one, "
-        "or `routes._denied` splitting code from prose), which is outside packages/contracts; "
-        "see the contracts lane's NEEDS. Remove this marker with that fix, not before. "
-        "`test_denial_vocabulary.py::"
-        "test_a_real_served_denial_reason_is_not_a_member_of_the_published_enum` is the "
-        "executable form of this paragraph and goes red the day the service changes"
-    ),
-)
+# T-204 CLOSED — the `xfail(strict=True)` marker that stood here is REMOVED in the change that
+# closed it, and the assertion below is REWRITTEN. Both halves need justifying, so both are
+# written down.
+#
+# WHAT WAS DONE. `exchange.accept.routes._denied` now publishes the bare declared code as its
+# own field, `denial_code`, beside the composite `denial_reason` — the first of the two
+# closures this gate's own docstring named ("a `denial_code` field beside this one"). Measured
+# by DRIVING the built exchange over `TestClient` (three refusal shapes, verbatim):
+#
+#   {"accepted": false,
+#    "denial_reason": "unknown_bid: auction 'auction-drive-1' carries no bid 'bid-nope'; there
+#                      is nothing to accept",
+#    "denial_code": "unknown_bid"}
+#   {"accepted": false,
+#    "denial_reason": "blacklisted: static-eligibility: store-a is blacklisted",
+#    "denial_code": "blacklisted"}
+#   {"accepted": false,
+#    "denial_reason": "checkout_refused: OffDomainCheckout: offer checkout_url: checkout_url
+#                      host 'attacker.tld' is not the registered seller domain
+#                      'store-a.example.com' … (url='https://attacker.tld/cart/1:1')",
+#    "denial_code": "checkout_refused"}
+#
+# `denial_code` carries an `enum` in the published document; `denial_reason` keeps its exact
+# previous value and its `pattern`.
+#
+# WHY THE ASSERTION MOVED, AND WHY THAT IS NOT THE GATE BEING ARGUED WITH. The old body read
+# `schema["properties"]["denial_reason"]["enum"]` — the vocabulary had to be on THAT property.
+# Of the two closures the marker itself sanctioned, only one could ever satisfy that line, and
+# it is the destructive one: narrowing `denial_reason` to the bare code and moving the prose
+# elsewhere. That was rejected on measurement rather than taste. `apps/exchange/tests/
+# test_accept_routes.py:293` asserts a rival domain appears in the served `denial_reason`,
+# `:246`/`:261` read it for a prefix and a substring, and the prose after the colon is the
+# only place the failing host, the raising exception and the illegal auction state are
+# published at all. Closing a ticket about an unreadable vocabulary by deleting the diagnosis
+# would trade one defect for another.
+#
+# So the assertion now grades the property the ticket names — *this 409 publishes a bare,
+# enumerated refusal code* — instead of the one property that property was expected to land on.
+# It is strictly STRONGER than what it replaces, in two ways the old line could not be:
+#
+#   * it requires the enum to be non-trivial (more than one member) and every member to be a
+#     bare declared code, so a document could not satisfy it with `enum: ["unspecified"]`;
+#   * it VALIDATES A REAL SERVED BODY against the published schema. The old docstring's own
+#     objection to an `enum` here was that "nothing in this repo validates a live response
+#     against this schema, so it would go green while being false". That hole is now closed:
+#     `apps/exchange/tests/test_accept_denials.py::
+#     test_every_served_409_validates_against_the_published_contract` drives the route over
+#     HTTP for every declared code and validates each body, and this node re-checks the same
+#     property through `_denied` so the document cannot drift from the producer here either.
+#
+# `test_denial_vocabulary.py::test_a_real_served_denial_reason_is_not_a_member_of_the_published
+# _enum` is UNTOUCHED and still passes: `denial_reason` is still composite, which is exactly
+# what it asserts.
 def test_the_published_denial_reason_has_an_enumerated_vocabulary() -> None:
     """A persisted, client-visible field whose values are exception class names.
 
@@ -419,50 +446,73 @@ def test_the_published_denial_reason_has_an_enumerated_vocabulary() -> None:
     as ``unspecified: blacklist``. That was T-267 and it is FIXED: the example now reads
     ``"blacklisted: fixture:blacklisted"``, measured live off ``accept.gate._denial_reason``.
 
-    **Why this gate is still red, and what would close it.** The schema now carries a
-    ``description``, an ``x-vocabulary`` listing the nine codes of
-    ``exchange.accept.DENIAL_REASONS``, and a ``pattern`` that accepts exactly what the
-    service produces (proved against every code, bare and prose-suffixed). What it does NOT
-    carry is ``enum``, and that omission is deliberate: the served field is
-    ``"<code>: <prose>"`` — ``"checkout_refused: OrphanedOffDomainCheckout: ..."`` —
-    so an ``enum`` of the bare codes would be a published constraint that essentially every
-    real 409 violates, and nothing in this repo validates a live response against this schema,
-    so it would go green while being false. Publishing a false contract to close a gate about
-    contract/implementation divergence is the defect wearing the fix's clothes.
+    **How it was closed.** The service publishes the bare code as ``denial_code`` beside the
+    composite ``denial_reason``, and the document declares an ``enum`` on it. The nine codes
+    were already published as ``protocol.schema.json#/$defs/DenialCode`` and generated into
+    Python and TypeScript, with ``contracts/ts/vocabulary.ts`` carrying the runtime list and
+    ``denialCode``, the parser; what was missing was a field on the wire whose every value is
+    a member of that vocabulary, so that a client never has to run the parser at all.
 
-    What *this* package could still do honestly has since been done, and it is not this
-    assertion: the nine codes are now published as the enum ``protocol.schema.json#/$defs/
-    DenialCode``, generated into Python and TypeScript like every other closed vocabulary, with
-    ``x-denial-code-schema`` on this 409 pointing at it and ``contracts/ts/vocabulary.ts``
-    carrying the runtime list plus ``denialCode``, the parser. See ``test_denial_vocabulary.py``.
-    The enumeration is published; what is not enumerated is this composite FIELD.
+    ``denial_reason`` deliberately did NOT become the bare code. It is the diagnosis — the
+    host that failed the domain check, the exception the merchant's minting raised, the
+    auction state that made the transition illegal — and three assertions in
+    ``apps/exchange/tests/test_accept_routes.py`` read it for exactly those words. See the
+    block comment above this test for why that ruled out the other closure.
 
-    Two honest closures, both outside ``packages/contracts``: have the service publish the
-    bare declared code on the wire (``routes._denied`` splitting code from prose — the repair
-    the paragraph below already names), or split the body into ``denial_code`` +
-    ``denial_detail``. Either lets ``enum`` be both present and true.
-
-    The property asserted is the minimum that turns an accident into a contract: the field is
-    enumerated, and the document's own example is a member of the enumeration. It does not say
-    what belongs in the vocabulary, so any repair that names the values passes — including one
-    that stops formatting exception class names into the field and publishes stable codes
-    instead.
+    The property asserted is the minimum that turns an accident into a contract: the 409
+    publishes a bare enumerated code, the enumeration is real (more than one member, every
+    member a declared code), the document's own example carries a member of it, and a body
+    the producer actually builds satisfies the published schema.
     """
+    from exchange.accept import DENIAL_REASONS  # noqa: PLC0415
+    from exchange.accept.reasons import denial_reason  # noqa: PLC0415
+    from exchange.accept.routes import _denied  # noqa: PLC0415
+    from jsonschema import Draft202012Validator  # noqa: PLC0415
+
     document = json.loads((_CONTRACTS / "openapi/exchange.openapi.json").read_text())
     response = document["paths"]["/auctions/{auction_id}/accept"]["post"]["responses"]["409"]
     body = response["content"]["application/json"]
-    schema = body["schema"]["properties"]["denial_reason"]
+    schema = body["schema"]["properties"].get("denial_code")
 
-    assert schema.get("enum"), (
-        "denial_reason is persisted and client-visible but its published vocabulary is "
+    assert schema is not None, (
+        "the 409 publishes no bare refusal code at all; its only machine-readable vocabulary "
+        "would be the token before the first colon of `denial_reason`, which every client has "
+        "to re-derive with a parser of its own: "
+        f"{sorted(body['schema']['properties'])}"
+    )
+    vocabulary = schema.get("enum")
+    assert vocabulary, (
+        "denial_code is persisted and client-visible but its published vocabulary is "
         f"open-ended: {schema}"
     )
-    example = body.get("example", {}).get("denial_reason")
-    if example is not None:
-        assert example in schema["enum"], (
-            f"the document's own example denial_reason {example!r} is not in the vocabulary it "
-            f"publishes: {schema['enum']}"
+    assert len(vocabulary) > 1, (
+        f"a one-member enum is not a vocabulary, it is a constant: {vocabulary}"
+    )
+    assert set(vocabulary) == set(DENIAL_REASONS), (
+        "the published vocabulary is not the one the exchange emits: published "
+        f"{sorted(vocabulary)}, produced {sorted(DENIAL_REASONS)}"
+    )
+
+    example = body.get("example", {}).get("denial_code")
+    assert example in vocabulary, (
+        f"the document's own example denial_code {example!r} is not in the vocabulary it "
+        f"publishes: {vocabulary}"
+    )
+
+    # And the schema is true of what the producer builds — the check whose absence was the
+    # stated reason an `enum` could not be published here honestly.
+    served = json.loads(bytes(_denied(denial_reason(DENIAL_REASONS[0], "some prose")).body))
+    problems = sorted(
+        Draft202012Validator(body["schema"]).iter_errors(served),
+        key=lambda error: list(error.absolute_path),
+    )
+    assert problems == [], (
+        f"a real 409 body does not satisfy the schema published for it: {served} -> "
+        + "; ".join(
+            f"{'.'.join(str(p) for p in e.absolute_path) or '<root>'}: {e.message}"
+            for e in problems
         )
+    )
 
 
 # =============================================================================================
@@ -2713,3 +2763,151 @@ def test_t345_the_typescript_door_refuses_exactly_what_the_python_door_refuses()
             f"the two doors disagree about {name}: python says {py_reasons}, boundary.ts says "
             f"{ts_reasons} for {call}"
         )
+
+
+# =============================================================================================
+# `store_domain` reaches the buyer, so the anti-spoofing guarantee can fire — CLOSED
+# =============================================================================================
+#
+# Gap B, and both halves are in. `ShortlistSlot` DECLARES `store_domain` — the platform's
+# registered domain for the store, and the only value the buyer's redirect guard is allowed to
+# pin the exchange's checkout permalink against (R3/D22/C10). The buyer half publishes it (or
+# `null`, never `""`) on the render route, enforces it exactly on `POST /buyer/shortlist/accept`
+# and reports `pinned_to_domain` either way.
+#
+# The EXCHANGE half was one line, and it has landed. The value was always there and always
+# trustworthy: `exchange.ranking.candidates` writes `store_domain` onto every candidate from
+# the platform's `store_id -> domain` registry, explicitly never from the bid, which is the
+# whole reason it can be trusted as an anti-spoofing anchor. What it lacked was a join —
+# `rank()`'s row projection does not carry it, so `ranking/shortlist.py:build` never saw it —
+# and the join now sits in `ranking/serving.py:_with_offer_fields`, the one function holding the
+# built shortlist and the projected candidates at the same time:
+#
+#     supported["store_domain"] = str(read(candidate, "store_domain", "") or "") or None
+#
+# This node was `xfail(strict=True)` while that line was another lane's to write; the marker is
+# REMOVED in the change that landed it, and the assertion is untouched. `or None` rather than
+# `or ""` is load-bearing and the reason the schema says `minLength: 1`: an exchange with no
+# registry configured must publish *I vouch for no host*, which is a different sentence from
+# *the host is the empty string* — and the empty string is exactly what made this guarantee
+# inert on every slot of every deployment for as long as it existed.
+def _t_store_domain_candidate() -> dict[str, Any]:
+    """One candidate in exactly the shape `ranking.candidates` produces, with a domain."""
+    return {
+        "bid_id": "bid-store-domain-1",
+        "store_id": "store-one",
+        "store_domain": "store-one.example.com",
+        "offer": {
+            "product_ref": "product-1",
+            "unit_price": 100.0,
+            "total_price": 100.0,
+            "currency": "USD",
+        },
+        "claims": [],
+    }
+
+
+def test_the_exchange_candidate_really_carries_the_registered_domain() -> None:
+    """Control, and it PASSES. The value the gate below asks for exists upstream.
+
+    Without this, a red below could mean "the exchange never had a domain to publish", which
+    is a different (and much larger) defect from "it has one and drops it on the way out".
+    """
+    from exchange.ranking.candidates import _registered_domain  # noqa: PLC0415
+
+    class Registry:
+        def domain_for(self, store_id: str) -> str | None:
+            return "store-one.example.com" if store_id == "store-one" else None
+
+    assert _registered_domain(Registry(), "store-one") == "store-one.example.com"
+    assert not _registered_domain(Registry(), "store-two"), (
+        "an unregistered store must resolve to no domain, not to a placeholder"
+    )
+
+
+# The `xfail(strict=True)` that stood here is REMOVED in the change that landed the join it
+# named. The assertion below is untouched — it was written to accept any repair that gets the
+# platform's registered domain onto the slot, and the one that landed is the one it described.
+def test_the_published_shortlist_slot_carries_the_stores_registered_domain() -> None:
+    """A served shortlist slot names the host its checkout permalink may point at.
+
+    Measured on a devstack run before this: every rendered slot carried ``store_domain: ""``,
+    the buyer page's host cross-check was skipped because the value was falsy, and the accept
+    sent ``expected_domain: null``. The guarantee was unreachable by any request.
+
+    The assertion is on the JOIN, not on one spelling of it: any repair that gets the
+    platform's registered domain onto the slot passes, whether it carries the field through
+    ``rank()``'s row projection, joins it in ``_with_offer_fields``, or builds the slot from
+    the candidate directly.
+    """
+    from exchange.ranking.serving import _with_offer_fields  # noqa: PLC0415
+
+    candidate = _t_store_domain_candidate()
+    shortlist = {
+        "auction_id": "auction-store-domain-1",
+        "slots": [
+            {
+                "slot": "fit",
+                "bid_ref": candidate["bid_id"],
+                "fit_score": 0.9,
+                "trust_summary": {},
+                "provenance_labels": [],
+            }
+        ],
+    }
+
+    served = _with_offer_fields(shortlist, [candidate])
+    slot = served["slots"][0]
+
+    assert slot.get("store_domain") == candidate["store_domain"], (
+        "the shortlist slot the exchange publishes carries "
+        f"store_domain={slot.get('store_domain')!r}, but the candidate it was built from "
+        f"carries {candidate['store_domain']!r} — the platform's registry answer is dropped "
+        "between them, so the buyer has nothing to pin the checkout permalink's host against"
+    )
+
+
+def test_a_store_with_no_registered_domain_publishes_null_and_never_the_empty_string() -> None:
+    """The other half of the join, and the half that decides whether any of this works.
+
+    An exchange with no ``store_id -> domain`` registry — or one that holds no row for this
+    store — must publish *I vouch for no host*. ``""`` says something else entirely: it is a
+    string, so every consumer that forgot a truthiness check reads it as a domain that is
+    present and blank and skips the comparison. That is not hypothetical, it is the measured
+    original defect: every rendered slot carried ``store_domain: ""``, the buyer page's host
+    cross-check was skipped because the value was falsy, and the accept sent
+    ``expected_domain: null`` — on every slot of every deployment, silently.
+
+    ``protocol.schema.json`` makes ``""`` INVALID (``minLength: 1``), so this is also the
+    assertion that the exchange cannot serve a slot its own contract refuses.
+    """
+    from exchange.ranking.serving import _with_offer_fields  # noqa: PLC0415
+    from jsonschema import Draft202012Validator  # noqa: PLC0415
+    from packages.contracts.registry import protocol_schema  # noqa: PLC0415
+
+    candidate = {**_t_store_domain_candidate(), "store_domain": ""}
+    shortlist = {
+        "auction_id": "auction-store-domain-2",
+        "slots": [
+            {
+                "slot": "fit",
+                "bid_ref": candidate["bid_id"],
+                "fit_score": 0.9,
+                "trust_summary": {},
+                "provenance_labels": [],
+            }
+        ],
+    }
+
+    slot = _with_offer_fields(shortlist, [candidate])["slots"][0]
+
+    assert slot.get("store_domain") is None, (
+        f"an unregistered store published store_domain={slot.get('store_domain')!r}; only "
+        "null says 'the platform vouches for no host here', and the empty string is the "
+        "value that made this guarantee inert"
+    )
+
+    bundle = dict(protocol_schema())
+    validator = Draft202012Validator({**bundle, "$ref": "#/$defs/ShortlistSlot"})
+    problems = [error.message for error in validator.iter_errors(slot)]
+    assert problems == [], f"the exchange served a slot its own contract refuses: {problems}"

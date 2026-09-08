@@ -154,11 +154,69 @@ def _run(argv: Sequence[str], *, cwd: Path) -> None:
         )
 
 
+#: ``Field(None, ...)`` — a default passed POSITIONALLY, which the pydantic mypy plugin does
+#: not read as a default at all.
+_POSITIONAL_NONE_DEFAULT = "= Field(None, "
+
+
+def _normalise_optional_field_defaults(target: Path) -> None:
+    """Rewrite ``Field(None, …)`` as ``Field(default=None, …)`` in the generated module.
+
+    This is the same class of fix as ``--field-constraints`` above, and it is here for the
+    same reason: the generator emits something pydantic accepts and mypy does not.
+
+    ``datamodel-code-generator`` writes an OPTIONAL field that also carries a constraint as
+    ``store_domain: str | None = Field(None, min_length=1)``. Pydantic reads that as a
+    defaulted field. The pydantic **mypy plugin** reads only the ``default=`` keyword, so it
+    synthesizes ``__init__`` with that argument REQUIRED — and every existing construction of
+    the model becomes ``error: Missing named argument``. Measured on the change that added
+    ``ShortlistSlot.store_domain``: one new optional field with ``minLength: 1`` turned
+    ``exchange/ranking/shortlist.py:193`` red, a call site that is correct and that nobody
+    touched. The bare `= None` form the generator uses for UNconstrained optionals
+    (``product``, ``price``, ``commitments``) has never had this problem, which is why it took
+    a constrained one to surface it.
+
+    The rewrite is semantically identical to pydantic — ``Field``'s first positional parameter
+    IS ``default`` — so nothing about the runtime model changes. It runs on every field rather
+    than one, so the next optional-with-a-constraint costs nobody an afternoon.
+    """
+    source = target.read_text(encoding="utf-8")
+    if _POSITIONAL_NONE_DEFAULT not in source:
+        return
+    target.write_text(
+        source.replace(_POSITIONAL_NONE_DEFAULT, "= Field(default=None, "), encoding="utf-8"
+    )
+    # Re-format: the rewrite lengthens every line it touches and the generated file is checked
+    # by `ruff format --check` like any other. Same formatter the generator itself was told to
+    # use, for the reason `--formatters` gives — but invoked BY ABSOLUTE PATH, because
+    # `subprocess` resolves a bare program name against the PARENT process's PATH and not
+    # against the `env` `_run` builds, so a bare `"ruff"` raises FileNotFoundError for exactly
+    # the caller `_run`'s PATH surgery exists to serve (measured: `.venv/bin/python -m
+    # contracts.codegen` from a shell with no venv activated).
+    # NOT `Path(sys.executable).resolve()`: this repo's venv is a uv venv, whose `bin/python`
+    # is a symlink into `~/.local/share/uv/python/...`. Resolving it lands in the INTERPRETER's
+    # bin directory, which holds no `ruff`, so the "absolute path" would be an absolute path to
+    # nothing. The unresolved parent is `.venv/bin`, which is where the tool actually lives.
+    ruff = next(
+        (
+            candidate
+            for candidate in (
+                Path(sys.executable).parent / "ruff",
+                Path(sys.executable).resolve().parent / "ruff",
+            )
+            if candidate.is_file()
+        ),
+        None,
+    )
+    _run([str(ruff) if ruff else "ruff", "format", "--quiet", str(target)], cwd=REPO_ROOT)
+
+
 def generate_python(output: Path | None = None) -> Path:
     """Write the Pydantic models. Returns the path written."""
     target = PYTHON_OUT if output is None else output
     target.parent.mkdir(parents=True, exist_ok=True)
     _run(_datamodel_codegen_argv(target), cwd=REPO_ROOT)
+    _normalise_optional_field_defaults(target)
     return target
 
 

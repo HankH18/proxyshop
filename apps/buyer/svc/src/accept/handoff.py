@@ -121,6 +121,9 @@ class AcceptedOffer:
     accepted_at: str
     called: str
     response: Any = None
+    #: The domain ``permalink_url``'s host was pinned to, or ``None`` when nothing pinned it.
+    #: See :func:`accept` for why an unpinned accept is reported rather than refused.
+    pinned_to_domain: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """The buyer-facing projection. Never echoes the slot it was built from."""
@@ -131,6 +134,7 @@ class AcceptedOffer:
             "slot": self.slot,
             "accepted_at": self.accepted_at,
             "called": self.called,
+            "pinned_to_domain": self.pinned_to_domain,
         }
 
     def __getitem__(self, key: str) -> Any:
@@ -214,6 +218,8 @@ def accept(
             ``None`` (the default) means "use the slot's ``store_domain`` if it carries
             one"; an explicit ``""`` means "no host constraint". Never taken from the
             slot's ``checkout_url`` — that value is not authority for anything (R3).
+            When neither the caller nor the slot names a domain, the accept still
+            completes and says so — see **An accept with nothing to pin** below.
         ledger: the accept ledger; defaults to the process-wide one.
         now: timestamp for the receipt.
 
@@ -231,10 +237,32 @@ def accept(
         NoPermalinkReturned: the exchange said yes and returned no permalink.
         UnsafePermalink / OffDomainPermalink: the exchange's permalink is not somewhere a
             browser may be sent.
+
+    **An accept with nothing to pin.** When neither the caller nor the slot names a domain,
+    the permalink is still checked for scheme, host presence and the parse/raw-text
+    disagreements :mod:`~buyer_svc.accept.permalink` refuses — but its host is compared
+    against nothing. That accept COMPLETES, and it is loud about it in the two places a
+    consumer can act on: a ``WARNING`` naming the auction, the bid and the permalink, and
+    ``pinned_to_domain=None`` on the receipt, which the served ``POST /buyer/shortlist/accept``
+    publishes. Silence — the old behaviour, a ``DEBUG`` line and a ``""`` nobody could tell
+    from a domain — is the one thing it is not.
+
+    It is not a refusal because the deployment that produces it is a legitimate one: an
+    exchange with no ``store_id -> domain`` registry configured publishes
+    ``store_domain: null`` on every slot, and refusing would take checkout away from every
+    buyer on it rather than telling anyone the registry is missing. A deployment that has
+    decided its registry is mandatory can refuse in one line at its composition root, on the
+    published ``pinned_to_domain``; a deployment that has not decided is not served by
+    guessing on its behalf.
     """
     auction_id, bid_ref, slot_name, slot_domain = _slot_reference(slot)
 
-    domain = slot_domain if expected_domain is None else str(expected_domain)
+    # `None` and `""` are DIFFERENT here and the difference is the whole guarantee: `None`
+    # from the caller means "use the slot's domain", `""` from the caller means "I am
+    # deliberately not constraining the host". `slot_domain` is already normalised to
+    # `None`-or-a-real-host by `_slot_reference`, so `pinned` is a domain or nothing, and
+    # never the empty string that used to make those two cases indistinguishable.
+    pinned = slot_domain if expected_domain is None else (str(expected_domain) or None)
 
     book = ledger if ledger is not None else accepted()
     book.claim(auction_id)
@@ -258,20 +286,39 @@ def accept(
                 f"{type(response).__name__}). R3 forbids the buyer minting one of its own, "
                 f"so this buyer is not being sent anywhere."
             )
-        permalink = verify_permalink(raw, domain, what="the exchange's checkout permalink")
+        permalink = verify_permalink(raw, pinned or "", what="the exchange's checkout permalink")
     except Exception:
         book.release(auction_id)
         raise
 
     book.record(auction_id, permalink)
-    if not domain:
-        # Worth a line in the log rather than nothing: on today's `ShortlistSlot` contract
-        # there is no store domain to compare against, so the host check ran with scheme
-        # and host-presence only. A composition root that knows the domain should pass it.
-        _log.debug(
-            "accepted auction %s with no expected store domain; the permalink host was not "
-            "pinned to a store",
+    if pinned is None:
+        # WARNING, not DEBUG, and it is the loudest thing this function is allowed to be.
+        #
+        # A buyer being redirected to a host nothing pinned is a security-relevant event, not
+        # a routine one: the permalink was checked for scheme and host presence and could name
+        # any host the exchange chose. It was a DEBUG line for as long as `ShortlistSlot`
+        # carried no `store_domain` at all, which made it true of every accept and therefore
+        # noise; now that the contract publishes the field, this fires only when the platform
+        # really holds no registered domain for the store, and an operator needs to see that.
+        #
+        # It is a log and a published `pinned_to_domain: null` rather than a REFUSAL, and the
+        # deployment that decides it is this: an exchange with no `store_id -> domain`
+        # registry configured publishes `store_domain: null` on every slot, so refusing here
+        # would mean no buyer on that deployment could ever reach a checkout — a missing
+        # diagnostic turned into a total outage. It would also brick the shipped browser
+        # client, which sends `expected_domain: null` when it has no domain to send. Refusing
+        # is available and is one line; it belongs to a deployment that has decided its
+        # registry is mandatory, not to this default.
+        _log.warning(
+            "accepted auction %s (bid %s) with NO expected store domain: the exchange "
+            "published no store_domain for this slot and the caller named none, so the "
+            "checkout permalink %r was verified for scheme and host presence only and its "
+            "host was NOT pinned to a store. If this deployment's exchange has a registered "
+            "domain for this store, the shortlist slot is dropping it.",
             auction_id,
+            bid_ref,
+            permalink,
         )
     moment = (now or datetime.now(UTC)).astimezone(UTC)
     return AcceptedOffer(
@@ -282,11 +329,18 @@ def accept(
         accepted_at=moment.isoformat().replace("+00:00", "Z"),
         called=name,
         response=response,
+        pinned_to_domain=pinned,
     )
 
 
-def _slot_reference(slot: Any) -> tuple[str, str, str, str]:
-    """``(auction_id, bid_ref, slot_name, store_domain)`` off a slot, or refuse."""
+def _slot_reference(slot: Any) -> tuple[str, str, str, str | None]:
+    """``(auction_id, bid_ref, slot_name, store_domain)`` off a slot, or refuse.
+
+    The domain is ``None`` — never ``""`` — when the slot names none, so a caller cannot
+    accidentally treat "no registered domain" as a host to compare against. See
+    :func:`buyer_svc.accept.labels.slot_store_domain`, which normalises the same three
+    spellings of absence for the render path.
+    """
     if slot is None or isinstance(slot, (str, bytes, int, float, bool)):
         raise UnusableSlot(
             f"accept() takes the shortlist slot the buyer chose, not {type(slot).__name__} "
@@ -306,7 +360,12 @@ def _slot_reference(slot: Any) -> tuple[str, str, str, str]:
             f"but answered without an id, and following a checkout for it would mean "
             f"guessing which auction the buyer meant."
         )
-    return auction_id, bid_ref, text(read(slot, "slot", "")), text(read(slot, "store_domain", ""))
+    return (
+        auction_id,
+        bid_ref,
+        text(read(slot, "slot", "")),
+        text(read(slot, "store_domain", None)) or None,
+    )
 
 
 def _accept_entrypoint(exchange_client: Any) -> tuple[str, Any]:

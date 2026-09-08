@@ -42,8 +42,22 @@ def test_no_route_is_declared_that_design_does_not_pin() -> None:
     assert extra == [], f"routes declared but not pinned in DESIGN §Interfaces: {extra}"
 
 
-def test_all_five_domains_have_a_document() -> None:
-    assert set(documents()) == {"exchange", "store-agent", "merchant", "trust", "ingest"}
+def test_every_domain_that_serves_routes_has_a_document() -> None:
+    """Six, not five. `buyer` joined in the change that published `buyer.openapi.json`.
+
+    The name of this test used to be `test_all_five_domains_have_a_document`, and the count in
+    it was the only thing standing between "the buyer publishes no contract" and a green
+    build: a service with no document did not fail this assertion, it satisfied it. Spelling
+    the set out is what makes a seventh service's absence visible too.
+    """
+    assert set(documents()) == {
+        "buyer",
+        "exchange",
+        "store-agent",
+        "merchant",
+        "trust",
+        "ingest",
+    }
 
 
 def test_there_are_examples_to_check() -> None:
@@ -92,7 +106,7 @@ def test_the_documents_are_openapi_3_1() -> None:
 def test_the_documents_are_valid_json_on_disk() -> None:
     """They are checked in and read by tooling in two languages; a stray comma is a build break."""
     paths = sorted(OPENAPI_DIR.glob("*.openapi.json"))
-    assert len(paths) == 5
+    assert len(paths) == 6
     for path in paths:
         with path.open(encoding="utf-8") as handle:
             json.load(handle)

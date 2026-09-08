@@ -1,0 +1,3078 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ProxyShop buyer service",
+    "version": "1.0.0",
+    "description": "The shopper-facing service: R1's clarify/confirm loop, R2's shortlist rendering and the buyer-side agent's case for each slot (D55), R3's accept — the one frame that decides where a shopper's browser is sent — R5's coarsened profile, R14's feedback intake, the magic-link session doors, and the deferred live-page check.\n\nPublished in the change that closed the buyer's half of T-317's rule: a route the service ANSWERS is declared here. Before it, `packages/contracts/openapi/` held five documents and none of them was this one, while `buyer_svc.main` mounted six routers and answered these fourteen operations — including an unauthenticated login door and the accept — with nothing in the contract-review process ever looking at them.\n\nEvery body schema below is FastAPI's own, generated from the Pydantic model the route validates against, and `apps/buyer/svc/tests/test_openapi_contract.py` fails if this document and the app disagree. Every example is a REAL response captured by driving the built app over HTTP; none is hand-written. Refusals the handlers raise by hand are published with the `{\"detail\": ...}` shape they actually answer with."
+  },
+  "x-domain": "buyer",
+  "paths": {
+    "/buyer/auctions/{auction_id}": {
+      "get": {
+        "operationId": "readBuyerAuction",
+        "summary": "One auction as this buyer can see it: the shortlist, and the bid journal behind it.",
+        "description": "The live shortlist and the recorded diagnostics for one auction, side by side.",
+        "parameters": [
+          {
+            "name": "auction_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Auction Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The auction. `shortlist` is the live or recorded shortlist; the five arrays are the journal of who was solicited, who answered, who was excluded and why.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "auction_id": {
+                      "type": "string",
+                      "title": "Auction Id"
+                    },
+                    "shortlist": {
+                      "anyOf": [
+                        {
+                          "additionalProperties": true,
+                          "type": "object"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Shortlist"
+                    },
+                    "entries": {
+                      "items": {},
+                      "type": "array",
+                      "title": "Entries",
+                      "default": []
+                    },
+                    "excluded": {
+                      "items": {},
+                      "type": "array",
+                      "title": "Excluded",
+                      "default": []
+                    },
+                    "denied": {
+                      "items": {},
+                      "type": "array",
+                      "title": "Denied",
+                      "default": []
+                    },
+                    "ranked": {
+                      "items": {},
+                      "type": "array",
+                      "title": "Ranked",
+                      "default": []
+                    },
+                    "solicited": {
+                      "items": {},
+                      "type": "array",
+                      "title": "Solicited",
+                      "default": []
+                    },
+                    "recorded_at": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Recorded At"
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "auction_id",
+                    "shortlist"
+                  ],
+                  "title": "AuctionView",
+                  "description": "One auction, with its live half and its recorded half labelled as such."
+                },
+                "example": {
+                  "auction_id": "auc-capture-1",
+                  "shortlist": {
+                    "auction_id": "auc-capture-1",
+                    "slots": [
+                      {
+                        "slot": "fit",
+                        "bid_ref": "bid-one-1",
+                        "store_id": "store-one",
+                        "fit_score": 0.91,
+                        "trust_summary": {
+                          "score": 0.82,
+                          "sample_size": 41
+                        },
+                        "store_domain": "store-one.example.com"
+                      }
+                    ]
+                  },
+                  "entries": [
+                    {
+                      "store_id": "store-one",
+                      "bid_ref": "bid-one-1",
+                      "rank": 1
+                    },
+                    {
+                      "store_id": "store-two",
+                      "bid_ref": "bid-two-1",
+                      "rank": 2
+                    }
+                  ],
+                  "excluded": [
+                    {
+                      "store_id": "store-three",
+                      "reason": "no_stock"
+                    }
+                  ],
+                  "denied": [
+                    {
+                      "store_id": "store-four",
+                      "reason": "trust_floor"
+                    }
+                  ],
+                  "ranked": [
+                    "bid-one-1",
+                    "bid-two-1"
+                  ],
+                  "solicited": [
+                    "store-one",
+                    "store-two",
+                    "store-three",
+                    "store-four"
+                  ],
+                  "recorded_at": "2026-09-07T17:04:11.220417+00:00"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such auction: nothing recorded for it and the exchange has no live shortlist under that id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": "no auction 'auc-nobody-knows': this buyer service holds no record of opening it, and the exchange has no shortlist for it either. One source knowing it would have been enough."
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error Declared by FastAPI for every operation that takes a parameter; this one's parameters admit any string, so no request reaches it and no example could be captured by driving the app."
+          },
+          "503": {
+            "description": "This deployment has no exchange client bound, so there is nobody to ask.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": "this buyer service has no exchange client, so it can say nothing about auction 'auc-capture-1': it neither opened the auction nor has anywhere to ask about it. Point BUYER_DEPLOYMENT at a deployment document naming an exchange_url."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/buyer/auth/magic-link": {
+      "post": {
+        "operationId": "requestMagicLink",
+        "summary": "Send a single-use login link to a buyer's mailbox.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email",
+                    "title": "Email"
+                  }
+                },
+                "type": "object",
+                "required": [
+                  "email"
+                ],
+                "title": "MagicLinkRequest",
+                "description": "What a buyer sends to start a login."
+              },
+              "example": {
+                "email": "Dana.Reyes@Example.com"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted for delivery. Deliberately says nothing about whether the address is known — a 202 for an unknown mailbox is what keeps this door from enumerating buyers.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "expires_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "title": "Expires At"
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "expires_at"
+                  ],
+                  "title": "MagicLinkAccepted",
+                  "description": "The answer. No token, by construction."
+                },
+                "example": {
+                  "expires_at": "2026-09-08T00:10:09.902640Z"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": [
+                    {
+                      "type": "value_error",
+                      "loc": [
+                        "body",
+                        "email"
+                      ],
+                      "msg": "value is not a valid email address: An email address must have an @-sign.",
+                      "input": "dana.reyes",
+                      "ctx": {
+                        "reason": "An email address must have an @-sign."
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The login budget for this subject or this window is spent. `Retry-After` says when to come back. The body deliberately says nothing about whether the address is known — a 429 that only appeared for real mailboxes would enumerate them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": "no login link was sent; please try again later"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "This deployment has no magic-link mail transport configured, so no link can be delivered. The DEFAULT state of an unconfigured deployment, and a 503 rather than a 202 so a caller is not told a link is on its way when none is.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": "no login link was sent: this deployment has no magic-link mail transport configured"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/buyer/auth/session": {
+      "post": {
+        "operationId": "redeemMagicLink",
+        "summary": "Redeem a login link; starts a session under a brand-new pseudonym.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "minLength": 1,
+                    "title": "Token"
+                  }
+                },
+                "type": "object",
+                "required": [
+                  "token"
+                ],
+                "title": "RedeemRequest",
+                "description": "The token out of the emailed link."
+              },
+              "example": {
+                "token": "jzQqyChsJ4cok0_Zbq2Uzpd_uvYGuLOaf1Gb54P2LTw"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "A live session. The pseudonym is minted per session and is never reissued after sign-out.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "session_id": {
+                      "type": "string",
+                      "title": "Session Id"
+                    },
+                    "pseudonym": {
+                      "type": "string",
+                      "title": "Pseudonym"
+                    },
+                    "issued_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "title": "Issued At"
+                    },
+                    "expires_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "title": "Expires At"
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "session_id",
+                    "pseudonym",
+                    "issued_at",
+                    "expires_at"
+                  ],
+                  "title": "SessionView",
+                  "description": "A session as the client is allowed to see it: a pseudonym and two timestamps."
+                },
+                "example": {
+                  "session_id": "gw2Q8WMb_6vB5M-kR8Q9hg",
+                  "pseudonym": "psn-c7a005ea721d11486775c8f363a6621b",
+                  "issued_at": "2026-09-07T23:55:09.908593Z",
+                  "expires_at": "2026-09-08T11:55:09.908593Z"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "This login link is not valid. Unknown, expired and already-used are deliberately one answer — distinguishing them would let a caller probe which links exist.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": "this login link is not valid"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": [
+                    {
+                      "type": "string_too_short",
+                      "loc": [
+                        "body",
+                        "token"
+                      ],
+                      "msg": "String should have at least 1 character",
+                      "input": "",
+                      "ctx": {
+                        "min_length": 1
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "readSession",
+        "summary": "The live session behind an X-Buyer-Session header.",
+        "parameters": [
+          {
+            "name": "X-Buyer-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Buyer-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The session this header names.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "session_id": {
+                      "type": "string",
+                      "title": "Session Id"
+                    },
+                    "pseudonym": {
+                      "type": "string",
+                      "title": "Pseudonym"
+                    },
+                    "issued_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "title": "Issued At"
+                    },
+                    "expires_at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "title": "Expires At"
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "session_id",
+                    "pseudonym",
+                    "issued_at",
+                    "expires_at"
+                  ],
+                  "title": "SessionView",
+                  "description": "A session as the client is allowed to see it: a pseudonym and two timestamps."
+                },
+                "example": {
+                  "session_id": "gw2Q8WMb_6vB5M-kR8Q9hg",
+                  "pseudonym": "psn-c7a005ea721d11486775c8f363a6621b",
+                  "issued_at": "2026-09-07T23:55:09.908593Z",
+                  "expires_at": "2026-09-08T11:55:09.908593Z"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `X-Buyer-Session` header, or no live session behind it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": "an X-Buyer-Session header is required"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error Declared by FastAPI for every operation that takes a parameter; this one's parameters admit any string, so no request reaches it and no example could be captured by driving the app."
+          }
+        }
+      },
+      "delete": {
+        "operationId": "closeSession",
+        "summary": "Sign out. The pseudonym stays retired and is never reissued.",
+        "parameters": [
+          {
+            "name": "X-Buyer-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Buyer-Session"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Signed out. No body."
+          },
+          "401": {
+            "description": "No `X-Buyer-Session` header.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": "an X-Buyer-Session header is required"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error Declared by FastAPI for every operation that takes a parameter; this one's parameters admit any string, so no request reaches it and no example could be captured by driving the app."
+          }
+        }
+      }
+    },
+    "/buyer/feedback": {
+      "post": {
+        "operationId": "submitFeedback",
+        "summary": "Record one buyer's feedback as a trust ledger event (R14).",
+        "description": "Record one answered prompt as a ``feedback`` ledger event (R14).",
+        "parameters": [
+          {
+            "name": "X-Buyer-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Buyer-Session"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "order": {
+                    "properties": {
+                      "order_ref": {
+                        "type": "string",
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "pattern": "^[A-Za-z0-9_.:#/-]{1,200}$",
+                        "title": "Order Ref"
+                      },
+                      "store_id": {
+                        "type": "string",
+                        "maxLength": 200,
+                        "pattern": "^[A-Za-z0-9_.:#/-]{1,200}$|^$",
+                        "title": "Store Id",
+                        "default": ""
+                      },
+                      "auction_id": {
+                        "type": "string",
+                        "maxLength": 200,
+                        "pattern": "^[A-Za-z0-9_.:#/-]{1,200}$|^$",
+                        "title": "Auction Id",
+                        "default": ""
+                      },
+                      "routed": {
+                        "anyOf": [
+                          {
+                            "type": "boolean"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Routed"
+                      },
+                      "network_routed": {
+                        "anyOf": [
+                          {
+                            "type": "boolean"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Network Routed"
+                      },
+                      "routed_by_network": {
+                        "anyOf": [
+                          {
+                            "type": "boolean"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Routed By Network"
+                      },
+                      "status": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "title": "Status",
+                        "default": ""
+                      },
+                      "buyer_pseudonym": {
+                        "type": "string",
+                        "maxLength": 200,
+                        "pattern": "^[A-Za-z0-9_.:#/-]{1,200}$|^$",
+                        "title": "Buyer Pseudonym",
+                        "default": ""
+                      }
+                    },
+                    "additionalProperties": true,
+                    "type": "object",
+                    "required": [
+                      "order_ref"
+                    ],
+                    "title": "OrderBody",
+                    "description": "One order, as much of it as this service needs to answer R14's question.\n\n``extra=\"allow\"`` because a real order record carries plenty more and truncating it here\nwould make the route's answer differ from the library's for the same order. Only the fields\nbelow are ever read."
+                  },
+                  "response": {
+                    "additionalProperties": true,
+                    "type": "object",
+                    "title": "Response"
+                  },
+                  "event_id": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "pattern": "^[A-Za-z0-9_.:#/-]{1,200}$|^$",
+                    "title": "Event Id",
+                    "default": ""
+                  }
+                },
+                "type": "object",
+                "required": [
+                  "order",
+                  "response"
+                ],
+                "title": "SubmitBody",
+                "description": "The order, and the answered prompt."
+              },
+              "example": {
+                "order": {
+                  "order_ref": "ord-capture-101",
+                  "store_id": "store-one",
+                  "auction_id": "auc-capture-1",
+                  "routed": true,
+                  "status": "delivered"
+                },
+                "response": {
+                  "question_id": "matched_pitch",
+                  "choice": "yes_as_described"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Recorded. The `event_id` is the ledger's, and re-submitting the same one is a 409 rather than a second event.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "event_id": {
+                      "type": "string",
+                      "title": "Event Id"
+                    },
+                    "kind": {
+                      "type": "string",
+                      "title": "Kind"
+                    },
+                    "ts": {
+                      "type": "string",
+                      "title": "Ts"
+                    },
+                    "order_ref": {
+                      "type": "string",
+                      "title": "Order Ref"
+                    },
+                    "store_id": {
+                      "type": "string",
+                      "title": "Store Id"
+                    },
+                    "auction_id": {
+                      "type": "string",
+                      "title": "Auction Id"
+                    },
+                    "matched_pitch": {
+                      "type": "boolean",
+                      "title": "Matched Pitch"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "title": "Reason"
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "event_id",
+                    "kind",
+                    "ts",
+                    "order_ref",
+                    "store_id",
+                    "auction_id",
+                    "matched_pitch",
+                    "reason"
+                  ],
+                  "title": "FeedbackEventView",
+                  "description": "The ledger event the submission became, as the client is allowed to see it."
+                },
+                "example": {
+                  "event_id": "fb-e4b06be254dd4f47be5e2558918c39a5",
+                  "kind": "feedback",
+                  "ts": "2026-09-07T23:55:09.939010Z",
+                  "order_ref": "ord-capture-101",
+                  "store_id": "store-one",
+                  "auction_id": "auc-capture-1",
+                  "matched_pitch": true,
+                  "reason": "yes_as_described"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "This order was not routed by the network, so there is no R14 feedback to take for it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": {
+                    "message": "no feedback was recorded for order 'ord-capture-202': the network did not route this order, so R14 offers no feedback prompt for it. Feedback is taken only from buyers the network actually routed — otherwise a store can move its own trust score with reviews of orders it was never given.",
+                    "reason": "the network did not route this order, so R14 offers no feedback prompt for it. Feedback is taken only from buyers the network actually routed — otherwise a store can move its own trust score with reviews of orders it was never given."
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Feedback for this order was already recorded; the body carries the `event_id` of the one that was.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": {
+                    "message": "feedback for order 'ord-capture-101' has already been recorded; R14 offers one structured prompt per routed order, and a second submission would move the store's trust score twice for one purchase.",
+                    "event_id": "fb-e4b06be254dd4f47be5e2558918c39a5"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": {
+                    "message": "<7 characters, which is not an option id> is not one of this prompt's options. R14's prompt is structured: the answer must be one of ['yes_as_described', 'as_described_but_late', 'not_as_described', 'wrong_item', 'never_arrived'], and free text is not an option the buyer was offered — recording it would put a body on the ledger that 'feedback' has no published shape for.",
+                    "options": [
+                      "yes_as_described",
+                      "as_described_but_late",
+                      "not_as_described",
+                      "wrong_item",
+                      "never_arrived"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/buyer/feedback/prompt": {
+      "post": {
+        "operationId": "feedbackPrompt",
+        "summary": "Offer the post-purchase feedback prompt for one order — or say why it is not offered.",
+        "description": "The one structured prompt for an order, or a reason there is none (R14).\n\nWrites nothing and can reach no ledger sink.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "order": {
+                    "properties": {
+                      "order_ref": {
+                        "type": "string",
+                        "maxLength": 200,
+                        "minLength": 1,
+                        "pattern": "^[A-Za-z0-9_.:#/-]{1,200}$",
+                        "title": "Order Ref"
+                      },
+                      "store_id": {
+                        "type": "string",
+                        "maxLength": 200,
+                        "pattern": "^[A-Za-z0-9_.:#/-]{1,200}$|^$",
+                        "title": "Store Id",
+                        "default": ""
+                      },
+                      "auction_id": {
+                        "type": "string",
+                        "maxLength": 200,
+                        "pattern": "^[A-Za-z0-9_.:#/-]{1,200}$|^$",
+                        "title": "Auction Id",
+                        "default": ""
+                      },
+                      "routed": {
+                        "anyOf": [
+                          {
+                            "type": "boolean"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Routed"
+                      },
+                      "network_routed": {
+                        "anyOf": [
+                          {
+                            "type": "boolean"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Network Routed"
+                      },
+                      "routed_by_network": {
+                        "anyOf": [
+                          {
+                            "type": "boolean"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Routed By Network"
+                      },
+                      "status": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "title": "Status",
+                        "default": ""
+                      },
+                      "buyer_pseudonym": {
+                        "type": "string",
+                        "maxLength": 200,
+                        "pattern": "^[A-Za-z0-9_.:#/-]{1,200}$|^$",
+                        "title": "Buyer Pseudonym",
+                        "default": ""
+                      }
+                    },
+                    "additionalProperties": true,
+                    "type": "object",
+                    "required": [
+                      "order_ref"
+                    ],
+                    "title": "OrderBody",
+                    "description": "One order, as much of it as this service needs to answer R14's question.\n\n``extra=\"allow\"`` because a real order record carries plenty more and truncating it here\nwould make the route's answer differ from the library's for the same order. Only the fields\nbelow are ever read."
+                  }
+                },
+                "type": "object",
+                "required": [
+                  "order"
+                ],
+                "title": "PromptBody",
+                "description": "The order a prompt is being asked about."
+              },
+              "example": {
+                "order": {
+                  "order_ref": "ord-capture-101",
+                  "store_id": "store-one",
+                  "auction_id": "auc-capture-1",
+                  "routed": true,
+                  "status": "delivered"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "`offered: false` with a `reason` is a normal answer, not a refusal: R14 feedback is only ever taken for an order this network actually routed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "offered": {
+                      "type": "boolean",
+                      "title": "Offered"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "title": "Reason",
+                      "default": ""
+                    },
+                    "prompt": {
+                      "anyOf": [
+                        {
+                          "properties": {
+                            "order_ref": {
+                              "type": "string",
+                              "title": "Order Ref"
+                            },
+                            "store_id": {
+                              "type": "string",
+                              "title": "Store Id"
+                            },
+                            "auction_id": {
+                              "type": "string",
+                              "title": "Auction Id"
+                            },
+                            "question_id": {
+                              "type": "string",
+                              "title": "Question Id"
+                            },
+                            "question": {
+                              "type": "string",
+                              "title": "Question"
+                            },
+                            "input_type": {
+                              "type": "string",
+                              "title": "Input Type"
+                            },
+                            "options": {
+                              "items": {
+                                "properties": {
+                                  "id": {
+                                    "type": "string",
+                                    "title": "Id"
+                                  },
+                                  "label": {
+                                    "type": "string",
+                                    "title": "Label"
+                                  },
+                                  "matched_pitch": {
+                                    "type": "boolean",
+                                    "title": "Matched Pitch"
+                                  }
+                                },
+                                "type": "object",
+                                "required": [
+                                  "id",
+                                  "label",
+                                  "matched_pitch"
+                                ],
+                                "title": "OptionView",
+                                "description": "One option on the prompt. Three fields, none of which admits typing."
+                              },
+                              "type": "array",
+                              "title": "Options"
+                            }
+                          },
+                          "type": "object",
+                          "required": [
+                            "order_ref",
+                            "store_id",
+                            "auction_id",
+                            "question_id",
+                            "question",
+                            "input_type",
+                            "options"
+                          ],
+                          "title": "PromptView",
+                          "description": "The one prompt. A single object, never a list — R14 offers one question, not a survey."
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "offered"
+                  ],
+                  "title": "PromptResponse",
+                  "description": "Whether there is a prompt for this order, and if not, why not."
+                },
+                "example": {
+                  "offered": true,
+                  "reason": "",
+                  "prompt": {
+                    "order_ref": "ord-capture-101",
+                    "store_id": "store-one",
+                    "auction_id": "auc-capture-1",
+                    "question_id": "matched_pitch",
+                    "question": "Did what arrived match what the store pitched?",
+                    "input_type": "single_select",
+                    "options": [
+                      {
+                        "id": "yes_as_described",
+                        "label": "Yes — it was what the store described",
+                        "matched_pitch": true
+                      },
+                      {
+                        "id": "as_described_but_late",
+                        "label": "Yes, but it arrived later than promised",
+                        "matched_pitch": true
+                      },
+                      {
+                        "id": "not_as_described",
+                        "label": "No — it was not what the store described",
+                        "matched_pitch": false
+                      },
+                      {
+                        "id": "wrong_item",
+                        "label": "No — a different item arrived",
+                        "matched_pitch": false
+                      },
+                      {
+                        "id": "never_arrived",
+                        "label": "It never arrived",
+                        "matched_pitch": false
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": [
+                    {
+                      "type": "bool_type",
+                      "loc": [
+                        "body",
+                        "order",
+                        "routed"
+                      ],
+                      "msg": "Input should be a valid boolean",
+                      "input": "yes"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/buyer/intent/clarify": {
+      "post": {
+        "operationId": "clarifyIntent",
+        "summary": "Turn a shopper's dialogue into a structured intent, and name what is still unresolved (R1).",
+        "description": "Ask at most three questions and hand back the structured intent (R1).\n\nCreates nothing. There is no auction client in this function's scope.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "turns": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array",
+                    "minItems": 1,
+                    "title": "Turns"
+                  }
+                },
+                "type": "object",
+                "required": [
+                  "turns"
+                ],
+                "title": "ClarifyBody",
+                "description": "The buyer's utterances so far, oldest first."
+              },
+              "example": {
+                "turns": [
+                  "I need a gift for my brother",
+                  "he drinks a lot of coffee",
+                  "under $30 and it has to arrive this week"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The intent so far, the questions still worth asking, and what remains unresolved. `confirmed` is false here by construction — clarifying never opens an auction.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "questions": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array",
+                      "title": "Questions"
+                    },
+                    "intent": {
+                      "additionalProperties": true,
+                      "type": "object",
+                      "title": "Intent"
+                    },
+                    "unresolved": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array",
+                      "title": "Unresolved"
+                    },
+                    "confirmed": {
+                      "type": "boolean",
+                      "title": "Confirmed",
+                      "default": false
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "questions",
+                    "intent",
+                    "unresolved"
+                  ],
+                  "title": "ClarifyResponse",
+                  "description": "What the buyer is shown, and what they are being asked.\n\n``confirmed`` is here and is always ``false``: the client that renders this screen\nreads one field to know whether anything has been committed, rather than inferring it."
+                },
+                "example": {
+                  "questions": [
+                    "What are you shopping for, and what will you use it for?",
+                    "What is the most you would want to spend?",
+                    "Are there any must-haves - a size, a colour, a material - that would rule an option out?"
+                  ],
+                  "intent": {
+                    "intent_id": "int-92b6816bdfe941269086a32fd6d6936f",
+                    "cluster_id": "cl-f63ee102f7a96f9e",
+                    "query": "I need a gift for my brother; he drinks a lot of coffee",
+                    "hard_constraints": [
+                      {
+                        "field": "price_usd",
+                        "op": "lte",
+                        "value": 30.0
+                      }
+                    ],
+                    "preferences": [],
+                    "currency": "USD",
+                    "budget_band": "0-50",
+                    "created_at": "2026-09-07T23:55:09.887633Z",
+                    "schema_version": "1.0.0",
+                    "category": "coffee"
+                  },
+                  "unresolved": [
+                    "constraints"
+                  ],
+                  "confirmed": false
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": "clarify() needs at least one non-empty buyer utterance; got ['   ']. There is no honest intent to derive from an empty dialogue."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/buyer/intent/confirm": {
+      "post": {
+        "operationId": "confirmIntent",
+        "summary": "Confirm an intent and open the auction for it (R1).",
+        "description": "Create the one auction a confirmed intent is entitled to (R1).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "intent": {
+                    "additionalProperties": true,
+                    "type": "object",
+                    "title": "Intent"
+                  },
+                  "confirmed": {
+                    "type": "boolean",
+                    "title": "Confirmed",
+                    "default": false
+                  },
+                  "profile": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Profile"
+                  },
+                  "roster": {
+                    "anyOf": [
+                      {
+                        "items": {
+                          "additionalProperties": true,
+                          "type": "object"
+                        },
+                        "type": "array"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Roster"
+                  },
+                  "bid_timeout_seconds": {
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "exclusiveMinimum": 0.0
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Bid Timeout Seconds"
+                  }
+                },
+                "type": "object",
+                "required": [
+                  "intent"
+                ],
+                "title": "ConfirmBody",
+                "description": "The intent the buyer just confirmed, and their confirmation."
+              },
+              "example": {
+                "intent": {
+                  "intent_id": "int-92b6816bdfe941269086a32fd6d6936f",
+                  "cluster_id": "cl-f63ee102f7a96f9e",
+                  "query": "I need a gift for my brother; he drinks a lot of coffee",
+                  "hard_constraints": [
+                    {
+                      "field": "price_usd",
+                      "op": "lte",
+                      "value": 30.0
+                    }
+                  ],
+                  "preferences": [],
+                  "currency": "USD",
+                  "budget_band": "0-50",
+                  "created_at": "2026-09-07T23:55:09.887633Z",
+                  "schema_version": "1.0.0",
+                  "category": "coffee"
+                },
+                "confirmed": true,
+                "profile": {
+                  "pseudonym": "psn-4f2a91c0d3b57e86",
+                  "buckets": {
+                    "region": "US-West",
+                    "budget_band": "10-50",
+                    "frequency_tier": "regular",
+                    "categories": [
+                      "coffee"
+                    ],
+                    "recency": "this-month"
+                  }
+                },
+                "roster": [
+                  {
+                    "store_id": "store-one",
+                    "endpoint": "https://store-one.invalid/bid"
+                  },
+                  {
+                    "store_id": "store-two",
+                    "endpoint": "https://store-two.invalid/bid"
+                  }
+                ],
+                "bid_timeout_seconds": 8.0
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The auction the exchange created for this intent.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "auction_id": {
+                      "type": "string",
+                      "title": "Auction Id"
+                    },
+                    "intent_id": {
+                      "type": "string",
+                      "title": "Intent Id"
+                    },
+                    "created_at": {
+                      "type": "string",
+                      "title": "Created At"
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "auction_id",
+                    "intent_id",
+                    "created_at"
+                  ],
+                  "title": "ConfirmResponse"
+                },
+                "example": {
+                  "auction_id": "auc-capture-1",
+                  "intent_id": "int-92b6816bdfe941269086a32fd6d6936f",
+                  "created_at": "2026-09-07T23:55:09.891450Z"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The intent was not confirmed, or it was already confirmed and its auction already exists.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": "the buyer has not confirmed this intent (confirmed=False), so no auction may be created (R1). `confirmed` must be exactly True: a truthy string such as 'false' is a refusal here, not a confirmation."
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": [
+                    {
+                      "loc": [
+                        "body",
+                        "confirmed"
+                      ],
+                      "msg": "Input should be a valid boolean",
+                      "type": "bool_type"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/buyer/livecheck/run": {
+      "post": {
+        "operationId": "runLiveChecks",
+        "summary": "Drain the deferred live-page check queue.",
+        "description": "Check the pages queued by earlier renders, and publish what disagreed.\n\nAnswers 200 with an empty ``records`` when there is nothing queued, rather than 404: \"no\nstore needed checking\" is a successful answer to this question.",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 32,
+              "minimum": 1,
+              "default": 32,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What this drain did. `checked: 0` with an empty queue is the ordinary answer and is not an error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "checked": {
+                      "type": "integer",
+                      "title": "Checked"
+                    },
+                    "contradicted": {
+                      "type": "integer",
+                      "title": "Contradicted"
+                    },
+                    "agreed": {
+                      "type": "integer",
+                      "title": "Agreed"
+                    },
+                    "no_verdict": {
+                      "type": "integer",
+                      "title": "No Verdict"
+                    },
+                    "pending": {
+                      "type": "integer",
+                      "title": "Pending"
+                    },
+                    "dropped": {
+                      "type": "integer",
+                      "title": "Dropped"
+                    },
+                    "fetcher": {
+                      "type": "string",
+                      "title": "Fetcher"
+                    },
+                    "records": {
+                      "items": {
+                        "properties": {
+                          "checked_at": {
+                            "type": "string",
+                            "title": "Checked At"
+                          },
+                          "outcome": {
+                            "type": "string",
+                            "title": "Outcome"
+                          },
+                          "surface": {
+                            "type": "string",
+                            "title": "Surface"
+                          },
+                          "fetch_reason": {
+                            "type": "string",
+                            "title": "Fetch Reason",
+                            "default": ""
+                          },
+                          "target": {
+                            "additionalProperties": true,
+                            "type": "object",
+                            "title": "Target"
+                          },
+                          "check": {
+                            "additionalProperties": true,
+                            "type": "object",
+                            "title": "Check"
+                          },
+                          "ledger_events": {
+                            "items": {
+                              "additionalProperties": true,
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "title": "Ledger Events"
+                          }
+                        },
+                        "type": "object",
+                        "required": [
+                          "checked_at",
+                          "outcome",
+                          "surface"
+                        ],
+                        "title": "LiveCheckView",
+                        "description": "One completed check, with both readings and what was compared."
+                      },
+                      "type": "array",
+                      "title": "Records"
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "checked",
+                    "contradicted",
+                    "agreed",
+                    "no_verdict",
+                    "pending",
+                    "dropped",
+                    "fetcher"
+                  ],
+                  "title": "RunResponse",
+                  "description": "What one drain did. ``pending`` is what is left, so a caller knows to come back."
+                },
+                "example": {
+                  "checked": 1,
+                  "contradicted": 0,
+                  "agreed": 1,
+                  "no_verdict": 0,
+                  "pending": 0,
+                  "dropped": 0,
+                  "fetcher": "RecordedPageFetcher",
+                  "records": [
+                    {
+                      "checked_at": "2026-09-07T23:55:09.957609Z",
+                      "outcome": "agrees",
+                      "surface": "seller_live_page",
+                      "fetch_reason": "",
+                      "target": {
+                        "store_id": "store-gaia",
+                        "product_ref": "prod_gaia_reflux",
+                        "url": "https://www.gaiaherbs.com/products/reflux-relief?fixture=agrees.html",
+                        "auction_id": "auc-live-capture",
+                        "bid_ref": "bid-gaia-1",
+                        "slot": "headline",
+                        "asking_price": 29.97,
+                        "currency": "USD",
+                        "claims": [
+                          {
+                            "key": "free_returns",
+                            "value": true,
+                            "unit": null,
+                            "provenance": {
+                              "source": "store_confirmed",
+                              "ref": "bid-gaia-1#free_returns",
+                              "authority_rank": 2
+                            }
+                          }
+                        ],
+                        "offered": true
+                      },
+                      "check": {
+                        "store_id": "store-gaia",
+                        "product_ref": "prod_gaia_reflux",
+                        "url": "https://www.gaiaherbs.com/products/reflux-relief?fixture=agrees.html",
+                        "surface": "seller_live_page",
+                        "outcome": "agrees",
+                        "reason": "the store's own live product page agrees on in_stock, unit_price",
+                        "readings": [
+                          {
+                            "key": "unit_price",
+                            "status": "verified",
+                            "pitched_value": 29.97,
+                            "observed_value": 29.97,
+                            "surface": "schema.org/ld+json",
+                            "compared": "the price the auction served against the price on the store's own product page",
+                            "reason": "the store is asking at or below its own live page price, which is what a discount looks like and is never a contradiction",
+                            "claim_ref": "",
+                            "tolerance": 0.005
+                          },
+                          {
+                            "key": "in_stock",
+                            "status": "verified",
+                            "pitched_value": true,
+                            "observed_value": true,
+                            "surface": "schema.org/ld+json",
+                            "compared": "the pitch's 'in_stock' against the store's own product page",
+                            "reason": "the boolean values agree",
+                            "claim_ref": "in_stock",
+                            "tolerance": 0.02
+                          }
+                        ],
+                        "page": {
+                          "url": "https://www.gaiaherbs.com/products/reflux-relief?fixture=agrees.html",
+                          "values": {
+                            "canonical_name": "Reflux Relief®",
+                            "brand": "Gaia Herbs",
+                            "unit_price": 29.97,
+                            "currency": "USD",
+                            "in_stock": true
+                          },
+                          "surfaces": {
+                            "canonical_name": "schema.org/ld+json",
+                            "brand": "schema.org/ld+json",
+                            "unit_price": "schema.org/ld+json",
+                            "currency": "schema.org/ld+json",
+                            "in_stock": "schema.org/ld+json"
+                          },
+                          "identity": {
+                            "canonical_name": "Reflux Relief®",
+                            "sku": "90C09090"
+                          },
+                          "reason": ""
+                        }
+                      },
+                      "ledger_events": []
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": [
+                    {
+                      "type": "greater_than_equal",
+                      "loc": [
+                        "query",
+                        "limit"
+                      ],
+                      "msg": "Input should be greater than or equal to 1",
+                      "input": "0",
+                      "ctx": {
+                        "ge": 1
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "This deployment's document could not be read, so no check can be run.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": "BUYER_DEPLOYMENT_JSON: not valid JSON (JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1))"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/buyer/livecheck/{auction_id}": {
+      "get": {
+        "operationId": "readLiveChecks",
+        "summary": "The live-page check verdicts recorded for one auction.",
+        "description": "What the platform checked for one auction, and what it declined to check.",
+        "parameters": [
+          {
+            "name": "auction_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Auction Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every verdict recorded for this auction, plus the targets that were refused before any fetch.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "auction_id": {
+                      "type": "string",
+                      "title": "Auction Id"
+                    },
+                    "records": {
+                      "items": {
+                        "properties": {
+                          "checked_at": {
+                            "type": "string",
+                            "title": "Checked At"
+                          },
+                          "outcome": {
+                            "type": "string",
+                            "title": "Outcome"
+                          },
+                          "surface": {
+                            "type": "string",
+                            "title": "Surface"
+                          },
+                          "fetch_reason": {
+                            "type": "string",
+                            "title": "Fetch Reason",
+                            "default": ""
+                          },
+                          "target": {
+                            "additionalProperties": true,
+                            "type": "object",
+                            "title": "Target"
+                          },
+                          "check": {
+                            "additionalProperties": true,
+                            "type": "object",
+                            "title": "Check"
+                          },
+                          "ledger_events": {
+                            "items": {
+                              "additionalProperties": true,
+                              "type": "object"
+                            },
+                            "type": "array",
+                            "title": "Ledger Events"
+                          }
+                        },
+                        "type": "object",
+                        "required": [
+                          "checked_at",
+                          "outcome",
+                          "surface"
+                        ],
+                        "title": "LiveCheckView",
+                        "description": "One completed check, with both readings and what was compared."
+                      },
+                      "type": "array",
+                      "title": "Records"
+                    },
+                    "refused": {
+                      "items": {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      "type": "array",
+                      "title": "Refused"
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "auction_id"
+                  ],
+                  "title": "AuctionChecksResponse",
+                  "description": "What was checked for one auction — and what was not, which is the other half.\n\n``refused`` is never omitted and never merged into ``records``. \"No page was checked for\nthis slot\" and \"the page was checked and agreed\" are different answers, and a surface that\nrendered them the same way would be claiming evidence the platform does not have."
+                },
+                "example": {
+                  "auction_id": "auc-live-capture",
+                  "records": [
+                    {
+                      "checked_at": "2026-09-07T23:55:09.957609Z",
+                      "outcome": "agrees",
+                      "surface": "seller_live_page",
+                      "fetch_reason": "",
+                      "target": {
+                        "store_id": "store-gaia",
+                        "product_ref": "prod_gaia_reflux",
+                        "url": "https://www.gaiaherbs.com/products/reflux-relief?fixture=agrees.html",
+                        "auction_id": "auc-live-capture",
+                        "bid_ref": "bid-gaia-1",
+                        "slot": "headline",
+                        "asking_price": 29.97,
+                        "currency": "USD",
+                        "claims": [
+                          {
+                            "key": "free_returns",
+                            "value": true,
+                            "unit": null,
+                            "provenance": {
+                              "source": "store_confirmed",
+                              "ref": "bid-gaia-1#free_returns",
+                              "authority_rank": 2
+                            }
+                          }
+                        ],
+                        "offered": true
+                      },
+                      "check": {
+                        "store_id": "store-gaia",
+                        "product_ref": "prod_gaia_reflux",
+                        "url": "https://www.gaiaherbs.com/products/reflux-relief?fixture=agrees.html",
+                        "surface": "seller_live_page",
+                        "outcome": "agrees",
+                        "reason": "the store's own live product page agrees on in_stock, unit_price",
+                        "readings": [
+                          {
+                            "key": "unit_price",
+                            "status": "verified",
+                            "pitched_value": 29.97,
+                            "observed_value": 29.97,
+                            "surface": "schema.org/ld+json",
+                            "compared": "the price the auction served against the price on the store's own product page",
+                            "reason": "the store is asking at or below its own live page price, which is what a discount looks like and is never a contradiction",
+                            "claim_ref": "",
+                            "tolerance": 0.005
+                          },
+                          {
+                            "key": "in_stock",
+                            "status": "verified",
+                            "pitched_value": true,
+                            "observed_value": true,
+                            "surface": "schema.org/ld+json",
+                            "compared": "the pitch's 'in_stock' against the store's own product page",
+                            "reason": "the boolean values agree",
+                            "claim_ref": "in_stock",
+                            "tolerance": 0.02
+                          }
+                        ],
+                        "page": {
+                          "url": "https://www.gaiaherbs.com/products/reflux-relief?fixture=agrees.html",
+                          "values": {
+                            "canonical_name": "Reflux Relief®",
+                            "brand": "Gaia Herbs",
+                            "unit_price": 29.97,
+                            "currency": "USD",
+                            "in_stock": true
+                          },
+                          "surfaces": {
+                            "canonical_name": "schema.org/ld+json",
+                            "brand": "schema.org/ld+json",
+                            "unit_price": "schema.org/ld+json",
+                            "currency": "schema.org/ld+json",
+                            "in_stock": "schema.org/ld+json"
+                          },
+                          "identity": {
+                            "canonical_name": "Reflux Relief®",
+                            "sku": "90C09090"
+                          },
+                          "reason": ""
+                        }
+                      },
+                      "ledger_events": []
+                    }
+                  ],
+                  "refused": []
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error Declared by FastAPI for every operation that takes a parameter; this one's parameters admit any string, so no request reaches it and no example could be captured by driving the app."
+          },
+          "503": {
+            "description": "This deployment's document could not be read.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": "BUYER_DEPLOYMENT_JSON: not valid JSON (JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1))"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/buyer/profile": {
+      "get": {
+        "operationId": "readBuyerProfile",
+        "summary": "The coarsened, identity-free profile a store may be shown (R5).",
+        "parameters": [
+          {
+            "name": "X-Buyer-Session",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "X-Buyer-Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Buckets, never values: a band rather than a budget, a region rather than an address. This is the object that crosses to a seller.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "pseudonym": {
+                      "type": "string",
+                      "title": "Pseudonym"
+                    },
+                    "buckets": {
+                      "additionalProperties": true,
+                      "type": "object",
+                      "title": "Buckets"
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "pseudonym",
+                    "buckets"
+                  ],
+                  "title": "ProfileView",
+                  "description": "The store-facing profile. Exactly the two keys DESIGN pins on ``BuyerProfile``."
+                },
+                "example": {
+                  "pseudonym": "psn-c7a005ea721d11486775c8f363a6621b",
+                  "buckets": {
+                    "budget_band": "100-250",
+                    "category_affinity": [
+                      "running-shoes",
+                      "trail-gear"
+                    ],
+                    "frequency_tier": "regular",
+                    "region": "US-OR",
+                    "first_time": false
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No `X-Buyer-Session` header, or no live session behind it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": "no live buyer session"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error Declared by FastAPI for every operation that takes a parameter; this one's parameters admit any string, so no request reaches it and no example could be captured by driving the app."
+          }
+        }
+      }
+    },
+    "/buyer/shortlist/accept": {
+      "post": {
+        "operationId": "acceptShortlistSlot",
+        "summary": "Accept one slot and hand back the exchange's checkout permalink (R3).",
+        "description": "Accept one slot and hand back the exchange's checkout permalink (R3).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "slot": {
+                    "additionalProperties": true,
+                    "type": "object",
+                    "title": "Slot"
+                  },
+                  "expected_domain": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Expected Domain"
+                  }
+                },
+                "type": "object",
+                "required": [
+                  "slot"
+                ],
+                "title": "AcceptBody",
+                "description": "The shortlist slot the buyer chose."
+              },
+              "example": {
+                "slot": {
+                  "slot": "fit",
+                  "bid_ref": "bid-one-1",
+                  "auction_id": "auc-capture-1",
+                  "store_id": "store-one",
+                  "fit_score": 0.91,
+                  "trust_summary": {
+                    "score": 0.82,
+                    "sample_size": 41
+                  },
+                  "store_domain": "store-one.example.com"
+                },
+                "expected_domain": "store-one.example.com"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Accepted. `permalink_url` is the exchange's answer byte for byte — the buyer follows it and mints nothing of its own — and `pinned_to_domain` says which store domain its host was pinned to, or `null` when nothing pinned it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "permalink_url": {
+                      "type": "string",
+                      "title": "Permalink Url"
+                    },
+                    "auction_id": {
+                      "type": "string",
+                      "title": "Auction Id"
+                    },
+                    "bid_ref": {
+                      "type": "string",
+                      "title": "Bid Ref"
+                    },
+                    "slot": {
+                      "type": "string",
+                      "title": "Slot"
+                    },
+                    "accepted_at": {
+                      "type": "string",
+                      "title": "Accepted At"
+                    },
+                    "pinned_to_domain": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Pinned To Domain"
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "permalink_url",
+                    "auction_id",
+                    "bid_ref",
+                    "slot",
+                    "accepted_at"
+                  ],
+                  "title": "AcceptResponse",
+                  "description": "Where the buyer goes next — the exchange's permalink, unmodified."
+                },
+                "example": {
+                  "permalink_url": "https://store-one.example.com/cart/44352913:1?discount=PS-7QK4M2",
+                  "auction_id": "auc-capture-1",
+                  "bid_ref": "bid-one-1",
+                  "slot": "fit",
+                  "accepted_at": "2026-09-07T23:55:09.857490Z",
+                  "pinned_to_domain": "store-one.example.com"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "This auction was already handed off in this process, or the exchange refused the accept. The body names which: an already-accepted auction carries the permalink it was already given, and an exchange refusal carries `denial_reason`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": {
+                    "message": "auction 'auc-capture-1' has already been accepted; one auction gets one checkout. Follow the permalink that was already issued rather than asking the exchange for a second one.",
+                    "permalink_url": "https://store-one.example.com/cart/44352913:1?discount=PS-7QK4M2"
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": "the shortlist slot names no auction_id and no bid_ref, so there is nothing for the exchange to accept. An empty auction_id is a real value here: buyer_svc.intent.confirm returns one when the exchange created the auction but answered without an id, and following a checkout for it would mean guessing which auction the buyer meant."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/buyer/shortlist/render": {
+      "post": {
+        "operationId": "renderShortlist",
+        "summary": "Label a shortlist for display (R2) and make each candidate's case (D55).",
+        "description": "Label a shortlist for display (R2) and make each candidate's case (D55).\n\nCreates nothing and accepts nothing: this handler takes no ``Request``, so it holds no\n``app.state`` and therefore cannot reach an exchange client. That is why the buyer-side\nagent's model client comes from :func:`buyer_svc.pitch.pitch_writer` — a module-level\nseam — rather than from the application.\n\nThe pitches are zipped onto the labelled slots **by position**, from\n:func:`~buyer_svc.accept.labels.slot_rows`, which is the one function both the labeller\nand the pitcher iterate. Ranking is the exchange's published formula (R11) and nothing\nhere reorders, filters or drops a slot: a render with a broken model returns exactly the\nslots a render with a working one returns.\n\nThe live-page check is ENQUEUED here and run nowhere near here. Every sponsored slot —\none with a store-authored message, which is the side D55 says carries the motive — is\nresolved to a product page and appended to an in-memory queue; nothing is fetched, no\nsocket is opened and nothing is waited on, so this response is served at the latency it\nwas served at before. ``POST /buyer/livecheck/run`` is the other end. See\n:mod:`buyer_svc.livecheck.deferred` for why a verdict that lands afterwards still costs\nthe store, and why a synchronous check was rejected on measured numbers.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "shortlist": {
+                    "additionalProperties": true,
+                    "type": "object",
+                    "title": "Shortlist"
+                  },
+                  "intent": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Intent"
+                  },
+                  "profile": {
+                    "anyOf": [
+                      {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Profile"
+                  },
+                  "derive_missing_labels": {
+                    "type": "boolean",
+                    "title": "Derive Missing Labels",
+                    "default": true
+                  }
+                },
+                "type": "object",
+                "required": [
+                  "shortlist"
+                ],
+                "title": "RenderBody",
+                "description": "A shortlist as the exchange sent it, and who it is being rendered for."
+              },
+              "example": {
+                "shortlist": {
+                  "auction_id": "auc-capture-1",
+                  "slots": [
+                    {
+                      "slot": "fit",
+                      "bid_ref": "bid-one-1",
+                      "store_id": "store-one",
+                      "fit_score": 0.91,
+                      "trust_summary": {
+                        "score": 0.82,
+                        "sample_size": 41
+                      },
+                      "provenance_labels": [
+                        "store-confirmed"
+                      ],
+                      "store_domain": "store-one.example.com",
+                      "product": {
+                        "product_ref": "prod-one-espresso",
+                        "variant_ref": "var-one-1kg"
+                      },
+                      "price": {
+                        "unit_price": 24.5,
+                        "total_price": 24.5,
+                        "currency": "USD",
+                        "discount": null,
+                        "expires_at": null
+                      },
+                      "commitments": [
+                        {
+                          "key": "free_returns",
+                          "value": true,
+                          "unit": null,
+                          "provenance": {
+                            "source": "store_confirmed",
+                            "ref": "bid-one-1#free_returns",
+                            "authority_rank": 2
+                          }
+                        },
+                        {
+                          "key": "ships_within_days",
+                          "value": 2,
+                          "unit": "days",
+                          "provenance": {
+                            "source": "store_confirmed",
+                            "ref": "bid-one-1#ships_within_days",
+                            "authority_rank": 2
+                          }
+                        }
+                      ],
+                      "message": "In stock and ready to ship. Free returns for thirty days."
+                    },
+                    {
+                      "slot": "value",
+                      "bid_ref": "bid-two-1",
+                      "store_id": "store-two",
+                      "fit_score": 0.74,
+                      "trust_summary": {
+                        "score": 0.61,
+                        "sample_size": 12
+                      },
+                      "provenance_labels": [
+                        "from their website"
+                      ],
+                      "store_domain": "store-two.example.com",
+                      "product": {
+                        "product_ref": "prod-two-espresso",
+                        "variant_ref": null
+                      },
+                      "price": {
+                        "unit_price": 19.0,
+                        "total_price": 19.0,
+                        "currency": "USD",
+                        "discount": null,
+                        "expires_at": null
+                      },
+                      "commitments": null
+                    }
+                  ]
+                },
+                "intent": {
+                  "query": "single-origin espresso beans under $30",
+                  "budget_band": "10-50",
+                  "constraints": [
+                    "free returns"
+                  ],
+                  "preferences": [
+                    "light roast"
+                  ]
+                },
+                "profile": {
+                  "pseudonym": "psn-4f2a91c0d3b57e86",
+                  "buckets": {
+                    "region": "US-West",
+                    "budget_band": "10-50",
+                    "frequency_tier": "regular",
+                    "categories": [
+                      "coffee"
+                    ],
+                    "recency": "this-month"
+                  }
+                },
+                "derive_missing_labels": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The shortlist, labelled. One entry per slot, in the exchange's order — nothing here reorders, filters or drops a slot.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "slots": {
+                      "items": {
+                        "properties": {
+                          "slot": {
+                            "type": "string",
+                            "title": "Slot"
+                          },
+                          "bid_ref": {
+                            "type": "string",
+                            "title": "Bid Ref"
+                          },
+                          "auction_id": {
+                            "type": "string",
+                            "title": "Auction Id"
+                          },
+                          "fit_score": {
+                            "type": "number",
+                            "title": "Fit Score"
+                          },
+                          "provenance_labels": {
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": "array",
+                            "title": "Provenance Labels"
+                          },
+                          "labels_source": {
+                            "type": "string",
+                            "title": "Labels Source"
+                          },
+                          "trust_summary": {
+                            "additionalProperties": true,
+                            "type": "object",
+                            "title": "Trust Summary"
+                          },
+                          "store_domain": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Store Domain"
+                          },
+                          "product": {
+                            "anyOf": [
+                              {
+                                "additionalProperties": true,
+                                "type": "object"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Product"
+                          },
+                          "price": {
+                            "anyOf": [
+                              {
+                                "additionalProperties": true,
+                                "type": "object"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Price"
+                          },
+                          "commitments": {
+                            "anyOf": [
+                              {
+                                "items": {
+                                  "properties": {
+                                    "key": {
+                                      "type": "string",
+                                      "title": "Key"
+                                    },
+                                    "value": {
+                                      "title": "Value"
+                                    },
+                                    "unit": {
+                                      "anyOf": [
+                                        {
+                                          "type": "string"
+                                        },
+                                        {
+                                          "type": "null"
+                                        }
+                                      ],
+                                      "title": "Unit"
+                                    },
+                                    "label": {
+                                      "type": "string",
+                                      "title": "Label"
+                                    }
+                                  },
+                                  "type": "object",
+                                  "required": [
+                                    "key",
+                                    "label"
+                                  ],
+                                  "title": "RenderedCommitment",
+                                  "description": "One promise a store made, and the buyer-facing label for that promise alone."
+                                },
+                                "type": "array"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Commitments"
+                          },
+                          "pitch": {
+                            "anyOf": [
+                              {
+                                "properties": {
+                                  "platform_case": {
+                                    "type": "string",
+                                    "title": "Platform Case"
+                                  },
+                                  "platform_case_source": {
+                                    "type": "string",
+                                    "title": "Platform Case Source"
+                                  },
+                                  "store_pitch": {
+                                    "anyOf": [
+                                      {
+                                        "type": "string"
+                                      },
+                                      {
+                                        "type": "null"
+                                      }
+                                    ],
+                                    "title": "Store Pitch"
+                                  },
+                                  "voices": {
+                                    "items": {
+                                      "type": "string"
+                                    },
+                                    "type": "array",
+                                    "title": "Voices"
+                                  },
+                                  "facts": {
+                                    "items": {
+                                      "properties": {
+                                        "key": {
+                                          "type": "string",
+                                          "title": "Key"
+                                        },
+                                        "value": {
+                                          "type": "string",
+                                          "title": "Value"
+                                        },
+                                        "kind": {
+                                          "type": "string",
+                                          "title": "Kind"
+                                        },
+                                        "label": {
+                                          "anyOf": [
+                                            {
+                                              "type": "string"
+                                            },
+                                            {
+                                              "type": "null"
+                                            }
+                                          ],
+                                          "title": "Label"
+                                        }
+                                      },
+                                      "type": "object",
+                                      "required": [
+                                        "key",
+                                        "value",
+                                        "kind"
+                                      ],
+                                      "title": "RenderedPitchFact",
+                                      "description": "One true thing the platform holds about this candidate (D55).\n\n``label`` is the buyer-facing provenance label for THIS fact where it has one — a\ncommitment is a published ``Claim`` and carries its source's label — and ``null`` for the\nexchange's own published fields (price, trust), which are not a store's claim and must not\nborrow a store's badge."
+                                    },
+                                    "type": "array",
+                                    "title": "Facts"
+                                  }
+                                },
+                                "type": "object",
+                                "required": [
+                                  "platform_case",
+                                  "platform_case_source",
+                                  "voices",
+                                  "facts"
+                                ],
+                                "title": "RenderedPitch",
+                                "description": "The case for one slot, and whose voice is making it (SPEC core tenet, D55).\n\nThe organic/sponsored split, on the wire. ``platform_case`` is the platform's own case,\nauthored from facts the platform already holds and constrained to them. ``store_pitch`` is\nthe shop's own message, byte for byte — the thing a shop buys by joining — and it is\n``null`` for a scraped shop that has no advocate. The two are never merged: ``voices`` says\nwhich of them the screen is showing and in what order, and both are labelled, because a\nshopper reading the platform's voice has no reason to discount it and must be able to tell\nit from the seller's."
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "type": "object",
+                        "required": [
+                          "slot",
+                          "bid_ref",
+                          "auction_id",
+                          "fit_score",
+                          "provenance_labels",
+                          "labels_source"
+                        ],
+                        "title": "RenderedSlot",
+                        "description": "One slot, labelled for display.\n\n**Every field the screen needs must be declared here.** ``BaseModel``'s ``extra`` defaults\nto ``ignore``, so ``RenderedSlot(**slot.to_dict())`` silently drops a key this class does\nnot name — which is how ``product``, ``price`` and ``commitments`` could have been added\nto :class:`~buyer_svc.accept.labels.LabelledSlot`, dumped by its ``to_dict``, and still\nnever reached a buyer. No exception, no 500, just a field missing from the body.\n\nThe three are ``None`` when the exchange sent nothing readable, and ``None`` is a\ndifferent answer from ``0`` or ``[]`` in every one of them. See\n:mod:`buyer_svc.accept.labels`."
+                      },
+                      "type": "array",
+                      "title": "Slots"
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "slots"
+                  ],
+                  "title": "RenderResponse"
+                },
+                "example": {
+                  "slots": [
+                    {
+                      "slot": "fit",
+                      "bid_ref": "bid-one-1",
+                      "auction_id": "auc-capture-1",
+                      "fit_score": 0.91,
+                      "provenance_labels": [
+                        "store-confirmed"
+                      ],
+                      "labels_source": "exchange",
+                      "trust_summary": {
+                        "score": 0.82,
+                        "sample_size": 41
+                      },
+                      "store_domain": "store-one.example.com",
+                      "product": {
+                        "product_ref": "prod-one-espresso",
+                        "variant_ref": "var-one-1kg"
+                      },
+                      "price": {
+                        "unit_price": 24.5,
+                        "total_price": 24.5,
+                        "currency": "USD",
+                        "discount": null,
+                        "expires_at": null
+                      },
+                      "commitments": [
+                        {
+                          "key": "free_returns",
+                          "value": true,
+                          "unit": null,
+                          "label": "unverified"
+                        },
+                        {
+                          "key": "ships_within_days",
+                          "value": 2,
+                          "unit": "days",
+                          "label": "unverified"
+                        }
+                      ],
+                      "pitch": {
+                        "platform_case": "Price: 24.50 USD. Also free returns: yes; ships within days: 2 days.",
+                        "platform_case_source": "assembled",
+                        "store_pitch": "In stock and ready to ship. Free returns for thirty days.",
+                        "voices": [
+                          "store",
+                          "platform"
+                        ],
+                        "facts": [
+                          {
+                            "key": "price",
+                            "value": "24.50 USD",
+                            "kind": "price",
+                            "label": null
+                          },
+                          {
+                            "key": "free returns",
+                            "value": "yes",
+                            "kind": "commitment",
+                            "label": "unverified"
+                          },
+                          {
+                            "key": "ships within days",
+                            "value": "2 days",
+                            "kind": "commitment",
+                            "label": "unverified"
+                          },
+                          {
+                            "key": "reliability",
+                            "value": "82%",
+                            "kind": "trust",
+                            "label": null
+                          }
+                        ]
+                      }
+                    },
+                    {
+                      "slot": "value",
+                      "bid_ref": "bid-two-1",
+                      "auction_id": "auc-capture-1",
+                      "fit_score": 0.74,
+                      "provenance_labels": [
+                        "from their website"
+                      ],
+                      "labels_source": "exchange",
+                      "trust_summary": {
+                        "score": 0.61,
+                        "sample_size": 12
+                      },
+                      "store_domain": "store-two.example.com",
+                      "product": {
+                        "product_ref": "prod-two-espresso",
+                        "variant_ref": null
+                      },
+                      "price": {
+                        "unit_price": 19.0,
+                        "total_price": 19.0,
+                        "currency": "USD",
+                        "discount": null,
+                        "expires_at": null
+                      },
+                      "commitments": null,
+                      "pitch": {
+                        "platform_case": "Price: 19.00 USD. Also reliability: 61%.",
+                        "platform_case_source": "assembled",
+                        "store_pitch": null,
+                        "voices": [
+                          "platform"
+                        ],
+                        "facts": [
+                          {
+                            "key": "price",
+                            "value": "19.00 USD",
+                            "kind": "price",
+                            "label": null
+                          },
+                          {
+                            "key": "reliability",
+                            "value": "61%",
+                            "kind": "trust",
+                            "label": null
+                          }
+                        ]
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": [
+                    {
+                      "type": "bool_type",
+                      "loc": [
+                        "body",
+                        "derive_missing_labels"
+                      ],
+                      "msg": "Input should be a valid boolean",
+                      "input": "yes"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

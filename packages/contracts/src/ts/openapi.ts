@@ -10,6 +10,7 @@
 import Ajv2020, {type ValidateFunction} from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 
+import buyerDoc from "../../openapi/buyer.openapi.json" with {type: "json"};
 import exchangeDoc from "../../openapi/exchange.openapi.json" with {type: "json"};
 import ingestDoc from "../../openapi/ingest.openapi.json" with {type: "json"};
 import merchantDoc from "../../openapi/merchant.openapi.json" with {type: "json"};
@@ -95,6 +96,27 @@ export const PINNED_ROUTES: readonly Route[] = [
   // store is resolved from the bearer token, so the published operation carries an
   // `Authorization` header and no `store_id` parameter of any kind.
   {domain: "exchange", method: "get", path: "/reports/losses"},
+  // The BUYER service, which until this block published no document at all — not a partial one:
+  // `packages/contracts/openapi/` held five files and `buyer.openapi.json` was not among them,
+  // while `buyer_svc.main` mounted six routers and answered these fourteen operations. Every
+  // gap the three sweeps above found was a service publishing LESS than it served; this was a
+  // whole service outside contract review, including its unauthenticated login door and
+  // `POST /buyer/shortlist/accept`, the frame that decides where a shopper's browser is sent.
+  // `apps/buyer/svc/tests/test_openapi_contract.py` is the served-vs-published gate.
+  {domain: "buyer", method: "post", path: "/buyer/shortlist/render"},
+  {domain: "buyer", method: "post", path: "/buyer/shortlist/accept"},
+  {domain: "buyer", method: "get", path: "/buyer/auctions/{auction_id}"},
+  {domain: "buyer", method: "post", path: "/buyer/auth/magic-link"},
+  {domain: "buyer", method: "post", path: "/buyer/auth/session"},
+  {domain: "buyer", method: "get", path: "/buyer/auth/session"},
+  {domain: "buyer", method: "delete", path: "/buyer/auth/session"},
+  {domain: "buyer", method: "get", path: "/buyer/profile"},
+  {domain: "buyer", method: "post", path: "/buyer/feedback/prompt"},
+  {domain: "buyer", method: "post", path: "/buyer/feedback"},
+  {domain: "buyer", method: "post", path: "/buyer/intent/clarify"},
+  {domain: "buyer", method: "post", path: "/buyer/intent/confirm"},
+  {domain: "buyer", method: "post", path: "/buyer/livecheck/run"},
+  {domain: "buyer", method: "get", path: "/buyer/livecheck/{auction_id}"},
 ];
 
 const HTTP_METHODS = ["get", "put", "post", "delete", "patch", "head", "options", "trace"] as const;
@@ -103,6 +125,7 @@ type Doc = Record<string, unknown>;
 
 /** Every OpenAPI document in this package, keyed by its `x-domain`. */
 export const documents: Readonly<Record<string, Doc>> = Object.freeze({
+  buyer: buyerDoc as unknown as Doc,
   exchange: exchangeDoc as unknown as Doc,
   "store-agent": storeAgentDoc as unknown as Doc,
   merchant: merchantDoc as unknown as Doc,

@@ -530,6 +530,19 @@ def _with_offer_fields(shortlist: Mapping[str, Any], candidates: Sequence[Any]) 
         enriched = dict(slot)
         candidate = by_bid_id.get(str(enriched.get("bid_ref", "")))
         supported = _slot_offer_fields(read(candidate, "offer", None))
+        # The store's REGISTERED domain, joined here for the same reason PRODUCT, PRICE and
+        # COMMITMENTS are: this is the only place holding both the built shortlist and the
+        # projected candidates. `ranking/shortlist.py` is handed rank ROWS, which carry no
+        # domain at all.
+        #
+        # It is the platform registry's answer (`candidates._registered_domain`), never
+        # `bid["store_domain"]`, and publishing it is what makes the buyer's anti-spoofing
+        # check possible: `RenderedSlot.store_domain` defaulted to `""` because nothing ever
+        # sent one, so `expected_domain` went to accept as null and a spoofed slot could have
+        # certified its own permalink. Empty stays absent rather than becoming `""` — an
+        # exchange with no registry configured must publish "I vouch for no host", which is a
+        # different sentence from "the host is the empty string".
+        supported["store_domain"] = str(read(candidate, "store_domain", "") or "") or None
         for key, value in supported.items():
             if enriched.get(key) is None:
                 enriched[key] = value

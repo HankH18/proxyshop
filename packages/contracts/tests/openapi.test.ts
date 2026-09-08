@@ -29,8 +29,11 @@ describe("the pinned cross-domain routes", () => {
     expect(extra).toEqual([]);
   });
 
-  it("cover all five domains", () => {
+  it("cover every domain that serves routes", () => {
+    // Six, not five. `buyer` joined in the change that published `buyer.openapi.json`; before
+    // it, a service with no document did not fail this assertion, it satisfied it.
     expect(Object.keys(documents).sort()).toEqual([
+      "buyer",
       "exchange",
       "ingest",
       "merchant",

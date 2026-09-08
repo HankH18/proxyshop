@@ -286,12 +286,12 @@
                 "schema": {
                   "type": "object",
                   "additionalProperties": false,
-                  "required": ["accepted", "denial_reason"],
+                  "required": ["accepted", "denial_reason", "denial_code"],
                   "properties": {
                     "accepted": { "type": "boolean" },
                     "denial_reason": {
                       "type": "string",
-                      "description": "A declared refusal code, then either the end of the string or a colon followed by free diagnostic prose. Parse only the token before the first colon; everything after it is for a human and is not part of the contract. The nine codes are published as the enum `protocol.schema.json#/$defs/DenialCode` — a typed vocabulary in both generated languages, and `contracts/ts/vocabulary.ts` carries the runtime list `DENIAL_CODES` plus `denialCode(reason)`, the parser this paragraph describes. Use it: `split(':')[0].trim()` disagrees with the exchange on U+001C-U+001F, which Python's `str.strip()` removes and JavaScript's `trim()` keeps. A refusal whose code this exchange does not declare is re-published as `unspecified` with its prose intact, so a client never sees a tenth token. The exchange writes the separator `\": \"` itself, but it also forwards a refusal VERBATIM when the reason a seller-eligibility source handed it already begins with a declared code, and the parser that decides that (`reasons.denial_code`) splits on a bare `\":\"` and strips the token — so `blacklisted:no space`, `blacklisted : x` and a bare `blacklisted:` are all values this endpoint really returns, and the pattern admits them. The run of blanks before the colon is spelled out by code point rather than as `\\s`, which means three different sets to Python, Rust and ECMAScript and would make this one constraint mean three things (T-115). NOT an `enum` on THIS field, and that is measured rather than assumed: a booted exchange driven over HTTP answered \"unknown_bid: auction '…' carries no bid '…'; there is nothing to accept\", \"blacklisted: chargeback fraud\" and \"checkout_refused: RuntimeError: merchant declined to mint\", so an `enum` of the bare codes would be a published constraint essentially every real 409 violates. The enumeration therefore lives on the CODE (`x-denial-code-schema` below) and this field keeps the `pattern`. Closing T-204's `enum` gate needs the SERVICE to publish the bare code — a `denial_code` field beside this one, or `routes._denied` splitting code from prose — which is outside packages/contracts.",
+                      "description": "A declared refusal code, then either the end of the string or a colon followed by free diagnostic prose. Parse only the token before the first colon; everything after it is for a human and is not part of the contract. The nine codes are published as the enum `protocol.schema.json#/$defs/DenialCode` — a typed vocabulary in both generated languages, and `contracts/ts/vocabulary.ts` carries the runtime list `DENIAL_CODES` plus `denialCode(reason)`, the parser this paragraph describes. Use it: `split(':')[0].trim()` disagrees with the exchange on U+001C-U+001F, which Python's `str.strip()` removes and JavaScript's `trim()` keeps. A refusal whose code this exchange does not declare is re-published as `unspecified` with its prose intact, so a client never sees a tenth token. The exchange writes the separator `\": \"` itself, but it also forwards a refusal VERBATIM when the reason a seller-eligibility source handed it already begins with a declared code, and the parser that decides that (`reasons.denial_code`) splits on a bare `\":\"` and strips the token — so `blacklisted:no space`, `blacklisted : x` and a bare `blacklisted:` are all values this endpoint really returns, and the pattern admits them. The run of blanks before the colon is spelled out by code point rather than as `\\s`, which means three different sets to Python, Rust and ECMAScript and would make this one constraint mean three things (T-115). NOT an `enum` on THIS field, and that is measured rather than assumed: a booted exchange driven over HTTP answered \"unknown_bid: auction '…' carries no bid '…'; there is nothing to accept\", \"blacklisted: chargeback fraud\" and \"checkout_refused: RuntimeError: merchant declined to mint\", so an `enum` of the bare codes would be a published constraint essentially every real 409 violates. The enumeration therefore lives on the CODE and this field keeps the `pattern`. T-204 CLOSED: the service now publishes that bare code as `denial_code` beside this field — `routes._denied` already computed it (it is how an undeclared reason is republished as `unspecified`) and threw it away — so the vocabulary is an `enum` on a field whose every served value is a member of it, rather than an `enum` on this one, which essentially every real 409 would violate. Branch on `denial_code`; read this field for the diagnosis.",
                       "pattern": "^(already_accepted|auction_not_acceptable|blacklisted|checkout_refused|unavailable|unknown_bid|unrecordable_acceptance|unroutable_fallback|unspecified)($|[\\u0009-\\u000d\\u001c-\\u0020\\u0085\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000]*:)",
                       "x-denial-code-schema": "protocol.schema.json#/$defs/DenialCode",
                       "x-vocabulary": [
@@ -305,12 +305,29 @@
                         "unroutable_fallback",
                         "unspecified"
                       ]
+                    },
+                    "denial_code": {
+                      "type": "string",
+                      "description": "The bare declared code for this refusal, and the field a client branches on. Always one of the nine values enumerated here — `routes._denied` republishes a reason it does not recognise under `unspecified` rather than letting an undeclared token reach a client — so unlike `denial_reason` this property can carry a true `enum`, which is what closed T-204. It is the SAME vocabulary as `protocol.schema.json#/$defs/DenialCode`, generated into Python and TypeScript, and `contracts/ts/vocabulary.ts` publishes the runtime list as `DENIAL_CODES`. Prefer it over parsing `denial_reason`: the split-on-colon parser that field's description describes disagrees with the exchange on U+001C-U+001F, which Python strips and JavaScript's `trim()` keeps, and a consumer that never has to parse cannot get that wrong.",
+                      "enum": [
+                        "already_accepted",
+                        "auction_not_acceptable",
+                        "blacklisted",
+                        "checkout_refused",
+                        "unavailable",
+                        "unknown_bid",
+                        "unrecordable_acceptance",
+                        "unroutable_fallback",
+                        "unspecified"
+                      ],
+                      "x-denial-code-schema": "protocol.schema.json#/$defs/DenialCode"
                     }
                   }
                 },
                 "example": {
                   "accepted": false,
-                  "denial_reason": "blacklisted: fixture:blacklisted"
+                  "denial_reason": "blacklisted: fixture:blacklisted",
+                  "denial_code": "blacklisted"
                 }
               }
             }

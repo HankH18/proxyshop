@@ -92,6 +92,11 @@ def test_the_receipt_never_echoes_the_slots_own_checkout_url() -> None:
     published = result.to_dict()
 
     assert "attacker.example" not in repr(published)
+    # `pinned_to_domain` joined this set in the change that published `store_domain` on
+    # `ShortlistSlot`. The key set is asserted exactly BECAUSE the projection is the wall the
+    # decoy `checkout_url` must not cross, so a new field has to be added here deliberately
+    # rather than let through — which is this line. It carries the domain the permalink's
+    # host was pinned to, or `None`; it is never a URL and never the slot's own.
     assert set(published) == {
         "permalink_url",
         "auction_id",
@@ -99,6 +104,7 @@ def test_the_receipt_never_echoes_the_slots_own_checkout_url() -> None:
         "slot",
         "accepted_at",
         "called",
+        "pinned_to_domain",
     }
     assert result["permalink_url"] == PERMALINK  # subscriptable, like ClarifyOutcome
 

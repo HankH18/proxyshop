@@ -138,6 +138,34 @@ PINNED_ROUTES: tuple[Route, ...] = (
     # Reachable by anyone who can reach a hosted agent, so it is declared here for the
     # same reason the sixteen above are.
     Route("store-agent", "post", "/v1/trust-events"),
+    # The BUYER service, which until this entry published no document at all — not a partial
+    # one, not one that omitted a route: `packages/contracts/openapi/` held five files and
+    # `buyer.openapi.json` was not among them, while `buyer_svc.main` mounted six routers and
+    # answered fourteen operations. Every gap the three sweeps above found was a service
+    # publishing LESS than it served; this was a whole service outside the review process,
+    # including its unauthenticated login door (`POST /buyer/auth/magic-link`), the session
+    # trio behind `X-Buyer-Session`, and `POST /buyer/shortlist/accept`, which is the frame
+    # that decides where a shopper's browser is sent.
+    #
+    # The rule this tuple encodes did not change to accommodate them — a route the service
+    # ANSWERS is declared here, and these are answered. `apps/buyer/svc/tests/
+    # test_openapi_contract.py` is the served-vs-published gate, the same class as T-317's for
+    # the merchant, and it grades BOTH directions off `app.routes` rather than `app.openapi()`
+    # so a route hidden with `include_in_schema=False` could not pass by disappearing.
+    Route("buyer", "post", "/buyer/shortlist/render"),
+    Route("buyer", "post", "/buyer/shortlist/accept"),
+    Route("buyer", "get", "/buyer/auctions/{auction_id}"),
+    Route("buyer", "post", "/buyer/auth/magic-link"),
+    Route("buyer", "post", "/buyer/auth/session"),
+    Route("buyer", "get", "/buyer/auth/session"),
+    Route("buyer", "delete", "/buyer/auth/session"),
+    Route("buyer", "get", "/buyer/profile"),
+    Route("buyer", "post", "/buyer/feedback/prompt"),
+    Route("buyer", "post", "/buyer/feedback"),
+    Route("buyer", "post", "/buyer/intent/clarify"),
+    Route("buyer", "post", "/buyer/intent/confirm"),
+    Route("buyer", "post", "/buyer/livecheck/run"),
+    Route("buyer", "get", "/buyer/livecheck/{auction_id}"),
     # R9's merchant-facing report door, and neither block above is the honest home for it.
     #
     # NOT the DESIGN §Interfaces block: DESIGN's exchange line pins five routes and this is not

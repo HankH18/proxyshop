@@ -99,6 +99,7 @@ __all__ = [
     "slot_price",
     "slot_product",
     "slot_rows",
+    "slot_store_domain",
 ]
 
 #: :attr:`LabelledSlot.labels_source` — the exchange sent these labels and we printed them.
@@ -220,6 +221,30 @@ def _finite(value: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def slot_store_domain(slot: Any) -> str | None:
+    """The platform's registered domain for this slot's store, or ``None``. Never ``""``.
+
+    The one job here is to make ABSENCE a value with a name. ``ShortlistSlot.store_domain``
+    is optional and nullable, so a slot can arrive with the key missing, with ``null``, or —
+    from a producer written before ``minLength: 1`` was published — with ``""``. All three
+    say the same thing, *the platform holds no registered domain for this store*, and they
+    are collapsed here into the one spelling the rest of this package tests against.
+
+    Why ``""`` is not allowed to survive: it is a string, so `if domain:` is the only thing
+    that separates it from a real host, and every caller that forgot that check silently got
+    "no host constraint" instead of a refusal. That is not hypothetical — it is exactly how
+    :func:`buyer_svc.accept.handoff.accept` came to run its redirect guard with scheme and
+    host-presence only on every slot of every deployment. ``None`` cannot be mistaken for a
+    domain by a template, a comparison or a type checker.
+
+    It is deliberately NOT read from ``checkout_url``: R3 makes that value authority for
+    nothing, and deriving the expected host from the URL being checked would let a spoofed
+    slot certify its own spoofed permalink.
+    """
+    domain = text(read(slot, "store_domain", None))
+    return domain or None
+
+
 def slot_product(slot: Any) -> dict[str, Any] | None:
     """R2's PRODUCT for one slot: WHICH catalogue thing this slot is offering.
 
@@ -337,7 +362,17 @@ class LabelledSlot:
     labels: tuple[str, ...]
     labels_source: str
     trust_summary: dict[str, Any] = field(default_factory=dict)
-    store_domain: str = ""
+    #: The PLATFORM's registered domain for this store, or ``None`` — never ``""``.
+    #:
+    #: ``None`` is the only spelling of "the exchange published no registered domain for this
+    #: store", and it is a different statement from a domain: it means the checkout permalink
+    #: this slot leads to **cannot be pinned to a named host** (R3/D22/C10). It used to be
+    #: ``""``, which reads identically to a domain that is present and blank, and that is
+    #: precisely how the anti-spoofing cross-check came to be skipped on every slot of every
+    #: deployment without anything saying so. ``""`` on the way in is normalised to ``None``
+    #: here (:func:`_domain`) so the two spellings cannot both exist downstream, and
+    #: ``protocol.schema.json`` now declares ``minLength: 1`` so a producer cannot emit one.
+    store_domain: str | None = None
     #: WHICH catalogue thing (:func:`slot_product`), or ``None``. A reference, not a title.
     product: dict[str, Any] | None = None
     #: What the store is asking (:func:`slot_price`), or ``None``. Never a zero.
@@ -417,7 +452,7 @@ def label_slot(slot: Any, *, auction_id: str = "", derive: bool = True) -> Label
         labels=labels,
         labels_source=source,
         trust_summary=summary if isinstance(summary, dict) else {},
-        store_domain=text(read(slot, "store_domain", "")),
+        store_domain=slot_store_domain(slot),
         product=slot_product(slot),
         price=slot_price(slot),
         commitments=None if commitments is None else tuple(commitments),
