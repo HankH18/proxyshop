@@ -18,6 +18,7 @@ import {
   BUYER_DEFAULT_PORT,
   DEMO_NAV_ID,
   JOURNEY_HASH,
+  LEARNING_HASH,
   METRICS_HASH,
   MERCHANT_DASHBOARD_PATH,
   MERCHANT_DEFAULT_PORT,
@@ -80,21 +81,40 @@ describe('the merchant console link', () => {
 
 describe('the entries on each surface', () => {
   it('links the shopper routes as bare hashes on the buyer origin', () => {
+    // The destination list used to read `['journey', 'metrics', 'merchant']`, and the two
+    // shopper hashes were addressed as `entries[0]` and `entries[1]`. The list gained a
+    // third shopper route — the learning demo — because the owner asked for one in his own
+    // words ("add something along with the demo nav bar where I can input a query"), so the
+    // old list is not a contract this build breaks but one it replaced. Kept as an exact
+    // `toEqual` rather than loosened to a `toContain`: the whole point of the assertion is
+    // that a fourth destination cannot appear without somebody deciding it should.
     const entries = navDestinations('buyer', HERE)
-    expect(entries.map((d) => d.key)).toEqual(['journey', 'metrics', 'merchant'])
-    expect(entries[0]?.href).toBe(JOURNEY_HASH)
-    expect(entries[1]?.href).toBe(METRICS_HASH)
-    expect(entries[0]?.external).toBe(false)
-    expect(entries[1]?.external).toBe(false)
+    expect(entries.map((d) => d.key)).toEqual(['journey', 'learning', 'metrics', 'merchant'])
+    // Addressed BY KEY from here down, which is what these assertions were always about: the
+    // claim is "the metrics entry is a bare hash on this origin", not "it is second".
+    const byKey = new Map(entries.map((d) => [d.key, d]))
+    expect(byKey.get('journey')?.href).toBe(JOURNEY_HASH)
+    expect(byKey.get('metrics')?.href).toBe(METRICS_HASH)
+    expect(byKey.get('learning')?.href).toBe(LEARNING_HASH)
+    expect(byKey.get('journey')?.external).toBe(false)
+    expect(byKey.get('metrics')?.external).toBe(false)
+    expect(byKey.get('learning')?.external).toBe(false)
   })
 
   it('spells the shopper routes absolutely from the merchant console', () => {
     // A bare `#/metrics` on the merchant origin would append a hash to the merchant's own
     // URL and go nowhere, which is a link that looks like it works.
     const entries = navDestinations('merchant', HERE)
-    expect(entries[1]?.href).toBe(`http://localhost:${BUYER_DEFAULT_PORT}/${METRICS_HASH}`)
-    expect(entries[1]?.external).toBe(true)
-    expect(entries.find((d) => d.key === 'merchant')?.external).toBe(false)
+    const byKey = new Map(entries.map((d) => [d.key, d]))
+    expect(byKey.get('metrics')?.href).toBe(`http://localhost:${BUYER_DEFAULT_PORT}/${METRICS_HASH}`)
+    expect(byKey.get('metrics')?.external).toBe(true)
+    // The same claim for the route added later, so a new shopper page cannot be added as a
+    // bare hash that silently goes nowhere from the console.
+    expect(byKey.get('learning')?.href).toBe(
+      `http://localhost:${BUYER_DEFAULT_PORT}/${LEARNING_HASH}`,
+    )
+    expect(byKey.get('learning')?.external).toBe(true)
+    expect(byKey.get('merchant')?.external).toBe(false)
   })
 
   it('takes a buyer port override, and discloses the guess when it crosses origins', () => {
@@ -111,7 +131,9 @@ describe('the entries on each surface', () => {
     // Nothing has been guessed, so nothing is disclosed: these are bare hashes.
     const here = navDestinations('buyer', HERE)
     expect(here[0]?.hint).not.toContain('BUYER_WEB_PORT')
-    expect(here[1]?.href).toBe(METRICS_HASH)
+    // By key rather than by index, for the reason recorded on the first test in this block:
+    // the claim is about the metrics entry, not about its position in a list that grew.
+    expect(here.find((d) => d.key === 'metrics')?.href).toBe(METRICS_HASH)
   })
 
   it('marks the entry the reader is actually looking at', () => {

@@ -42,17 +42,62 @@ export type LabelTone = 'confirmed' | 'observed' | 'unverified' | 'unknown'
 export type TrustSummary = Readonly<Record<string, number>>
 
 /**
- * R2's PRODUCT: WHICH catalogue thing this slot offers. A reference, never a rendered name.
+ * WHAT THE PLATFORM CRAWLED: a product name a person can read, in the PLATFORM's voice (D55).
  *
- * The exchange holds the ref because that is what the roster and the offer agree on; a
- * title, an image or a description belongs to a catalogue, and nothing in this app has one.
- * So the ref is what a shopper is shown, and that is stated on the screen rather than
- * papered over with an invented product name.
+ * The organic half of the market, published. A title the platform observed in its own crawl
+ * is a platform-authored fact about a product exactly as `platform_case` is a
+ * platform-authored case for a shop — so this is the same tenet as `SlotPitch`, applied to
+ * the name instead of to the argument, and it is emphatically NOT the store's catalogue
+ * speaking. **No field here is ever read off a bid.** A store that could write the
+ * buyer-facing name of the thing it is selling would hold a persuasion lever with none of
+ * the grading `message` goes through; the exchange reads this off the same crawl snapshot it
+ * already grades the store's claims against, gated in Cypher to sources the platform
+ * observed itself.
+ *
+ * `title` and `source` are BOTH REQUIRED, and the pairing is the point rather than schema
+ * tidiness. `source` is the snapshot's own id (`neo4j-crawl:{store}:{product}` for the
+ * crawl), so a rendered name can be traced back to the record that produced it — and a name
+ * a reader cannot trace is indistinguishable from one the exchange made up. A reader that
+ * accepted a title with no source would be rendering exactly that, which is why
+ * `wire.ts::readIdentity` drops the whole object when either is missing.
+ *
+ * `brand` and `observed_at` are genuinely optional: the crawl states a brand for most rows
+ * and not all, and `observed_at` is the snapshot's own stamp — WHEN the platform saw this,
+ * which is the thing a shopper needs in order to distrust a stale name. Absent is absent and
+ * neither is invented.
+ */
+export interface ShortlistProductIdentity {
+  readonly title: string
+  readonly brand?: string | null
+  readonly source: string
+  readonly observed_at?: string | null
+}
+
+/**
+ * R2's PRODUCT: WHICH catalogue thing this slot offers, and — where the platform has crawled
+ * it — what the platform's own record calls it.
+ *
+ * `product_ref` and `variant_ref` are REFERENCES, never a rendered name, and that has not
+ * changed: they are what the roster and the offer agree on, and they are what the accept path
+ * resolves against. What DID change is the argument that used to sit here, which said a title
+ * "belongs to a catalogue, and nothing in this app has one" and concluded that a bare ref was
+ * therefore the honest thing to show. The premise was right and the conclusion was wrong: this
+ * app still owns no catalogue and still resolves nothing, but it is no longer handed only
+ * references. `identity` is a name the PLATFORM crawled, carried under a key that says whose
+ * it is and names the snapshot it came from — see `ShortlistProductIdentity`.
+ *
+ * `null`/absent where this exchange holds no crawled snapshot for the pair, which is the same
+ * "we have not checked" that grades a claim `unsupported`. The producer publishes it only when
+ * the ref it resolved the snapshot against is the ref published beside it, because a name read
+ * for one product printed above another product's reference is D58's defect class wearing a
+ * title, and a shopper cannot see the join to check it.
  */
 export interface ShortlistProduct {
   readonly product_ref: string
   /** Absent means the bid named no variant — never "the default variant". */
   readonly variant_ref?: string | null
+  /** The platform's own crawled name, or `null` — never the store's. Product-scoped. */
+  readonly identity?: ShortlistProductIdentity | null
 }
 
 /** The discount a slot's price states. A *stated* depth, not an entitlement: no single-use
@@ -205,6 +250,33 @@ export interface ShortlistSlot {
   readonly product?: ShortlistProduct | null
   readonly price?: ShortlistPrice | null
   readonly commitments?: readonly SlotCommitment[] | null
+  /**
+   * WHOSE PRICE the `price` above is: `false` a bid this store actually sent, `true` a
+   * stand-in the exchange wrote for it at its roster row's list price (R10), `null`/absent a
+   * producer that did not say.
+   *
+   * **THREE states, and this screen may not collapse them into two.** The exchange represents
+   * a rostered store that does not answer usably rather than dropping it, so a shopper sees
+   * the shop at its catalogue price instead of not seeing it at all — and that number reaches
+   * `price` like any other. Reading an absent flag as `false` would present a price nobody
+   * quoted as a quote, which is the exact defect the field exists to close; so absence is its
+   * own answer here and `ShortlistView` gives it its own sentence.
+   *
+   * `true` is NOT a verdict about the store. It is reachable by silence, by having no agent
+   * at all, by a late reply and by an explicit decline alike, which is why the reason travels
+   * separately instead of being folded into this boolean.
+   */
+  readonly fallback?: boolean | null
+  /**
+   * WHY the exchange stood in, in the exchange's own vocabulary
+   * (`exchange.auction.collect.FALLBACK_REASONS`), or `null`.
+   *
+   * The buyer service already guarantees `null` whenever `fallback` is not `true` — a reason
+   * carried beside a real quote would be read as one — and the token is forwarded rather than
+   * turned into a sentence, because how much of it to say is the screen's decision and not
+   * the wire's.
+   */
+  readonly fallback_reason?: string | null
   /**
    * The case for this slot and whose voice makes it, or `null`.
    *

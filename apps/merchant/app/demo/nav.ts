@@ -69,7 +69,7 @@
 export type DemoSurface = 'buyer' | 'merchant'
 
 /** The in-page routes the shopper SPA answers on its hash. */
-export type DemoRoute = 'journey' | 'metrics'
+export type DemoRoute = 'journey' | 'metrics' | 'learning'
 
 /** The element id the bar mounts under. Exported so a test asserts the spelling. */
 export const DEMO_NAV_ID = 'proxyshop-demo-nav'
@@ -79,6 +79,9 @@ export const JOURNEY_HASH = '#/'
 
 /** The hash the metrics and tracing page lives at. */
 export const METRICS_HASH = '#/metrics'
+
+/** The hash the learning demo lives at. */
+export const LEARNING_HASH = '#/learning'
 
 /**
  * The merchant console's port in `apps/merchant/compose.yaml` (`MERCHANT_SVC_PORT`), and the
@@ -144,7 +147,10 @@ export function merchantConsoleUrl(
  * would be worse than one that shows the journey.
  */
 export function routeForHash(hash: string): DemoRoute {
-  return hash.replace(/^#/, '').replace(/^\/+/, '') === 'metrics' ? 'metrics' : 'journey'
+  const path = hash.replace(/^#/, '').replace(/^\/+/, '')
+  if (path === 'metrics') return 'metrics'
+  if (path === 'learning') return 'learning'
+  return 'journey'
 }
 
 /** The bar's entries, in order, for a given surface. */
@@ -179,6 +185,15 @@ export function navDestinations(
         buyerPortNote,
     },
     {
+      key: 'learning',
+      label: 'Watch it learn',
+      href: `${buyerBase}${LEARNING_HASH}`,
+      external: crossing,
+      hint:
+        'Run a query, feed the network real purchases and customer feedback, run the same ' +
+        'query again and read which ranking term moved.' + buyerPortNote,
+    },
+    {
       key: 'metrics',
       label: 'Metrics & tracing',
       href: `${buyerBase}${METRICS_HASH}`,
@@ -203,7 +218,10 @@ export function navDestinations(
 /** Which entry is the one being looked at right now. */
 export function currentKey(surface: DemoSurface, hash: string): string {
   if (surface === 'merchant') return 'merchant'
-  return routeForHash(hash) === 'metrics' ? 'metrics' : 'journey'
+  // The route names and the entry keys are the same words on purpose: a bar whose current
+  // marker was decided by a second mapping could disagree with the router about which page
+  // the reader is on, and the marker is a claim about exactly that.
+  return routeForHash(hash)
 }
 
 /** Options for {@link mountDemoNav}. */

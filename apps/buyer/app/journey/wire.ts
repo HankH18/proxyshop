@@ -48,6 +48,7 @@ import {
   type Shortlist,
   type ShortlistPrice,
   type ShortlistProduct,
+  type ShortlistProductIdentity,
   type ShortlistSlot,
   type SlotCommitment,
   type SlotDiscount,
@@ -728,6 +729,42 @@ export async function loadAuction(auctionId: string, fetcher: Fetcher): Promise<
 }
 
 /**
+ * The PLATFORM's own crawled name for a product off one served slot, or `null` (D55).
+ *
+ * **BOTH `title` AND `source`, or nothing at all.** That is the one rule in this function
+ * and it is a rule about attribution rather than about parsing. `source` is the snapshot id
+ * the name was read out of, and it is what lets the card say WHOSE name it is showing; an
+ * identity that cannot say where the name came from is not attributable, and a title
+ * rendered without attribution reads to a shopper as the shop's own catalogue speaking —
+ * which is precisely the laundering `SlotPitch`'s two-voice split exists to prevent. So a
+ * body carrying a title with no source is dropped whole rather than rendered as a name with
+ * a missing footnote, and the card falls back to the reference it showed before.
+ *
+ * `brand` and `observed_at` are read the way every other optional string on this wire is:
+ * present and non-blank, or `null`. Neither is required, neither is invented, and a blank
+ * one is an absence rather than a present-and-empty value a template would render as a gap.
+ *
+ * Trimmed, unlike `readPitch`'s store pitch. These are not a seller's bytes — they are the
+ * platform's own record of what it observed, and `buyer_svc.accept.labels._slot_identity`
+ * already strips them with the same `text()` every other field on this response goes
+ * through. Matching it here keeps the two ends of the wire agreeing on what "blank" means.
+ */
+function readIdentity(value: unknown): ShortlistProductIdentity | null {
+  if (!isRecord(value)) return null
+  const title = asString(value.title).trim()
+  const source = asString(value.source).trim()
+  if (!title || !source) return null
+  const brand = asString(value.brand).trim()
+  const observedAt = asString(value.observed_at).trim()
+  return {
+    title,
+    brand: brand === '' ? null : brand,
+    source,
+    observed_at: observedAt === '' ? null : observedAt,
+  }
+}
+
+/**
  * R2's PRODUCT off one served slot, or `null`.
  *
  * `null` for both of the service's absences and for a body this client cannot read as a
@@ -735,13 +772,23 @@ export async function loadAuction(auctionId: string, fetcher: Fetcher): Promise<
  * a third state for "malformed" would put a distinction on the page that a shopper has no
  * use for. What is NOT collapsed is a missing `product_ref`: an object with no ref names no
  * product, so it is an absence rather than a product with a blank name.
+ *
+ * An unreadable `identity` does NOT take the product with it. The ref is what the accept
+ * path resolves against and what the card can always show; losing a whole slot's product
+ * line because the platform has not crawled the thing — or because it crawled it without
+ * recording where — would be the worse failure, and it is the ordinary case rather than an
+ * error. See `readIdentity` for why an unattributable name is dropped instead of shown.
  */
 function readProduct(value: unknown): ShortlistProduct | null {
   if (!isRecord(value)) return null
   const productRef = asString(value.product_ref).trim()
   if (!productRef) return null
   const variantRef = asString(value.variant_ref).trim()
-  return { product_ref: productRef, variant_ref: variantRef === '' ? null : variantRef }
+  return {
+    product_ref: productRef,
+    variant_ref: variantRef === '' ? null : variantRef,
+    identity: readIdentity(value.identity),
+  }
 }
 
 /** The discount off a served price, or `null`. A stated depth (D22), never an entitlement. */
@@ -934,6 +981,21 @@ export async function renderShortlist(
       trust_summary: asNumberMap(row.trust_summary),
       trust_fields: asUnknownMap(row.trust_summary),
       store_domain: asString(row.store_domain),
+      // WHOSE PRICE the `price` below is, in the three states the service serves and not two.
+      //
+      // `typeof === 'boolean'` rather than a truthiness test or a cast, and that is the whole
+      // guard: anything that is not a real boolean reads as `null`, never as `false`. The
+      // service applies the identical rule (`buyer_svc.accept.labels.slot_fallback` refuses to
+      // coerce, on the ground that `Boolean('false')` is `true`), and the failure it is
+      // refusing is asymmetric — reading "the producer did not say" as "the store quoted this"
+      // presents a price nobody quoted as a quote, which is the defect the field was added to
+      // close. `undefined` from a producer older than the field lands on `null` for free.
+      fallback: typeof row.fallback === 'boolean' ? row.fallback : null,
+      // FORWARDED, not re-derived. The service already guarantees this is `null` unless
+      // `fallback` is `true`, so re-checking it here would be a second copy of that rule able
+      // to drift from it; what this client owes the value is not to invent one, and a blank
+      // reads as `null` rather than as a present-but-empty reason.
+      fallback_reason: asString(row.fallback_reason).trim() || null,
       // R2's other three. They come off THIS slot, from the live shortlist the service
       // fetched for this request — not joined in from anywhere else on the page.
       product: readProduct(row.product),

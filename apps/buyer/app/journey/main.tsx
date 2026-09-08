@@ -29,6 +29,7 @@ import { createRoot } from 'react-dom/client'
 import { DemoShell } from '../demo/DemoShell'
 import { mountDemoNav } from '../demo/nav'
 import '../demo/demo-nav.css'
+import '../learning/learning.css'
 import '../metrics/metrics.css'
 import './journey.css'
 

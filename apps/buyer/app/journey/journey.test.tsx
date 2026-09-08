@@ -1100,12 +1100,37 @@ describe('the four beats', () => {
 
     // The price gap is CLOSED — the slot carries `price` now — so `gap-price` is gone from
     // this list, the same way sign-in and the browser-minted pseudonym went: because the gap
-    // closed, not because the sentence softened. What is still true, and is still listed, is
-    // that the product arrives as a REFERENCE and not as a name.
+    // closed, not because the sentence softened.
     expect(screen.queryByTestId('gap-price')).toBeNull()
-    const product = screen.getByTestId('gap-product-name').textContent ?? ''
-    expect(product).toContain('product_ref')
-    expect(product).toContain('catalogue')
+
+    // THREE MORE went with them, and this block used to assert the opposite of what it now
+    // asserts, so the reason is recorded here rather than left to `git log`.
+    //
+    // It read: `const product = screen.getByTestId('gap-product-name').textContent ?? ''`,
+    // then `expect(product).toContain('product_ref')` and `expect(product).toContain(
+    // 'catalogue')` — pinning the page's claim that the product arrives as a REFERENCE and
+    // never as a name, "because a title belongs to the store's own catalogue". Introduced in
+    // `0dffb80`, true when written, and false now for a reason that is not a softening: the
+    // name the card shows is NOT the store's catalogue's. `98529bd` published
+    // `ShortlistProduct.identity`, `exchange.ranking.verification.catalog_identity` reads it
+    // off the PLATFORM's own crawl (gated in Cypher to sources the platform observed itself,
+    // reachable from no bid), and `buyer_svc.accept.labels._slot_identity` forwards it with
+    // the snapshot id attached. The bullet's premise — that only the store could name the
+    // product — is what stopped being true, so the bullet went rather than its wording.
+    //
+    // `gap-fallback` and `gap-store-voice` are the same commit's other two: `ShortlistSlot`
+    // now declares `fallback`/`fallback_reason` and `message`, and `extra="forbid"` survived
+    // the change, so nothing was loosened to make room for them. What each of the three is
+    // replaced by is asserted positively on the card itself, in `shortlist.test.tsx` —
+    // absence here would otherwise be indistinguishable from the claim having been dropped.
+    expect(screen.queryByTestId('gap-product-name')).toBeNull()
+    expect(screen.queryByTestId('gap-fallback')).toBeNull()
+    expect(screen.queryByTestId('gap-store-voice')).toBeNull()
+
+    // The retired premise must not creep back into the panel as prose under another id.
+    const gaps = screen.getByLabelText('What is not wired yet').textContent ?? ''
+    expect(gaps).not.toContain('a reference, not a name')
+    expect(gaps).not.toContain('not on the wire to here')
 
     // The model bullet no longer claims the questions came from the offline double, and the
     // retirement of that claim is the assertion.
@@ -1150,12 +1175,19 @@ describe('the four beats', () => {
     fireEvent.click(screen.getByRole('button', { name: /accept this one/i }))
     await screen.findByTestId('permalink-url')
 
-    await waitFor(() => expect(screen.getByTestId('gap-product-name')).toBeInTheDocument())
-    expect(screen.queryByTestId('gap-domain')).toBeNull()
+    // The PANEL is what is being pinned here — that it survives to the end of the journey
+    // rather than only appearing at the start — so the witness has to be a gap that is still
+    // open. It used to be `gap-product-name`; that bullet was retired above, so the witness
+    // moved to the two that remain rather than the assertion being dropped.
+    await waitFor(() => expect(screen.getByTestId('gap-feedback-seeded')).toBeInTheDocument())
     expect(screen.getByTestId('gap-model')).toBeInTheDocument()
+    expect(screen.queryByTestId('gap-domain')).toBeNull()
     expect(screen.queryByTestId('gap-price')).toBeNull()
     expect(screen.queryByTestId('gap-signin')).toBeNull()
     expect(screen.queryByTestId('gap-pseudonym')).toBeNull()
+    expect(screen.queryByTestId('gap-product-name')).toBeNull()
+    expect(screen.queryByTestId('gap-fallback')).toBeNull()
+    expect(screen.queryByTestId('gap-store-voice')).toBeNull()
   })
 
   it('prints the clock the service sent, and nothing at all when it sent none', async () => {
@@ -1512,13 +1544,20 @@ describe('the four beats', () => {
     // number on it came off the caller-supplied roster row, so it may not be called a price
     // that store quoted.
     //
-    // WHERE THIS MOVED. The distinction used to be a sentence on the slot's price cell,
-    // written by `bidPrice` off the joined `entries[]` row. The price comes off the slot now
-    // and the slot carries no `fallback` flag — `contracts.protocol.ShortlistSlot` has none
-    // and forbids extras — so the CARD cannot make this distinction and does not pretend to;
-    // `gap-fallback` in the gaps panel says exactly that. The distinction itself is not lost:
-    // it lives in the recorded entries panel, which states `fallback` per store and glosses
-    // the reason, and that is what is asserted here.
+    // WHERE THIS MOVED, TWICE. It began as a sentence on the slot's price cell, written by
+    // `bidPrice` off the joined `entries[]` row. When the price started coming off the slot
+    // itself, the card lost the distinction — `contracts.protocol.ShortlistSlot` declared no
+    // `fallback` and forbids extras — and `gap-fallback` in the gaps panel said so.
+    //
+    // `98529bd` closed that: the slot carries `fallback` and `fallback_reason`, `gap-fallback`
+    // is retired, and `ShortlistView` prints a price-provenance sentence off the slot's own
+    // flag (asserted in `shortlist.test.tsx`, on the card, in all three of its states).
+    //
+    // THIS TEST IS STILL ABOUT THE OTHER PANEL and is unchanged by that. It drives a shortlist
+    // with NO slots, so there is no card to carry the flag; what it pins is the recorded
+    // entries panel, which states `fallback` per store and glosses the reason. The two are
+    // different surfaces answering for different shortlists, and the entries panel is the only
+    // one a shopper has when the market returned nothing.
     const { fetcher } = demoService({
       slots: [],
       body: { entries: [ENTRIES[0]!, SILENT_ENTRY, ENTRIES[2]!] },

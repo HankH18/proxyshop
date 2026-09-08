@@ -492,6 +492,166 @@ describe('a slot the exchange had nothing for', () => {
     expect(price).not.toContain('USD')
     expect(price.toLowerCase()).toContain('no currency')
   })
+
+  /**
+   * WHAT THE PLATFORM CRAWLED, on the card, attributed (D55) — and the reason these tests
+   * replace `journey.test.tsx`'s retired `gap-product-name` bullet rather than merely
+   * out-numbering it. That bullet said the card could show only a reference; these assert
+   * what it shows instead, so the retirement is a moved claim and not a dropped one.
+   *
+   * The values below are the shape `POST /buyer/shortlist/render` actually answers with:
+   * `buyer_svc.accept.labels._slot_identity` emits all four keys and publishes the object
+   * only when `title` AND `source` both read, which is the rule `wire.ts::readIdentity`
+   * keeps at this end.
+   */
+  const CRAWLED = {
+    title: 'Milk Thistle Gummies',
+    brand: 'Gaia Herbs',
+    source: 'neo4j-crawl:gaiaherbs.com:prod-merino-crew',
+    observed_at: '2026-09-05T11:02:44Z',
+  }
+
+  it('shows the platform’s crawled name instead of the reference, with the brand', () => {
+    render(
+      <ShortlistView
+        shortlist={one({ ...PRICED_SLOT, product: { ...PRICED_SLOT.product!, identity: CRAWLED } })}
+        onAccept={vi.fn()}
+      />,
+    )
+    const product = screen.getByTestId('product-bid-e7-7').textContent ?? ''
+    expect(product).toContain('Milk Thistle Gummies')
+    expect(product).toContain('Gaia Herbs')
+    // The reference is not the headline any more — but it is not LOST, see the next test.
+    expect(product).not.toContain('prod-merino-crew')
+  })
+
+  it('attributes the crawled name to Proxyshop and keeps the reference beside it', () => {
+    render(
+      <ShortlistView
+        shortlist={one({ ...PRICED_SLOT, product: { ...PRICED_SLOT.product!, identity: CRAWLED } })}
+        onAccept={vi.fn()}
+      />,
+    )
+    // THE POINT OF THE WHOLE FEATURE. A title with no attribution reads as the shop's own
+    // word for its own product, which is the seller's voice wearing the platform's — the
+    // exact laundering the two-voice split exists to prevent. So the snapshot the name came
+    // out of is on the card, in words, not behind a hover.
+    const gloss = screen.getByTestId('product-identity-bid-e7-7').textContent ?? ''
+    expect(gloss).toContain('Proxyshop’s, not this shop’s')
+    expect(gloss).toContain('neo4j-crawl:gaiaherbs.com:prod-merino-crew')
+    expect(gloss).toContain('2026-09-05T11:02:44Z')
+    // The reference the accept path resolves against survives the name arriving.
+    expect(gloss).toContain('prod-merino-crew')
+    expect(gloss).toContain('var-m-navy')
+  })
+
+  it('renders a crawled name that carries no brand and no observation time', () => {
+    render(
+      <ShortlistView
+        shortlist={one({
+          ...PRICED_SLOT,
+          product: {
+            product_ref: 'prod-plain',
+            identity: { title: 'Milk Thistle Liver Support', source: 'op-doc:oregonswildharvest' },
+          },
+        })}
+        onAccept={vi.fn()}
+      />,
+    )
+    const product = screen.getByTestId('product-bid-e7-7').textContent ?? ''
+    expect(product).toContain('Milk Thistle Liver Support')
+    expect(product).not.toContain('undefined')
+    expect(product).not.toContain('null')
+    // No brand is invented out of the title, and the missing stamp is SAID rather than left
+    // blank — a name with no date is the one a shopper most needs to be able to distrust.
+    const gloss = screen.getByTestId('product-identity-bid-e7-7').textContent ?? ''
+    expect(gloss).not.toContain('undefined')
+    expect(gloss).toContain('named no time it was observed')
+  })
+
+  it('falls back to the reference, with no attribution line, when nothing was crawled', () => {
+    render(<ShortlistView shortlist={one(PRICED_SLOT)} onAccept={vi.fn()} />)
+    expect(screen.getByTestId('product-bid-e7-7').textContent).toContain('prod-merino-crew')
+    // No name, so nothing to attribute: an attribution box over a bare reference would be the
+    // empty attributed box this screen refuses everywhere else.
+    expect(screen.queryByTestId('product-identity-bid-e7-7')).toBeNull()
+  })
+
+  /**
+   * WHOSE PRICE IT IS — three states, and the third is not the first (R10, D55). These
+   * replace `journey.test.tsx`'s retired `gap-fallback` bullet, which said the card could not
+   * make this distinction at all.
+   */
+  it('says nothing about provenance when the store really quoted the price', () => {
+    render(
+      <ShortlistView shortlist={one({ ...PRICED_SLOT, fallback: false })} onAccept={vi.fn()} />,
+    )
+    // Silence is the deliberate answer: a line on every card saying "this shop quoted this"
+    // teaches a reader to skim the one place the sentence matters.
+    expect(screen.queryByTestId('price-provenance-bid-e7-7')).toBeNull()
+  })
+
+  it('says the price is Proxyshop’s, and why, when the exchange stood in', () => {
+    render(
+      <ShortlistView
+        shortlist={one({
+          ...PRICED_SLOT,
+          fallback: true,
+          fallback_reason: 'store_declined:cluster_not_pursued',
+        })}
+        onAccept={vi.fn()}
+      />,
+    )
+    const provenance = screen.getByTestId('price-provenance-bid-e7-7').textContent ?? ''
+    expect(provenance).toContain('Proxyshop’s, not this shop’s')
+    expect(provenance).toContain('nobody at this shop quoted')
+    // The exchange's own token, printed as the token it is rather than translated here.
+    expect(provenance).toContain('store_declined:cluster_not_pursued')
+    // The price itself is still shown — it is a real number the service sent.
+    expect(screen.getByTestId('price-bid-e7-7').textContent).toContain('156')
+  })
+
+  it('says a stand-in with no stated reason is still a stand-in', () => {
+    render(<ShortlistView shortlist={one({ ...PRICED_SLOT, fallback: true })} onAccept={vi.fn()} />)
+    const provenance = screen.getByTestId('price-provenance-bid-e7-7').textContent ?? ''
+    expect(provenance).toContain('Proxyshop’s, not this shop’s')
+    expect(provenance).toContain('did not say why')
+    expect(provenance).not.toContain('undefined')
+    expect(provenance).not.toContain('null')
+  })
+
+  it('says the shop never answered even when the stand-in carried no price either', () => {
+    // A stand-in minted from a roster row that named no readable list price. The flag is the
+    // only thing on the card that can still say the shop was silent, so it says it — and it
+    // does not claim a number nobody quoted, because there is no number.
+    render(
+      <ShortlistView
+        shortlist={one({ ...PRICED_SLOT, price: null, fallback: true, fallback_reason: 'no_response' })}
+        onAccept={vi.fn()}
+      />,
+    )
+    const provenance = screen.getByTestId('price-provenance-bid-e7-7').textContent ?? ''
+    expect(provenance).toContain('did not answer this auction')
+    expect(provenance).toContain('no_response')
+    expect(provenance).not.toContain('the number above')
+  })
+
+  it('stays quiet about whose price it is when there is no price to attribute', () => {
+    // Nothing said the provenance AND nothing said a price: a sentence about whose price this
+    // is, printed under a line that just said there is no price, is a sentence about nothing.
+    render(<ShortlistView shortlist={one({ ...PRICED_SLOT, price: null })} onAccept={vi.fn()} />)
+    expect(screen.queryByTestId('price-provenance-bid-e7-7')).toBeNull()
+  })
+
+  it('will not read an absent flag as a quote, and says the exchange did not say', () => {
+    // THE FAILURE THIS FIELD EXISTS TO CLOSE. A producer older than `fallback` sends nothing,
+    // and a screen that rendered that as `false` would present a price nobody quoted as a
+    // quote. The pre-existing `PRICED_SLOT` carries no flag, which is exactly that producer.
+    render(<ShortlistView shortlist={one(PRICED_SLOT)} onAccept={vi.fn()} />)
+    const provenance = screen.getByTestId('price-provenance-bid-e7-7').textContent ?? ''
+    expect(provenance).toContain('did not say whose price this is')
+    expect(provenance).toContain('will not guess')
+  })
 })
 
 /**
@@ -648,18 +808,35 @@ describe('the two voices, and a shopper who can tell them apart', () => {
     // this shop simply had nothing to say.
     //
     // It must NOT say "this shop has no advocate", and that assertion is here because this
-    // test asserted exactly that until the devstack was driven. `store_pitch: null` has two
-    // causes at this hop and they are indistinguishable from here: a scraped shop with no
-    // advocate, and an in-network shop whose `Bid.message` was dropped by the exchange's
-    // `extra="forbid"` shortlist contract. On the running stack it is always the SECOND —
-    // both bidding shops are in-network — so the obvious gloss would be false on every card.
+    // test asserted exactly that until the devstack was driven. `store_pitch: null` does not
+    // have ONE cause at this hop, and the gloss may not pick one.
+    //
+    // WHAT CHANGED, and why the third assertion below is not the one it used to be. This
+    // block used to require the gloss to contain `'shortlist contract'` — introduced in
+    // `b34d591`, when the second of the two causes it named was "an in-network shop whose
+    // `Bid.message` was dropped by the exchange's `extra="forbid"` shortlist contract". That
+    // cause is GONE, and not because the sentence was softened: `98529bd` declared
+    // `ShortlistSlot.message`, `buyer_svc.pitch.writing.store_pitch_of` reads the seller's
+    // bytes off it, and a shop that sends a pitch now has it rendered. Measured through the
+    // repo's own buyer service on a real live-auction slot: `/buyer/shortlist/render`
+    // answered `store_pitch: "Our milk thistle gummies…"` with `voices: ["store","platform"]`.
+    // Keeping the old assertion would have pinned the page to blaming a contract that has
+    // since been fixed for a silence the shop itself chose — so the assertion moved to the
+    // three causes that are actually left, which is a stricter claim than the two it replaces.
     const why = (screen.getByTestId('no-store-voice-bid-e7-7').textContent ?? '').toLowerCase()
     // The typographic apostrophe is the one the page renders (`&rsquo;`), asserted as the
     // character it becomes rather than as the entity.
     expect(why).toContain('nothing here is in this shop’s own voice')
+    // Cause 1: a scraped shop, which has no advocate and is paying for nothing.
     expect(why).toContain('crawling')
-    expect(why).toContain('shortlist contract')
+    // Cause 2: an in-network shop that had an advocate and chose to say nothing.
+    expect(why).toContain('chose to say nothing')
+    // Cause 3: a message longer than the published cap, refused WHOLE rather than truncated,
+    // because a shortened pitch is words the shop did not write with the shop's name on them.
+    expect(why).toContain('longer than the published limit')
     expect(why).not.toMatch(/this shop has no advocate/)
+    // The retired cause must not creep back: the contract carries the message now.
+    expect(why).not.toContain('shortlist contract')
   })
 
   it('shows the facts the case was drawn from, and says the case is a subset of them', () => {

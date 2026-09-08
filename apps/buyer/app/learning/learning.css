@@ -1,0 +1,108 @@
+/*
+ * The learning page's own rules — and only the ones the journey's stylesheet does not already
+ * publish.
+ *
+ * Like `metrics.css`, this page reuses `journey.css` wholesale: `.journey`, `.masthead`,
+ * `.lede`, `.step`, `.gaps`, `.mono`, `button.primary`, `button.linkish`, `[data-tone]` and
+ * `details.trace` are all defined there and used verbatim here. It also reuses three of the
+ * metrics page's own components — `.metrics-source`, `.metrics-form`, `.metrics-warning`,
+ * `.metrics-empty` — because a "which route did this come off" line and a "this is a demo
+ * aid" warning should look the same on both demo pages rather than nearly the same.
+ *
+ * Every colour is a `--ps-*` token from that block. There is no hex literal in this file and
+ * no token is redefined.
+ */
+
+/* The wide table of candidates. It scrolls inside itself rather than widening the page: the
+   fifth column holds five `name=0.0000` pairs and there is no width at which that wraps
+   nicely, so the choice is between a horizontal scroll here and a horizontal scroll on the
+   whole document. */
+.learning-table {
+  width: 100%;
+  margin: var(--ps-3) 0 0;
+  border-collapse: collapse;
+  font-size: 13px;
+  display: block;
+  overflow-x: auto;
+}
+.learning-table caption {
+  caption-side: top;
+  text-align: left;
+  padding-bottom: var(--ps-2);
+  color: var(--ps-ink-3);
+  font-size: 12px;
+}
+.learning-table th,
+.learning-table td {
+  padding: var(--ps-2) var(--ps-3);
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--ps-rule-soft);
+  white-space: nowrap;
+}
+.learning-table th {
+  color: var(--ps-ink-3);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  border-bottom-color: var(--ps-rule);
+}
+.learning-table tbody tr:hover {
+  background: var(--ps-sunk);
+}
+
+/* The components column. Allowed to wrap — it is the one column whose content is a list. */
+.learning-terms {
+  white-space: normal;
+}
+.learning-terms ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.learning-terms li {
+  margin: 0 0 2px;
+}
+
+/* A movement's direction, said with colour AND with the sign the page always prints, so the
+   two are redundant rather than the colour being the only carrier. */
+[data-delta='up'] {
+  color: var(--ps-confirmed);
+}
+[data-delta='down'] {
+  color: var(--ps-unverified);
+}
+[data-delta='flat'],
+[data-delta='absent'] {
+  color: var(--ps-ink-3);
+}
+
+/* The paragraph under a control that says what the control assumes. */
+.learning-hint {
+  max-width: 46rem;
+  margin: var(--ps-3) 0 0;
+  color: var(--ps-ink-2);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+/* The request log. One line per request, and a failure is marked as one. */
+.learning-log {
+  margin: var(--ps-3) 0 0;
+  padding-left: 20px;
+  font-size: 12px;
+  line-height: 1.6;
+  max-height: 24rem;
+  overflow-y: auto;
+}
+.learning-log li {
+  margin-bottom: var(--ps-1);
+  color: var(--ps-ink-2);
+  overflow-wrap: anywhere;
+}
+.learning-log li[data-ok='false'] {
+  color: var(--ps-alarm);
+}
+.learning-log li[data-ok='false'] strong {
+  color: var(--ps-alarm);
+}

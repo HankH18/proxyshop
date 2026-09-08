@@ -33,6 +33,7 @@
 import { useEffect, useState } from 'react'
 
 import { Journey } from '../journey/Journey'
+import { LearningPage } from '../learning/LearningPage'
 import { MetricsPage } from '../metrics/MetricsPage'
 import { routeForHash, type DemoRoute } from './nav'
 
@@ -57,10 +58,12 @@ export function useHashRoute(): DemoRoute {
   return route
 }
 
-/** Chooses the page. Everything else about either page is that page's own business. */
+/** Chooses the page. Everything else about each page is that page's own business. */
 export function DemoShell() {
   const route = useHashRoute()
-  return route === 'metrics' ? <MetricsPage /> : <Journey />
+  if (route === 'metrics') return <MetricsPage />
+  if (route === 'learning') return <LearningPage />
+  return <Journey />
 }
 
 export default DemoShell

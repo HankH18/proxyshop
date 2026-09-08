@@ -63,7 +63,12 @@ describe('the bar and the root, put together the way main.tsx does', () => {
     // four places that the rendered container holds a known number of `a[href]` — zero before
     // an accept, exactly one after — and says beside the last of them that the assertion is
     // there so a future link fails a test. That is R3: the page must never build a navigable
-    // URL out of slot data. The bar has three links; all three must be outside that container.
+    // URL out of slot data. The bar has four links; all four must be outside that container.
+    //
+    // The count was three until the learning demo was added as a third shopper route, at the
+    // owner's own request. It is still asserted exactly rather than as "more than zero",
+    // because the property being protected is that EVERY link the bar carries is outside the
+    // journey's container — a count that could drift would let one slip inside unnoticed.
     const root = document.createElement('div')
     root.id = 'root'
     document.body.append(root)
@@ -75,7 +80,7 @@ describe('the bar and the root, put together the way main.tsx does', () => {
       const bar = document.getElementById(DEMO_NAV_ID)
       expect(bar).not.toBeNull()
       // The bar really does carry links — this is not passing because it is empty.
-      expect(bar!.querySelectorAll('a[href]').length).toBe(3)
+      expect(bar!.querySelectorAll('a[href]').length).toBe(4)
       // And not one of them is inside the tree the journey's assertions see.
       expect(container.querySelectorAll('a[href]')).toHaveLength(0)
       expect(root.contains(bar)).toBe(false)

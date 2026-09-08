@@ -66,14 +66,61 @@
  *    model double rather than a live model. All five are stated in the UI rather than faked,
  *    because a demo that supplies its own join is the defect this app exists to not be.
  *
- *    That sentence used to open "the exchange's slot carries neither a store domain nor a
- *    price", and BOTH of those gaps have since closed — the list below carries neither
- *    `gap-price` nor `gap-domain` and `journey.test.tsx` asserts their absence. Re-measured
- *    on the devstack for this change: a slot comes back with `price` on it, and with
- *    `store_domain` set to the platform registry's answer (`demo-woolworks.example.com`),
- *    which `ShortlistView` now prints at the head of the card. `contracts.protocol
- *    .ShortlistSlot` declares `store_domain: str | None`, and `ranking/serving.py` joins it
- *    on. An exchange with no registry still publishes none, and the card says so.
+ *    THAT SENTENCE NOW NAMES TWO GAPS, NOT FIVE, and everything else in it is history kept
+ *    on purpose. What remains listed below is step 5's seeded order and the page's inability
+ *    to say whether a live model wrote the clarifying questions. The retirements, newest
+ *    last, each recorded here because a gap that closes quietly is indistinguishable from a
+ *    gap that was talked away:
+ *
+ *    `gap-price` and `gap-domain` — the sentence used to open "the exchange's slot carries
+ *    neither a store domain nor a price". Both closed. Re-measured on the devstack: a slot
+ *    comes back with `price` on it, and with `store_domain` set to the platform registry's
+ *    answer (`demo-woolworks.example.com`), which `ShortlistView` prints at the head of the
+ *    card. `contracts.protocol.ShortlistSlot` declares `store_domain: str | None`, and
+ *    `ranking/serving.py` joins it on. An exchange with no registry still publishes none,
+ *    and the card says so.
+ *
+ *    `gap-fallback`, `gap-product-name` and `gap-store-voice` — three bullets, but ONE gap
+ *    wearing three faces, which is why they retire together. Each said, in its own words,
+ *    that a fact was computed on both sides of the wire and had nowhere to sit in the
+ *    middle: `contracts.protocol.ShortlistSlot` was `extra="forbid"` and declared no field
+ *    for whose price it was, for what the thing was called, or for what the shop had said.
+ *    `98529bd` declared all three at once (SCHEMA_VERSION 2.0.0 → 3.0.0) and the
+ *    `extra="forbid"` survived it, so nothing was loosened to make room.
+ *
+ *      * WHOSE PRICE. The slot carries `fallback` and `fallback_reason` in THREE states —
+ *        `false` a bid the store really sent, `true` the exchange standing in at its roster
+ *        row's list price, `null` a producer that never said. `ShortlistView` prints a
+ *        sentence for the second and the third and, deliberately, nothing for the first.
+ *      * WHAT IT IS CALLED. The retired bullet argued a title "belongs to the store's own
+ *        catalogue, nothing in this app resolves one". The premise was true and the
+ *        conclusion was wrong, because the name is not the store's: `exchange.ranking
+ *        .verification.catalog_identity` reads it off the PLATFORM's own crawl — the same
+ *        snapshot the exchange already grades the store's claims against, gated in Cypher to
+ *        sources the platform observed itself, reachable from no bid — and publishes it as
+ *        `product.identity` with the snapshot id that produced it. That is the ORGANIC half
+ *        of D55 stated about a product instead of about a shop, so the card renders the name
+ *        and attributes it to Proxyshop rather than letting it read as the shop's.
+ *      * WHOSE WORDS. `ShortlistSlot.message` carries the seller's bytes verbatim,
+ *        `buyer_svc.pitch.writing.store_pitch_of` reads them off it, and `PitchPanel`
+ *        renders them in the labelled store blockquote it has had all along. The sponsored
+ *        half of D55 — the one thing a shop buys by joining — reaches the screen.
+ *
+ *      MEASURED FOR THIS CHANGE, and the measurement is narrower than the claim, which is
+ *      exactly why it is written down rather than summarised as "verified". THE DEVSTACK'S
+ *      OWN CONTAINERS STILL SHIP `contracts` 2.0.0 — they predate `98529bd` — so a live
+ *      `POST /buyer/shortlist/render` against them serves no `identity`, no `fallback` and
+ *      `store_pitch: null` on every slot. What was driven instead is the repo's own buyer
+ *      service, in-process, on the real four-slot shortlist a live `milk thistle liver
+ *      support` auction produced against the running exchange: the pinned `Shortlist` model
+ *      accepted the exchange's post-`98529bd` shape, and `/buyer/shortlist/render` answered
+ *      with `identity: {"title": "Milk Thistle Gummies", "brand": "Gaia Herbs", "source":
+ *      "neo4j-crawl:gaiaherbs.com:prod_5b31…", …}` and `fallback: false` on one slot,
+ *      `fallback: true` with `fallback_reason: "store_declined:cluster_not_pursued"` on a
+ *      second, a brand-less and stamp-less identity on a third, and `identity: null,
+ *      fallback: null` on the fourth. `readProduct` and `readRenderedSlots` were written
+ *      against that response rather than against the schema. This paragraph comes out when
+ *      the containers are rebuilt and the served route answers the same way.
  *
  *    Two entries used to sit at the top of that list and are gone because the gap closed
  *    rather than because the sentence was softened. They said sign-in could not complete in a
@@ -992,41 +1039,6 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
       <section aria-label="What is not wired yet" className="gaps">
         <h2>What is not wired yet</h2>
         <ul>
-          <li data-testid="gap-fallback">
-            <strong>Whose price it is: not on the slot</strong> &mdash; when a store does not
-            answer, the exchange stands in for it at the list price its roster row carried,
-            and that number reaches the card as the slot&rsquo;s <code>price</code> like any
-            other. The slot carries no <code>fallback</code> flag &mdash;{' '}
-            <code>ShortlistSlot</code> has no such field &mdash; so a card cannot tell you
-            which of the two happened, and this page does not guess. Which stores answered and
-            which were stood in for is in <code>entries[]</code>, stated per store, in the
-            panel that opens when the shortlist is empty and in the verbatim answer.
-          </li>
-          <li data-testid="gap-product-name">
-            <strong>Product: a reference, not a name</strong> &mdash; the slot carries{' '}
-            <code>product_ref</code> (and a <code>variant_ref</code> where the bid named one),
-            which is what the roster and the offer agree on. It is not a title: a title
-            belongs to the store&rsquo;s own catalogue, nothing in this app resolves one, and
-            the exchange does not copy one through. So the card shows the reference the
-            exchange sent rather than a product name this page would have had to invent.
-          </li>
-          <li data-testid="gap-store-voice">
-            <strong>The shop&rsquo;s own voice: computed, and not on the wire to here</strong>{' '}
-            &mdash; every card above carries Proxyshop&rsquo;s own case, and none of them
-            carries the shop&rsquo;s. That is not this page declining to show it. A store
-            agent really does write a per-shopper pitch and really does put it on{' '}
-            <code>Bid.message</code>, and <code>POST /buyer/shortlist/render</code> really
-            does carry one back verbatim as <code>pitch.store_pitch</code> when a slot arrives
-            holding one. What sits between them is the exchange&rsquo;s published shortlist
-            contract: <code>contracts.protocol.ShortlistSlot</code> is{' '}
-            <code>extra=&quot;forbid&quot;</code> and declares no message field, so the
-            seller&rsquo;s words are dropped at that boundary and never reach this origin.
-            Measured on this stack: both shops that bid are in-network, both have an advocate,
-            and both came back <code>store_pitch: null</code>. Until that contract carries the
-            message, every slot here shows the organic voice only &mdash; so what a shop buys
-            by joining is the one thing this screen cannot yet show you, and this page says so
-            rather than letting the platform&rsquo;s voice stand in for the seller&rsquo;s.
-          </li>
           <li data-testid="gap-feedback-seeded">
             <strong>Step 5 is seeded, and the real prompt is unreachable</strong> &mdash; the
             question in step 5 is real, the form is the real{' '}

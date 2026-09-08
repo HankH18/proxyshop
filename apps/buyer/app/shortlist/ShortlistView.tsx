@@ -106,19 +106,91 @@ function storeDomainLine(domain: string | undefined): string {
 }
 
 /**
- * WHAT THE THING IS.
+ * WHAT THE THING IS — the platform's own crawled name where it has one, the reference where
+ * it does not.
  *
- * The exchange sends a catalogue *reference*, deliberately — a title belongs to the store's
+ * WHAT THIS USED TO ARGUE, and why the argument is gone rather than softened. It read: "the
+ * exchange sends a catalogue *reference*, deliberately — a title belongs to the store's
  * catalogue and copying one through the exchange would publish a second, staler spelling of
- * a fact it does not own. So the ref is what a shopper sees, and this app does not dress it
- * up as a product name it has not resolved. Absence gets a sentence, never a blank line.
+ * a fact it does not own." Every clause of that is about the STORE's catalogue, and it was
+ * sound about the store's catalogue. It was the wrong question. The name on the card is not
+ * the store's and never passes through the store: `exchange.ranking.verification
+ * .catalog_identity` reads it off the PLATFORM's own snapshot — the same one the exchange
+ * already grades the store's claims against, gated in Cypher to sources the platform
+ * observed itself, reachable from no bid at all — and publishes it as `product.identity`
+ * with the snapshot id that produced it. So this is not the exchange re-spelling a fact it
+ * does not own; it is the platform stating a fact it does own, in its own voice.
+ *
+ * That snapshot is a crawl on a crawled shop (`neo4j-crawl:{store}:{product}`) and an
+ * operator's deployment document on a configured one, which is why the card's attribution
+ * says "Proxyshop's own record" and prints the id rather than claiming Proxyshop went and
+ * looked. Preserving that distinction is the stated reason `source` is a REQUIRED field.
+ *
+ * That makes the name the ORGANIC half of D55, exactly as `platform_case` is: a
+ * platform-authored fact about a product beside a platform-authored case for a shop. It is
+ * therefore attributed on the card rather than printed bare — see the identity gloss in the
+ * slot below, which names the snapshot and when the platform saw it — because a title with
+ * no attribution reads as the shop's word for its own product, and a shopper who cannot tell
+ * whose name they are reading has been handed the seller's voice wearing the platform's.
+ *
+ * `brand` joins the title when the crawl recorded one, and is absent otherwise; no brand is
+ * inferred from a title. With NO identity the reference is what a shopper sees, unchanged
+ * and for the original reason — this app resolves nothing and dresses nothing up. Absence of
+ * a product altogether gets a sentence, never a blank line.
  */
 function productLine(product: ShortlistProduct | null | undefined): string {
   if (!product || !product.product_ref) {
     return 'The exchange did not name a product for this slot.'
   }
+  const identity = product.identity
+  if (identity) {
+    return identity.brand ? `${identity.title} — ${identity.brand}` : identity.title
+  }
   const variant = product.variant_ref
   return variant ? `${product.product_ref} — variant ${variant}` : product.product_ref
+}
+
+/**
+ * WHOSE PRICE THIS IS — three answers, and the third is not the first (R10, D55).
+ *
+ * `false` renders NOTHING, and that is the deliberate half. A price a store actually quoted
+ * is the unremarkable case, and a line on every card saying "this shop quoted this" would
+ * teach a reader to skim the one place the sentence matters. The other two both get words:
+ *
+ * * `true` — the shop did not answer this auction usably, so the exchange stood in for it at
+ *   the list price on its own roster row. The number is real and nobody at that shop quoted
+ *   it. The reason is the exchange's own token, printed as the token it is rather than
+ *   translated, because this screen is not the layer that owns that vocabulary.
+ * * `null`/absent — the exchange did not state whose price this is. That is a producer older
+ *   than the field, and the page says so instead of guessing. Rendering it as `false` would
+ *   turn silence into a quote, which is the entire reason the flag exists.
+ *
+ * `priced` is here because this line attributes A NUMBER, and a slot can carry the flag with
+ * no number under it: an R10 stand-in minted from a roster row that named no readable list
+ * price is exactly that, and it is not rare. With no price, "the exchange did not say whose
+ * price this is" is a sentence about nothing, printed directly beneath a line that already
+ * said there is no price — so the unknown state stays quiet and the stand-in state says the
+ * thing that is still true and still useful, which is that the shop never answered at all.
+ */
+function priceProvenanceLine(
+  fallback: boolean | null | undefined,
+  reason: string | null | undefined,
+  priced: boolean,
+): string | null {
+  if (fallback === false) return null
+  if (fallback === true) {
+    const named = typeof reason === 'string' ? reason.trim() : ''
+    const because =
+      named === ''
+        ? 'The exchange did not say why it stood in.'
+        : `The exchange gives its reason as ${named}.`
+    const what = priced
+      ? 'This price is Proxyshop’s, not this shop’s. The shop did not answer this auction, so the exchange stood in for it at the list price on its own roster row — nobody at this shop quoted the number above.'
+      : 'This shop did not answer this auction. The exchange stood in for it rather than dropping it, and its roster row carried no list price to show you either, so there is no number here that anyone quoted.'
+    return `${what} ${because}`
+  }
+  if (!priced) return null
+  return 'The exchange did not say whose price this is: whether this shop quoted it, or Proxyshop stood in for a shop that did not answer and used a list price instead. This page will not guess.'
 }
 
 /**
@@ -265,23 +337,34 @@ function PitchPanel({ slot, pitch }: { slot: ShortlistSlot; pitch: SlotPitch }) 
       )}
 
       {order.includes(VOICE_STORE) ? null : (
-        // MEASURED, and the reason this sentence names TWO causes instead of the obvious
-        // one. `store_pitch: null` is not "a scraped shop with no advocate" at this hop: the
-        // buyer service reads it off the slot's `message`, and `contracts.protocol
-        // .ShortlistSlot` is `extra="forbid"` with no message field, so a store agent's real
-        // pitch is dropped at the exchange boundary before it can reach this origin. On the
-        // devstack BOTH shops that bid are in-network, both have an advocate, and both come
-        // back `null`. A gloss that said "this shop has no advocate" would therefore be false
-        // on every card this stack can currently draw — the page does not guess which cause
-        // it is looking at, because from here the two are the same value.
+        // WHAT THIS USED TO SAY, and why it could not stay. It named the missing message as
+        // one of two causes — a scraped shop with no advocate, OR a real pitch "dropped at
+        // the exchange boundary" because `contracts.protocol.ShortlistSlot` was
+        // `extra="forbid"` with no message field — and said the page could not tell them
+        // apart. The second cause is gone: `ShortlistSlot.message` exists now and carries the
+        // seller's bytes verbatim, `buyer_svc.pitch.writing.store_pitch_of` reads them off it,
+        // and a shop that sends a pitch has it rendered in the block above. Leaving the old
+        // sentence up would have the page blaming a contract that has since been fixed for a
+        // silence the shop itself chose.
+        //
+        // THREE causes remain and this page still does not guess between them, because from
+        // here they are one value. `ShortlistSlot.message` is `null` for a shop with no
+        // advocate at all, for a shop that has one and said nothing, and for a message longer
+        // than the published 1200-character cap — which is refused WHOLE rather than cut,
+        // because a truncated pitch is words the store did not write attributed to the store.
+        // `fallback` separates the first from the other two often enough to be worth reading,
+        // and it is on this card: the price-provenance line above says when the shop did not
+        // answer this auction at all.
         <p className="gloss" data-testid={`no-store-voice-${slot.bid_ref}`}>
-          <strong>Nothing here is in this shop&rsquo;s own voice.</strong> Either Proxyshop
-          found this shop by crawling &mdash; in which case it has no advocate of its own, has
-          not asked for anything and is not paying for this placement &mdash; or it has one
-          and its message did not survive the exchange&rsquo;s published shortlist contract,
-          which carries no field to put it in. This page cannot tell those two apart and will
-          not guess. Either way, what you have read above is Proxyshop&rsquo;s own case and
-          not the seller&rsquo;s.
+          <strong>Nothing here is in this shop&rsquo;s own voice.</strong> The exchange carries
+          a shop&rsquo;s own words when it sends them, and this slot arrived with none. That
+          happens three ways and this page will not guess which: Proxyshop found this shop by
+          crawling, so it has no advocate, has asked for nothing and is not paying for this
+          placement; or it has an advocate and chose to say nothing this time; or it wrote
+          something longer than the published limit, which is refused whole rather than
+          trimmed, because a shortened pitch is words the shop did not write with the
+          shop&rsquo;s name on them. Either way, what you have read above is Proxyshop&rsquo;s
+          own case and not the seller&rsquo;s.
         </p>
       )}
 
@@ -368,7 +451,14 @@ export function ShortlistView({
       </p>
 
       <ul aria-label="Options">
-        {shortlist.slots.map((slot) => (
+        {shortlist.slots.map((slot) => {
+          const priceProvenance = priceProvenanceLine(
+            slot.fallback,
+            slot.fallback_reason,
+            Boolean(slot.price),
+          )
+          const identity = slot.product?.identity
+          return (
           <li key={slot.bid_ref} data-testid={`slot-${slot.bid_ref}`}>
             <h3>{slot.slot}</h3>
 
@@ -388,9 +478,52 @@ export function ShortlistView({
             <p className="item" data-testid={`product-${slot.bid_ref}`}>
               {productLine(slot.product)}
             </p>
+            {/* WHOSE NAME THAT WAS. Rendered only when a name replaced the reference above,
+                because it is the attribution for that name and there is nothing to attribute
+                otherwise. The reference itself moves down here rather than disappearing: it
+                is what Accept resolves against and it is the join a reader would need to
+                check the name against the exchange's own record. */}
+            {identity && slot.product ? (
+              <p className="gloss" data-testid={`product-identity-${slot.bid_ref}`}>
+                {/* "Proxyshop's own record", NOT "Proxyshop's own crawl". Both are true of
+                    the usual case and only the first is true of all of them: `catalog_identity`
+                    reads whatever snapshot the exchange holds, and that is a `neo4j-crawl:…`
+                    document on a crawled shop and an operator's deployment document on a
+                    configured one. Naming the crawl here would state, on a shopper's card,
+                    that Proxyshop went and looked — when on some deployments an operator
+                    simply wrote it down. The snapshot id below is the discriminator, which is
+                    exactly what the contract says `source` is REQUIRED for. */}
+                <strong>That name is Proxyshop&rsquo;s, not this shop&rsquo;s.</strong> It was
+                read from Proxyshop&rsquo;s own record of this shop &mdash; the same record the
+                shop&rsquo;s claims are graded against, which no shop can write to &mdash; so
+                the shop did not choose the name on its own card. That record is{' '}
+                <code className="mono">{identity.source}</code>
+                {identity.observed_at
+                  ? `, observed ${identity.observed_at}`
+                  : ', which named no time it was observed'}
+                . The exchange&rsquo;s reference for it is{' '}
+                <code className="mono">{slot.product.product_ref}</code>
+                {slot.product.variant_ref ? (
+                  <>
+                    {' '}
+                    (variant <code className="mono">{slot.product.variant_ref}</code>)
+                  </>
+                ) : null}
+                .
+              </p>
+            ) : null}
             <p className="price" data-testid={`price-${slot.bid_ref}`}>
               {priceLine(slot.price)}
             </p>
+            {/* WHOSE PRICE THAT WAS — see `priceProvenanceLine`. Directly under the number,
+                above the discount and the expiry, because both of those are qualities OF a
+                quote and this is the line that says whether there was a quote at all. A slot
+                the store really bid renders nothing here. */}
+            {priceProvenance === null ? null : (
+              <p className="gloss" data-testid={`price-provenance-${slot.bid_ref}`}>
+                {priceProvenance}
+              </p>
+            )}
             {slot.price?.discount ? (
               <p className="gloss" data-testid={`discount-${slot.bid_ref}`}>
                 {discountLine(slot.price.discount)}
@@ -455,7 +588,8 @@ export function ShortlistView({
               Accept this one
             </button>
           </li>
-        ))}
+          )
+        })}
       </ul>
 
       {error !== undefined ? (
