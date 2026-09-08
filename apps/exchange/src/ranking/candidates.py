@@ -267,9 +267,8 @@ def _completed_fallback_offer(offer: Any, registered_domain: str | None) -> Any:
       store, and so is one the T-177 price wall degraded.
 
       The count is twelve rather than seven since ``store_declined`` and ``store_refused``
-      landed, and since the fan-out began minting ``response_timed_out``,
-      ``fan_out_capacity_exhausted`` and ``arrival_stamp_unparseable`` rather than flattening
-      all three into ``no_response``: a store that answers ``204`` with a decline reason, or
+      landed, and since ``bid_claim_unprovenanced``,
+      ``response_timed_out`` and ``fan_out_capacity_exhausted`` were added beside them: a store that answers ``204`` with a decline reason, or
       ``422``, or that answers correctly but after the window closed, is no longer recorded as
       silence but is still a fallback, so it is completed too. That makes the point
       sharper rather than weaker — a store can now reach this branch by *explicitly refusing*

@@ -821,7 +821,7 @@ class ShortlistSlot(BaseModel):
     at all.
 
     `true` is not a verdict about the store's honesty and must not be rendered as one. It is reachable
-    by every one of the nine `exchange.auction.collect.FALLBACK_REASONS` — silence, a Tier-0 store
+    by every one of the twelve `exchange.auction.collect.FALLBACK_REASONS` — silence, a Tier-0 store
     with no agent, a late reply, an unreadable offer, a discount that would not reconcile, a claim
     with no provenance, and an explicit decline or refusal among them — and a store that reaches it
     has already lost everything it could have offered: `_list_price_bid` rebuilds the offer from the
@@ -838,8 +838,9 @@ class ShortlistSlot(BaseModel):
 
     An OPEN string rather than a closed enum, for the reason `provenance_labels` is: the vocabulary is
     the exchange's and it has grown twice already (`store_declined` and `store_refused` took it from
-    seven values to nine), and a closed enum here would make adding a reason a breaking protocol
-    change rather than a more precise answer.
+    seven values to nine; `bid_claim_unprovenanced`, `response_timed_out` and
+    `fan_out_capacity_exhausted` took it to twelve), and a closed enum here would make adding a
+    reason a breaking protocol change rather than a more precise answer.
 
     Always `null` when `fallback` is not `true` — there is no reason to give for a bid that arrived.
     A `true` with a `null` reason is legal and means the producer stated the fact without the cause.

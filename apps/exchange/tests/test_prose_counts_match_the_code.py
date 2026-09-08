@@ -3,9 +3,8 @@
 Prose that outlived its subject is this repository's largest single defect class -- roughly a
 third of everything found -- and the cheapest instance of it is a NUMBER. ``candidates.py``
 said ``FALLBACK_REASONS`` held NINE reasons in three separate places; the tuple has held
-twelve since the fan-out started minting ``response_timed_out``,
-``fan_out_capacity_exhausted`` and ``arrival_stamp_unparseable`` instead of flattening all
-three into ``no_response``. Nothing went red, because nothing was looking.
+twelve since ``bid_claim_unprovenanced``,
+``response_timed_out`` and ``fan_out_capacity_exhausted`` were added beside the nine. Nothing went red, because nothing was looking.
 
 A number word in a docstring is machine-checkable, so it is checked here. The gate is
 deliberately narrow: it grades the sentences that name a specific collection, and it fails
@@ -20,7 +19,7 @@ from pathlib import Path
 import pytest
 from exchange.auction.collect import FALLBACK_REASONS
 
-SRC = Path(__file__).resolve().parents[1] / "src"
+REPO = Path(__file__).resolve().parents[3]
 
 #: Number words this file can read, up to a ceiling well past any collection it grades.
 NUMBER_WORDS = {
@@ -53,7 +52,7 @@ NUMBER_WORDS = {
 #: look green while grading nothing.
 COUNTED_PROSE = [
     (
-        "ranking/candidates.py",
+        "apps/exchange/src/ranking/candidates.py",
         len(FALLBACK_REASONS),
         re.compile(
             r"(?:every one of the|one of the)\s+([A-Za-z]+)\s+(?:reasons|values)"
@@ -62,9 +61,43 @@ COUNTED_PROSE = [
         ),
     ),
     (
-        "ranking/candidates.py",
+        "apps/exchange/src/ranking/candidates.py",
         len(FALLBACK_REASONS),
         re.compile(r"The count is\s+([A-Za-z]+)\s+rather than", re.IGNORECASE),
+    ),
+    # THE PUBLISHED BUNDLE, and it is here because the count got out of date in the SCHEMA
+    # first. A partner integrator reading `protocol.schema.json` to decide whether to pin an
+    # enum reads this sentence, and until this row existed nothing in the repo compared it to
+    # anything. Its shape differs from the two above — the number word is followed by the
+    # IDENTIFIER rather than by "reasons" or "values" — so it needs its own pattern; reusing
+    # theirs would match nothing and trip this file's own "grading no prose at all" assertion,
+    # which is red for the wrong reason.
+    (
+        "packages/contracts/schemas/protocol.schema.json",
+        len(FALLBACK_REASONS),
+        re.compile(
+            r"every one of the\s+([A-Za-z]+)\s+`exchange\.auction\.collect\.FALLBACK_REASONS`",
+            re.IGNORECASE,
+        ),
+    ),
+    # ...and both generated mirrors, which are the files a consumer actually imports. They are
+    # written by `contracts.codegen` from the schema above, so a correction there reaches them
+    # only if somebody regenerates; this row is what notices when nobody did.
+    (
+        "packages/contracts/generated/python/protocol.py",
+        len(FALLBACK_REASONS),
+        re.compile(
+            r"every one of the\s+([A-Za-z]+)\s+`exchange\.auction\.collect\.FALLBACK_REASONS`",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "packages/contracts/generated/ts/protocol.schema.d.ts",
+        len(FALLBACK_REASONS),
+        re.compile(
+            r"every one of the\s+([A-Za-z]+)\s+`exchange\.auction\.collect\.FALLBACK_REASONS`",
+            re.IGNORECASE,
+        ),
     ),
 ]
 
@@ -73,7 +106,7 @@ COUNTED_PROSE = [
 def test_a_count_written_out_in_prose_equals_the_collection_it_names(
     relative: str, expected: int, pattern: re.Pattern[str]
 ) -> None:
-    text = (SRC / relative).read_text(encoding="utf-8")
+    text = (REPO / relative).read_text(encoding="utf-8")
     found = pattern.findall(text)
 
     assert found, (
