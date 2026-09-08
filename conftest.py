@@ -384,16 +384,23 @@ def _neo4j_connection() -> Iterator[Any]:
     """
     from neo4j import GraphDatabase
 
+    from proxyshop_support.neo4j_auth import graph_credentials
+
     _require_services("neo4j-bolt")
-    uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
-    user = os.environ.get("NEO4J_USER", "neo4j")
-    password = os.environ.get("NEO4J_PASSWORD", "proxyshop_dev_pw")
-    driver = GraphDatabase.driver(uri, auth=(user, password), connection_timeout=5)
+    # Resolved through the ONE resolver, not a fourth spelling of the same three defaults.
+    # This block used to inline `proxyshop_dev_pw` alongside the two served paths and the
+    # readiness probe's `""` — four readings of one credential, and the probe's disagreed. It
+    # agreed here by luck rather than by construction, and drift made the graph suite SKIP
+    # rather than fail, which is the quietest way for a gate to stop grading anything.
+    creds = graph_credentials()
+    driver = GraphDatabase.driver(
+        creds.uri, auth=(creds.user, creds.password), connection_timeout=5
+    )
     try:
         driver.verify_connectivity()
     except Exception as exc:  # pragma: no cover - stack-down path
         driver.close()
-        pytest.skip(f"neo4j is not reachable at {uri}: {exc}")
+        pytest.skip(f"neo4j is not reachable at {creds.describe()}: {exc}")
     try:
         yield driver
     finally:

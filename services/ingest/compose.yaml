@@ -32,7 +32,9 @@ services:
       # `services/ingest/src/embeddings/__init__.py` is now the single source of truth and an
       # operator can still override by exporting the variable.
       EMBEDDING_PROVIDER: "${EMBEDDING_PROVIDER:-}"
-      # graph/reembed.py:377,391 read these when graph_driver() opens the bolt session.
+      # `proxyshop_support/neo4j_auth.graph_credentials` reads these — one resolution shared by
+      # the re-embedder, the exchange's roster and catalogue, and the readiness probe, which
+      # used to disagree three ways about the default.
       # Inside the compose network `neo4j` is the host, not localhost — a .env copied from
       # .env.example is written for the HOST side and must not leak in here.
       NEO4J_URI: "bolt://neo4j:7687"

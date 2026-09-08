@@ -119,9 +119,15 @@ UNDRIVEN_ALLOWLIST: dict[tuple[str, str, str], str] = {}
 
 #: The manual survey this census was cross-checked against, kept as a second opinion rather
 #: than as truth. Both agree, so a future disagreement means one of them moved.
+#:
+#: The buyer moved: 14 -> 15 when `GET /buyer/store-window` landed (T-142). This test caught it
+#: on the full suite and named the service and both numbers, which is the whole point of keeping
+#: a hand count beside a derived one — the census cannot notice that IT changed, only that the
+#: tree did. Update this the same way: name the route and say why it moved, so the next reader
+#: can tell a real drift from a deliberate addition.
 EXPECTED_COUNTS: dict[str, int] = {
     "exchange": 7,
-    "buyer": 14,
+    "buyer": 15,  # +1: GET /buyer/store-window, the store's read of the buyer window (T-142)
     "merchant": 12,  # 11 routes + the /dashboard SPA mount
     "trust": 10,
     "ingest": 9,

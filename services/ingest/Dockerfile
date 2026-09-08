@@ -66,7 +66,7 @@ RUN pip install --no-cache-dir \
 # is required for the image to start or for any module to import — which is exactly why an
 # import scan cannot see them and why they have to be reasoned about rather than derived:
 #
-#   neo4j            graph/reembed.py:386, inside graph_driver(). Without it the graph
+#   neo4j            proxyshop_support/neo4j_auth.py, reached from graph_driver(). Without it the graph
 #                    write path raises on first use; ingest's whole job is writing the graph.
 #   beautifulsoup4   adapters/signed_fetch.py:446, inside SignedFetchAdapter._blocks(),
 #   lxml             which asks BeautifulSoup for the "lxml" parser at :449 and falls back

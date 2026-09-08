@@ -74,7 +74,19 @@ services:
       # reached unless EXCHANGE_DEPLOYMENT (below) also names one. The two lines are one
       # switch; splitting them is how this reads as configured and behaves as unwired.
       EXCHANGE_SHOP_ROSTER: "${EXCHANGE_SHOP_ROSTER:-graph}"
-      # ...and the graph it reads. `roster.py:517-520` builds the driver from exactly these
+      # Which store holds the auction records. Set here for the reason the line above exists:
+      # a seam nothing selects is a seam nobody uses, and `EXCHANGE_SHOP_ROSTER` spent its
+      # whole life defaulted off with a Dockerfile comment claiming otherwise. The in-memory
+      # store is bounded now (512 records, the auction's own 15-minute TTL, oldest-first
+      # eviction) so the unbounded-growth defect is closed either way — but it is
+      # PROCESS-LOCAL, and an exchange that restarts loses every open auction and every
+      # one-accept reservation with it.
+      #
+      # Unlike EXCHANGE_SHOP_ROSTER this one works with no deployment document, because
+      # `ensure_configured` binds the machine on both branches. An unreachable Redis is a 503
+      # naming the store, never a silent downgrade to the in-memory one.
+      EXCHANGE_AUCTION_STORE: "${EXCHANGE_AUCTION_STORE:-redis}"
+      # ...and the graph it reads. `proxyshop_support/neo4j_auth.py` builds the driver from
       # three names, defaulting the URI to `bolt://localhost:7687` — the CONTAINER'S own
       # loopback, where nothing listens — so without these lines every solicitation came back
       # as an empty roster whose reason named a connection refusal. Inside the compose network
@@ -174,10 +186,16 @@ services:
               "uvicorn", "exchange.main:app", "--host", "0.0.0.0", "--port", "8083", "--workers", "1"]
     # READINESS, not liveness — see the long note in apps/trust/compose.yaml.
     #
-    # `--redis` is the MEASURED dependency: `exchange/auction/state.py` holds the auction
-    # state machine in a `proxyshop_support.redis_client.WorkerRedis` (D39), and the check
-    # also refuses a worker index the running server cannot isolate, which is a state in
-    # which no auction route can serve.
+    # `--redis` is the MEASURED dependency, and it is measured only because
+    # `EXCHANGE_AUCTION_STORE` above says `redis`. Stated as a pairing, because this comment
+    # asserted the dependency for a long time while the served app fell back to the in-process
+    # store and Redis held nothing: with the store selected, `RedisAuctionStore` holds every
+    # auction record and every one-accept reservation, so an unreachable Redis is a container
+    # that cannot open, close or accept an auction. Set the variable empty and the store is
+    # process-local again and this probe is merely stricter than it needs to be.
+    #
+    # The check also refuses a worker index the running server cannot isolate, which is a
+    # state in which no auction route can serve.
     #
     # `--postgres exchange:app.sellers` covers what this fragment DECLARES it depends on.
     # Measured honestly: `git grep -l psycopg -- apps/exchange/src` is empty today, so the
@@ -198,9 +216,12 @@ services:
     # test_deploy_readiness.py` fails a service that declares `depends_on: neo4j` and does
     # not probe it.
     #
-    # NEO4J_PASSWORD above is load-bearing for this line, not decoration —
-    # `service_launch.check_neo4j` defaults that variable to the EMPTY string, so a probe
-    # without it authenticates as nobody against a server that requires a password.
+    # NEO4J_PASSWORD above is load-bearing for this line, not decoration. It used to be
+    # load-bearing for a worse reason: `service_launch.check_neo4j` defaulted the variable to
+    # the EMPTY string while two SERVED paths defaulted it to a literal, so the probe and the
+    # app disagreed about who they were. All three resolve through
+    # `proxyshop_support.neo4j_auth.graph_credentials` now, which warns once naming
+    # NEO4J_PASSWORD when the development default is what answered.
     healthcheck:
       test: ["CMD", "python", "-m", "proxyshop_support.service_launch", "ready",
              "--http-port", "8083", "--postgres", "exchange:app.sellers", "--redis",

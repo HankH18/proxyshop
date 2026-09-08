@@ -65,12 +65,15 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 #: bolt session on behalf of a running service.
 SWEPT_ROOTS = ("apps", "services", "packages", "proxyshop_support", "e2e", "scripts")
 
-#: The one file allowed to name a password default, and the repo-root ``conftest.py``, which is
-#: the test harness rather than a served path and is pinned by its own node below instead.
-EXEMPT = (
-    REPO_ROOT / "proxyshop_support" / "neo4j_auth.py",
-    REPO_ROOT / "conftest.py",
-)
+#: The one file allowed to name a password default.
+#:
+#: The repo-root ``conftest.py`` used to be exempted here too, as the test harness rather than a
+#: served path, and was pinned by a node of its own that required its literal to AGREE with
+#: :data:`~proxyshop_support.neo4j_auth.DEV_PASSWORD`. It folded onto ``graph_credentials()``, so
+#: it needs no exemption and no agreement: there is no second literal left to drift. The node
+#: that pinned it said in its own failure message to delete both when this happened, and
+#: :func:`test_the_test_harness_resolves_through_the_resolver_like_everything_else` replaced it.
+EXEMPT = (REPO_ROOT / "proxyshop_support" / "neo4j_auth.py",)
 
 #: A sentinel credential no environment can produce, used to prove that a connector reads the
 #: RESOLVER rather than merely reading the same environment variable the resolver reads.
@@ -367,38 +370,40 @@ def test_no_module_outside_the_resolver_supplies_a_neo4j_password_default() -> N
     )
 
 
-def test_the_test_harnesss_own_literal_still_agrees_with_the_resolver() -> None:
-    """The repo-root ``conftest.py`` is exempted from the sweep, so it is pinned here instead.
+def test_the_test_harness_resolves_through_the_resolver_like_everything_else() -> None:
+    """The repo-root ``conftest.py`` reads the resolver, not a fourth copy of its default.
 
-    It is the fixture the whole graph suite rides, and it is not a served path — but if its
-    literal ever drifts from :data:`~proxyshop_support.neo4j_auth.DEV_PASSWORD`, the graph
-    tests do not go red, they go **skipped**, because ``_neo4j_connection`` catches the refusal
-    and calls ``pytest.skip``. A silently skipped datastore suite is indistinguishable from a
-    passing one, which is why this node exists rather than a comment.
+    This node replaced one that required conftest's own ``proxyshop_dev_pw`` literal to EQUAL
+    :data:`~proxyshop_support.neo4j_auth.DEV_PASSWORD`. That was the right assertion while a
+    literal was there, and its failure message said to delete it the moment conftest started
+    calling ``graph_credentials()`` — which it now does. Asking the old question of the new code
+    can only fail, and asking nothing would drop the property entirely, so the question moved:
+    not "do the two literals still agree" but "is there still only one".
 
-    It asks the question through :mod:`ast` rather than through ``in``, because ``in`` answers
-    the wrong question. ``DEV_PASSWORD in conftest`` is satisfied by the word appearing in a
-    comment, in a docstring, in a skip message or in an unrelated constant — every one of which
-    leaves the actual lookup defaulting to something else, which is the exact drift this node
-    exists to catch. What is required is that the literal is the FALLBACK ARGUMENT of
-    conftest's own ``NEO4J_PASSWORD`` lookup.
+    Why it is graded at all, rather than trusted: ``_neo4j_connection`` turns an authentication
+    refusal into ``pytest.skip``. So a conftest that resolved the password differently from the
+    served paths would not turn the graph suite RED — it would turn it SKIPPED, and a silently
+    skipped datastore suite reads exactly like a passing one. That is the failure mode this file
+    exists for, and it is the reason the harness is worth a node even though it ships nothing.
     """
     source = _conftest_source()
-    default = _password_default_argument(source)
 
-    assert ENV_PASSWORD in source, "conftest.py no longer resolves a Neo4j password at all"
-    assert default is not None, (
-        f"conftest.py has no {ENV_PASSWORD} lookup with a literal fallback any more. Either it "
-        f"stopped resolving the password (and the graph suite now depends on the developer's "
-        f"shell), or it started resolving it through something this node cannot read — if it "
-        f"is now calling graph_credentials(), delete this node and the EXEMPT entry with it"
+    assert "graph_credentials" in source, (
+        "conftest.py no longer resolves the Neo4j credential through "
+        "proxyshop_support.neo4j_auth.graph_credentials. If it has gone back to reading "
+        f"{ENV_PASSWORD} with its own fallback, that is a second default again — and the graph "
+        "suite will SKIP rather than fail when it drifts"
     )
-    assert default == DEV_PASSWORD, (
-        f"conftest.py defaults {ENV_PASSWORD} to {default!r}, and "
-        f"neo4j_auth.DEV_PASSWORD is {DEV_PASSWORD!r}. The graph suite will not fail — it will "
-        f"SKIP, because _neo4j_connection turns an authentication refusal into pytest.skip. "
-        f"Fold conftest.py onto graph_credentials(), or move the two back into agreement"
+    assert _password_default_argument(source) is None, (
+        f"conftest.py has a literal fallback on its own {ENV_PASSWORD} lookup again, beside the "
+        "resolver call. Two readings of one credential is the defect this file grades; the "
+        "harness is not exempt from it just because it ships nothing"
     )
+    # Deliberately NOT asserted: that the string never appears in conftest.py at all. This
+    # file's own header quotes all three pre-repair lines verbatim, and the sweep above skips
+    # test modules for the stated reason — naming the old shape is documenting it, not
+    # shipping it. A comment recording what was removed is the convention here, not a leak.
+    # The two assertions above ask the question that matters: is there a second RESOLUTION.
 
 
 # =====================================================================================
