@@ -103,7 +103,33 @@ __all__ = [
 #: The comparator generation the exchange records on the verdicts it produces. Recorded on
 #: every attestation and covered by its MAC, so a comparator change invalidates the verdicts
 #: minted under the previous one rather than silently inheriting them.
-DEFAULT_VERIFIER_VERSION = "verification/1.0.0"
+#:
+#: ``2.0.0`` at D59: the verifier now decides the binary stock fact from the crawl's
+#: ``availability``, so a stock claim that answered ``ambiguous`` under ``1.0.0`` answers
+#: ``verified``, ``contradicted`` or ``unsupported`` under this one. That is a different answer
+#: for the same ``(pitch, snapshot)`` pair, which is the exact case
+#: :func:`claim_verification.verification_key` names this constant for — a stored verdict minted
+#: under ``1.0.0`` must be re-verified rather than inherited. MAJOR because the change is not
+#: additive: the same claim can now cost a store the published ``contradicted_claim`` penalty
+#: where before it cost nothing.
+#:
+#: **``RANKING_FEATURES_VERSION`` deliberately does NOT move with it**, which is the opposite
+#: call from D57 and for a stated reason. D57 bumped it because ``delivery_fits`` itself was
+#: redefined — same feature name, same weight, a different computation. Nothing in
+#: :mod:`.features` is redefined here: ``verified_claim_ratio`` and ``policy_penalties`` compute
+#: exactly what they computed before, from the verdicts they are handed. What changed is the
+#: EVIDENCE, and the evidence carries its own version — this constant, stamped on every attested
+#: claim and covered by its MAC — so a replay comparing feature versions alone was never going
+#: to reproduce a claim-derived score anyway, and moving the features version would say a
+#: feature changed when none did.
+#:
+#: **The gap in that argument, named rather than left to be found:** no DURABLE record carries
+#: this version. ``contracts.ledger`` pins ``claim_verified`` to ``(claim_ref, status, dim)``
+#: and ``rank`` publishes only ``ranking_versions: {weights, features}``, so the attested claim
+#: that carries it never reaches a published surface and an auditor replaying a recorded auction
+#: cannot tell a ``1.0.0`` verdict from a ``2.0.0`` one. Closing it means a field on a frozen
+#: ledger payload, which is a contract change and a separate decision (D59).
+DEFAULT_VERIFIER_VERSION = "verification/2.0.0"
 
 #: The frozen ledger kind a minted verdict is announced under. Named rather than spelled at
 #: the emission, so the one string this module writes to the ledger has an address.
@@ -532,6 +558,22 @@ def declared_attributes(
     unanswerable. Returned in the ``{"key": ...}`` shape
     :meth:`~exchange.retrieval.criteria.HardCriterion.is_evidenced_by` reads, so the key fold
     stays in the one place that owns it.
+
+    **The vocabulary is :func:`claim_verification.verifier.catalog_keys`, and it used to be
+    :func:`catalog_units`.** That was a real defect and not a tidying. ``catalog_units`` reads
+    the ``attributes`` block ALONE, while ``verify`` decides a claim from four places — the
+    attributes block, the ``offer`` block, the product record itself, and the derived
+    ``in_stock`` reading (D59). So for every key in the other three classes this exchange could
+    decide the constraint while telling :func:`~.filters.unanswerable_criteria` it could not,
+    and the relaxation then turned on **whether a bidder happened to claim the key**: claim it
+    and the constraint stayed a filter nobody could pass, so every store in the auction was
+    excluded — including the ones that had claimed nothing. That is precisely the defect
+    :func:`~.filters.decided_attributes` was written to close, reachable by another route, and
+    it reproduced on the shipped ``deploy/demo/exchange-deployment.json`` via
+    ``canonical_name``: with the store silent the constraint was relaxed and two shops were
+    shortlisted; with the same store claiming ``canonical_name`` falsely the shortlist came
+    back empty. ``catalog_keys`` is the function that answers "what could this snapshot decide
+    at all", which is this function's own question, so the two can no longer disagree.
     """
     refs = dict(product_refs or {})
     keys: list[str] = []
@@ -543,7 +585,7 @@ def declared_attributes(
         snapshot = snapshot_for(catalog, name, refs.get(name))
         if snapshot is None:
             continue
-        for key in catalog_units(snapshot, refs.get(name)):
+        for key in sorted(catalog_keys(snapshot, refs.get(name))):
             if key not in seen:
                 seen.add(key)
                 keys.append(key)

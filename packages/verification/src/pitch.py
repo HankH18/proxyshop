@@ -49,6 +49,15 @@ therefore cannot choose which catalogue field its prose is graded against — th
 ``product_ref``. When nothing in the vocabulary matches, the canonical key is kept and the
 exchange answers "this catalogue could never decide that", which costs the seller nothing.
 
+**A phrase is not an assertion.** A rule matches a substring; what the sentence DOES with that
+substring is a separate question, and for a boolean it is the whole question. "We never let this
+one go out of stock" contains "out of stock" and asserts its opposite. So every flag reading is
+put through :func:`_asserts_current_state` — negation, conditional, past tense and attributive
+use each decline the match — and an equality-graded key the pitch reads two incompatible ways is
+dropped entirely by :func:`_drop_self_contradicting_readings`, because a pitch that asserts a
+value and its negation is evidence for neither. See the guard block below for why this became
+load-bearing the moment D59 made ``in_stock`` decidable.
+
 **A hedge is not a commitment.** The shared engine's hedge discount multiplies a reading's
 confidence by :data:`~claim_verification.decomposition.HEDGE_DISCOUNT` when the sentence
 hedges, and anything landing under :data:`PITCH_CONFIDENCE_FLOOR` (C10's published floor) is
@@ -131,7 +140,11 @@ SELLER_ASSERTED_AUTHORITY_RANK = 5
 #: would read different claims out of identical bytes — a stored claim then names the code that
 #: produced it and a re-decomposition is explainable, exactly as
 #: ``ingest.extraction.claims.EXTRACTOR_VERSION`` is for the policy-page path.
-PITCH_EXTRACTOR_VERSION = "pitch_decomposition@1.0.0"
+#: ``1.1.0`` is the guard block below: the same bytes that minted ``in_stock`` out of a negated,
+#: conditional or past-tense sentence now mint nothing, and a key read two incompatible ways
+#: mints nothing either — so a stored claim names which of the two readings of that sentence it
+#: was decided on.
+PITCH_EXTRACTOR_VERSION = "pitch_decomposition@1.1.0"
 
 #: C10's published confidence floor, taken from the shared engine rather than restated. A
 #: reading below it is DROPPED rather than quarantined, and the difference matters: the ingest
@@ -216,6 +229,184 @@ def _captured(match: re.Match[str], index: int, default: str = "") -> str:
     return default if found is None else str(found)
 
 
+# ---------------------------------------------------------------------------------------------
+# When a flag phrase is NOT the sentence asserting that flag
+# ---------------------------------------------------------------------------------------------
+#
+# A flag rule matches a bare phrase anywhere in a sentence, and a phrase is not an assertion.
+# Measured, against a catalogue whose offer says ``availability: "in_stock"`` — the platform
+# AGREEING with the store — every one of these honest sentences minted ``in_stock: False`` and
+# graded ``contradicted``:
+#
+#     "We never let this one go out of stock, and returns are free for 30 days."
+#     "It has not been sold out since spring."
+#     "Sold out twice last month; back on the shelf now."
+#     "The 1 kg bag is sold out, but the 250 g is ready to ship today."   <- and True, at once
+#     "If it does go out of stock we will tell you within the hour."
+#     "Back-ordered orders ship separately at no extra cost."
+#
+# Until D59 that was harmless: ``in_stock`` was in no crawl-shaped snapshot's vocabulary, every
+# such reading was rewritten to ``ambiguous`` and cost nothing. D59 makes the fact decidable off
+# the offer block, so these readings are now GRADED, and one wrong one costs an honest store the
+# published ``policy_penalties: -0.15`` plus a ``catalog_claim_accuracy`` hit.
+#
+# The rule this module already lives by decides the shape of the fix: **silence is worth more
+# than a wrong verdict, in both directions.** A reading that is not confidently about CURRENT,
+# WHOLE-PRODUCT availability is not minted at all — minting nothing costs the seller exactly what
+# not writing the sentence costs, and minting a wrong one costs 0.15 — so every guard below errs
+# toward declining. All of them are plain regexes over the sentence the engine already lowered:
+# untrusted text still reaches a regular expression and a comparator, never an instruction and
+# never a model (C10).
+
+#: Where one clause of a sentence ends and the next begins. The shared engine's splitter already
+#: cuts on terminal punctuation and semicolons; this cuts the rest of the way, because a cue
+#: qualifies the clause it is IN and not the whole sentence. "It is in stock and we do not charge
+#: for returns" negates the returns, not the shelf, and that seller keeps its honest reading.
+_CLAUSE_BOUNDARY = re.compile(
+    r"[,;:()\[\]–—]|\b(?:and|but|or|yet|however|although|though|while|whereas)\b"
+)
+
+#: The clause says the opposite of what the phrase spells. ``n't`` is matched as a suffix so one
+#: entry covers ``isn't``/``won't``/``hasn't``/``didn't``. Bare ``no`` is deliberately absent —
+#: it would suppress "in stock, no waiting" for a reason that has nothing to do with the shelf,
+#: and a guard that fires for the wrong reason is a guard nobody can maintain.
+_NEGATED = re.compile(
+    r"\bnever\b|\bnot\b|n't\b|\bno\s+longer\b|\bwithout\b|\bnor\b|\bnone\b|\bnothing\b"
+    r"|\brarely\b|\bseldom\b|\bhardly\b|\binstead\s+of\b|\brather\s+than\b|\bavoids?\b"
+    r"|\bavoided\b"
+)
+
+#: The clause describes a state that has not happened. Most modal hedges never reach this test —
+#: ``may``, ``might``, ``should``, ``usually`` are in ``decomposition.HEDGE_TERMS`` and the hedge
+#: discount already drops the whole reading under :data:`PITCH_CONFIDENCE_FLOOR`. What is left is
+#: the conditionals and the futures, which are not hedges: "if it does go out of stock we will
+#: tell you" is a firm promise about a state that is not the case.
+_HYPOTHETICAL = re.compile(
+    r"\bif\b|\bunless\b|\bin\s+case\b|\bin\s+the\s+event\b|\bwhen(?:ever)?\b|\bwere\s+to\b"
+    r"|\bwould\b|\bcould\b|\bwill\b|\bgoing\s+to\b|\bwhether\b|\botherwise\b|\bever\b"
+)
+
+#: The clause is about another time. A store that WAS sold out and says so is describing its
+#: history, and grading that against a snapshot of today convicts it for being candid.
+_TIME_SHIFTED = re.compile(
+    r"\bwas\b|\bwere\b|\bhas\s+been\b|\bhave\s+been\b|\bhad\b|\bused\s+to\b|\bpreviously\b"
+    r"|\bformerly\b|\bearlier\b|\bbriefly\b|\byesterday\b|\bonce\b|\btwice\b|\bthrice\b"
+    r"|\b\d+\s+times\b|\bsince\b|\bago\b|\blast\s+\w+\b|\bback\s+in\b|\bat\s+one\s+point\b"
+)
+
+#: The phrase modifies the noun after it rather than predicating this product: "back-ordered
+#: ORDERS ship separately", "in stock ITEMS leave the same day". Attributive use is a statement
+#: about a class of things the store handles — a shipping policy, usually — and the store's own
+#: shelf is not what it is about. The one guard that reads what comes AFTER the match.
+_ATTRIBUTIVE_HEAD = re.compile(
+    r"^[\s-]*(?:orders?|items?|products?|lines?|skus?|variants?|models?|sizes?|options?"
+    r"|colou?rs?|units?|purchases?|customers?|shoppers?|deliveries|delivery|shipments?"
+    r"|goods|stock|inventory|listings?|ranges?)\b"
+)
+
+#: The clause's subject is a PACKAGE rather than the product: "the 1 kg bag is sold out". One
+#: pack size running out is not the product being unavailable, and D59 names this residual
+#: itself — ``graph.query.catalogue_entry`` picks ONE offer, so the snapshot this reading is
+#: graded against describes one listing and cannot answer a per-variant sentence. The units are
+#: packaging units only: ``l``, ``bar`` and ``v`` are deliberately absent because the rule table
+#: reads those as SPECIFICATIONS of the product itself, so "the 2.9 L tank machine is in stock"
+#: keeps the reading it should keep.
+_PACKAGE_SCOPED = re.compile(
+    r"\b\d+(?:\.\d+)?\s*(?:kgs?|g|mg|ml|cl|oz|lbs?|packs?|counts?|ct|tins?|bags?|bottles?)\b"
+)
+
+
+def _clause_bounds(sentence: str, start: int, end: int) -> tuple[int, int]:
+    """The half-open span of the clause of ``sentence`` that ``[start, end)`` sits in."""
+    left, right = 0, len(sentence)
+    for boundary in _CLAUSE_BOUNDARY.finditer(sentence):
+        if boundary.end() <= start:
+            left = boundary.end()
+        elif boundary.start() >= end:
+            right = boundary.start()
+            break
+    return (left, right)
+
+
+def _asserts_current_state(match: re.Match[str]) -> bool:
+    """Is this phrase the sentence asserting the flag, now, about the whole product?
+
+    ``match.string`` is the lower-cased SENTENCE :func:`~claim_verification.decomposition.scan`
+    matched against. The sentence is reached through the match rather than by widening
+    ``Rule.read``'s signature, because that signature belongs to the engine
+    ``ingest.extraction.rules`` still also defines and
+    ``test_pitch.py::test_the_shared_engine_and_the_ingest_rule_engine_do_not_drift`` polices;
+    forking it to carry a pitch-only guard is the duplication this package keeps closing.
+
+    Returns ``False`` on any doubt. Declining is worth exactly what the seller not writing the
+    sentence is worth; a wrong reading is worth ``-0.15`` to a store that told the truth.
+    """
+    sentence = match.string
+    left, right = _clause_bounds(sentence, match.start(), match.end())
+    clause = sentence[left:right]
+    if _NEGATED.search(clause) or _HYPOTHETICAL.search(clause) or _TIME_SHIFTED.search(clause):
+        return False
+    if _PACKAGE_SCOPED.search(sentence[left : match.start()]):
+        return False
+    return not _ATTRIBUTIVE_HEAD.match(sentence[match.end() :])
+
+
+#: The value families a repeated key is a CONTRADICTION in rather than a list. Both are graded
+#: by equality — ``bool`` against ``bool``, casefolded whitespace-collapsed ``str`` against
+#: ``str`` — so a key read twice with two of them says two incompatible things about one product
+#: and can only be right once. Numbers are deliberately absent; see
+#: :func:`_drop_self_contradicting_readings`.
+_EXCLUSIVE_VALUE_TYPES = (bool, str)
+
+
+def _drop_self_contradicting_readings(readings: list[TextReading]) -> list[TextReading]:
+    """Drop every reading of a key this pitch read two incompatible ways.
+
+    One sentence cannot assert a boolean and its negation. Measured before this filter::
+
+        "The 1 kg bag is sold out, but the 250 g is ready to ship today."
+            -> in_stock: False -> contradicted   AND   in_stock: True -> verified
+
+    — one honest sentence, one key, the same store convicted and vindicated at once. Two
+    opposite readings are not evidence for either value; they are evidence that this decomposer
+    cannot tell which listing the sentence is about, which is exactly the case where minting
+    nothing is not merely safe but correct.
+
+    The same shape, measured, on the one other equality-graded family::
+
+        "Unlike a dual boiler machine, this one is a heat exchanger."
+            -> boiler_type: "dual boiler" -> contradicted  AND  "heat exchange" -> verified
+
+    Whole-pitch rather than per-sentence, because splitting the identical statement in two ("The
+    1 kg bag is sold out. The 250 g is ready to ship today.") must not make it gradeable —
+    punctuation is not evidence.
+
+    **Numbers are deliberately excluded**, and it is a scope line rather than an oversight. A
+    boolean or a closed-vocabulary term read two ways is one fact asserted twice and
+    incompatibly; two numbers on one key ("a 9 bar pump" and "the 15 bar model") are as likely to
+    be two products, so cancelling them is a different decision with a different false-positive
+    profile. It also cannot be taken here without silently gutting a gate: ``test_pitch.py::
+    test_the_text_and_the_claim_count_a_bidder_can_choose_are_both_bounded`` floods the
+    decomposer with 263 distinct ``N bar`` sentences and asserts the claim CAP holds, and a
+    numeric rule would make that assertion pass by returning nothing at all. The numeric case is
+    real and is recorded rather than folded in on the way past.
+    """
+    by_key: dict[str, set[Any]] = {}
+    for reading in readings:
+        if isinstance(reading.value, _EXCLUSIVE_VALUE_TYPES):
+            by_key.setdefault(str(reading.key), set()).add(reading.value)
+    contradictory = {key for key, values in by_key.items() if len(values) > 1}
+    if not contradictory:
+        return readings
+    return [
+        reading
+        for reading in readings
+        if not (
+            isinstance(reading.value, _EXCLUSIVE_VALUE_TYPES) and str(reading.key) in contradictory
+        )
+    ]
+
+
 @dataclass(frozen=True)
 class _DurationRule(Rule):
     """A term quoted in years or months, normalised to whole months."""
@@ -268,12 +459,21 @@ class _QuantityRule(Rule):
 
 @dataclass(frozen=True)
 class _FlagRule(Rule):
-    """A boolean the sentence states outright — "in stock", "sold out"."""
+    """A boolean the sentence states OUTRIGHT — "in stock", "sold out".
+
+    "Outright" is the whole rule and it used to be unenforced: the pattern matched the phrase
+    and the flag was minted, whatever the sentence did with it. A boolean has no room for a
+    partly-right reading — it is compared for equality against the catalogue and comes back
+    ``verified`` or ``contradicted`` — so a phrase that is negated, conditional, historical or
+    attributive is declined by :func:`_asserts_current_state` rather than guessed at.
+    """
 
     key_template: str = ""
     flag: bool = True
 
     def read(self, match: re.Match[str]) -> tuple[str, Any, str | None] | None:
+        if not _asserts_current_state(match):
+            return None
         return (self.key_template, self.flag, None)
 
 
@@ -385,6 +585,10 @@ PITCH_RULES: tuple[Rule, ...] = (
         key_template="units_left",
         integral=True,
     ),
+    # Both stock rules mint a BOOLEAN on a key D59 made decidable, so each match is put through
+    # :func:`_asserts_current_state` before it becomes a reading, and a pitch reading the key
+    # both ways mints neither. See the guard block above for the six honest sentences that
+    # graded ``contradicted`` against a catalogue that agreed with the store.
     _FlagRule(
         name="in_stock",
         pattern=re.compile(r"\bin\s+stock\b|\bavailable\s+now\b|\bready\s+to\s+ship\b"),
@@ -556,6 +760,10 @@ def decompose_pitch(
         for reading in scan(text, PITCH_RULES)
         if float(reading.confidence) >= float(confidence_floor)
     ]
+    # A pitch that read one equality-graded key two incompatible ways asserted neither. Applied
+    # here rather than in a rule because no rule can see what another rule read out of the same
+    # sentence.
+    readings = _drop_self_contradicting_readings(readings)
     # Text order, then key, so the emitted list is a stable function of the bytes rather than of
     # the rule table's declaration order — two rules matching the same sentence must not be able
     # to swap places when the table is edited.

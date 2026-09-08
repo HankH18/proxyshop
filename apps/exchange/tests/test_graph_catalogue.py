@@ -68,6 +68,22 @@ STORE = "shop-north"
 PRODUCT = "prod-serum-c"
 
 
+def _just_crawled() -> Any:
+    """A clock twenty minutes after :data:`OBSERVED_AT`, i.e. "the platform just looked".
+
+    ``as_snapshot`` stamps ``read_at`` from this, and ``read_at - captured_at`` is what D59's
+    stale-evidence floor measures for the LIVE-state keys (``availability`` and the derived
+    ``in_stock``). Fixtures here pin a fixed ``OBSERVED_AT``, so against a wall clock every one
+    of them would describe a months-old crawl and those two keys would correctly leave the
+    decidable vocabulary — which is a true statement about a stale snapshot and the wrong
+    scenario for a test about the JOIN. Pinning the clock is how a fixture says "this crawl is
+    current"; it was not something a fixture had to say before the floor existed.
+    """
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    return lambda: datetime(2026, 1, 1, 0, 20, 0, tzinfo=UTC)
+
+
 @pytest.fixture(autouse=True)
 def _restore_the_process_wide_domain_registry() -> Any:
     """Undo the PROCESS-WIDE write ``configure_accept`` makes, after every test here.
@@ -251,12 +267,17 @@ def test_a_crawled_entry_becomes_a_snapshot_the_verifier_can_decide_a_claim_on()
     sponsored shop's message must meet.
     """
     session = _Session([_row()])
-    catalog = GraphCatalogSnapshots(_Factory(session))
+    catalog = GraphCatalogSnapshots(_Factory(session), clock=_just_crawled())
 
     snapshot = catalog.snapshot_for(STORE, PRODUCT)
     assert snapshot is not None
     assert snapshot["snapshot_id"] == f"{CATALOG_SNAPSHOT_PREFIX}:{STORE}:{PRODUCT}"
     assert snapshot["captured_at"] == OBSERVED_AT
+    assert snapshot["read_at"] == "2026-01-01T00:20:00Z", (
+        "the snapshot must say WHEN THIS EXCHANGE READ IT; `captured_at` is the latest "
+        "observation behind the entry, so measuring a reading's age against it is measuring "
+        "the document against itself and answers zero at any crawl age"
+    )
     assert snapshot["evidence_refs"] == ["src-product", "src-store"]
     assert "freshness_window_days" not in snapshot, (
         "no window is published unless the operator states one; inventing one silently turns "

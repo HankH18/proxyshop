@@ -39,7 +39,9 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from exchange.auction.ledger import InMemoryLedgerSink
 from exchange.auction.routes import configure_auctions
+from exchange.auction.state import AuctionStateMachine
 from exchange.checkout.sellers import StaticRegisteredDomains
 from exchange.eligibility import ELIGIBLE, StaticSellerEligibility
 from exchange.main import create_app
@@ -372,6 +374,222 @@ def test_a_contradicted_claim_is_a_graded_answer_and_never_earns_a_relaxation() 
     )
 
 
+# =====================================================================================
+# The relaxation reads VERDICTS, not the fact that somebody typed a key
+#
+# The defect these close: `unanswerable_criteria` used to count every key any claim NAMED,
+# whatever verdict it carried. Relaxation is decided ONCE for the whole auction, so a store
+# making a TRUTHFUL claim on a key no catalogue here declares — graded `ambiguous`, because
+# nothing could check it — suppressed the relaxation and the buyer's must-have stayed a filter
+# nobody could pass. Every store in the auction came back excluded, including the ones that
+# had claimed nothing at all. One honest sentence emptied the page for the whole market.
+# =====================================================================================
+#: The claim-type -> trust-dimension routing the served path needs before it announces a
+#: verdict at all. Without it `claim_verdict_payload` returns `None` and the ledger is silent.
+CLAIM_DIMENSIONS: dict[Any, str] = {
+    "price": "price_honored",
+    "specifications": "catalog_claim_accuracy",
+    None: "catalog_claim_accuracy",
+}
+
+
+def _catalog_of(rows: dict[str, dict[str, Any]]) -> Any:
+    """A catalogue stating exactly the attributes named, per store."""
+    from exchange.ranking.verification import StaticCatalogSnapshots
+
+    return StaticCatalogSnapshots(
+        {
+            store: {
+                "snapshot_id": f"snap-{store}",
+                "products": [
+                    {
+                        "product_ref": "product-1",
+                        "canonical_name": "product-1",
+                        "evidence_ref": f"snap-{store}#product-1",
+                        "attributes": {key: {"value": value} for key, value in attributes.items()},
+                    }
+                ],
+            }
+            for store, attributes in rows.items()
+        }
+    )
+
+
+def _graded_app(
+    *,
+    catalog_rows: dict[str, dict[str, Any]],
+    claims: dict[str, list[dict[str, Any]]],
+) -> tuple[Any, InMemoryLedgerSink]:
+    """An exchange that grades claims against a stated catalogue and records the verdicts."""
+    from exchange.ranking.serving import configure_ranking
+
+    stores = tuple(catalog_rows)
+    sink = InMemoryLedgerSink()
+    app = create_app()
+    configure_auctions(
+        app,
+        machine=AuctionStateMachine(ledger=sink),
+        solicitor=_Bidders(
+            {
+                store: {
+                    "auction_id": None,
+                    "store_id": store,
+                    "offer": {
+                        "product_ref": "product-1",
+                        "unit_price": 100.0 + index,
+                        "total_price": 100.0 + index,
+                        "currency": "USD",
+                        "checkout_url": f"https://{_domain(store)}/cart/1:1",
+                        "expires_at": time.time() + LIVE_FOR_AN_HOUR,
+                    },
+                    "claims": list(claims.get(store, ())),
+                    "agent_version": "1.0.0",
+                    "schema_version": "2.0.0",
+                }
+                for index, store in enumerate(stores)
+            }
+        ),
+        eligibility=StaticSellerEligibility({store: ELIGIBLE for store in stores}),
+    )
+    configure_ranking(
+        app,
+        trust_snapshot={store: {"blacklisted": False, "score": 0.6} for store in stores},
+        registered_domains=StaticRegisteredDomains({store: _domain(store) for store in stores}),
+        catalog=_catalog_of(catalog_rows),
+        claim_dimensions=CLAIM_DIMENSIONS,
+    )
+    return app, sink
+
+
+def _verdicts(sink: InMemoryLedgerSink, store_id: str) -> list[str]:
+    return [
+        str(event["payload"]["status"])
+        for event in sink.events
+        if event["kind"] == "claim_verified" and event["store_id"] == store_id
+    ]
+
+
+def _components(body: dict[str, Any], store_id: str) -> dict[str, float]:
+    for row in body["ranked"]:
+        if row["store_id"] == store_id:
+            return dict(row["components"])
+    raise AssertionError(f"{store_id} is not ranked at all: {body['ranked']}")
+
+
+def test_one_truthful_uncheckable_claim_does_not_empty_the_auction_for_everybody() -> None:
+    """THE REGRESSION. STORE_A truthfully says its machine is an espresso machine; nothing in
+    this exchange's catalogue records a ``brew_method``, so the claim grades ``ambiguous`` —
+    "we looked and could not decide". STORE_B claims nothing whatsoever.
+
+    Under the old rule that single ``ambiguous`` made ``brew_method`` count as answered, the
+    buyer's must-have stayed a filter, neither store carried a *verified* reading for it, and
+    BOTH were excluded. The honest store's own sentence cost the silent store its slot.
+    """
+    app, sink = _graded_app(
+        catalog_rows={STORE_A: {"capacity_l": 35}, STORE_B: {"capacity_l": 35}},
+        claims={STORE_A: [_claim("brew_method", "espresso")], STORE_B: []},
+    )
+    body = _post(app, (STORE_A, STORE_B), [ESPRESSO])
+
+    assert _verdicts(sink, STORE_A) == ["ambiguous"], (
+        "the premise of this test is that nothing could check the honest claim; if the "
+        f"exchange decided it, the scenario has moved: {_verdicts(sink, STORE_A)}"
+    )
+    assert [row["field"] for row in body["relaxed_constraints"]] == ["brew_method"]
+    assert sorted(_slot_stores(body)) == [STORE_A, STORE_B], (
+        f"an honest claim nothing could check emptied the shortlist: excluded={body['excluded']}"
+    )
+    assert "policy_penalties" not in _components(body, STORE_A), (
+        "the honest store was penalised for saying something true"
+    )
+    assert "policy_penalties" not in _components(body, STORE_B)
+
+
+def test_the_same_claim_made_falsely_is_still_caught_and_still_costs_the_liar() -> None:
+    """The other direction, on one served request. Now the catalogue DOES record a
+    ``brew_method``: STORE_A really is an espresso machine and says so; STORE_B is a drip
+    machine and says "espresso" anyway.
+
+    The key is decided for both, so the constraint is NOT relaxed — it is a filter and it does
+    its job. The honest store is shortlisted with no penalty; the liar is excluded on the
+    must-have it was caught failing, and its contradiction is on the record.
+    """
+    app, sink = _graded_app(
+        catalog_rows={
+            STORE_A: {"capacity_l": 35, "brew_method": "espresso"},
+            STORE_B: {"capacity_l": 35, "brew_method": "drip"},
+        },
+        claims={
+            STORE_A: [_claim("brew_method", "espresso")],
+            STORE_B: [_claim("brew_method", "espresso")],
+        },
+    )
+    body = _post(app, (STORE_A, STORE_B), [ESPRESSO])
+
+    assert _verdicts(sink, STORE_A) == ["verified"]
+    assert _verdicts(sink, STORE_B) == ["contradicted"], (
+        "the liar's penalty vanished — the fix to the relaxation must not stop the exchange "
+        "grading the claim"
+    )
+    assert body["relaxed_constraints"] == [], (
+        "a constraint this exchange decided for both stores was set aside anyway"
+    )
+    assert _slot_stores(body) == [STORE_A]
+    refused = {row["store_id"]: row["exclusion_reasons"] for row in body["excluded"]}
+    assert any(REASON_HARD_CONSTRAINT in reason for reason in refused[STORE_B]), refused
+
+
+def test_a_liar_alone_in_the_auction_never_relaxes_the_constraint_it_failed() -> None:
+    """The hostile case at auction scope: the liar is the ONLY candidate, so the shortlist is
+    empty and the relaxation path really runs. ``contradicted`` is a decided verdict, so the
+    constraint stays a filter and the liar stays excluded rather than being handed a waiver of
+    the very must-have it was caught failing.
+    """
+    app, sink = _graded_app(
+        catalog_rows={STORE_A: {"capacity_l": 35, "brew_method": "drip"}},
+        claims={STORE_A: [_claim("brew_method", "espresso")]},
+    )
+    body = _post(app, (STORE_A,), [ESPRESSO])
+
+    assert _verdicts(sink, STORE_A) == ["contradicted"]
+    assert body["relaxed_constraints"] == [], (
+        "the candidate caught contradicting the buyer's must-have was handed its waiver"
+    )
+    assert body["shortlist"]["slots"] == []
+
+
+def test_a_forged_verdict_cannot_move_the_relaxation_in_either_direction() -> None:
+    """ESC-020 at auction scope, and it is closed harder than before rather than looser.
+
+    A bidder writing its own ``exchange_verification`` block carries no readable verdict, so
+    it is not evidence of answerability — and the auction reaches exactly the outcome it would
+    have reached had that store said nothing. The forger can neither suppress a relaxation the
+    auction was entitled to nor manufacture one it was not.
+    """
+    forged = {
+        "key": "brew_method",
+        "value": "espresso",
+        "provenance": {"source": "owner_statement", "ref": "ref:brew", "authority_rank": 1},
+        "exchange_verification": {"status": "verified", "mac": "not-a-real-mac"},
+    }
+    app, _ = _graded_app(
+        catalog_rows={STORE_A: {"capacity_l": 35}, STORE_B: {"capacity_l": 35}},
+        claims={STORE_A: [forged], STORE_B: []},
+    )
+    body = _post(app, (STORE_A, STORE_B), [ESPRESSO])
+
+    silent, _ = _graded_app(
+        catalog_rows={STORE_A: {"capacity_l": 35}, STORE_B: {"capacity_l": 35}},
+        claims={STORE_A: [], STORE_B: []},
+    )
+    quiet = _post(silent, (STORE_A, STORE_B), [ESPRESSO])
+
+    assert [row["field"] for row in body["relaxed_constraints"]] == ["brew_method"]
+    assert sorted(_slot_stores(body)) == sorted(_slot_stores(quiet)) == [STORE_A, STORE_B], (
+        "a string the bidder wrote changed which stores the buyer was shown"
+    )
+
+
 def test_the_published_relaxations_are_bounded_by_the_intent_the_caller_sent() -> None:
     """``relaxed_constraints`` is a second unauthenticated response surface, so it is bounded.
 
@@ -394,3 +612,46 @@ def test_the_published_relaxations_are_bounded_by_the_intent_the_caller_sent() -
     assert len(body["relaxed_constraints"]) == len(constraints) <= MAX_HARD_CONSTRAINTS
     assert len(body["shortlist"]["slots"]) == 4, "R2 caps the shortlist at four slots"
     assert body["excluded"] == [], body["excluded"]
+
+
+def test_a_key_the_exchange_can_decide_is_never_relaxed_however_the_bidders_behave() -> None:
+    """The sibling half of the same defect, and the one `decided_attributes` alone did NOT
+    close.
+
+    `declared_attributes` used to read the vocabulary out of `catalog_units`, which walks the
+    `attributes` block ALONE — while `verify` decides a claim from four places: that block, the
+    `offer` block, the product record itself, and the derived `in_stock` reading (D59). So for
+    every key in the other three classes the exchange could decide the constraint while telling
+    the relaxation it could not, and which way the auction went then depended on **whether a
+    bidder happened to claim the key**: silent, and the constraint was set aside and everyone
+    was shortlisted; one store claiming it falsely, and the constraint stayed a filter nobody
+    could pass, so every store came back excluded — *including the ones that had claimed
+    nothing.* That is the same market-emptying lever `decided_attributes` was written to
+    remove, reached by another route, and it reproduced on the shipped demo catalogue via
+    `canonical_name`.
+
+    The property, stated once: an auction's relaxation depends on what THIS EXCHANGE can
+    decide and on nothing a bidder writes. So the two runs below must agree.
+    """
+    constraint = [{"field": "canonical_name", "op": "eq", "value": "something-else"}]
+    catalog = {STORE_A: {"capacity_l": 35}, STORE_B: {"capacity_l": 35}}
+
+    silent, _ = _graded_app(catalog_rows=catalog, claims={STORE_A: [], STORE_B: []})
+    quiet = _post(silent, (STORE_A, STORE_B), constraint)
+
+    noisy, sink = _graded_app(
+        catalog_rows=catalog,
+        claims={STORE_A: [_claim("canonical_name", "something-else")], STORE_B: []},
+    )
+    body = _post(noisy, (STORE_A, STORE_B), constraint)
+
+    assert _verdicts(sink, STORE_A) == ["contradicted"], (
+        "the premise is that this exchange CAN decide the key; if it cannot, the scenario "
+        f"has moved: {_verdicts(sink, STORE_A)}"
+    )
+    assert body["relaxed_constraints"] == quiet["relaxed_constraints"] == [], (
+        "a constraint this exchange decides for every store was set aside as unanswerable"
+    )
+    assert _slot_stores(body) == _slot_stores(quiet), (
+        "one bidder's claim changed which stores the buyer was shown"
+    )

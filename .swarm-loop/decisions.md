@@ -1567,13 +1567,65 @@ reading alone cannot tell them apart. What tells them apart is how old the readi
 
 `_is_stale` already existed and already named this exact case in its own docstring — *"a
 six-week-old snapshot's `roast_level` is still evidence… its `availability` is not: that is live
-state"* — and it could not fire on either count. The offer block is written as bare scalars, so
-`availability` was not a Mapping and was skipped at the first line; and the window it reads,
-`freshness_window_days`, is published only when an operator sets one, which
-`graph_catalog_from_env` never does. The mechanism existed and the data path bypassed it twice.
-Both are closed: the derived reading is returned in the `{value, observed_at}` attribute shape,
-which is what puts it inside `_is_stale`'s reach, and both spellings of the fact are held to
-`STOCK_EVIDENCE_WINDOW_DAYS` whether or not an operator configured anything.
+state"* — and it could not fire, on **three** independent counts. An adversarial verification of
+the first draft of this entry measured all three; the first draft claimed the rule worked and it
+did not, so what follows is what it took to make the sentence true rather than what it took to
+write it.
+
+1. **The offer block is bare scalars**, so `availability` was not a Mapping and `_is_stale`
+   returned at its first line. Closed by returning the live-state keys — and ONLY those — in the
+   `{value, observed_at, stale}` attribute shape. Without this a store claiming
+   `availability: "in_stock"` banked a `verified` off a day-old reading while the same store
+   claiming `in_stock: true` got `unsupported`: a spelling-shaped hole in the floor. `price` and
+   `currency` stay bare scalars, for the reason the offer block was written that way.
+2. **There was no reference instant outside the snapshot.** `_is_stale` measured against
+   `captured_at`, and `captured_at` is `entry.observed_at`, which `graph.query.catalogue_entry`
+   computes as `latest_instant(store, product, attributes, offer)` — **the offer's own stamp is
+   one of the maxands.** So the quantity being compared was "is this reading older than the
+   newest thing in the same document", which for one crawl pass is exactly zero however old the
+   pass was. Measured through the real `catalogue_entry` → `as_snapshot` → served
+   `POST /auctions`: an honest restocked store was **`contradicted` at 0h, 1h, 1d, 7d, 30d, 90d
+   and 365d alike**, `policy_penalties: -0.15` at every age. On the recorded corpus that is 195
+   of 3,093 products (6.3%) — real stores, payable. Closed by `GraphCatalogSnapshots.as_snapshot`
+   stamping **`read_at`**, the moment this exchange READ the graph, which `_is_stale` prefers
+   over every reference inside the document. The clock is read by the I/O adapter and never by
+   `verify`, which stays the pure function its docstring promises.
+3. **`Offer.observed_at` is a last-CHANGED stamp, not a last-CONFIRMED one.**
+   `ingest.adapters.mapping.build_upserts` does not rewrite an unchanged product's Offer, so a
+   shelf the crawler re-read this morning and found unchanged still carries the stamp of
+   whenever it last moved — measured at 12,600s of drift against a 3,600s window after a single
+   re-crawl, growing without bound while the store churns other SKUs. Reading it as the
+   confirmation time would have retired the grading of every well-behaved store while leaving
+   the churning ones graded, which is the inverse of the point. So the derived reading's
+   timestamp is the snapshot's `captured_at` — the latest platform observation behind the entry,
+   i.e. *the crawl looked, and found this* — and never the offer's own.
+
+**The quantity the floor now measures is therefore `read_at - captured_at`: how long it has
+been since the platform last looked at this shelf, at the moment it grades a claim about it.**
+That is the only honest reading of "is our evidence current", and it is the one an operator can
+act on — if it is too large, the answer is to crawl more often, not to grade more bravely. A
+snapshot with no `read_at` — every hand-authored deployment document, devstack market and
+fixture in the tree, none of which carries an offer `observed_at` either — falls through to the
+old references and is taken as current, which is exactly what a stated document asserts.
+
+**And a reading the platform could not keep current costs the store nothing**, which is a
+separate guard and was also missing. `catalog_keys` drops `in_stock` from the vocabulary when
+the reading is stale, so the exchange rewrites the verdict to `ambiguous` — its OWN gap — rather
+than letting a real `unsupported` land in `verified_claim_ratio`'s denominator. Without that,
+measured on a buyer who asks about stock, the honest restocked store read `rank_score` **0.365
+against 0.465 for a store that said nothing at all**: a direct incentive not to make true stock
+claims. A gap on the platform's side must not be a cost on the seller's.
+
+**The derivation may not launder a stale flag either.** The snapshot's own
+`attributes["availability"]` row, when it has one, is what the derivation reads — it timestamps
+and flags ITSELF — and `stale` is additionally inherited from the product and the snapshot.
+Measured on this repo's own stale-evidence gate, `fixtures/golden/golden_set.json`'s
+`gp-002-stale-evidence`, which carries `stale: true` at snapshot, product and attribute level
+beside an unflagged copy in its offer block: before this, `availability` correctly answered
+`unsupported` while `in_stock` answered **`verified`** off a June reading. One document, one
+fact, opposite verdicts, and the seller credited with the fresh confirmation that fixture exists
+to deny — its own rationale being *"Stale evidence must not be silently treated as fresh
+confirmation."*
 
 **Where that window comes from matters more than its value, because it is not a number this
 ruling invented.** `ingest.scheduler.cadence.DEFAULT_CADENCE` already publishes
@@ -1640,13 +1692,21 @@ stays out of that table, unchanged.
   place: the graph `Offer` already holds `availability` with its own `observed_at` and its own
   `Source` provenance, and a second copy of the same fact on a different node is two records
   free to disagree about one shelf. `mapping.build_upserts` is unchanged.
+* **Re-stamping `Offer.observed_at` on every crawl pass**, which is the obvious way to turn a
+  last-CHANGED stamp into a last-CONFIRMED one and would let the floor read the offer's own
+  time. It is rejected because it breaks a property this repo already gates: T-024's "no
+  re-extraction without a hash change across a full cycle", which is what
+  `ingest.adapters.mapping.build_upserts`' early return exists to satisfy. Writing every
+  unchanged Offer on every pass to make one timestamp meaningful is paying in write volume and
+  in a frozen acceptance property for something `captured_at` already says.
 * **A third, "partially available" verdict.** R18's vocabulary is closed (four statuses) and
   `unsupported` already means precisely "the catalog says nothing that decides this".
 * **Moving `RANKING_FEATURES_VERSION`.** This is the opposite call from D57 and the reason is
   stated at the constant: D57 bumped it because `delivery_fits` ITSELF was redefined, whereas
   nothing in `ranking/features.py` is redefined here. `verified_claim_ratio` and
   `policy_penalties` compute exactly what they computed before, from the verdicts they are
-  handed; what changed is the EVIDENCE, and the evidence carries its own version.
+  handed; what changed is the EVIDENCE, and the evidence carries its own version — in memory
+  and under its MAC, though not yet on any durable record, which is named as a residual below.
   `DEFAULT_VERIFIER_VERSION` moves `verification/1.0.0` -> `verification/2.0.0` instead — MAJOR,
   because the change is not additive (a claim that cost nothing can now cost the published
   `contradicted_claim` penalty), and because `verification_key` names that constant exactly so a
@@ -1663,11 +1723,32 @@ stays out of that table, unchanged.
   another variant's shelf is facts about two objects graded as one, which is D58's defect class
   exactly. Closing it is the variant-binding ticket D58 already deferred — *"give the snapshot
   the crawled variant ids per product"* — and this fact is now a second reason to do it.
-* **`declared_attributes` still reads only the `attributes` block**, so a buyer's hard
-  constraint naming `in_stock` is still eligible for relaxation even though the exchange can now
-  decide it. That is unchanged behaviour rather than new breakage — the same is true of `price`,
-  `currency` and `canonical_name` — and it fails in the fail-closed direction the relaxation
-  path was built for.
+  **Sized, so it is not filed as theoretical:** replaying `fixtures/real-catalogs` through the
+  real `coerce_availability`, 569 of 3,093 products (18.4%) have a cheapest variant reading
+  `out_of_stock`, and 195 of those (6.3% of the corpus) have another variant genuinely in
+  stock. Those are the rows where an honest store's claim is graded against a shelf that is not
+  the one it is selling from. The freshness floor does not help them — their reading is
+  perfectly current, it is about the wrong variant — so this residual, not (b), is the largest
+  remaining source of a wrong stock verdict.
+* **The window is only as good as the crawler.** `read_at - captured_at` is a real age, and it
+  says the platform stops being able to grade stock the moment it stops crawling on its own
+  published cadence. That is the correct direction — the right to accuse rests on the duty to
+  observe — but it is a live operational coupling and it is stated here rather than discovered:
+  a stalled crawler silently retires this check for every store, and the symptom is `ambiguous`
+  verdicts rather than an error anywhere.
+* **The drift gate pins the DEFAULT cadence table, not the deployed one.**
+  `test_the_verifiers_stock_freshness_floor_matches_this_services_own_cadence` reads
+  `DEFAULT_CADENCE`, while a deployment can retune `offer.availability` through
+  `CadenceConfig.from_env` (`PROXYSHOP_INGEST_CADENCE`). An operator who does that moves the
+  crawler and not the verifier, and the gate stays green.
+* **No DURABLE record carries the verifier version**, which weakens — though it does not
+  overturn — the argument above for leaving `RANKING_FEATURES_VERSION` alone. `contracts.ledger`
+  pins `claim_verified` to `(claim_ref, status, dim)` and `rank` publishes only
+  `ranking_versions: {weights, features}`; the attested claim that carries the version never
+  reaches a published surface. So an auditor replaying a recorded auction cannot today tell a
+  `1.0.0` verdict from a `2.0.0` one. The fix is a field on the frozen `claim_verified` payload,
+  which is a contract change and a separate decision; naming it is what stops the version bump
+  above from reading as a guarantee it does not yet deliver.
 * **A store that declines still mints no verdict**, so declining still suppresses a stock
   contradiction at the price of the auction. D58 already recorded that every store can do this,
   and D59 adds no cheaper route to it.
@@ -1686,23 +1767,70 @@ are this exchange reporting its own gap, and a forged or absent attestation is i
 directions — the auction reaches the outcome it would have reached had that store said nothing,
 which is a stronger ESC-020 property than the old width had.
 
+**That alone did not close it, and the second half is a sibling defect the same adversarial
+verification found.** `declared_attributes` read the auction's vocabulary out of `catalog_units`,
+which walks the `attributes` block ALONE, while `verify` decides a claim from four places — that
+block, the `offer` block, the product record itself, and now the derived `in_stock` reading. So
+for every key in the other three classes the exchange could decide the constraint while telling
+the relaxation it could not, and the outcome then turned on whether a bidder chose to claim the
+key. Reproduced on the **shipped** `deploy/demo/exchange-deployment.json`, unmodified, using
+`canonical_name`:
+
+```
+gaiaherbs says NOTHING                     -> relaxed=['canonical_name']  shortlist=[gaiaherbs, toniiq]
+gaiaherbs claims canonical_name (falsely)  -> relaxed=[]                  shortlist=[]
+```
+
+One store's single false claim, and the buyer is shown nothing — by the same store-controlled
+lever, one layer down. `declared_attributes` now reads `claim_verification.verifier.catalog_keys`,
+which is the function that answers its own question, so the vocabulary the relaxation trusts and
+the vocabulary the verifier grades against can no longer disagree. Both halves are required;
+neither is sufficient alone.
+
+**And a third fix this ruling made necessary rather than found: the pitch decomposer's stock
+rules.** `pitch._FlagRule` matched `out of stock|sold out|back[\s-]?ordered` anywhere in a
+sentence, with no reading of negation, tense, condition or scope. That was inert while `in_stock`
+was outside every crawl-shaped vocabulary — the reading was rewritten to `ambiguous` and cost
+nothing — and making the key decidable turned it into a published `-0.15` against sentences that
+are true. Measured against a catalogue that AGREES with the store: *"We never let this one go out
+of stock"*, *"It has not been sold out since spring"*, *"Sold out twice last month; back on the
+shelf now"*, *"If it does go out of stock we will tell you within the hour"* and *"Back-ordered
+orders ship separately at no extra cost"* each minted `in_stock: False` and graded
+`contradicted`; *"The 1 kg bag is sold out, but the 250 g is ready to ship today"* minted BOTH
+values of one key, so the store was `verified` and `contradicted` at once and paid. The rules now
+DECLINE a negated, conditional, time-shifted, package-scoped or attributive match rather than
+inverting it, and a pitch that reads one equality-graded key two incompatible ways mints neither.
+`PITCH_EXTRACTOR_VERSION` moves `1.0.0` -> `1.1.0`. The general lesson is the one worth keeping:
+**a rule that costs nothing is not a rule anyone has tested**, and this ruling's real work was
+finding the three places that had been silently free.
+
 ### What was proven, in both directions, on one served request
 
 `apps/exchange/tests/test_stock_claim_served.py` drives `POST /auctions` against a crawl-shaped
-catalogue — empty `attributes`, offer block carrying the token and its `observed_at` — with four
-stores all claiming `in_stock: true`:
+catalogue — empty `attributes`, an offer block carrying the availability token, and the `read_at`
+stamp saying when this exchange read the graph — with four stores all claiming `in_stock: true`:
 
 ```
-store-honest     in_stock      read 20 min before the snapshot -> verified      no penalty, slot kept
-store-restocked  out_of_stock  read 24 h  before the snapshot -> unsupported   no penalty, slot kept
-store-liar       out_of_stock  read 20 min before the snapshot -> contradicted  policy_penalties -0.15
-store-prose      out_of_stock  read 20 min, claimed in PROSE   -> contradicted  policy_penalties -0.15
+store-honest     in_stock      crawled 20 min before the read -> verified      no penalty, slot kept
+store-restocked  out_of_stock  crawled 24 h   before the read -> ambiguous     no penalty, slot kept
+store-liar       out_of_stock  crawled 20 min before the read -> contradicted  policy_penalties -0.15
+store-prose      out_of_stock  crawled 20 min, claimed in PROSE -> contradicted  policy_penalties -0.15
 rank_score: 0.465 / 0.465 / 0.315 / 0.315      penalised == {store-liar, store-prose}
 ```
 
 `store-liar` and `store-restocked` send byte-identical bids against byte-identical availability
-tokens and are graded oppositely on the age of the platform's reading alone, which is the whole
+tokens, and every Offer node in that request carries the same ancient `observed_at`. They are
+graded oppositely on ONE quantity — how long ago the platform last looked — which is the whole
 of (b) stated as one measurement. `packages/verification/tests/test_stock_fact.py` grades the
-rule itself — every token's reading, both freshness directions, the tighter-window rule, the
-stated-attribute precedence, and that `availability` keeps its own verbatim verdict and stays
-untyped.
+rule itself: every token's reading, both freshness directions, that the offer's last-changed
+stamp is never read as an age, the tighter-window rule, the stated-attribute precedence, the
+stale-flag inheritance, that a stale reading leaves the vocabulary rather than costing the
+store, and that `availability` keeps its own verbatim verdict and stays untyped.
+
+**And the same pair is driven through the REAL adapter**, not only through a fixture shaped like
+its output — `test_on_the_real_adapter_a_fresh_crawl_decides_and_a_stale_one_does_not` builds two
+snapshots from `GraphCatalogSnapshots.as_snapshot` over a real `CatalogueEntry` that differ in
+one field, when the platform last crawled the shelf, and asserts the key is decidable in one and
+absent from the vocabulary in the other. That test exists because the first version of this
+ruling passed its hand-written fixtures and was inert on the object the exchange actually
+grades against.

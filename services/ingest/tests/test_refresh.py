@@ -908,3 +908,32 @@ def test_the_default_scheduler_uses_the_wall_clock() -> None:
     scheduler = RefreshScheduler(registry=StoreRegistry(), perform=_Recorder())
     assert isinstance(scheduler.clock, SystemClock)
     assert scheduler.clock.now().tzinfo is not None
+
+
+def test_the_verifiers_stock_freshness_floor_matches_this_services_own_cadence() -> None:
+    """D59's drift gate. The claim verifier declines to grade a stock claim against an
+    availability reading older than ``claim_verification.verifier.STOCK_EVIDENCE_WINDOW_DAYS``,
+    and the whole defence of that number is that it is not a number the verifier invented: it
+    is the interval THIS service publishes for re-reading ``offer.availability``. The platform
+    holds its own grading to the freshness standard it set for its own crawler.
+
+    Two definitions in two packages is exactly the shape that drifts, and a drift here is
+    silent in both directions — loosen the cadence and the verifier starts grading readings the
+    crawler has already given up on; tighten it and every stock claim quietly becomes
+    ``unsupported`` again, which is the hole D59 closed.
+
+    **What this gate does NOT cover, stated so nobody reads it as more than it is:** it pins the
+    DEFAULT table, and a deployment may retune ``offer.availability`` through
+    ``CadenceConfig.from_env`` (``PROXYSHOP_INGEST_CADENCE``). An operator who does that moves
+    the crawler and not the verifier, and this stays green. Binding the two at runtime means the
+    verifier reading a deployment's cadence config, which is a dependency from a leaf package
+    onto a service and a separate decision; D59 records it as a residual.
+    """
+    from claim_verification.verifier import STOCK_EVIDENCE_WINDOW_DAYS  # noqa: PLC0415
+
+    published = next(entry for entry in DEFAULT_CADENCE if entry.field == "offer.availability")
+    assert STOCK_EVIDENCE_WINDOW_DAYS == pytest.approx(published.max_age_seconds / 86_400.0), (
+        f"the verifier grades a stock claim on a reading up to "
+        f"{STOCK_EVIDENCE_WINDOW_DAYS * 86_400.0:.0f}s old while this service refreshes "
+        f"`offer.availability` every {published.max_age_seconds}s; one of the two moved"
+    )

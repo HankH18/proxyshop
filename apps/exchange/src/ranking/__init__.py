@@ -50,13 +50,14 @@ The deciding fact is never what a catalogue CONFIG names; it is what the candida
 
 So one narrow relaxation lives here, and its guards are in :func:`rank`. A constraint is set
 aside only when no catalogue snapshot THIS EXCHANGE holds declares the attribute and no
-candidate claimed it — never one a candidate merely failed, and never one it was caught
-contradicting — and only when the caller could tell us what its catalogues declare
-(`network_attributes`), only when nothing is eligible without it, only when the intent itself
-was readable, and only when setting it aside actually fills a slot. The buyer is never
-quietly given a shortlist that ignores a must-have: every set-aside constraint is published
-verbatim, with its reason, under `relaxed_constraints`, and it is NOT counted in
-`verified_hard_fit_count`, so no store wins the D13 tie-break on a constraint nobody proved.
+candidate's claim about it came back `verified` or `contradicted` — never one a candidate
+merely failed, and never one it was caught contradicting — and only when the caller could tell
+us what its catalogues declare (`network_attributes`), only when nothing is eligible without
+it, only when the intent itself was readable, and only when setting it aside actually fills a
+slot. The buyer is never quietly given a shortlist that ignores a must-have: every set-aside
+constraint is published verbatim, with its reason, under `relaxed_constraints`, and it is NOT
+counted in `verified_hard_fit_count`, so no store wins the D13 tie-break on a constraint
+nobody proved.
 
 `config` supplies `now` (so nothing here reads the wall clock) and optionally `auction_id`.
 `weights` and `eligibility` are keyword-only extras with inert defaults: the published
@@ -310,9 +311,13 @@ def rank(
     #     unreadable intent into an unconstrained one, which is the exact confusion
     #     `read_criteria` exists to prevent.
     #  3. The constraint is UNDECIDABLE FOR EVERYONE — no catalogue snapshot this exchange
-    #     holds declares the attribute and no candidate claimed it — not merely failed by
-    #     them. A constraint some store was graded on stays a filter for all of them, so a
-    #     store that fails a must-have (or is caught contradicting one) is still excluded.
+    #     holds declares the attribute, and no candidate's claim about it came back `verified`
+    #     or `contradicted` — not merely failed by them. A constraint some store was GRADED on
+    #     stays a filter for all of them, so a store that fails a must-have (or is caught
+    #     contradicting one) is still excluded. Note it is the VERDICT that decides this and
+    #     not the fact of a claim: a claim nothing could check is this exchange reporting its
+    #     own gap, and reading it as "the question was answerable" let one store's honest
+    #     sentence empty the shortlist for every store in the auction.
     #  4. Setting them aside CHANGES the answer. If the shortlist is empty because everyone
     #     is blacklisted, off-domain or expired, the relaxed pass is empty too and nothing is
     #     published — a relaxation nobody benefited from is a claim about a filter that was

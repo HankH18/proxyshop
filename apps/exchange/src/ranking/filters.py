@@ -60,6 +60,7 @@ import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
+from claim_verification.statuses import DECIDED_STATUSES
 from ingest.graph.model import slug
 
 from ..checkout.codes import UnusableOffer, expiry_epoch
@@ -335,33 +336,67 @@ def verified_attributes(claims: Any, *, store_id: Any = None) -> list[dict[str, 
     return attributes
 
 
-def claimed_attributes(claims: Any) -> list[dict[str, Any]]:
-    """Every attribute key a candidate's claims NAME, whatever verdict they carry.
+def decided_attributes(claims: Any, *, store_id: Any = None) -> list[dict[str, Any]]:
+    """Every attribute key this exchange actually DECIDED for a candidate — the keys whose
+    claims carry an attested `verified` or `contradicted` verdict.
 
-    A strictly wider set than :func:`verified_attributes`, and the two are never
-    interchangeable. `verified` is the only thing that SATISFIES a hard constraint (R19), and
-    that rule is untouched here. This answers a different question — was the constraint
-    *spoken to* at all? — and the widest possible reading of "spoken to" is the safe one,
-    because the only thing this set can do is PREVENT a relaxation.
+    Wider than :func:`verified_attributes` and narrower than "every key a claim names", and
+    all three answer different questions. `verified` is the only thing that SATISFIES a hard
+    constraint (R19), and that rule is untouched here. This one answers: **could this exchange
+    decide the key for anybody?** — which is the question :func:`unanswerable_criteria` is
+    asking, and a claim's VERDICT is the only honest answer to it.
 
-    Two candidates make the width necessary, and both are hostile:
+    The hostile case that makes `contradicted` belong here:
 
     * a store whose claim this exchange's own verifier **contradicted** carries no verified
-      reading. Reading that as "nobody could answer" would hand the waiver of the constraint
-      to exactly the candidate caught failing it;
-    * a store whose attestation is **forged, absent or unreadable** carries no verdict at all
-      (ESC-020). It must not be able to convert "nothing checked my claim" into "the
-      constraint does not apply to anybody", which is a slot for the forger.
+      reading, but the exchange plainly decided the key — the question was answered and the
+      answer was no. Reading that as "nobody could answer" would hand the waiver of the
+      constraint to exactly the candidate caught failing it, so a contradicted claim keeps the
+      constraint a filter and keeps its author excluded by it.
 
-    The cost of being this wide is that a store can suppress an auction's relaxation by
-    claiming a key it knows nothing about. That buys it nothing — the shortlist it empties is
-    the one it would have been in — so it is the right side to be wrong on.
+    **Why the undecided verdicts are excluded, which is the defect this replaced.** This used
+    to return every key any claim NAMED, on the argument that the widest reading was safe
+    because "the only thing this set can do is PREVENT a relaxation" and "the shortlist it
+    empties is the one it would have been in". The second half of that is false, and the
+    measurement is on the served ``POST /auctions``: relaxation is decided ONCE for the whole
+    auction, not per candidate. A store making a TRUTHFUL claim on a key no catalogue this
+    exchange holds declares gets `ambiguous` — nothing could check it — and under the old rule
+    that `ambiguous` suppressed the relaxation for the auction, so the buyer's must-have stayed
+    a filter no candidate could pass and **every store's shortlist came back empty, including
+    the stores that claimed nothing at all**. One honest sentence from one shop emptied the
+    page for the whole market.
+
+    `ambiguous` and `unsupported` are, in this exact sense, evidence FOR unanswerability
+    rather than against it: they are this exchange saying it looked and could not decide.
+    Counting them as "the question was answerable" inverts what they mean.
+
+    **ESC-020 is closed harder by this, not more loosely.** A claim whose attestation is
+    forged, absent or unreadable carries no verdict (:func:`~.attestation.attested_status`
+    returns ``None``), so it is not here — and therefore a bidder's own writing cannot move
+    the relaxation decision in EITHER direction. It cannot suppress a relaxation the auction
+    was entitled to, and it cannot manufacture one either: the outcome is identical to the one
+    the auction would have reached had that candidate said nothing. Under the old rule an
+    unattested string was load-bearing, which is the thing ESC-020 exists to forbid.
+
+    `store_id` is the candidate's EXCHANGE-ATTRIBUTED store, for the same reason
+    :func:`verified_attributes` takes it: a verdict attested for one store may not be presented
+    on behalf of another.
     """
     seen: list[dict[str, Any]] = []
     for claim in claims or ():
         key = read(claim, "key", None)
-        if key is not None:
-            seen.append({"key": str(key)})
+        if key is None:
+            continue
+        status = attested_status(
+            read(claim, ATTESTATION_FIELD, None),
+            key=key,
+            value=read(claim, "value", None),
+            unit=read(claim, "unit", None),
+            subject=store_id,
+        )
+        if str(_enum_value(status)) not in DECIDED_STATUSES:
+            continue
+        seen.append({"key": str(key)})
     return seen
 
 
@@ -612,7 +647,11 @@ def unanswerable_criteria(
       asked the question you asked".
 
     TWO facts have to be absent before a constraint is called unanswerable, and either one on
-    its own keeps it a filter:
+    its own keeps it a filter. **Both are things THIS EXCHANGE knows** — what its catalogues
+    declare and what its verifier decided — and neither is a string a bidder can write. That
+    is the property this function lost and has regained: the relaxation is decided once for
+    the whole auction, so an input a single participant controls is an input that participant
+    can use against every other participant.
 
     ``network_attributes``
         the attributes the catalogue snapshots THIS EXCHANGE holds for this auction's stores
@@ -621,9 +660,13 @@ def unanswerable_criteria(
         then NOTHING is unanswerable: an exchange that can verify nothing has discovered that
         it is misconfigured, not that the buyer's must-have is meaningless, and ESC-020
         already fixed which way that fails (shortlist nobody).
-    ``claimed_attributes``
-        anything any candidate said about the key, verdict or no verdict. See that function
-        for why the widest reading is the safe one.
+    ``decided_attributes``
+        the keys this exchange actually DECIDED for some candidate — `verified` or
+        `contradicted`. Not "the keys somebody named": a claim graded `ambiguous` or
+        `unsupported` is this exchange saying it looked and could not decide, which is
+        evidence FOR unanswerability rather than against it. See that function for the
+        measurement that made the wider reading untenable — a single honest claim on an
+        undecidable key used to empty the shortlist for every store in the auction.
 
     The catalogue half is what makes this decidable here and nowhere else. A buyer service
     holds no candidates and no snapshots, so the best it could do is guess from a catalogue
@@ -654,9 +697,18 @@ def unanswerable_criteria(
     """
     if not criteria or not network_attributes:
         return []
+    # ONE flat list for the whole auction, which is what makes the verdict rule load-bearing
+    # rather than fastidious: whatever goes in here decides the relaxation for EVERY candidate,
+    # including the ones that said nothing. `decided_attributes` is what keeps the entries in
+    # it to facts this exchange established.
     seen: list[Mapping[str, Any]] = list(network_attributes)
     for candidate in candidates:
-        seen.extend(claimed_attributes(read(candidate, "claims", None)))
+        seen.extend(
+            decided_attributes(
+                read(candidate, "claims", None),
+                store_id=read(candidate, "store_id", None),
+            )
+        )
     return [
         criterion
         for criterion in criteria
@@ -673,8 +725,9 @@ def unanswerable_reason(criterion: HardCriterion) -> str:
     """
     return (
         f"{REASON_UNEVIDENCED_CONSTRAINT}: no catalogue this exchange holds for the stores in "
-        f"this auction declares an attribute called {criterion.field!r}, and no store claimed "
-        f"one, so {criterion.field!r} {criterion.op} {criterion.value!r} could not be decided "
+        f"this auction declares an attribute called {criterion.field!r}, and no store's claim "
+        f"about it could be checked either way, so {criterion.field!r} {criterion.op} "
+        f"{criterion.value!r} could not be decided "
         f"for anybody — it could not narrow the shortlist, only empty it. It was NOT applied: "
         f"the slots below are unfiltered on {criterion.field!r}, and no store below has been "
         f"shown to meet it."
@@ -748,13 +801,13 @@ __all__ = [
     "VERIFIED",
     "blacklist_reason",
     "budget_reasons",
+    "decided_attributes",
     "domain_reason",
     "eligibility_source_reason",
     "exclusion_reasons",
     "expiry_reason",
     "hard_constraint_reasons",
     "is_budget_bound",
-    "claimed_attributes",
     "offer_price",
     "read",
     "read_criteria",

@@ -83,6 +83,7 @@ calls. So for a crawled product the decidable vocabulary is exactly
 
     price, currency, availability, observed_at        (the graph Offer)
     product_ref, canonical_name, brand, status        (the Product record)
+    in_stock                                          (D59, DERIVED from availability)
 
 and everything else — including ``list_price``, which is the key the hosted store agent
 actually publishes (``store_agent.runtime.bidding.LIST_PRICE_KEY``) — falls outside it and is
@@ -98,6 +99,27 @@ are the same fact — but it is a product decision with a real false-positive co
 whose price moved since the last crawl would be attested ``contradicted``, which carries the
 published penalty), and it belongs to whoever owns the claim vocabulary rather than to the
 module that happens to hold both names.
+
+**D59 is that product decision, made for exactly one fact, and it is still not a synonym
+table.** ``in_stock`` is the name every producer of a stock claim already writes and
+``availability`` is what the crawl writes, and until D59 nothing joined them, so every stock
+claim on this snapshot came back ``ambiguous``: free to a liar, worth nothing to an honest
+store. What was added is a DERIVED reading published under the platform's own name for it
+(``claim_verification.verifier.stock_reading``) — ``availability`` keeps its spelling, its
+verbatim token and its own verdict, and a snapshot that states an ``in_stock`` of its own is
+still answered by what it states. The false-positive cost this header names for ``list_price``
+is real here too — a shelf moves faster than a price — and the answer to it is the freshness
+floor: a stock reading older than the crawl's own published refresh cadence for
+``offer.availability`` can neither support nor contradict, so a restocked seller is not
+accused. That floor is what a bare alias would have lacked.
+
+One thing the offer block deliberately still is: **ONE listing.** ``catalogue_entry`` picks the
+cheapest fully provenanced offer so that the snapshot's price and the roster's quote are the
+same observation, and the availability beside it is that same listing's. A product whose
+cheapest variant has sold out while a dearer one has not therefore reads out of stock. That is
+a real residual and it is the honest one — an offer block pairing one variant's price with
+another variant's shelf would be exactly D58's defect class, facts about two objects graded as
+one — and closing it is the variant-binding ticket D58 already deferred.
 """
 
 from __future__ import annotations
@@ -105,6 +127,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from typing import Any
 
 # From the SUBMODULE rather than the package root, the same way
@@ -217,6 +240,7 @@ class GraphCatalogSnapshots:
         *,
         source_classes: Sequence[str] = tuple(sorted(PLATFORM_OBSERVED_SOURCE_CLASSES)),
         freshness_window_days: float | None = None,
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         """
         Args:
@@ -234,6 +258,10 @@ class GraphCatalogSnapshots:
                 posture ``StaticCatalogSnapshots`` has, because how old a reading may be before
                 it stops being evidence is an operator's policy and inventing one here would
                 silently turn honest crawled evidence into ``unsupported``.
+            clock: what stamps ``read_at`` on every snapshot — the moment this exchange READ
+                the graph, which is the only reference against which the age of a crawled
+                reading can be measured. Injected so a test can drive an age rather than sleep
+                through one; defaults to the wall clock. See :meth:`as_snapshot`.
         """
         if isinstance(source_classes, (str, bytes)):
             # `tuple("scraped")` is seven one-character classes, none of which matches
@@ -249,6 +277,7 @@ class GraphCatalogSnapshots:
         self.sessions = sessions
         self.source_classes = tuple(str(one) for one in source_classes)
         self.freshness_window_days = freshness_window_days
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     @contextmanager
     def _session(self) -> Iterator[Any]:
@@ -370,6 +399,17 @@ class GraphCatalogSnapshots:
         snapshot: dict[str, Any] = {
             "snapshot_id": f"{CATALOG_SNAPSHOT_PREFIX}:{entry.store_id}:{entry.product_id}",
             "captured_at": entry.observed_at,
+            # WHEN THIS EXCHANGE READ IT, which is a different fact from `captured_at` and the
+            # only one against which the age of a crawled reading can be measured.
+            # `captured_at` is `entry.observed_at`, itself the LATEST observation behind the
+            # entry — so `captured_at - <any reading in the entry>` is bounded by the spread
+            # WITHIN one crawl, which for a single pass is zero however old the pass was.
+            # Measured before this field existed: `claim_verification`'s stale-evidence gate
+            # could not fire on this snapshot at any crawl age, and an honest store whose shelf
+            # had been restocked since the crawl was `contradicted` at 0h, 1h, 1d, 7d, 30d, 90d
+            # and 365d alike. The clock is read HERE, in the I/O adapter, so
+            # `claim_verification.verify` stays the pure function its docstring promises.
+            "read_at": self.clock().astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "evidence_refs": list(entry.source_ids),
             "products": [product],
         }
