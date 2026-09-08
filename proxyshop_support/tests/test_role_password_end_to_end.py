@@ -86,6 +86,54 @@ def _postgres_service_block() -> str:
     return "\n".join(line.split("#", 1)[0] for line in block.splitlines())
 
 
+#: One ``KEY: value`` out of a compose mapping. Quoted forms are matched FIRST and consume to
+#: their closing quote, because the unquoted branch stops at ``}`` and an interpolated value
+#: contains one.
+def _compose_entry(key: str) -> re.Pattern[str]:
+    return re.compile(
+        rf"""\b{re.escape(key)}\s*:\s*(?:"(?P<dq>[^"]*)"|'(?P<sq>[^']*)'|(?P<bare>[^\s,}}]+))"""
+    )
+
+
+#: ``${NAME}``, ``${NAME:-default}`` or ``${NAME-default}`` — compose's own interpolation.
+_INTERPOLATION = re.compile(r"^\$\{(?P<name>[A-Za-z_][A-Za-z0-9_]*)(?::?-(?P<default>.*))?\}$")
+
+
+def _compose_value(block: str, key: str) -> str | None:
+    """The value compose gives ``key`` **in the shipped configuration**, or ``None``.
+
+    "Shipped" means with nothing exported: an interpolation resolves to its ``:-`` default,
+    which is the value a reader of this repository actually gets. A ``${NAME}`` with no
+    default resolves to the empty string, which is what compose substitutes (with a warning).
+
+    Written because the regex this replaces — ``([^\\s,}]+)`` — could not read an
+    interpolation at all. It stopped at the first ``}``, so when ``docker-compose.yml``
+    commit 6555f27 ("the datastore passwords are settable by a deployment") turned
+    ``POSTGRES_PASSWORD: proxyshop_dev_pw`` into
+    ``POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-proxyshop_dev_pw}"``, the extractor returned
+    the string ``"${POSTGRES_PASSWORD:-proxyshop_dev_pw`` and
+    :func:`test_the_admin_password_is_pinned_to_composes_superuser_password` failed against a
+    compose file that was, and is, correct. That commit changed one file and left this
+    reader behind.
+
+    **The assertion it feeds was not weakened**: it still compares the effective superuser
+    password against ``ROLES['admin']`` and still fails if the two diverge — see
+    :func:`test_the_compose_value_reader_resolves_what_compose_resolves`, which pins this
+    resolver against the forms it has to survive so a future compose edit cannot quietly
+    slip past it the way this one did.
+    """
+    found = _compose_entry(key).search(block)
+    if found is None:
+        return None
+    raw = next(
+        value for value in (found.group("dq"), found.group("sq"), found.group("bare")) if value
+    )
+    interpolated = _INTERPOLATION.match(raw)
+    if interpolated is None:
+        return raw
+    return interpolated.group("default") or ""
+
+
 # ---------------------------------------------------------------------------------------
 # Acceptance 1 -- the seed side: compose forwards the variable
 # ---------------------------------------------------------------------------------------
@@ -343,18 +391,66 @@ def test_the_admin_password_is_pinned_to_composes_superuser_password() -> None:
     password is in two: a library cannot read the deployment. Two copies that cannot drift
     are one source of truth, so pin them, rather than leave a changed compose password to be
     discovered as every admin connection failing at once.
+
+    The password is now an interpolation with a default rather than a bare literal, so the
+    comparison is against the value compose resolves with nothing exported (see
+    :func:`_compose_value`). That is the same claim, read correctly: a deployment that
+    exports its own ``POSTGRES_PASSWORD`` moves the seed side and the connect side together
+    only if it also hands ``ROLES`` an override DSN, and *that* is what
+    ``PROXYSHOP_PG_DSN_ADMIN`` is for.
     """
     block = _postgres_service_block()
-    user = re.search(r"POSTGRES_USER\s*:\s*([^\s,}]+)", block)
-    password = re.search(r"POSTGRES_PASSWORD\s*:\s*([^\s,}]+)", block)
+    user = _compose_value(block, "POSTGRES_USER")
+    password = _compose_value(block, "POSTGRES_PASSWORD")
     assert user is not None and password is not None, (
         "docker-compose.yml's postgres service no longer declares POSTGRES_USER/PASSWORD"
     )
-    assert (ROLES["admin"][1], ROLES["admin"][2]) == (user.group(1), password.group(1)), (
+    assert (ROLES["admin"][1], ROLES["admin"][2]) == (user, password), (
         f"proxyshop_support.postgres connects as "
         f"{ROLES['admin'][1]}/{ROLES['admin'][2]} but docker-compose.yml creates the "
-        f"superuser as {user.group(1)}/{password.group(1)}. Every admin connection in the "
+        f"superuser as {user}/{password}. Every admin connection in the "
         f"repo — including the one that CREATEs each worker database — goes through ROLES."
+    )
+
+
+def test_the_compose_value_reader_resolves_what_compose_resolves() -> None:
+    """The extractor above, pinned against the forms a compose file actually carries.
+
+    Added with the fix, because the defect it repairs was invisible: the old regex did not
+    raise or return ``None`` on an interpolation, it returned a **truncated string**, and the
+    only symptom was an assertion about Postgres failing with a confusing message. A reader
+    that can be silently wrong needs its own test, or the next compose edit reopens this.
+
+    The last two cases are the ones that matter: a resolver that returned the raw text would
+    pass every other case here and still fail the real file.
+    """
+    for block, key, expected in [
+        ("environment: { POSTGRES_USER: proxyshop, POSTGRES_DB: x }", "POSTGRES_USER", "proxyshop"),
+        ('{ A: "plain-quoted" }', "A", "plain-quoted"),
+        ("{ A: 'single-quoted' }", "A", "single-quoted"),
+        ('{ A: "${SOME_VAR:-the-default}" }', "A", "the-default"),
+        ('{ A: "${SOME_VAR-the-default}" }', "A", "the-default"),
+        ('{ A: "${SOME_VAR}" }', "A", ""),
+        ('{ A: "${SOME_VAR:-}" }', "A", ""),
+        (
+            '{ POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-proxyshop_dev_pw}" }',
+            "POSTGRES_PASSWORD",
+            "proxyshop_dev_pw",
+        ),
+        ("{ A: x }", "MISSING", None),
+    ]:
+        assert _compose_value(block, key) == expected, (
+            f"_compose_value({block!r}, {key!r}) did not resolve to {expected!r}; the "
+            f"reader that feeds the admin-password pin is wrong, so that pin is grading "
+            f"a value docker compose would never produce."
+        )
+
+    # The pin must still BITE. A compose file whose effective default really has drifted
+    # from ROLES has to be caught, which is the whole point of the assertion above.
+    drifted = '{ POSTGRES_USER: proxyshop, POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-changed}" }'
+    assert _compose_value(drifted, "POSTGRES_PASSWORD") != ROLES["admin"][2], (
+        "a compose file whose superuser password no longer matches ROLES['admin'] resolved "
+        "to the ROLES value anyway; the pin has stopped being able to fail."
     )
 
 

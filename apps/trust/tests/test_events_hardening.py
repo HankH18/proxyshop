@@ -9,6 +9,10 @@ the ledger stay *available*, stay *cheap*, and say something *useful* when it ca
 ===============================================  =====================================
 An unreachable datastore is a 503, not a 500     :func:`test_a_datastore_that_cannot_be_
                                                  reached_is_a_503_with_the_documented_body`
+...for ANY store, not only the Postgres one      :func:`test_an_unreachable_redis_is_a_503_
+                                                 naming_it_and_not_a_bodyless_500`
+...and a bug is still a bug, not an outage       :func:`test_the_door_does_not_launder_an_
+                                                 ordinary_bug_into_a_datastore_outage`
 ...and it is bounded, not a 30-second stall      :func:`test_an_unreachable_dsn_fails_
                                                  fast_rather_than_blocking_on_the_pool`
 One event costs one row, not the whole ledger    :func:`test_reading_one_event_by_id_
@@ -86,6 +90,41 @@ def _client_for(store: Any) -> Iterator[httpx.Client]:
         yield client
 
 
+@contextlib.contextmanager
+def _served_client_for(store: Any) -> Iterator[httpx.Client]:
+    """The same, over the application ``uvicorn`` actually runs.
+
+    :func:`create_events_app` is a TEST factory. It mounts the same ``router`` object, so it
+    is a fair stand-in for anything the router itself decides -- but it is not the served
+    door, and a suite in which *every* availability test goes through it can only ever grade
+    the writer that the fixture chose to inject. ``trust.main.create_app()`` is what
+    ``apps/trust/Dockerfile``'s ``uvicorn trust.main:app`` reaches, discovered by the glob
+    over ``apps/trust/src/*/routes.py``.
+
+    ``create_app`` has no lifespan of its own (``create_events_app`` does), so the store is
+    closed here instead -- a pool left open per test is how a session ends in ``FATAL: sorry,
+    too many clients already`` several hundred tests after the fault.
+    """
+    from trust.main import create_app
+
+    app = create_app()
+    app.state.event_store = store
+    # No sink: this file grades refusals, and a store agent address would put an outbound
+    # socket on a path that is meant to be refused before it reaches one.
+    app.state.trust_event_sink = None
+    try:
+        with (
+            serve(app) as base_url,
+            httpx.Client(base_url=base_url, timeout=60.0) as client,
+        ):
+            yield client
+    finally:
+        closer = getattr(store, "close", None)
+        if callable(closer):
+            with contextlib.suppress(Exception):
+                closer()
+
+
 def _closed_loopback_port() -> int:
     """A port on 127.0.0.1 that nothing is listening on."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
@@ -119,10 +158,17 @@ def test_a_datastore_that_cannot_be_reached_is_a_503_with_the_documented_body() 
     at all. A caller could not tell "the ledger is down, retry" from "your event broke the
     server, do not retry" -- which is the whole reason :class:`StoreUnavailable` and its
     503 exist.
+
+    Driven through ``trust.main.create_app()`` rather than through :func:`create_events_app`.
+    It used to be the test factory, and that was the *second* half of this defect rather than
+    a detail of the first: with no availability test on the served application, "an
+    unreachable datastore answers 503" was graded only where the suite had chosen the store,
+    and the sibling below -- which finds the door 500ing for a store this one never builds --
+    could not have been written against the app this one was using.
     """
     store = PostgresEventStore(connect=_refuse_to_connect)
 
-    with _client_for(store) as client:
+    with _served_client_for(store) as client:
         responses = {
             "POST /events": client.post("/events", json=_event("ev-1")),
             "GET /events": client.get("/events"),
@@ -142,6 +188,144 @@ def test_a_datastore_that_cannot_be_reached_is_a_503_with_the_documented_body() 
             f"{name}'s 503 does not carry the driver's diagnosis, so an operator cannot "
             f"tell an unreachable host from a wrong password: {message!r}"
         )
+
+
+#: What a dead Redis says. Taken verbatim from ``redis-py``'s own connection failure, which
+#: is the string an operator will be grepping for.
+_REDIS_DOWN = "Error 61 connecting to 127.0.0.1:6379. Connection refused."
+
+
+class _UnreachableRedisStore:
+    """An event store whose datastore is a Redis nobody can reach.
+
+    Every member of the surface ``trust.events.routes`` actually calls -- ``append``,
+    ``read_page``, ``iter_events``, ``get``, ``verify``, ``replay``, and the ``head_hash`` /
+    ``length`` properties -- fails with the real ``redis.exceptions.ConnectionError``, not a
+    stand-in. That matters: the whole question is what the door does with an exception it was
+    not written to expect, so raising a bespoke class would grade a different question, and
+    an incomplete surface would grade ``AttributeError`` instead of the outage.
+
+    ``app.state.event_store`` takes any object with this surface by design -- that is what
+    :func:`trust.events.routes.store_for` and :func:`create_events_app`'s ``store`` argument
+    both document -- so this is a supported configuration of the served service, not a
+    hypothetical one.
+    """
+
+    def _unreachable(self, *args: Any, **kwargs: Any) -> Any:
+        import redis.exceptions
+
+        raise redis.exceptions.ConnectionError(_REDIS_DOWN)
+
+    append = _unreachable
+    append_all = _unreachable
+    read = _unreachable
+    read_page = _unreachable
+    iter_events = _unreachable
+    get = _unreachable
+    verify = _unreachable
+    replay = _unreachable
+    stream_hash = _unreachable
+
+    @property
+    def head_hash(self) -> str:
+        return str(self._unreachable())
+
+    @property
+    def length(self) -> int:
+        return int(self._unreachable())
+
+    @property
+    def anchor(self) -> dict[str, Any]:
+        return dict(self._unreachable())
+
+
+def test_an_unreachable_redis_is_a_503_naming_it_and_not_a_bodyless_500() -> None:
+    """The 503 belongs to the DOOR, not to one store class.
+
+    Red first, measured on the served ``trust.main.create_app()`` before the fix -- all six
+    ``/events`` endpoints answered ``500`` with ``content-type: text/plain`` and the body
+    ``Internal Server Error``: no ``error`` code, no message, nothing naming the store.
+
+    Why it was reachable at all. The 503 was implemented in
+    :meth:`~trust.events.pg.PostgresEventStore._connection`, which translates
+    ``psycopg.OperationalError``; the handlers catch only
+    :class:`~trust.events.errors.EventServiceError`. So the guarantee held for exactly one
+    store class, and any other store's driver error walked out of the handler -- while
+    ``trust.ledger.errors.is_transient_datastore_error``, which has named
+    ``redis.exceptions.ConnectionError`` a connection-level datastore failure since T-011,
+    had no caller on any served path.
+
+    A 503 rather than a 500 is not politeness. 5xx-without-a-code reads as "your request
+    broke the server, do not retry", which is the opposite of the truth for an outage, and a
+    body naming the datastore is the difference between an operator restarting the right
+    process and reading this service's source.
+    """
+    with _served_client_for(_UnreachableRedisStore()) as client:
+        responses = {
+            "POST /events": client.post("/events", json=_event("ev-redis-1")),
+            "GET /events": client.get("/events"),
+            "GET /events/head": client.get("/events/head"),
+            "GET /events/verify": client.get("/events/verify"),
+            "GET /events/replay": client.get("/events/replay"),
+            "GET /events/{id}": client.get("/events/ev-redis-1"),
+        }
+
+    for name, response in responses.items():
+        assert response.status_code == 503, (
+            f"{name} answered {response.status_code} with body {response.text!r}; an "
+            f"unreachable datastore must be a 503, and a bodyless 500 tells the caller the "
+            f"opposite of the truth about retrying"
+        )
+        detail = response.json()["detail"]
+        assert detail["error"] == "store_unavailable", f"{name}: {detail}"
+        message = detail["message"]
+        assert "Redis" in message, (
+            f"{name}'s 503 does not name the datastore that is down, so it sends an operator "
+            f"to look at Postgres: {message!r}"
+        )
+        assert "Connection refused" in message, (
+            f"{name}'s 503 drops the driver's diagnosis, which is what separates an "
+            f"unreachable host from a wrong password: {message!r}"
+        )
+
+
+def test_the_door_does_not_launder_an_ordinary_bug_into_a_datastore_outage() -> None:
+    """The control on the test above: a refusal must stay a refusal, and a bug stay a bug.
+
+    The cheap way to make an unreachable store legible is ``except Exception -> 503``, and it
+    is worse than the 500 it replaces: every defect in this service would then report itself
+    as somebody else's downtime, with ``Retry`` advice attached, and nothing red anywhere.
+    So the backstop consults
+    :func:`trust.ledger.errors.is_transient_datastore_error` -- which excludes integrity and
+    privilege failures on purpose, neither becoming true on a second attempt -- and anything
+    it does not recognise propagates exactly as before.
+    """
+    from trust.events.routes import _datastore_outage
+
+    class _BrokenStore:
+        def append(self, event: Any) -> Any:
+            raise ZeroDivisionError("a bug in this process, not an outage")
+
+    with _served_client_for(_BrokenStore()) as client:
+        response = client.post("/events", json=_event("ev-bug-1"))
+
+    assert response.status_code == 500, (
+        f"a bug in the store was reported as {response.status_code}; laundering a defect "
+        f"into an outage is how it stays open"
+    )
+    assert "store_unavailable" not in response.text
+
+    # And the classifier itself, on the three shapes the door must keep apart.
+    import redis.exceptions
+    from trust.events.errors import StoreUnavailable
+
+    assert _datastore_outage(redis.exceptions.ConnectionError(_REDIS_DOWN)) is not None
+    assert _datastore_outage(psycopg.OperationalError("server closed the connection")) is not None
+    assert _datastore_outage(ZeroDivisionError("division by zero")) is None
+    # An `EventServiceError` already carries its own status through `_refuse`; re-classifying
+    # it here would relabel "no DSN is configured" as "the configured thing is down", which
+    # are two outages with different fixes.
+    assert _datastore_outage(StoreUnavailable("no DSN was passed")) is None
 
 
 # T-172: no `docker` mark. This test's DSN points at a port it just closed itself, so it

@@ -261,6 +261,15 @@ def window_tokens(env: Mapping[str, str] | None = None) -> dict[str, str]:
 
     Empty ids and empty tokens are dropped rather than kept, so there is no row an empty
     presented bearer could compare equal to.
+
+    A **non-ASCII token is dropped too, loudly**, and that is a real rule rather than
+    tidiness. :func:`_store_for` compares the encoded bytes of the configured token against
+    the encoded bytes of the presented one, and the presented one has been through ASGI's
+    latin-1 header decode by the time it arrives — so a token spelled ``wtok-brightbeän``
+    would have to survive `utf-8 bytes on the wire -> latin-1 decode -> utf-8 encode` to
+    match itself, and it does not. Such a token authenticates NOBODY. Keeping it would leave
+    an operator with a configured store that can never sign in and no line anywhere saying
+    why; the warning names the **store id only**, never the token.
     """
     source: Mapping[str, str] = os.environ if env is None else env
     path = source.get(WINDOW_TOKENS_ENV)
@@ -274,7 +283,22 @@ def window_tokens(env: Mapping[str, str] | None = None) -> dict[str, str]:
     if not isinstance(body, Mapping):
         _log.warning("%s does not hold a {store_id: token} object", WINDOW_TOKENS_ENV)
         return {}
-    return {str(k): str(v) for k, v in body.items() if str(k) and str(v)}
+    table: dict[str, str] = {}
+    for key, value in body.items():
+        store_id, token = str(key), str(value)
+        if not store_id or not token:
+            continue
+        if not token.isascii():
+            _log.warning(
+                "%s: the token configured for store %r is not ASCII, so no bearer that "
+                "reaches this route over HTTP can equal it. Dropping the row rather than "
+                "keeping a store that can never authenticate",
+                WINDOW_TOKENS_ENV,
+                store_id,
+            )
+            continue
+        table[store_id] = token
+    return table
 
 
 def window_floor(env: Mapping[str, str] | None = None) -> int:
@@ -423,13 +447,50 @@ def _problem(status: int, reason: str, **detail: Any) -> JSONResponse:
     return JSONResponse(status_code=status, content={"error": reason, **detail})
 
 
+def _credential_bytes(value: object) -> bytes:
+    """The bytes of a credential that has to become bytes **without raising**. Never raises.
+
+    ``hmac.compare_digest`` accepts ``str`` only when *both* sides are ASCII-only and raises
+    ``TypeError`` otherwise. The presented bearer arrives from the network, so "the bearer is
+    ASCII" is an assumption about the caller and not a property of this code. MEASURED, before
+    this function existed: one ``0xe9`` byte in ``Authorization`` on this route —
+
+        GET /buyer/store-window
+        Authorization: Bearer tok-alph\\xe9
+
+    — raised ``TypeError: comparing strings with non-ASCII characters is not supported`` out
+    of the handler and was answered ``500 Internal Server Error`` with a full traceback in the
+    log, from an unauthenticated caller, on the route that releases the buyer population. A
+    bad credential must be a 401.
+
+    So the comparison happens on **bytes**, where ``compare_digest`` has no such rule, and the
+    encoding itself cannot raise either: ``surrogatepass`` is what makes that promise true,
+    because a lone surrogate is the one thing a plain ``utf-8`` encode refuses and lone
+    surrogates are exactly what a lenient decode produces. This is
+    ``merchant_svc.install.signatures.signature_bytes`` and
+    ``store_agent.external.signatures.signature_bytes``, which is the third site in this
+    repository to need it; a shared home for the three is noted in the report rather than
+    taken here, because two of them are outside this ticket's scope.
+
+    Length still leaks, exactly as it does in :func:`hmac.compare_digest`; the content
+    comparison is constant time.
+    """
+    text = value if isinstance(value, str) else str(value)
+    return text.encode("utf-8", "surrogatepass")
+
+
 def _store_for(bearer: str, tokens: Mapping[str, str]) -> str | None:
-    """The store whose token this is, or ``None``. Constant-time, and over every row."""
+    """The store whose token this is, or ``None``. Constant-time, and over every row.
+
+    Total: any bearer of any length in any encoding is either a store id or ``None``, never
+    an exception. See :func:`_credential_bytes`.
+    """
     if not bearer:
         return None
+    presented = _credential_bytes(bearer)
     found: str | None = None
     for store_id, token in tokens.items():
-        if hmac.compare_digest(str(token), bearer):
+        if hmac.compare_digest(_credential_bytes(token), presented):
             found = store_id
     return found
 

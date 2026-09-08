@@ -70,6 +70,22 @@ purpose -- those say something about the ledger, not about the request. What IS 
 what the sentence was reaching for, is the narrower claim worth holding: **no input a
 caller can send may produce a 5xx.** That claim was measured false twice (the two bullets
 above), which is why it is now a claim with gates behind it rather than a comment.
+
+**An unreachable datastore is a 503 on THIS DOOR, not on one store class.** "A datastore
+that cannot be reached answers 503 naming the store, never a bodyless 500" used to be a
+property of :class:`~.pg.PostgresEventStore` alone: it is :meth:`~.pg.PostgresEventStore.
+_connection` that translates ``psycopg.OperationalError`` into
+:class:`~.errors.StoreUnavailable`, and every handler below catches only
+:class:`~.errors.EventServiceError`. :func:`store_for` will serve **any** object with the
+store surface -- that is what ``app.state.event_store`` is for -- so a store backed by
+anything else raised its driver's own connection error straight past the handler, and
+Starlette answered ``500 text/plain "Internal Server Error"``. Measured on the served
+``trust.main.create_app()`` against a store whose Redis was refused, all six ``/events``
+endpoints: no ``error`` code, no message, nothing naming the store, and 5xx-without-a-code
+reads as "your request broke the server, do not retry" when the truth was "retry".
+:func:`_datastore_outage` and :class:`_BoundedBodyRoute` close that at the door, using the
+predicate the repo already wrote for the question
+(:func:`trust.ledger.errors.is_transient_datastore_error`) rather than a second opinion.
 """
 
 from __future__ import annotations
@@ -265,6 +281,71 @@ async def _receive_bounded_body(request: Request) -> None:
     request._body = b"".join(chunks)
 
 
+#: Which datastore a driver's exceptions belong to, keyed by the root module the exception
+#: class was defined in. A refusal that says only "the datastore is down" sends an operator
+#: to look at the wrong process; this is what lets the 503 below name Redis or Postgres.
+#: ``psycopg_pool`` is listed separately because ``PoolTimeout`` -- the shape a Postgres that
+#: is down actually produces once a pool is in front of it -- is defined there, not in
+#: ``psycopg``.
+_DATASTORE_BY_DRIVER: Mapping[str, str] = {
+    "redis": "Redis",
+    "psycopg": "Postgres",
+    "psycopg_pool": "Postgres",
+}
+
+
+def _datastore_outage(exc: BaseException) -> StoreUnavailable | None:
+    """Translate a driver's connection-level failure into this service's vocabulary.
+
+    Args:
+        exc: whatever escaped a route handler.
+
+    Returns:
+        A :class:`~.errors.StoreUnavailable` naming the datastore when ``exc`` means the
+        store could not be reached, or ``None`` when it means anything else -- in which case
+        it must propagate untouched, because a bug reported as "the datastore is down" is a
+        bug nobody will look for.
+
+    **Why the predicate is imported rather than restated.**
+    :func:`trust.ledger.errors.is_transient_datastore_error` is already this repo's answer to
+    "is this the datastore being unreachable, or the datastore refusing me": it names
+    ``psycopg.OperationalError`` (SQLSTATE 08/53/57/58, and ``psycopg_pool``'s ``PoolTimeout``
+    / ``PoolClosed`` through it) and ``redis.exceptions.ConnectionError`` / ``TimeoutError``,
+    and it excludes integrity and privilege failures on purpose, because neither becomes true
+    on a second attempt. Until this function it had no caller outside its own test, so the
+    classification the repo had written down was not one any served route consulted.
+
+    **Why this is not :func:`~.pg.classify_connection_error`.** That one is the *store's*
+    guard and is deliberately psycopg-shaped: it also forgives ``InterfaceError`` and bare
+    ``OSError``, which is right inside a Postgres connection attempt and wrong at a door that
+    sees every exception the application can raise. A bare ``OSError`` at this depth is as
+    likely to be a bug in this process as an outage, and answering 503 to it would launder a
+    defect into a retry.
+
+    The import is function-local and reached only from the failure path, so a healthy request
+    pays nothing for it and a build with no driver installed still imports this module.
+    """
+    if isinstance(exc, EventServiceError):
+        return None
+    try:
+        from ..ledger.errors import is_transient_datastore_error  # noqa: PLC0415
+    except ImportError:  # pragma: no cover - psycopg and redis both ship with this venv
+        # No driver, so nothing to classify. Deliberately NOT a 503: guessing "outage" with
+        # no classifier is how a genuine bug gets reported as somebody else's downtime.
+        return None
+    if not is_transient_datastore_error(exc):
+        return None
+    datastore = _DATASTORE_BY_DRIVER.get(type(exc).__module__.split(".")[0])
+    where = f"its {datastore} datastore" if datastore else "its datastore"
+    # The driver's own diagnosis, which is what separates "unreachable host" from "wrong
+    # password" for the operator who has to fix one of them. It carries no caller input --
+    # this is the exception text a datastore client produced, not anything that arrived on
+    # the request -- which is the same trade `pg.classify_connection_error` already makes.
+    return StoreUnavailable(
+        f"the ledger writer could not reach {where}: {type(exc).__name__}: {exc}".rstrip()
+    )
+
+
 class _BoundedBodyRoute(APIRoute):
     """Every route on this router, with its request body bounded before FastAPI reads it.
 
@@ -273,14 +354,42 @@ class _BoundedBodyRoute(APIRoute):
     through the frozen ``trust.main.create_app``, which globs ``*/routes.py`` and mounts the
     ``router`` object it finds. The bound has to travel with the router, so it lives on the
     router.
+
+    It carries the datastore-outage backstop for the same reason and in the same place. Each
+    handler below already maps :class:`~.errors.EventServiceError` at every store call, which
+    covers exactly the store that raises it -- :class:`~.pg.PostgresEventStore`. Anything else
+    on ``app.state.event_store`` reached the client as a bodyless 500. Doing it here rather
+    than in six handlers means a route added later inherits the refusal instead of having to
+    remember it.
     """
 
     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
         handler = super().get_route_handler()
+        # The DECLARED path (`/events/{event_id}`), captured once, never `request.url.path`.
+        # `scope["path"]` is percent-DECODED by the server, so the live path is a string a
+        # caller chooses -- and a caller-chosen newline in a log line is a forged log record.
+        # The route template names the endpoint just as well and is a constant of this module.
+        declared_path = self.path
 
         async def bounded(request: Request) -> Response:
             await _receive_bounded_body(request)
-            return await handler(request)
+            try:
+                return await handler(request)
+            except Exception as exc:
+                unavailable = _datastore_outage(exc)
+                if unavailable is None:
+                    # Not an outage. It propagates exactly as it did before -- including as
+                    # a 500 -- because the one thing worse than an illegible failure is a
+                    # legible failure that is a lie.
+                    raise
+                _log.warning(
+                    "%s %s: the event store could not be reached; refusing with 503 "
+                    "store_unavailable",
+                    request.method,
+                    declared_path,
+                    exc_info=True,
+                )
+                raise _refuse(unavailable) from exc
 
         return bounded
 

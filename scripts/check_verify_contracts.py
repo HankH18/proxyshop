@@ -11,8 +11,11 @@ Fatal checks
    ``rootdir`` and with it ``pythonpath``, ``testpaths`` and the import mode.
 2. **D36 — no "pixel" outside ``pixel/``.** The pixel ticket's verify is
    ``npx vitest run pixel``, which vitest treats as a *case-insensitive path substring*
-   filter. Any ``*.test.*``/``*.spec.*`` file elsewhere whose path contains "pixel" would
-   silently join that run.
+   filter applied across every project rather than as a project selector. Any
+   ``*.test.``/``*.spec.`` file with a ts/tsx/js/jsx extension elsewhere whose path contains
+   "pixel" would silently join that run. Scoped to what vitest can actually collect: a
+   ``test_*.py`` file matches no project's ``include`` glob, so it is not a candidate for
+   the filter and this check does not flag it.
 3. **D1 — the old schema package name is gone.** The schema package is
    ``packages/contracts``; the superseded name must not appear in the source tree.
 4. **No test directory is empty.** ``pytest`` exits 0 when *one* directory's tests are
@@ -100,7 +103,11 @@ EXCLUDED_FILES = frozenset(
 #: D1's superseded package name, assembled so this file does not match its own check.
 SUPERSEDED_SCHEMA_DIR = "packages/" + "protocol"
 
-TEST_FILE_RE = re.compile(r"\.(test|spec)\.[^.]+$")
+#: A test file as each runner recognises one. ``TS_TEST_RE`` is deliberately the *vitest*
+#: half and ``PY_TEST_RE`` the *pytest* half: several checks below turn on which runner could
+#: collect a given file, and conflating them is what made check 2 fire on a Python file.
+PY_TEST_RE = re.compile(r"^test_.*\.py$")
+TS_TEST_RE = re.compile(r"\.(test|spec)\.(ts|tsx|js|jsx)$")
 
 
 #: Directories the filesystem fallback never descends into.
@@ -198,9 +205,32 @@ def check_single_pytest_config(failures: list[str]) -> None:
 
 
 def check_pixel_path_filter(failures: list[str]) -> None:
+    """No file *vitest can collect* carries "pixel" in its path from outside ``pixel/``.
+
+    The scope is the vitest-collectable set — ``*.test.``/``*.spec.`` with a ts/tsx/js/jsx
+    extension — and NOT every file whose name begins ``test_``. That wider net is what this
+    check used to cast, and it was wrong rather than merely strict: it failed the build on
+    ``apps/merchant/svc/tests/test_pixel_ledger.py``, a **Python** file that
+    ``npx vitest run pixel`` cannot collect and never could. Every project in
+    ``vitest.config.ts`` includes only ``*.test.ts``/``*.test.tsx`` under its own root, so no
+    ``.py`` path is ever a candidate for the filter to match; measured, ``npx vitest list
+    pixel`` collects the four ``*.test.ts`` files under ``pixel/tests/`` and nothing else.
+    Applying a JS-tooling constraint to files that tooling cannot see bought no isolation and
+    cost the domain's own word — "pixel" names a served route (``POST /pixel/collect``) and a
+    canonical ledger kind (``checkout_pixel``), so Python tests about them had nowhere honest
+    to go.
+
+    The hazard the check exists for is untouched and is real: vitest's positional argument is
+    a case-insensitive substring match over the whole path, applied across every project
+    rather than selecting one. Measured, ``npx vitest list PIXEL`` collects the pixel
+    project's tests despite the case, and ``npx vitest list app/routes`` reaches into the
+    *merchant* project. So a TS test named for T-050's acceptance 2 —
+    ``apps/merchant/app/routes/webPixelCreate.test.ts`` — would silently join the pixel
+    ticket's verify. That file is named ``install.test.ts`` today for exactly this reason.
+    """
     needle = "pixel"
     for path in source_files():
-        if not TEST_FILE_RE.search(Path(path).name) and not Path(path).name.startswith("test_"):
+        if not TS_TEST_RE.search(Path(path).name):
             continue
         if path.startswith(f"{needle}/"):
             continue
@@ -232,9 +262,6 @@ def check_superseded_schema_dir(failures: list[str]) -> None:
 
 #: Directories that must contain tests even though they are not named ``tests``.
 EXTRA_TEST_DIRS = ("e2e",)
-
-PY_TEST_RE = re.compile(r"^test_.*\.py$")
-TS_TEST_RE = re.compile(r"\.(test|spec)\.(ts|tsx|js|jsx)$")
 
 
 def _is_test_file(name: str) -> bool:

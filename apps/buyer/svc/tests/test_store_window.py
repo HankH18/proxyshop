@@ -260,6 +260,80 @@ def test_the_window_refuses_every_caller_it_cannot_name(
     assert "wtok" not in response.text, "the refusal echoed the presented bearer"
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(b"Bearer wtok-brightbean-3f9c2a71d0e64b5\xe9", id="one-latin1-byte"),
+        pytest.param("Bearer wtok-brightbeän".encode(), id="utf-8-umlaut"),
+        pytest.param(b"Bearer \xff\xfe\x00", id="bytes-that-are-not-text-at-all"),
+        pytest.param("Bearer \ud800".encode("utf-8", "surrogatepass"), id="a-lone-surrogate"),
+        pytest.param(b"Bearer \xe9" * 400, id="long-and-non-ascii"),
+    ],
+)
+def test_a_non_ascii_bearer_is_refused_and_not_a_500(
+    window_app: Any, tokens_file: pathlib.Path, raw: bytes
+) -> None:
+    """One non-ASCII byte in ``Authorization`` must be a 401, never an unhandled 500.
+
+    MEASURED before the fix, on this exact route, from an unauthenticated caller::
+
+        Authorization: Bearer tok-alph\\xe9
+        -> 500 Internal Server Error
+        TypeError: comparing strings with non-ASCII characters is not supported
+          File ".../buyer_svc/window/routes.py", in _store_for
+            if hmac.compare_digest(str(token), bearer):
+
+    ``hmac.compare_digest`` takes ``str`` only when BOTH sides are ASCII-only, and the
+    presented side comes from the network. This route releases the buyer population, so a
+    caller who cannot be named must get the same flat refusal whatever they send, and the
+    service must not answer a credential probe with a traceback.
+
+    The header is passed as **bytes**, which is what an HTTP header is: a ``str`` carrying
+    ``\\xe9`` never leaves the test client (httpx encodes header values as ASCII and raises),
+    so a test written with ``str`` headers cannot reach this defect at all — it fails in the
+    client, in the test's own process, and never serves a request.
+    """
+    from buyer_svc.window.routes import STORE_WINDOW_PATH
+
+    response = _client(window_app).get(f"/buyer{STORE_WINDOW_PATH}", headers={"Authorization": raw})
+    assert response.status_code == 401, response.text
+    assert response.json() == {"error": "unauthorized"}
+    assert "wtok" not in response.text, "the refusal echoed the presented bearer"
+
+
+def test_a_non_ascii_token_in_the_table_is_dropped_and_the_store_is_named(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A token no bearer could ever equal is refused at load, naming the store and not the token.
+
+    The comparison is on encoded bytes and the presented side has been through ASGI's latin-1
+    header decode, so a non-ASCII token cannot match itself over HTTP. Keeping the row would
+    leave an operator with a configured store that silently authenticates nobody. The warning
+    must name the store id and must NOT name the token, for the reason the 401 body echoes
+    nothing: a log line is as much a place a credential lives as a database is.
+    """
+    import logging as _logging
+
+    from buyer_svc.window.routes import WINDOW_TOKENS_ENV, window_tokens
+
+    path = tmp_path / "tokens.json"
+    path.write_text(
+        json.dumps({"store-ascii": "wtok-fine", "store-umlaut": "wtok-brightbeän"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(WINDOW_TOKENS_ENV, str(path))
+
+    with caplog.at_level(_logging.WARNING, logger="buyer_svc.window.routes"):
+        table = window_tokens()
+
+    assert table == {"store-ascii": "wtok-fine"}, (
+        "a non-ASCII token was kept in the table; it can never equal a presented bearer, so "
+        "the store it belongs to would be unable to authenticate with no line saying why"
+    )
+    assert "store-umlaut" in caplog.text, "the dropped row's store was not named"
+    assert "brightbeän" not in caplog.text, "the warning put the token itself in the log"
+
+
 def test_a_buyer_session_is_not_a_window_credential(
     window_app: Any, tokens_file: pathlib.Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
