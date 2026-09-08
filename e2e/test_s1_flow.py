@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import copy
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -624,10 +625,6 @@ def test_the_blacklisted_store_stays_blacklisted_in_the_projection(s1_run, s1_fi
 #: are product defects, measured on this tree and reported by this ticket, NOT a licence for
 #: the run's own events to be sloppy — every other kind below is held to the published shape.
 #:
-#: * ``auction_opened`` / ``auction_closed`` — ``AuctionStateMachine._transition``
-#:   (apps/exchange/src/auction/state.py:267) writes ``{state, intent_id, cluster_id, reason}``
-#:   where the published shapes are ``("intent_id","cluster_id","roster_size")`` and
-#:   ``("shortlist_size","reason")``.
 #: * ``checkout_pixel`` — the SHIPPED web pixel does not send the order total, so
 #:   ``merchant_svc.composition.pixel_ledger_payload`` projects ``total_price: None`` and the
 #:   published shape ``("checkout_token","client_id","total_price")`` is one key short.
@@ -641,11 +638,17 @@ def test_the_blacklisted_store_stays_blacklisted_in_the_projection(s1_run, s1_fi
 #:   is the webhook's number and not the beacon's, so the driver was papering over a real
 #:   defect in the emitter it was standing in for.
 #:
-#: ``code_created`` used to be listed here — the checkout port writing ``{checkout_token,
-#: discount_code}`` against a published ``("code","permalink_url","expires_at")``. It is not
-#: exempted any more and the test below is what says so: with it out of this set the
-#: conformance test is green, so the port now writes the published shape.
-KNOWN_NONCONFORMING_KINDS = frozenset({"auction_opened", "auction_closed", "checkout_pixel"})
+#: Three kinds have left this set, each because an emitter was fixed and the test below went
+#: red demanding the deletion — which is the whole point of that test existing:
+#:
+#: * ``code_created`` — the checkout port used to write ``{checkout_token, discount_code}``
+#:   against a published ``("code","permalink_url","expires_at")``;
+#: * ``auction_opened`` / ``auction_closed`` — ``AuctionStateMachine._transition`` used to
+#:   write ``{state, intent_id, cluster_id, reason}`` against
+#:   ``("intent_id","cluster_id","roster_size")`` and ``("shortlist_size","reason")``.
+#:   Measured on this tree: ``auction_opened`` now carries ``roster_size`` (and a ``roster``
+#:   beside it) and ``auction_closed`` carries ``shortlist_size``, so both validate clean.
+KNOWN_NONCONFORMING_KINDS = frozenset({"checkout_pixel"})
 
 
 def test_every_event_the_run_produced_satisfies_its_published_payload_shape(s1_run) -> None:
@@ -688,7 +691,33 @@ def test_the_known_nonconforming_emitters_are_still_exactly_the_ones_reported(s1
 # --------------------------------------------------------------------------------------
 # 7 — what this run had to supply itself, stated as tests so it cannot be forgotten
 # --------------------------------------------------------------------------------------
-def _ledger_emitters(kind: str) -> list[str]:
+@dataclass(frozen=True)
+class _KindProducers:
+    """What the parse below found about one kind — in THREE values, never two.
+
+    ``decided`` is the answer; ``undecided`` is the reason an empty ``decided`` may not be
+    read as "there is no producer". Every source in ``undecided`` builds something
+    ``LedgerEvent``-shaped whose ``kind`` this parse cannot resolve, so it could be a producer
+    of any of the eighteen and this function cannot say which.
+
+    **The two-valued version of this is how the bug survived twice.** A search that answers
+    ``[]`` for "I could not tell" is indistinguishable from one that answers ``[]`` for "there
+    is nothing there", and both times the difference was the whole ticket.
+    """
+
+    kind: str
+    decided: tuple[str, ...]
+    undecided: tuple[str, ...]
+
+    def summary(self) -> str:
+        """One line for an assertion message, saying which of the three answers this is."""
+        found = ", ".join(self.decided) or "nowhere in the tree"
+        if not self.undecided:
+            return found
+        return f"{found} (and this parse could not decide about: {', '.join(self.undecided)})"
+
+
+def _ledger_emitters(kind: str) -> _KindProducers:
     r"""Every product source that emits ``kind`` — by AST, not by grepping for a literal.
 
     **This function is the repair of a gate that was measured VACUOUS**, and the measurement is
@@ -724,13 +753,42 @@ def _ledger_emitters(kind: str) -> list[str]:
     verb carries it away is not the question this function is asking. The call rule for
     ``recorder.record(<kind>, ...)`` / ``build_event(<kind>, ...)`` is unchanged.
 
-    It is still a proxy for "is there a producer", and its remaining blind spots are named
-    rather than left to be discovered: a kind assembled from a non-constant expression, one
-    read out of a config file, and one emitted by a service that is not under ``apps/``,
-    ``packages/`` or ``services/``. The direct measurement of a producer is a served request,
-    which is what ``test_the_run_records_the_three_auction_kinds_from_the_exchange_itself``
-    and ``test_the_pixel_row_was_written_by_the_served_collector_and_not_by_the_run`` below do
-    for the four kinds this run no longer writes for itself.
+    **And a FOURTH time, which is why this returns three values rather than a list.** The
+    first blind spot the paragraph above names — "a kind assembled from a non-constant
+    expression" — was not hypothetical. ``merchant_svc.composition.ledger_event`` builds
+    ``"kind": str(record.get("kind") or "")``, and the value comes from a mapping
+    ``merchant_svc.install.webhooks.ledger_record`` builds in ANOTHER module out of
+    ``LEDGER_KIND_FOR_TOPIC.get(event.topic, ...)``. No per-file parse can resolve that, and
+    no amount of constant folding will: it is cross-module dataflow off a runtime value. So
+    this search answered ``[]`` for ``order_paid`` while ``POST /webhooks/shopify/orders/paid``
+    sat served, one hop from the run, publishing that exact row — and
+    ``KINDS_THE_RUN_STILL_EMITS_ITSELF`` could not have caught it either, because putting
+    ``order_paid`` in that tuple asserts *no producer exists* and this parse would have
+    agreed.
+
+    The repair is not a cleverer resolver, it is an honest third answer. A source whose
+    ``LedgerEvent``-shaped construction names a kind this parse cannot resolve is reported as
+    :attr:`_KindProducers.undecided` rather than being silently skipped, so ``decided == ()``
+    means "nothing found AND nothing ambiguous" and nothing else. What counts as
+    ``LedgerEvent``-shaped is narrow on purpose, because a list of "could be anything" is a
+    list nobody reads: a dict literal that maps ``kind`` alongside at least one of
+    ``event_id`` / ``ts`` / ``payload``, or a non-constant kind handed to ``record`` /
+    ``build_event`` / ``build_published_event`` in a call that also names a ``LedgerEvent``
+    field as a keyword. That last qualifier is what keeps ``record`` usable at all — it is a
+    method name a dozen unrelated classes in this tree use (a robots cache, a lint visitor, an
+    envelope store), and none of those calls passes ``auction_id=`` or ``payload=``, while
+    ``AuctionStateMachine``'s ``self.ledger.record(_TRANSITION_KIND[target], auction_id=…,
+    payload=…)`` — the only producer ``auction_opened`` and ``auction_closed`` have — does.
+    Measured on this tree: thirteen sources, one of them the merchant composition root this
+    ticket is about.
+
+    The blind spots that remain are named rather than left to be discovered: a kind read out
+    of a config file, and one emitted by a service that is not under ``apps/``, ``packages/``
+    or ``services/``. The direct measurement of a producer is a served request, which is what
+    ``test_the_run_records_the_three_auction_kinds_from_the_exchange_itself``,
+    ``test_the_pixel_row_was_written_by_the_served_collector_and_not_by_the_run`` and
+    ``test_the_order_paid_row_was_written_by_the_served_webhook_route_and_not_by_the_run``
+    below do for the five kinds this run no longer writes for itself.
     """
     roots = [REPO_ROOT / "apps", REPO_ROOT / "packages", REPO_ROOT / "services"]
     sources = {
@@ -745,11 +803,49 @@ def _ledger_emitters(kind: str) -> list[str]:
     return _emitters_in(sources, kind)
 
 
-def _emitters_in(sources: dict[str, str], kind: str) -> list[str]:
-    """Which of ``sources`` emit ``kind``. The parse :func:`_ledger_emitters` describes."""
+#: The driver itself, parsed the same way the product is. The run may READ any kind back —
+#: that is the whole point of it now — but it must not WRITE one a served route produces, or
+#: the exact per-kind multiset double-counts.
+HARNESS_PATH = "e2e/support/s1/flow.py"
+
+
+def _harness_emitters(kind: str) -> _KindProducers:
+    """What the driver itself emits for ``kind``, decided by the parse the product gets."""
+    return _emitters_in(
+        {HARNESS_PATH: (REPO_ROOT / HARNESS_PATH).read_text(encoding="utf-8")}, kind
+    )
+
+
+#: The keys that make a dict literal ``LedgerEvent``-shaped rather than merely a mapping with
+#: a ``kind`` in it. A payload can carry its own ``kind`` — ``policy_event``'s published body
+#: does (apps/exchange/src/auction/routes.py) — and calling that an undecided event producer
+#: would be noise in the one list that has to stay readable.
+_LEDGER_EVENT_COMPANION_KEYS = frozenset({"event_id", "ts", "payload"})
+
+#: The event-recording calls. A non-constant kind handed to one of these is a producer this
+#: parse cannot resolve — but only when the call also names a ``LedgerEvent`` field as a
+#: keyword (below), because ``record`` is a method name a dozen unrelated classes in this tree
+#: use and ``x.record(y)`` on its own says nothing about ledger events.
+_EVENT_BUILDERS = ("record", "build_event", "build_published_event")
+
+#: The keyword arguments that make such a call a ledger record rather than someone else's
+#: ``record``. ``LedgerRecorder.record(kind, *, auction_id, store_id, order_ref, payload)`` and
+#: ``build_event`` take these; a robots cache, a lint visitor and an envelope store do not.
+_LEDGER_RECORD_KEYWORDS = frozenset(
+    {"event_id", "ts", "auction_id", "store_id", "order_ref", "payload"}
+)
+
+
+def _emitters_in(sources: dict[str, str], kind: str) -> _KindProducers:
+    """Which of ``sources`` emit ``kind``, and which it cannot decide about.
+
+    The parse :func:`_ledger_emitters` describes, and the ``undecided`` half is the part that
+    makes an empty answer mean something.
+    """
     import ast
 
     emitters: list[str] = []
+    undecided: list[str] = []
     for name, text in sorted(sources.items()):
         try:
             tree = ast.parse(text)
@@ -772,18 +868,38 @@ def _emitters_in(sources: dict[str, str], kind: str) -> list[str]:
 
         for node in ast.walk(tree):
             if isinstance(node, ast.Dict):
+                keys = {names(key) for key in node.keys}
+                if "kind" not in keys:
+                    continue
                 for key, value in zip(node.keys, node.values, strict=True):
-                    if names(key) == "kind" and names(value) == kind:
+                    if names(key) != "kind":
+                        continue
+                    if names(value) == kind:
                         emitters.append(name)
-                        break
+                    elif names(value) is None and keys & _LEDGER_EVENT_COMPANION_KEYS:
+                        undecided.append(name)
                 continue
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
             called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-            if called in ("record", "build_event") and node.args and names(node.args[0]) == kind:
+            if called not in _EVENT_BUILDERS or not node.args:
+                continue
+            first = names(node.args[0])
+            if first == kind:
                 emitters.append(name)
-    return sorted(set(emitters))
+            elif (
+                first is None
+                and {keyword.arg for keyword in node.keywords} & _LEDGER_RECORD_KEYWORDS
+            ):
+                undecided.append(name)
+    return _KindProducers(
+        kind=kind,
+        decided=tuple(sorted(set(emitters))),
+        # A source that certainly emits this kind is not also "undecided about" it: the
+        # dynamic construction beside the constant one has already been answered.
+        undecided=tuple(sorted(set(undecided) - set(emitters))),
+    )
 
 
 #: The kinds the S1 chain needs that STILL have no production emitter, so the run would have
@@ -796,12 +912,28 @@ def _emitters_in(sources: dict[str, str], kind: str) -> list[str]:
 KINDS_THE_RUN_STILL_EMITS_ITSELF: tuple[str, ...] = ()
 
 #: The kinds a SERVED route produces for itself, which the run must therefore not write. Each
-#: maps to the module that has to contain the producer.
+#: maps to the module that has to contain the producer, and for each one the AST search can
+#: SEE that producer — the module names its kind as a constant.
 SERVICE_PRODUCED_KINDS = {
     "bid_placed": "apps/exchange/src/auction/routes.py",
     "shown": "apps/exchange/src/ranking/serving.py",
     "claim_verified": "apps/exchange/src/ranking/verification.py",
     "checkout_pixel": "apps/merchant/svc/src/composition.py",
+}
+
+#: The same claim, for the kinds whose producer the AST search **cannot** see. ``order_paid``
+#: is the whole of it: ``composition.ledger_event`` takes its kind from a mapping another
+#: module built out of ``LEDGER_KIND_FOR_TOPIC``, which is cross-module dataflow off a runtime
+#: topic and not something a per-file parse can resolve.
+#:
+#: Listing it here is the opposite of exempting it. The test below requires the owner to be
+#: named in :attr:`_KindProducers.undecided` — so the search must still SEE the construction
+#: and still SAY it cannot resolve the kind — and the provenance of the actual row is then
+#: held by ``test_the_order_paid_row_was_written_by_the_served_webhook_route_and_not_by_the_run``,
+#: which is a stronger check than any parse: it recomputes the row's DERIVED id from the exact
+#: signed bytes the stub put on the wire.
+UNDECIDABLE_PRODUCED_KINDS = {
+    "order_paid": "apps/merchant/svc/src/composition.py",
 }
 
 
@@ -822,13 +954,27 @@ def test_no_kind_in_the_s1_chain_is_left_without_a_production_emitter(s1_run) ->
     unchanged. The half that failed is now
     ``test_the_pixel_row_was_written_by_the_served_collector_and_not_by_the_run``, which
     checks the row's provenance rather than its count.
+
+    **A kind whose producer the search cannot decide about is refused here too**, and that is
+    the second repair. ``order_paid`` was the same defect as the pixel's one hop over, and
+    listing it in this tuple would NOT have caught it: the claim this tuple makes is "no
+    producer exists", the parse could not resolve ``composition.ledger_event``'s kind, and it
+    would have answered ``[]`` — agreeing. So "I could not tell" now fails this test rather
+    than passing it, and a kind that lands in that state has to be moved to
+    ``UNDECIDABLE_PRODUCED_KINDS`` with a provenance test of its own.
     """
     for kind in KINDS_THE_RUN_STILL_EMITS_ITSELF:
-        emitters = _ledger_emitters(kind)
-        assert not emitters, (
-            f"{kind!r} now has a production emitter ({emitters}). The S1 run emits its own, "
-            "so the exact per-kind multiset is about to double-count: delete the run's "
+        found = _ledger_emitters(kind)
+        assert not found.decided, (
+            f"{kind!r} now has a production emitter ({found.summary()}). The S1 run emits its "
+            "own, so the exact per-kind multiset is about to double-count: delete the run's "
             "emission in e2e/support/s1/flow.py and drive that emitter instead."
+        )
+        assert not found.undecided, (
+            f"this file claims {kind!r} has no producer anywhere, and the search cannot back "
+            f"that up: {', '.join(found.undecided)} build LedgerEvent-shaped rows whose kind "
+            "this parse cannot resolve, so one of them may be emitting it. Drive the route "
+            "and prove the row's provenance instead of asserting an absence nobody measured."
         )
         assert s1_run.kind_counts.get(kind, 0) > 0, f"the run produced no {kind} events at all"
 
@@ -864,10 +1010,81 @@ def test_the_pixel_row_was_written_by_the_served_collector_and_not_by_the_run(s1
         f"publish_pixel_observation: {pixel['event_id']!r}"
     )
     assert pixel["payload"]["checkout_token"] == observation.checkout_token
-    assert not _emitters_in(
-        {"e2e/support/s1/flow.py": (REPO_ROOT / "e2e/support/s1/flow.py").read_text("utf-8")},
-        "checkout_pixel",
-    ), "e2e/support/s1/flow.py builds a checkout_pixel event again; the multiset double-counts"
+    assert not _harness_emitters("checkout_pixel").decided, (
+        "e2e/support/s1/flow.py builds a checkout_pixel event again; the multiset double-counts"
+    )
+
+
+def test_the_order_paid_row_was_written_by_the_served_webhook_route_and_not_by_the_run(
+    s1_run,
+) -> None:
+    """``order_paid`` came out of ``POST /webhooks/shopify/orders/paid``, proved by its own id.
+
+    **The same defect as the pixel's, one hop over, and it outlived the pixel fix.** The run
+    caught the stub's signed delivery at a ``RecordingReceiver``, re-verified the bytes with a
+    second ``handle_delivery`` call and hand-built the ledger row from what came back — while
+    ``install/routes.receive_webhook`` sat served, one hop away, wired to ``default_sink`` ->
+    ``composition.publish_ledger_record``. During the run that emitter fired on nothing; when
+    it did fire it published at the unreachable deployment default and logged "trust ledger:
+    NOT written, counted as lost". Every count in this file agreed with itself throughout.
+
+    **The discriminator is the row's DERIVED id, and here it is stronger than the pixel's.**
+    ``composition.ledger_event_id`` spells it ``merchant-<kind>-<sha256 of the SIGNED delivery
+    bytes>`` — derived precisely so a Shopify retry after a restart collapses to one row —
+    while ``exchange.auction.ledger.build_event``, the only event builder this driver has,
+    mints a ``uuid4``. The pixel's id digests a projection this repo computes; this one digests
+    the exact bytes the stub put on the wire and signed, which the test re-hashes from the
+    delivery it captured. A driver-built row could not carry that value.
+
+    Two more, each independent of the first and of each other:
+
+    * ``payload.body_digest`` is the same hash again, in a key ``ledger_payload`` puts there
+      and no caller of ``build_event`` in this repo has ever written; and
+    * ``store_id`` is the shop's ``.myshopify.com`` domain, which is the merchant's OWN name
+      for the store (``composition._store_id``, off the unsigned shop-domain header, through
+      ``normalize_shop_domain``). The run's own name for that store is the platform
+      ``store_id``, which is what the hand-built row carried — so the two spellings are a
+      second fingerprint, and the fact that they differ is the identity gap
+      ``_store_aliases`` now resolves the way ``POST /reconcile`` does.
+    """
+    from merchant_svc.composition import ledger_event
+    from merchant_svc.install.webhooks import delivery_digest, ledger_record
+
+    from e2e.support.s1.flow import store_domain
+
+    (paid,) = [event for event in s1_run.events if event["kind"] == "order_paid"]
+    body = s1_run.webhook_delivery["body"]
+    assert isinstance(body, bytes) and body, "the run captured no raw webhook body"
+    digest = delivery_digest(body)
+
+    assert paid["event_id"] == f"merchant-order_paid-{digest}", (
+        "the order_paid row's event_id is not the one composition.ledger_event_id derives "
+        "from the bytes the stub signed, so the row did not come out of "
+        f"publish_ledger_record: {paid['event_id']!r}"
+    )
+    # …and the same id recomputed the way the service computes it, from the delivery the
+    # SERVED route authenticated and kept — `merchant_svc.install.webhooks.INBOX`, not a
+    # second parse of the wire by this suite.
+    recorded = s1_run.webhook_decision.event
+    assert recorded is not None, "the served webhook route recorded no delivery"
+    assert paid["event_id"] == ledger_event(ledger_record(recorded))["event_id"]
+
+    assert paid["payload"]["body_digest"] == digest, (
+        "the row does not carry the signed-body digest composition.ledger_payload puts on "
+        "every order_paid it projects"
+    )
+    winner = s1_run.fixture["expected"]["winning_store"]
+    assert paid["store_id"] == store_domain(winner), (
+        "the order_paid row names the store by something other than the shop domain the "
+        f"merchant's own _store_id writes: {paid['store_id']!r}"
+    )
+    assert paid["store_id"] != winner, (
+        "the row carries the PLATFORM's store id, which is the run's name for the store and "
+        "not the merchant's — the hand-built row is back"
+    )
+    assert not _harness_emitters("order_paid").decided, (
+        "e2e/support/s1/flow.py builds an order_paid event again; the multiset double-counts"
+    )
 
 
 def test_the_run_records_the_three_auction_kinds_from_the_exchange_itself(s1_run) -> None:
@@ -887,30 +1104,52 @@ def test_the_run_records_the_three_auction_kinds_from_the_exchange_itself(s1_run
     beaconing at the served ``POST /pixel/collect``; the merchant's composition root is the
     module that owns that stage.
 
+    ``order_paid`` is in :data:`UNDECIDABLE_PRODUCED_KINDS` instead, and the loop below holds
+    it to the OTHER half of the same claim: the search has to name the merchant's composition
+    root as a place it cannot decide about. That is what stops the search quietly regressing
+    to "there is nothing there" — the state in which this whole class of defect hides.
+
     The counts are then the services' own answer, cross-checked against the auction's
     published response in
     ``test_the_run_covers_every_frozen_ledger_kind_with_an_exact_count``.
     """
-    harness_path = "e2e/support/s1/flow.py"
-    harness = (REPO_ROOT / harness_path).read_text(encoding="utf-8")
     for kind, owner in SERVICE_PRODUCED_KINDS.items():
-        emitters = _ledger_emitters(kind)
-        assert owner in emitters, (
+        found = _ledger_emitters(kind)
+        assert owner in found.decided, (
             f"{kind!r} has no producer in {owner}; the served path stopped recording "
-            f"it. Found in: {emitters or 'nowhere in the tree'}"
+            f"it. Found in: {found.summary()}"
         )
-        assert s1_run.kind_counts.get(kind, 0) > 0, (
-            f"the services produced no {kind!r} events for a served auction that ranked "
-            f"{len(s1_run.ranked)} candidates and filled "
-            f"{len(s1_run.shortlist['slots'])} slots"
+        _assert_served_kind(s1_run, kind)
+    for kind, owner in UNDECIDABLE_PRODUCED_KINDS.items():
+        found = _ledger_emitters(kind)
+        assert owner in found.undecided, (
+            f"{kind!r} is listed as a kind whose producer this parse cannot resolve, and the "
+            f"parse no longer says so about {owner}. Either the producer moved — in which "
+            f"case the run may be writing that row itself again — or the kind became "
+            f"decidable and belongs in SERVICE_PRODUCED_KINDS. Found: {found.summary()}"
         )
-        # The harness may READ these events back — that is the whole point of the run now —
-        # but it must not WRITE one. Measured with the same parse, so "the driver emits it"
-        # is decided the same way "the product emits it" is.
-        assert not _emitters_in({harness_path: harness}, kind), (
-            f"e2e/support/s1/flow.py emits {kind!r} itself; the run must not write a kind a "
-            f"served route produces, or the exact per-kind multiset double-counts"
-        )
+        _assert_served_kind(s1_run, kind)
+
+
+def _assert_served_kind(s1_run, kind: str) -> None:
+    """The run produced ``kind``, and the driver wrote none of it.
+
+    The harness may READ these events back — that is the whole point of the run now — but it
+    must not WRITE one. Measured with the same parse, so "the driver emits it" is decided the
+    same way "the product emits it" is, and an *undecidable* construction in the driver fails
+    here too: a hand-built row hidden behind a variable is the exact move this search was
+    blind to in the product.
+    """
+    assert s1_run.kind_counts.get(kind, 0) > 0, (
+        f"the services produced no {kind!r} events for a served auction that ranked "
+        f"{len(s1_run.ranked)} candidates and filled {len(s1_run.shortlist['slots'])} slots"
+    )
+    harness = _harness_emitters(kind)
+    assert not harness.decided and not harness.undecided, (
+        f"e2e/support/s1/flow.py emits {kind!r} itself, or builds a LedgerEvent whose kind "
+        f"this parse cannot resolve ({harness.summary()}); the run must not write a kind a "
+        "served route produces, or the exact per-kind multiset double-counts"
+    )
 
 
 def test_the_checkout_token_seam_has_no_production_binding(s1_run) -> None:

@@ -147,6 +147,13 @@ STUB_PRODUCT_ID = 8123456
 #: the delivery log.
 WEBHOOK_SECRET = "s1-e2e-webhook-secret"
 
+#: The one webhook topic this run's checkout produces, spelled the way Shopify spells it. It
+#: is both the path segment the merchant serves (``WEBHOOK_PATH_PREFIX``/``orders/paid``) and
+#: the ``X-Shopify-Topic`` the merchant authenticates under — and those are not the same
+#: thing: ``handle_delivery`` treats the path as a *constraint* on the header and never as a
+#: source for it, because nothing signs a URL.
+PAID_TOPIC = "orders/paid"
+
 
 def load_run_fixture() -> dict[str, Any]:
     """The run's scenario. Read once; never mutated by the flow."""
@@ -154,7 +161,24 @@ def load_run_fixture() -> dict[str, Any]:
 
 
 def store_domain(store_id: str) -> str:
-    return f"{store_id}.example.com"
+    """The one domain the platform holds for a seller — ``app.sellers.domain``'s value.
+
+    A ``.myshopify.com`` host and not the ``.example.com`` it used to be, because **the
+    merchant leg of this run is a Shopify store** and the merchant service will not write a
+    shop name that is not one: ``merchant_svc.composition._store_id`` puts an authenticated
+    delivery's ``X-Shopify-Shop-Domain`` through ``normalize_shop_domain``, which refuses
+    anything that does not end in ``.myshopify.com``, and files the event with **no**
+    ``store_id`` rather than an unverifiable one.
+
+    That is the identity gap ``apps/trust/src/reconcile/routes.py`` names in its own module
+    docstring — "the exchange stamps its platform ``store_id`` (``store-northroast``);
+    ``merchant_svc.composition._store_id`` writes the shop domain" — and it is the gap the
+    run walked straight past while it hand-built the ``order_paid`` row with the exchange's
+    name on it. Driving the served webhook makes it real, so the run now stands in for the
+    ``app.sellers`` row that resolves it (:func:`_store_aliases`), exactly as
+    ``configure_ranking`` stands in for the catalogue and the domain registry.
+    """
+    return f"{store_id}.myshopify.com"
 
 
 def permalink_parts(url: str) -> tuple[int, int, str]:
@@ -421,7 +445,6 @@ def run_s1_flow() -> S1Run:
         InMemoryLedgerSink,
         LedgerRecorder,
     )
-    from exchange.auction.ledger import build_event
     from exchange.auction.routes import configure_auctions
     from exchange.checkout.sellers import StaticRegisteredDomains
     from exchange.eligibility import StaticSellerEligibility
@@ -569,8 +592,10 @@ def run_s1_flow() -> S1Run:
 
     # -- 6. the merchant leg: stub checkout, pixel, webhook -----------------------------
     # The sink goes in because the merchant's own ledger writes come back out through it: the
-    # beacon reaches the SERVED `POST /pixel/collect`, and `publish_pixel_observation` appends
-    # the `checkout_pixel` row from inside that route, before this call returns.
+    # beacon reaches the SERVED `POST /pixel/collect` and the signed delivery reaches the
+    # SERVED `POST /webhooks/shopify/orders/paid`, and `publish_pixel_observation` and
+    # `publish_ledger_record` append the `checkout_pixel` and `order_paid` rows from inside
+    # those two routes, before this call returns. Nothing below adds a merchant event.
     checkout = asyncio.run(_drive_merchant(run, sink))
     run.completion = checkout["completion"]
     # The exact bytes the stub signed, and the headers it signed them with. Kept verbatim so
@@ -578,10 +603,7 @@ def run_s1_flow() -> S1Run:
     # ever sees a valid signature accepted cannot tell `verify` from `lambda *_: True`.
     run.webhook_delivery = dict(checkout["webhook_requests"][0])
     run.second_redemption = dict(checkout["second_redemption"])
-    order_paid_event, run.pixel_observation, run.webhook_decision = _merchant_events(
-        run, checkout, build_event
-    )
-    sink.emit(order_paid_event)
+    run.pixel_observation, run.webhook_decision = _merchant_events(run, checkout)
 
     # -- 7. reconciliation --------------------------------------------------------------
     run.reconciled = _reconcile(run, sink)
@@ -729,24 +751,35 @@ class _RecordingCodeCreator:
     __call__ = create_code
 
 
-class _RecordingCollector:
-    """The merchant service, with the exact bytes of every request it is sent kept alongside.
+class _RecordingMerchant:
+    """The merchant service, with the exact bytes of every exchange it is part of kept beside it.
 
     Raw ASGI and not a framework, for the same reason ``shopify_stub.testing
-    .RecordingReceiver`` is: the beacon has to be observable as the bytes that were on the
-    wire, and a wrapper that parsed and re-serialised them would make this module the author
-    of what the collector read.
+    .RecordingReceiver`` is: both a beacon and a signed webhook have to be observable as the
+    bytes that were on the wire, and a wrapper that parsed and re-serialised them would make
+    this module the author of what the merchant read. The webhook case is the one that makes
+    it non-negotiable — an HMAC covers the exact bytes, so a re-serialised recording is a
+    recording of a delivery that would not verify.
 
     It records and then **forwards**, which is the whole difference between this and the
     ``RecordingReceiver`` that used to stand where the merchant now stands. The recording is
     evidence; the forward is the point. ``receive`` is replayed once with the body this
     wrapper already drained and then reports a disconnect, which is what an ASGI app expects
     after a complete request body.
+
+    The **answer** is recorded too, off the ``send`` channel. That is what lets the run report
+    the served route's own verdict on the signed delivery rather than re-deciding it here: see
+    :func:`_merchant_events`, which used to call ``handle_delivery`` a second time and thereby
+    make the driver, not ``POST /webhooks/shopify/orders/paid``, the thing under test.
     """
 
     def __init__(self, app: Any) -> None:
         self.app = app
         self.requests: list[dict[str, Any]] = []
+
+    def exchanges(self, prefix: str) -> list[dict[str, Any]]:
+        """Every recorded request whose path starts with ``prefix``, in arrival order."""
+        return [row for row in self.requests if str(row["path"]).startswith(prefix)]
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] != "http":
@@ -758,16 +791,17 @@ class _RecordingCollector:
             body += message.get("body", b"")
             if not message.get("more_body"):
                 break
-        self.requests.append(
-            {
-                "path": scope["path"],
-                "headers": {
-                    key.decode("latin-1").lower(): value.decode("latin-1")
-                    for key, value in scope["headers"]
-                },
-                "body": body,
-            }
-        )
+        exchange: dict[str, Any] = {
+            "path": scope["path"],
+            "headers": {
+                key.decode("latin-1").lower(): value.decode("latin-1")
+                for key, value in scope["headers"]
+            },
+            "body": body,
+            "status": None,
+            "response": b"",
+        }
+        self.requests.append(exchange)
         replayed = False
 
         async def replay() -> dict[str, Any]:
@@ -777,7 +811,14 @@ class _RecordingCollector:
             replayed = True
             return {"type": "http.request", "body": body, "more_body": False}
 
-        await self.app(scope, replay, send)
+        async def record(message: dict[str, Any]) -> None:
+            if message["type"] == "http.response.start":
+                exchange["status"] = message["status"]
+            elif message["type"] == "http.response.body":
+                exchange["response"] += message.get("body", b"") or b""
+            await send(message)
+
+        await self.app(scope, replay, record)
 
 
 class _TrustLedgerEvents:
@@ -833,6 +874,21 @@ class _TrustLedgerEvents:
         await send({"type": "http.response.body", "body": b"{}"})
 
 
+class _DiscardingSink:
+    """A ledger sink that takes an event and keeps nothing. The probe window's.
+
+    Not a ``None`` and not a branch inside :class:`_TrustLedgerEvents`: the probe's writes
+    have to travel the same route, through the same publisher, over the same loopback POST,
+    or the probe stops being a probe of the shipped path. What must not happen is that they
+    land in the ledger the exact multiset grades. So the door is real and the far end is a
+    bin, and ``_TrustLedgerEvents.requests`` still holds the bytes as evidence that the
+    second delivery really was published rather than merely accepted.
+    """
+
+    def emit(self, event: Any) -> None:
+        return None
+
+
 @contextmanager
 def _merchant_ledger_at(url: str) -> Iterator[None]:
     """Point the merchant service's ledger writes at ``url`` for the duration.
@@ -865,19 +921,70 @@ def _merchant_ledger_at(url: str) -> Iterator[None]:
         set_trust_publisher(None)
 
 
+@contextmanager
+def _merchant_app_secret(secret: str) -> Iterator[None]:
+    """Give the merchant service the client secret the stub is signing with.
+
+    The served ``POST /webhooks/shopify/{topic}`` verifies against ``app_config().api_secret``
+    — read from ``SHOPIFY_API_SECRET`` at call time, never injected — so this is the same kind
+    of deployment fact :func:`_merchant_ledger_at` supplies for the ledger address, and it is
+    supplied the same way: through the service's own resolution rather than past it.
+
+    **It does not weaken the check it enables.** ``verify`` is unchanged, it runs over the
+    exact wire bytes, and an empty secret refuses every delivery — which is what a run that
+    forgot this would get, loudly, as a 401 from the merchant's own route rather than as a
+    quiet acceptance. ``test_a_tampered_unsigned_or_reserialised_paid_webhook_is_refused``
+    drives that verifier with five hostile deliveries and the empty-secret case besides.
+    """
+    from merchant_svc.install.config import ENV_API_SECRET
+
+    previous = os.environ.get(ENV_API_SECRET)
+    os.environ[ENV_API_SECRET] = secret
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(ENV_API_SECRET, None)
+        else:
+            os.environ[ENV_API_SECRET] = previous
+
+
 async def _drive_merchant(run: S1Run, sink: Any) -> dict[str, Any]:
     """Complete the checkout at the real shopify-stub, in-process on loopback (D41).
 
-    The merchant is real here too, and served: ``merchant_svc.main.create_app`` on loopback,
-    with the stub's web pixel installed against the merchant's OWN
-    :data:`~merchant_svc.install.config.COLLECTOR_PATH`. So the beacon the stub fires is a
-    real HTTP request to the real ``POST /pixel/collect``, and the ``checkout_pixel`` row in
-    ``sink`` is the one ``merchant_svc.composition.publish_pixel_observation`` wrote from
-    inside that route. Nothing in this module builds it.
+    The merchant is real here too, and served: ``merchant_svc.main.create_app`` on loopback.
+    **Both** of its checkout observers are driven over the wire and neither row is built here:
+
+    * the stub's web pixel is installed against the merchant's OWN
+      :data:`~merchant_svc.install.config.COLLECTOR_PATH`, so the beacon is a real HTTP POST
+      to the real ``POST /pixel/collect`` and the ``checkout_pixel`` row in ``sink`` is the
+      one ``composition.publish_pixel_observation`` wrote from inside that route;
+    * the stub's ``ORDERS_PAID`` subscription points at the merchant's OWN
+      :data:`~merchant_svc.install.config.WEBHOOK_PATH_PREFIX` + ``/orders/paid``, so the
+      signed delivery is a real HTTP POST to the real ``receive_webhook``, and the
+      ``order_paid`` row is the one ``install.webhooks.default_sink`` handed to
+      ``composition.publish_ledger_record`` from inside that route.
+
+    The second one is this ticket. It used to go to a ``RecordingReceiver`` that recorded the
+    delivery and answered 200, while :func:`_merchant_events` re-verified the bytes with
+    ``handle_delivery`` and hand-built the ledger row from what came back — with the served
+    route sitting one hop away, firing on nothing, publishing at the unreachable deployment
+    default and logging "trust ledger: NOT written, counted as lost".
+
+    Two consequences of driving it, both handled below rather than papered over:
+
+    * the merchant names the shop by its ``.myshopify.com`` domain and the exchange by its
+      platform ``store_id``. See :func:`store_domain` and :func:`_store_aliases`.
+    * the second-redemption probe completes a SECOND order, which fires a second signed
+      ``orders/paid`` at the same served route. The stub has no way to cancel a subscription
+      (``webhookSubscriptionCreate`` only ever adds), so the probe's writes are steered away
+      from the graded ledger the same way its beacon already is: the merchant's publisher is
+      re-pointed at a throwaway trust door for the probe window.
     """
     import httpx
     from merchant_svc.collector import PIXEL_INBOX
-    from merchant_svc.install.config import COLLECTOR_PATH
+    from merchant_svc.install.config import COLLECTOR_PATH, WEBHOOK_PATH_PREFIX
+    from merchant_svc.install.webhooks import INBOX
     from merchant_svc.main import create_app as create_merchant
     from shopify_stub.app import create_app as create_stub
     from shopify_stub.testing import RecordingReceiver, StubClient
@@ -891,23 +998,25 @@ async def _drive_merchant(run: S1Run, sink: Any) -> dict[str, Any]:
             f"the minted permalink carries {code!r}, not the code the ledger recorded "
             f"({run.minted_code!r})"
         )
-    collector = _RecordingCollector(create_merchant())
+    merchant = _RecordingMerchant(create_merchant())
     ledger = _TrustLedgerEvents(sink, TRUST_EVENTS_PATH)
-    #: Where the SECOND-redemption probe's beacon goes. The probe must not perturb the run it
-    #: is probing, and a live collector makes that a live concern: the probe completes a
-    #: second checkout, whose beacon is a second real POST and would be a second
-    #: ``checkout_pixel`` row in the ledger the exact multiset grades. So the pixel is
-    #: re-pointed here before the probe runs, which records the beacon and publishes nothing.
+    #: Where the SECOND-redemption probe's writes go. The probe must not perturb the run it is
+    #: probing, and a live merchant makes that a live concern in two places: the probe
+    #: completes a second checkout, whose beacon is a second real POST and whose ``orders/paid``
+    #: is a second real signed delivery, and both would be extra rows in the ledger the exact
+    #: multiset grades. So the beacon is re-pointed at ``probe_collector`` (which records and
+    #: publishes nothing) and the merchant's ledger publisher at ``probe_ledger`` (which
+    #: records and hands nothing to ``sink``) before the probe runs.
     probe_collector = RecordingReceiver()
-    webhooks = RecordingReceiver()
+    probe_ledger = _TrustLedgerEvents(_DiscardingSink(), TRUST_EVENTS_PATH)
     already_observed = len(PIXEL_INBOX.observations())
+    already_recorded = len(INBOX.events(PAID_TOPIC))
     with (
         serve(create_stub()) as stub_url,
         serve(ledger) as trust_url,
-        serve(collector) as collector_url,
+        serve(probe_ledger) as probe_trust_url,
+        serve(merchant) as merchant_url,
         serve(probe_collector) as probe_collector_url,
-        serve(webhooks) as webhook_url,
-        _merchant_ledger_at(trust_url),
     ):
         async with httpx.AsyncClient(base_url=stub_url, follow_redirects=False) as http:
             stub = StubClient(http, stub_url)
@@ -929,40 +1038,58 @@ async def _drive_merchant(run: S1Run, sink: Any) -> dict[str, Any]:
                 ]
             )
             assert seeded.status_code == 200, seeded.text
-            await stub.configure(webhook_secret=WEBHOOK_SECRET)
-            # The merchant's own collector path, off the merchant's own constant. The stub's
-            # `webPixel` settings therefore carry the URL a real install would carry, and a
-            # path this run spelled by hand could not drift from the service's.
-            await stub.install_pixel(f"{collector_url}{COLLECTOR_PATH}")
-            await stub.subscribe("ORDERS_PAID", f"{webhook_url}/webhooks/shopify")
-            created = await stub.create_code(run.minted_code, percentage=0.0)
-            assert created.status_code == 200, created.text
-            completion = await stub.buy(variant_id, quantity=quantity, code=code)
-            deliveries = await stub.deliveries()
-            # Everything the run is graded on is snapshotted HERE, before the second
-            # redemption below, so that probe cannot perturb the run it is probing —
-            # `_merchant_events` unpacks exactly one webhook delivery.
-            pixel_requests = list(collector.requests)
-            webhook_requests = list(webhooks.requests)
-            pixel_observations = list(PIXEL_INBOX.observations()[already_observed:])
-            # ONE ledger write reached the trust door while the merchant was pointed at it,
-            # and it came from the collector route. Checked here rather than left implicit
-            # because this window is the only one in which the merchant's publisher is
-            # addressable at all: `handle_delivery`'s default sink also publishes (an
-            # `order_paid`, through the same publisher), and `_merchant_events` calls it after
-            # `_merchant_ledger_at` has put the address back, so that write goes to the
-            # unreachable deployment default and this run's `order_paid` row stays the one
-            # `_merchant_events` builds. If that ever changes, the count below moves first.
-            if len(ledger.requests) != 1:
-                raise AssertionError(
-                    f"{len(ledger.requests)} ledger event(s) reached the trust door during the "
-                    "merchant leg; the run's checkout produced exactly one beacon and the "
-                    "served collector publishes exactly one row for it"
+            # The shop this store really is, as the platform's own roster records it. The
+            # stub puts it in the unsigned `X-Shopify-Shop-Domain` of every delivery and
+            # `composition._store_id` decides what to do with it; a value that is not a bare
+            # myshopify host would be dropped there and the `order_paid` row would name no
+            # store at all.
+            configured = await stub.configure(
+                webhook_secret=WEBHOOK_SECRET,
+                shop_domain=store_domain(run.fixture["expected"]["winning_store"]),
+            )
+            assert configured.status_code == 200, configured.text
+            with _merchant_ledger_at(trust_url), _merchant_app_secret(WEBHOOK_SECRET):
+                # The merchant's own collector path and its own webhook prefix, off the
+                # merchant's own constants. The stub's `webPixel` settings and subscription
+                # therefore carry the URLs a real install would carry, and a path this run
+                # spelled by hand could not drift from the service's.
+                await stub.install_pixel(f"{merchant_url}{COLLECTOR_PATH}")
+                subscribed = await stub.subscribe(
+                    "ORDERS_PAID", f"{merchant_url}{WEBHOOK_PATH_PREFIX}/{PAID_TOPIC}"
                 )
-            # …and the beacon is re-pointed away from the served collector for the same
-            # reason, because that snapshot cannot protect a ledger the probe writes to.
+                assert subscribed.status_code == 200, subscribed.text
+                created = await stub.create_code(run.minted_code, percentage=0.0)
+                assert created.status_code == 200, created.text
+                completion = await stub.buy(variant_id, quantity=quantity, code=code)
+                deliveries = await stub.deliveries()
+                # Everything the run is graded on is snapshotted HERE, before the second
+                # redemption below, so that probe cannot perturb the run it is probing —
+                # `_merchant_events` unpacks exactly one webhook delivery.
+                pixel_requests = merchant.exchanges(COLLECTOR_PATH)
+                webhook_requests = merchant.exchanges(WEBHOOK_PATH_PREFIX)
+                pixel_observations = list(PIXEL_INBOX.observations()[already_observed:])
+                paid_deliveries = list(INBOX.events(PAID_TOPIC)[already_recorded:])
+                # TWO ledger writes reached the trust door while the merchant was pointed at
+                # it, and both came out of a served route: the beacon's `checkout_pixel` from
+                # `POST /pixel/collect`, and the delivery's `order_paid` from
+                # `POST /webhooks/shopify/orders/paid`. Checked here rather than left
+                # implicit, because this window is the only one in which the merchant's
+                # publisher is addressable at all — and because the count is what says the
+                # webhook half is no longer the silent loss it was: it read 1, with the
+                # `order_paid` write failing against `http://trust:8084`, for as long as the
+                # run built that row itself.
+                if len(ledger.requests) != 2:
+                    raise AssertionError(
+                        f"{len(ledger.requests)} ledger event(s) reached the trust door during "
+                        "the merchant leg; this run's one checkout produces exactly two — the "
+                        "served collector's beacon row and the served webhook route's order row"
+                    )
+            # …and both writers are re-pointed away from the graded run for the same reason,
+            # because that snapshot cannot protect a ledger the probe writes to.
             await stub.install_pixel(f"{probe_collector_url}/collect")
-            second = await _second_redemption(stub, variant_id, quantity, code)
+            with _merchant_ledger_at(probe_trust_url), _merchant_app_secret(WEBHOOK_SECRET):
+                second = await _second_redemption(stub, variant_id, quantity, code)
+                probe_ledger_requests = list(probe_ledger.requests)
     return {
         "completion": completion,
         "variant_id": variant_id,
@@ -970,9 +1097,12 @@ async def _drive_merchant(run: S1Run, sink: Any) -> dict[str, Any]:
         "pixel_requests": pixel_requests,
         "pixel_observations": pixel_observations,
         "webhook_requests": webhook_requests,
+        "paid_deliveries": paid_deliveries,
         "ledger_requests": list(ledger.requests),
+        "probe_ledger_requests": probe_ledger_requests,
         "deliveries": deliveries,
         "stub_url": stub_url,
+        "merchant_url": merchant_url,
         "second_redemption": second,
     }
 
@@ -1067,25 +1197,33 @@ def require_redeemed_code(run: S1Run, completion: dict[str, Any]) -> str:
     return redeemed
 
 
-def _merchant_events(
-    run: S1Run, checkout: dict[str, Any], build_event: Any
-) -> tuple[dict[str, Any], Any, Any]:
-    """The paid webhook, read by the real merchant code, and the beacon's own observation.
+def _merchant_events(run: S1Run, checkout: dict[str, Any]) -> tuple[Any, Any]:
+    """What the SERVED merchant recorded for this checkout. It builds no ledger event at all.
 
-    **There is no ``checkout_pixel`` here any more, and its absence is the ticket.** This
-    function used to call ``merchant_svc.collector.accept_pixel_event`` on the stub's beacon
-    body and then hand-build the ledger row from what came back, because no served path wrote
-    one. One does now: ``collector/routes.collect_pixel_event`` calls
-    ``composition.publish_pixel_observation``, and :func:`_drive_merchant` beacons at that
-    route, so the row is already in the sink before this function is reached. What is
-    returned here is the observation the SERVED route parsed and recorded, read back off
-    ``merchant_svc.collector.PIXEL_INBOX`` — the collector's own ring, not a second parse.
+    **There is no ``checkout_pixel`` here and there is no ``order_paid`` here, and both
+    absences are tickets.** This function used to build each row itself — the pixel one out of
+    ``collector.accept_pixel_event``, the webhook one out of a SECOND ``handle_delivery`` call
+    over bytes a ``RecordingReceiver`` had caught — because no served path wrote either. Both
+    paths exist and both are now driven by :func:`_drive_merchant`:
+
+    * ``collector/routes.collect_pixel_event`` -> ``composition.publish_pixel_observation``
+    * ``install/routes.receive_webhook`` -> ``install/webhooks.default_sink`` ->
+      ``composition.publish_ledger_record``
+
+    so both rows are already in the sink before this function is reached, written by the
+    projections those modules own (``pixel_ledger_event``, ``ledger_event``), with ids those
+    modules DERIVE rather than mint.
+
+    What is returned is what the merchant itself kept: the observation the collector parsed,
+    read off ``merchant_svc.collector.PIXEL_INBOX``, and the delivery the webhook route
+    authenticated, read off ``merchant_svc.install.webhooks.INBOX``. Neither is a second parse
+    and neither is a second decision — the verdict below is the served route's own answer,
+    transported out of the HTTP response :class:`_RecordingMerchant` recorded, because a
+    ``handle_delivery`` call made from here grades this module and not the route.
     """
-    from merchant_svc.install.webhooks import handle_delivery, ledger_record
+    from merchant_svc.install.webhooks import WebhookDecision
 
     completion = checkout["completion"]
-    store_id = run.fixture["expected"]["winning_store"]
-    total_price = float(completion["total_price"])
     require_redeemed_code(run, completion)
 
     observations = checkout["pixel_observations"]
@@ -1096,55 +1234,76 @@ def _merchant_events(
         )
     (observation,) = observations
 
-    (delivery,) = checkout["webhook_requests"]
-    decision = handle_delivery(
-        body=delivery["body"], headers=delivery["headers"], secret=WEBHOOK_SECRET
+    (exchange,) = checkout["webhook_requests"]
+    answer = json.loads(exchange["response"] or b"{}")
+    recorded = checkout["paid_deliveries"]
+    if len(recorded) != 1:
+        raise AssertionError(
+            f"the served webhook route recorded {len(recorded)} `{PAID_TOPIC}` delivery(ies) "
+            f"for this run's one checkout; it answered {exchange['status']} {answer}"
+        )
+    # The route's own verdict, re-assembled from what it ANSWERED and what it RECORDED —
+    # every field off the wire or off the merchant's own inbox, none of it re-decided here.
+    # `accepted` is then the same status-code range `handle_delivery` applies, so a 401 on a
+    # signature the stub really did mint fails the run rather than being read past.
+    decision = WebhookDecision(
+        status_code=int(exchange["status"] or 0),
+        reason=str(answer.get("status") or ""),
+        event=recorded[0],
+        duplicate=bool(answer.get("duplicate")),
+        detail={key: value for key, value in answer.items() if key not in ("status", "duplicate")},
     )
     if not decision.accepted:
         raise AssertionError(
-            f"the paid webhook was refused: {decision.status_code} {decision.reason}"
+            f"the served merchant refused the paid webhook: {decision.status_code} "
+            f"{decision.reason}"
         )
-    if decision.event is None:
-        # `accepted` is a status-code range and `event` is separately optional — a 2xx with
-        # no event is how `handle_delivery` reports an acknowledged DUPLICATE. Recording one
-        # would be the double-count the merchant's de-duplication exists to prevent.
-        raise AssertionError(
-            f"the merchant accepted the paid webhook ({decision.status_code} "
-            f"{decision.reason}, duplicate={decision.duplicate}) but produced no event"
-        )
-    record = ledger_record(decision.event)
-    order_paid_event = build_event(
-        record["kind"],
-        auction_id=run.auction_id,
-        store_id=store_id,
-        order_ref=str(record["order_ref"]),
-        payload={
-            # The MERCHANT's own token, exactly as `ledger_record` lifted it off the signed
-            # body and exactly as `merchant_svc.composition.ledger_payload` would publish it.
-            # It used to be overwritten with the exchange's, which is a value no production
-            # emitter puts here and which now splits the pixel from its own webhook — see
-            # `require_redeemed_code`.
-            "checkout_token": record["checkout_token"],
-            "order_ref": str(record["order_ref"]),
-            "total_price": total_price,
-            # D24 pins `discount_code` as one of the four join keys, and the signed
-            # `orders/paid` body is where it lives — spelled `discount_codes: [{"code": …}]`,
-            # Shopify's own shape. `ledger_record` keeps the whole vendor body but lifts only
-            # `order_ref` and `checkout_token` out of it, so a driver that rebuilds the
-            # payload by hand, as this one does, was silently throwing the code away. It is
-            # forwarded verbatim rather than lifted: the ledger should record what the
-            # merchant actually said, and `trust.reconcile` already reads this spelling.
-            "discount_codes": record["payload"].get("discount_codes") or [],
-        },
+    return observation, decision
+
+
+def _store_aliases(run: S1Run) -> dict[str, str]:
+    """``shop domain -> platform store_id``, resolved by the trust service's own function.
+
+    The ``app.sellers`` row this run stands in for. ``POST /reconcile`` reads
+    ``select store_id, domain from app.sellers`` and puts it through
+    :func:`~trust.reconcile.routes.resolve_store_aliases`; there is no database in this run,
+    so the roster is supplied from the fixture and the *resolution* is the shipped one —
+    including its three refusals, which are the reason this is not a dict comprehension here.
+
+    Without it the two halves of one checkout cannot meet at all. ``reconcile`` namespaces
+    every join key by store (a Shopify ``order_id`` is a per-shop number), the exchange's
+    ``accepted`` carries ``store-northroast`` and the merchant's ``order_paid`` carries
+    ``store-northroast.myshopify.com``, so the discount-code bridge links nothing and the
+    order is never graded. Measured on this branch with the alias step absent and the served
+    webhook driven: ``reconciled`` came back **0**, and the run's ``order_paid`` row was
+    perfectly well-formed the whole time.
+    """
+    from trust.reconcile.routes import resolve_store_aliases
+
+    return resolve_store_aliases(
+        {"store_id": store["store_id"], "domain": store_domain(store["store_id"])}
+        for store in run.fixture["stores"]
     )
-    return order_paid_event, observation, decision
 
 
 def _reconcile(run: S1Run, sink: Any) -> list[dict[str, Any]]:
-    """Join the accepted offer, the beacon and the webhook into one ``reconciled`` verdict."""
-    from trust.reconcile import reconcile
+    """Join the accepted offer, the beacon and the webhook into one ``reconciled`` verdict.
 
-    return reconcile(copy.deepcopy(list(sink.events)))
+    Read out of the chained store through ``routes.read_checkout_events``, which is what the
+    served ``POST /reconcile`` folds: it screens an unjoinable webhook, translates each shop
+    domain into the platform's name for that store (:func:`_store_aliases`) and keeps only the
+    kinds reconciliation reads. Handing ``sink.events`` straight to ``reconcile`` skipped all
+    three, and the alias step is the one this run cannot do without now that the merchant's
+    own emitter — rather than this module — names the store on the ``order_paid`` row.
+    """
+    from trust.events import InMemoryEventStore, append
+    from trust.reconcile import reconcile
+    from trust.reconcile.routes import read_checkout_events
+
+    store = InMemoryEventStore()
+    for event in copy.deepcopy(list(sink.events)):
+        append(store, {key: value for key, value in event.items() if value is not None})
+    return reconcile(read_checkout_events(store, _store_aliases(run)).events)
 
 
 def _project_trust(run: S1Run) -> dict[str, Any]:
@@ -1222,6 +1381,7 @@ def _resolved_module_files() -> dict[str, str]:
         "exchange.retrieval.fit",
         "merchant_svc.collector",
         "merchant_svc.composition",
+        "merchant_svc.install.routes",
         "merchant_svc.install.webhooks",
         "merchant_svc.main",
         "shopify_stub.app",
