@@ -2699,6 +2699,45 @@ def configure_exchange(
         configure_ranking(app, catalog=StaticCatalogSnapshots(deployment.catalog))
         bound.append("ranking_catalog")
 
+    if unset("ranking_catalog"):
+        # D55's EVIDENCE HALF, and the other end of the seam the graph roster above opened.
+        # The roster decides who may make their case; this decides what their case is CHECKED
+        # AGAINST, which is the asymmetry that makes a persuasion market safe — a seller's
+        # purchased message is graded against the platform's own snapshot of the catalogue.
+        # Until this line the only snapshots this exchange could hold were the ones an operator
+        # typed into the block above, so an exchange whose roster came out of a crawl of 3,093
+        # real products verified every claim against a hand-authored document, or against
+        # `NoCatalogSnapshots` and therefore against nothing.
+        #
+        # SECOND, so a stated `catalog` wins. A document that names snapshots has made a
+        # statement about what this exchange holds, and a `neo4j` wheel being present must not
+        # overrule it.
+        #
+        # Bound from the ENVIRONMENT rather than from the document for the reason the roster is
+        # — reading the graph is a deployment fact, not a preference — but through its OWN env
+        # var, `EXCHANGE_RANKING_CATALOG`, which DEFAULTS to the roster's setting. Sharing one
+        # switch would make each decision unstateable without the other, and they are genuinely
+        # different powers: a deployment can serve request-stated rosters of crawled store ids
+        # and still want their claims checked against the crawl, and an operator who turned on
+        # organic discovery has not thereby said "believe my crawl about every sponsored
+        # claim". Defaulting it on with the roster is the fix rather than a convenience: an
+        # exchange that reads the graph to find shops and holds no catalogue verifies nothing
+        # about anybody it just found. See `graph_catalog_from_env` for the full argument.
+        #
+        # `graph_catalog_from_env` answers `None` when unconfigured and CONNECTS TO NOTHING
+        # when it does answer — the driver is built on the first lookup, so an exchange pointed
+        # at a Neo4j that is down still serves every caller. FAIL CLOSED at both ends: nothing
+        # is bound when it answers `None`, which leaves `ranking.serving.catalog_of`'s
+        # `NoCatalogSnapshots` — a snapshot for nobody, every claim `unsupported`, R19 refusing
+        # to let one satisfy a hard constraint — and an unreachable graph answers `None` per
+        # lookup, which is the same denial. There is no path here to a permissive catalogue.
+        from .retrieval.catalogue import graph_catalog_from_env  # noqa: PLC0415
+
+        graph_catalog = graph_catalog_from_env(env)
+        if graph_catalog is not None:
+            configure_ranking(app, catalog=graph_catalog)
+            bound.append("ranking_catalog")
+
     domains = deployment.registered_domains
     if domains:
         # ONE object for both doors. The ranking reads `ranking_registered_domains` and the

@@ -1,6 +1,6 @@
 """Candidate retrieval: vector similarity **and** attribute nodes (T-012, acceptance 2).
 
-Two reads live here and they answer different questions:
+Three reads live here and they answer different questions:
 
 * :func:`candidate_products` — "which products match this need?"
 * :func:`candidate_shops` — "which SHOPS plausibly serve it?", the roster D55's organic side
@@ -8,6 +8,11 @@ Two reads live here and they answer different questions:
   refusal below applies to it unchanged; and only provenanced facts survive the pivot,
   because a roster row is what a buyer-side pitch is built from and the platform may only
   pitch what it has checked. :func:`roster_provenance_exclusions` names what was dropped.
+* :func:`catalogue_entry` — "what did the platform CHECK about this shop's product?", the
+  evidence a sponsored shop's own claims are graded against. Same three-tier provenance rule
+  as the roster, plus one the roster does not need: a ``Source`` counts as evidence only if
+  the PLATFORM authored it (:data:`PLATFORM_OBSERVED_SOURCE_CLASSES`), because a claim graded
+  against the seller's own statement is a check that cannot fail.
 
 DESIGN, twice over: retrieval is "Neo4j vector + attributes", and products are "never
 matched by free-text name alone". Both clauses are enforced here rather than trusted:
@@ -33,6 +38,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from ..embeddings import EmbeddingProvider, get_embedding_provider
@@ -1105,6 +1111,420 @@ def roster_provenance_exclusions(
     )
 
 
+#: ``Source.source_class`` values that are the PLATFORM's own observation of the world, and
+#: therefore the only provenance a *seller's* claim may be graded against.
+#:
+#: **This is a narrower rule than the roster's, on purpose, and the difference is the whole
+#: point of :func:`catalogue_entry`.** :func:`candidate_shops` asks only "is this fact
+#: sourced?", because a roster row decides who gets *asked*, and being wrong there costs a
+#: wasted solicitation. A catalogue snapshot decides whose claims are *believed*, and
+#: :data:`~ingest.graph.model.SOURCE_CLASSES` includes ``seller_asserted`` and
+#: ``owner_statement`` — a store telling the platform about itself. A snapshot built from
+#: those would hand the verifier the store's own assertion as the evidence for the store's own
+#: claim: perfectly sourced, and exactly the "marking its own homework" failure that
+#: ``exchange.ranking.verification`` exists to prevent. ``network``, ``learned_policy`` and
+#: ``envelope_rule`` are excluded for a different reason — they are things this system
+#: *concluded*, not things it observed, and a conclusion is not evidence for the claim that
+#: motivated it.
+#:
+#: What is left is the crawl (``scraped``) and the platform's own instrumentation
+#: (``pixel_feed``): facts nobody but the platform authored.
+PLATFORM_OBSERVED_SOURCE_CLASSES: frozenset[str] = frozenset({"scraped", "pixel_feed"})
+
+
+def _observed_node(variable: str) -> str:
+    """Cypher for "this node is supported by a Source the PLATFORM itself authored".
+
+    :func:`_sourced_node` with the class filter added. The two are deliberately separate
+    functions rather than one with a flag: the roster's question ("is it sourced?") and this
+    one ("did *we* observe it?") have different right answers, and collapsing them would let a
+    later edit widen one by relaxing the other.
+
+    Args:
+        variable: the bound node variable.
+
+    Returns:
+        A boolean Cypher expression, reading the ``$source_classes`` parameter.
+    """
+    inner = f"pobs_{variable}"
+    return (
+        f"EXISTS {{ MATCH ({variable})-[:{SUPPORTED_BY}]->({inner}:Source) "
+        f"WHERE {inner}.source_class IN $source_classes }}"
+    )
+
+
+def _observed_edge(variable: str) -> str:
+    """Cypher for "this edge's ``source_id`` resolves to a Source the platform authored".
+
+    :func:`_sourced_edge` with the class filter added; see :func:`_observed_node` for why it
+    is a separate function.
+
+    Args:
+        variable: the bound relationship variable.
+
+    Returns:
+        A boolean Cypher expression, reading the ``$source_classes`` parameter.
+    """
+    inner = f"pobs_{variable}"
+    return (
+        f"({variable}.{SOURCE_ID_PROPERTY} IS NOT NULL AND EXISTS {{ "
+        f"MATCH ({inner}:Source {{{SOURCE_ID_PROPERTY}: {variable}.{SOURCE_ID_PROPERTY}}}) "
+        f"WHERE {inner}.source_class IN $source_classes }})"
+    )
+
+
+def _observed_property(variable: str, prop: str, alias: str) -> str:
+    """Cypher listing one property of every platform-authored ``Source`` behind a node.
+
+    Args:
+        variable: the bound node variable.
+        prop: the ``Source`` property to read (``source_id``, ``observed_at``).
+        alias: a query-unique name for the comprehension's own binding.
+
+    Returns:
+        A Cypher list expression with nulls already dropped.
+    """
+    return (
+        f"[x IN [({variable})-[:{SUPPORTED_BY}]->({alias}:Source) "
+        f"WHERE {alias}.source_class IN $source_classes | {alias}.{prop}] "
+        f"WHERE x IS NOT NULL]"
+    )
+
+
+#: One (store, product) pair as the PLATFORM observed it — the read behind a catalogue
+#: snapshot. Every clause is a provenance gate; see :func:`catalogue_entry` for what each one
+#: refuses and why refusing is the safe direction.
+_CATALOGUE_ENTRY = f"""
+MATCH (s:Store {{store_id: $store_id}})
+WHERE {_observed_node("s")}
+MATCH (p:Product {{product_id: $product_id}})
+WHERE {_observed_node("p")}
+WITH s, p,
+     {_observed_property("s", "source_id", "ssrc")} AS store_sources,
+     {_observed_property("s", "observed_at", "sobs")} AS store_observed,
+     {_observed_property("p", "source_id", "psrc")} AS product_sources,
+     {_observed_property("p", "observed_at", "pobs")} AS product_observed
+OPTIONAL MATCH (s)-[e:SELLS]->(p)
+WHERE {_observed_edge("e")}
+WITH s, p, store_sources, store_observed, product_sources, product_observed, count(e) AS sells
+OPTIONAL MATCH (s)-[mo:MAKES_OFFER]->(o:Offer)-[f:FOR]->(v:Variant)<-[hv:HAS_VARIANT]-(p)
+WHERE {_observed_node("o")}
+  AND {_observed_edge("mo")}
+  AND {_observed_edge("f")}
+  AND {_observed_edge("hv")}
+WITH s, p, store_sources, store_observed, product_sources, product_observed, sells,
+     collect(DISTINCT {{
+         offer_id: o.offer_id,
+         variant_id: v.variant_id,
+         price: o.price,
+         currency: coalesce(o.currency, ''),
+         availability: coalesce(o.availability, ''),
+         observed_at: coalesce(o.observed_at, ''),
+         source_ids: {_observed_property("o", "source_id", "osrc")}
+     }}) AS collected_offers
+WITH s, p, store_sources, store_observed, product_sources, product_observed, sells,
+     [x IN collected_offers WHERE x.offer_id IS NOT NULL] AS chains,
+     [x IN collected_offers WHERE x.offer_id IS NOT NULL AND x.price IS NOT NULL] AS offers
+WHERE sells > 0 OR size(chains) > 0
+OPTIONAL MATCH (p)-[ha:HAS_ATTRIBUTE]->(a:AttributeValue)
+WHERE {_observed_edge("ha")}
+  AND {_observed_node("a")}
+WITH s, p, store_sources, store_observed, product_sources, product_observed, sells, chains,
+     offers,
+     collect(DISTINCT {{
+         key: a.key,
+         canonical_key: a.canonical_key,
+         value_string: a.value_string,
+         value_number: a.value_number,
+         value_bool: a.value_bool,
+         unit: a.unit,
+         observed: {_observed_property("a", "observed_at", "aobs")},
+         source_ids: {_observed_property("a", "source_id", "asrc")}
+     }}) AS collected_attributes
+RETURN s.store_id AS store_id,
+       coalesce(s.domain, '') AS domain,
+       p.product_id AS product_id,
+       coalesce(p.canonical_name, '') AS canonical_name,
+       coalesce(p.brand, '') AS brand,
+       coalesce(p.status, '') AS status,
+       store_sources,
+       store_observed,
+       product_sources,
+       product_observed,
+       CASE WHEN sells > 0 THEN ['SELLS'] ELSE [] END
+         + CASE WHEN size(chains) > 0 THEN ['MAKES_OFFER'] ELSE [] END AS via,
+       offers,
+       [x IN collected_attributes WHERE x.key IS NOT NULL] AS attributes
+"""
+
+
+@dataclass(frozen=True)
+class CatalogueAttribute:
+    """One attribute reading the PLATFORM observed about a product.
+
+    Every one of these came off an ``AttributeValue`` node carrying
+    ``SUPPORTED_BY -> (:Source)`` in :data:`PLATFORM_OBSERVED_SOURCE_CLASSES`, reached over a
+    ``HAS_ATTRIBUTE`` edge whose ``source_id`` resolves to one. An unsourced reading is not
+    represented as a ``None`` value here — it is simply absent, so a claim about it comes back
+    "the catalogue records no such key" rather than being graded against a number nobody
+    checked.
+
+    Attributes:
+        key: the raw key as the extractor wrote it, which is the spelling a claim is matched
+            against (``claim_verification`` compares ``str(key)`` with no folding).
+        canonical_key: the slug the retrieval filters compare on, carried so a consumer can
+            report the two spellings without re-deriving one from the other.
+        value: the reading — ``bool``, ``float`` or ``str``, in that resolution order, which
+            is the order :meth:`ingest.extraction.claims.ExtractedClaim.as_attribute` writes them in.
+        unit: the unit as recorded, or ``None`` when the reading carries none. ``None`` means
+            "no unit stated", never "dimensionless".
+        observed_at: the latest platform observation behind this reading, or ``""`` when no
+            supporting ``Source`` stamped one.
+        source_ids: the platform-authored ``Source`` ids behind it, sorted.
+    """
+
+    key: str
+    canonical_key: str
+    value: Any
+    unit: str | None
+    observed_at: str
+    source_ids: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class CatalogueEntry:
+    """What the platform's own crawl holds about ONE (store, product) pair.
+
+    The evidence half of D55: the roster says which shops may make their case, and this says
+    what the platform can check that case against. Everything on it is a fact the platform
+    observed itself — see :data:`PLATFORM_OBSERVED_SOURCE_CLASSES` for the class rule and
+    :func:`catalogue_entry` for the three-tier provenance rule the read enforces.
+
+    Attributes:
+        via: which carrying relations the platform observed — ``SELLS``, ``MAKES_OFFER``, or
+            both, SORTED. Never empty: an entry with neither is not built. Sorted rather than
+            written in reading order so that this field and :attr:`ShopCandidate.via` — same
+            name, same two-value vocabulary, and a consumer will hold both at once — cannot
+            disagree about the order of the same two facts.
+        offer: the cheapest fully provenanced priced listing, or ``None`` when the platform
+            never observed a price for this pair. ``None`` is "never checked", never "free" —
+            and a provenanced offer chain whose ``Offer`` carries no ``price`` lands here as
+            ``None`` while ``MAKES_OFFER`` stays in :attr:`via`, exactly as
+            :func:`candidate_shops` keeps such a shop on the roster and drops only its price.
+        source_ids: the ``Source`` ids behind the ``Store`` and ``Product`` nodes, sorted.
+        observed_at: the latest platform observation behind this entry, or ``""`` when none of
+            them stamped one. Compared by PARSED instant rather than as text — the graph holds
+            both ``…Z`` and ``…+00:00`` spellings of the same moment (the crawl writes the
+            first, the graph fixtures the second) and a text ``max`` over the two orders them
+            by punctuation. The value returned is the winner's own spelling, unchanged, so the
+            snapshot carries what the graph says rather than a re-rendering of it. A stamp this
+            module cannot parse is ignored rather than allowed to win.
+    """
+
+    store_id: str
+    domain: str
+    product_id: str
+    canonical_name: str
+    brand: str
+    status: str
+    via: list[str] = field(default_factory=list)
+    attributes: list[CatalogueAttribute] = field(default_factory=list)
+    offer: ShopOffer | None = None
+    source_ids: list[str] = field(default_factory=list)
+    observed_at: str = ""
+
+
+def latest_instant(stamps: Sequence[str]) -> str:
+    """The latest of these ISO-8601 stamps, in its own original spelling, or ``""``.
+
+    By PARSED instant, not by text. The graph holds both spellings of UTC — the crawl stamps
+    ``%Y-%m-%dT%H:%M:%SZ`` (``ingest.scheduler.catalog.observed_now``) and the graph fixtures
+    write ``+00:00`` — and ``"...Z" > "...+00:00"`` orders them by punctuation rather than by
+    time. A stamp that will not parse is dropped rather than allowed to win a text comparison
+    it has no business winning; ``""`` is the honest answer when nothing parsed.
+    """
+    best: datetime | None = None
+    winner = ""
+    for stamp in stamps:
+        text = str(stamp).strip()
+        if not text:
+            continue
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        if best is None or parsed > best:
+            best, winner = parsed, text
+    return winner
+
+
+def _attribute_reading(row: Any) -> Any:
+    """The value out of one ``AttributeValue`` row, in the order the writer wrote them.
+
+    ``bool`` before ``float`` before ``str``, matching
+    :meth:`ingest.extraction.claims.ExtractedClaim.as_attribute`, so a reading round-trips
+    into the same Python type it was extracted as.
+    """
+    if row.get("value_bool") is not None:
+        return bool(row["value_bool"])
+    if row.get("value_number") is not None:
+        return float(row["value_number"])
+    return None if row.get("value_string") is None else str(row["value_string"])
+
+
+def catalogue_entry(
+    session: Any,
+    *,
+    store_id: str,
+    product_id: str,
+    source_classes: Sequence[str] = tuple(sorted(PLATFORM_OBSERVED_SOURCE_CLASSES)),
+) -> CatalogueEntry | None:
+    """What the platform CHECKED about one (store, product) pair, or ``None``.
+
+    The read a catalogue snapshot is built from, and the counterpart of
+    :func:`candidate_shops`: that one answers "which shops may make their case", this one
+    answers "what may their case be checked against". It exists because the exchange's
+    authority to grade a seller's pitch rests entirely on holding its own snapshot of the
+    catalogue, and until now the only snapshots it could hold were hand-authored — so a
+    verifier reading the platform's crawl was grading fiction, or nothing.
+
+    **The three-tier provenance rule, enforced here rather than trusted.** It is the same rule
+    :func:`candidate_shops` keeps, applied to evidence instead of to a roster row, and each
+    tier fails in the direction that denies:
+
+    * an **unsourced Store** (or Product) answers ``None``. The platform has checked nothing
+      about this shop, so it holds no evidence about it, and a claim graded against no
+      snapshot is ``unsupported`` — off the roster there, unbelieved here.
+    * an **unsourced carrying relation** answers ``None``. Both the ``SELLS`` edge and the
+      ``MAKES_OFFER -> Offer -> FOR -> Variant <- HAS_VARIANT`` chain are checked, and unless
+      at least one survives, the platform never observed this store carrying this product —
+      so its catalogue of the product is not evidence about *this seller*, and the claim is
+      dropped rather than graded against somebody else's shelf.
+    * an **unsourced Offer chain** keeps the entry and loses its price: :attr:`CatalogueEntry.
+      offer` is ``None``, and a snapshot built from it states no price at all. ``None`` here
+      means "never checked" and must never be read as "free" — the same reading
+      :attr:`ShopCandidate.lowest_price` insists on. A chain that is fully provenanced but
+      whose ``Offer`` carries no ``price`` is the same case and not a fourth one: the platform
+      observed the listing, so ``MAKES_OFFER`` stays in :attr:`CatalogueEntry.via` and the
+      entry survives even with no ``SELLS`` edge beside it, exactly as :func:`candidate_shops`
+      keeps that shop on the roster. Refusing the whole entry there would deny a claim the
+      platform holds good evidence for because a *different* fact was missing.
+
+    A fourth gate has no roster counterpart because a roster does not need one: an
+    **unsourced attribute**, or one reached over an unsourced ``HAS_ATTRIBUTE`` edge, is
+    dropped from :attr:`CatalogueEntry.attributes` entirely. A claim on that key then answers
+    "this catalogue records no such key" instead of being graded against a reading nobody
+    checked, which is the difference between an undecided claim and a laundered one.
+
+    **And a gate the roster deliberately does not have at all**: a ``Source`` is evidence only
+    if its ``source_class`` is in :data:`PLATFORM_OBSERVED_SOURCE_CLASSES`. Sourced is not the
+    same as observed-by-us — ``seller_asserted`` and ``owner_statement`` are provenance for
+    "the store said so", and grading a store's claim against the store's own statement is a
+    check that cannot fail. That is the D55 failure this whole read is shaped to avoid: the
+    seller's purchased message is checked against the PLATFORM's snapshot, and a snapshot
+    assembled out of the seller's own assertions is not the platform's.
+
+    Args:
+        session: an open ``neo4j.Session``.
+        store_id: the store whose shelf is being read.
+        product_id: the product the auction named. Required: this read is per pair, never
+            "everything this store sells", because a claim is graded against the one product
+            the auction is about.
+        source_classes: which ``Source.source_class`` values count as platform observation.
+            Defaults to :data:`PLATFORM_OBSERVED_SOURCE_CLASSES`; widening it is a deliberate
+            act with the consequence written above.
+
+    Returns:
+        The entry, or ``None`` when the platform has observed nothing it may grade a claim
+        against for this pair. ``None`` is a real answer and the safe one.
+
+    Raises:
+        TypeError: ``source_classes`` is a bare string. ``list("scraped")`` is seven
+            one-character classes, none of which matches anything, so the silent version of
+            this mistake is a source that answers ``None`` for every pair in the graph while
+            looking correctly configured.
+    """
+    if isinstance(source_classes, (str, bytes)):
+        raise TypeError(
+            f"source_classes must be a sequence of class names, not the single string "
+            f"{source_classes!r}; write ({source_classes!r},)"
+        )
+    rows = session.run(
+        _CATALOGUE_ENTRY,
+        store_id=str(store_id),
+        product_id=str(product_id),
+        source_classes=list(source_classes),
+    ).data()
+    if not rows:
+        return None
+    row = rows[0]
+
+    offers = [
+        ShopOffer(
+            offer_id=str(offer["offer_id"]),
+            product_id=str(row["product_id"]),
+            variant_id=str(offer["variant_id"]),
+            price=float(offer["price"]),
+            currency=str(offer["currency"]),
+            availability=str(offer["availability"]),
+            observed_at=str(offer["observed_at"]),
+            source_ids=sorted(str(one) for one in offer["source_ids"]),
+        )
+        for offer in row["offers"]
+    ]
+    # The CHEAPEST, matching `_solicited`'s rule in `exchange.retrieval.roster`, so the price
+    # a snapshot states and the price the roster quoted are the same observation rather than
+    # two draws from the same set.
+    offer = min(offers, key=lambda one: (one.price, one.offer_id), default=None)
+
+    attributes: list[CatalogueAttribute] = []
+    for raw in row["attributes"]:
+        value = _attribute_reading(raw)
+        if value is None:
+            # An `AttributeValue` carrying no value component at all. `AttributeValue.
+            # __post_init__` refuses to mint one, so this is only reachable from raw Cypher or
+            # another library — the same threat model `_sourced_edge` is Cypher for. A reading
+            # with no reading is not evidence, and dropping it answers "no such key" rather
+            # than grading a claim against `None`.
+            continue
+        attributes.append(
+            CatalogueAttribute(
+                key=str(raw["key"]),
+                canonical_key=str(raw["canonical_key"] or ""),
+                value=value,
+                unit=None if raw["unit"] is None else str(raw["unit"]),
+                observed_at=latest_instant([str(one) for one in raw["observed"]]),
+                source_ids=sorted(str(one) for one in raw["source_ids"]),
+            )
+        )
+    attributes.sort(key=lambda one: (one.key, str(one.value)))
+
+    observed_at = latest_instant(
+        [str(one) for one in row["store_observed"]]
+        + [str(one) for one in row["product_observed"]]
+        + [one.observed_at for one in attributes]
+        + ([offer.observed_at] if offer is not None else [])
+    )
+    return CatalogueEntry(
+        store_id=str(row["store_id"]),
+        domain=str(row["domain"]),
+        product_id=str(row["product_id"]),
+        canonical_name=str(row["canonical_name"]),
+        brand=str(row["brand"]),
+        status=str(row["status"]),
+        via=sorted(str(one) for one in row["via"]),
+        attributes=attributes,
+        offer=offer,
+        source_ids=sorted(
+            {str(one) for one in row["store_sources"]}
+            | {str(one) for one in row["product_sources"]}
+        ),
+        observed_at=observed_at,
+    )
+
+
 def cosine_from_score(score: float | None) -> float:
     """Recover the raw cosine similarity from a ``queryNodes`` cosine score.
 
@@ -1193,8 +1613,11 @@ __all__ = [
     "DEFAULT_OVERSAMPLE",
     "DEFAULT_ROSTER_PRODUCTS",
     "MAX_INDEX_FETCH",
+    "PLATFORM_OBSERVED_SOURCE_CLASSES",
     "AttributeFilter",
     "Candidate",
+    "CatalogueAttribute",
+    "CatalogueEntry",
     "EmbeddingIndexEmpty",
     "EmbeddingProviderMismatch",
     "EmbeddingRunIncomplete",
@@ -1205,7 +1628,9 @@ __all__ = [
     "VectorIndexUnusable",
     "candidate_products",
     "candidate_shops",
+    "catalogue_entry",
     "cosine_from_score",
+    "latest_instant",
     "products_missing_embeddings",
     "products_missing_status",
     "roster_provenance_exclusions",

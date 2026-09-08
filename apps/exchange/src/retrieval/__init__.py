@@ -61,6 +61,11 @@ which is the point of the seam.
 
 from __future__ import annotations
 
+from .catalogue import (
+    CATALOG_SNAPSHOT_PREFIX,
+    GraphCatalogSnapshots,
+    graph_catalog_from_env,
+)
 from .clusters import (
     CATEGORY_WEIGHT,
     CONSTRAINT_WEIGHT,
@@ -120,6 +125,7 @@ from .roster import (
     ShopRosterSource,
     SolicitedShop,
     graph_roster_from_env,
+    graph_sessions_from_env,
 )
 from .service import (
     RETRIEVAL_LATENCY_BUDGET_MS,
@@ -137,6 +143,7 @@ from .sources import (
 )
 
 __all__ = [
+    "CATALOG_SNAPSHOT_PREFIX",
     "CATEGORY_WEIGHT",
     "CONSTRAINT_OPS",
     "CONSTRAINT_WEIGHT",
@@ -167,6 +174,7 @@ __all__ = [
     "FitFeatures",
     "FitLogError",
     "GraphCandidateSource",
+    "GraphCatalogSnapshots",
     "GraphShopRoster",
     "HardCriterion",
     "InMemoryCandidateSource",
@@ -191,7 +199,9 @@ __all__ = [
     "attribute_rows",
     "build_query",
     "configure_clusters",
+    "graph_catalog_from_env",
     "graph_roster_from_env",
+    "graph_sessions_from_env",
     "intent_clusters_of",
     "intent_match_by_bid",
     "make_candidate",

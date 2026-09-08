@@ -108,6 +108,7 @@ __all__ = [
     "ShopRosterSource",
     "SolicitedShop",
     "graph_roster_from_env",
+    "graph_sessions_from_env",
 ]
 
 #: How many shops one graph-sourced solicitation may name.
@@ -476,15 +477,75 @@ def _solicited(shops: Sequence[ShopCandidate], *, fit: Mapping[str, float]) -> l
     return rows
 
 
+#: One lazily-built ``neo4j.Driver`` per distinct connection, shared by every graph-backed
+#: seam this service wires. A ``Driver`` owns a connection pool and is documented as safe to
+#: share across threads; a *session* is not, which is why :meth:`GraphShopRoster._session`
+#: still takes one per solicitation. Keyed by the resolved connection so a test driving a
+#: different ``env`` gets a different driver rather than the first caller's.
+#:
+#: Never closed, exactly as the per-seam holder it replaces was never closed: the process
+#: holds it for its lifetime and there is no shutdown hook in this service to hang one on.
+_DRIVERS: dict[tuple[str, str, str], Any] = {}
+_BUILDING = threading.Lock()
+
+
+def graph_sessions_from_env(env: Mapping[str, str] | None = None) -> Callable[[], Any]:
+    """A zero-argument ``neo4j.Session`` factory over the configured connection.
+
+    **Connects to nothing here.** The composition root runs on the first served request, and a
+    driver built eagerly against a graph that is down would take the whole exchange with it —
+    including the roster-in-the-body path, which needs no graph at all. The driver is built on
+    the first CALL of the returned factory, and a failure to build or connect it surfaces
+    there, where each consumer already has a fail-closed answer for it.
+
+    One spelling of "how this service reaches Neo4j", shared by the two seams that do (the
+    shop roster and the catalogue snapshots), so a deployment cannot end up with them pointed
+    at different graphs — which would mean grading a shop's claims against a catalogue that
+    never named it.
+
+    Args:
+        env: the environment to read; the process environment when ``None``.
+
+    Returns:
+        A callable returning an open session. Whether the graph is reachable is not known
+        until it is called.
+    """
+    import os  # noqa: PLC0415 — read at call time so a test can drive `env`
+
+    source = dict(os.environ if env is None else env)
+    key = (
+        source.get("NEO4J_URI", "bolt://localhost:7687"),
+        source.get("NEO4J_USER", "neo4j"),
+        source.get("NEO4J_PASSWORD", "proxyshop_dev_pw"),
+    )
+
+    def sessions() -> Any:
+        driver = _DRIVERS.get(key)
+        if driver is None:
+            # A lock, because `app.state` is shared by every worker thread and the first
+            # request may arrive on several at once. Two drivers would not be wrong so much as
+            # leaked: the loser of the race is never closed, and a `neo4j.Driver` owns a
+            # connection pool.
+            with _BUILDING:
+                driver = _DRIVERS.get(key)
+                if driver is None:
+                    from neo4j import GraphDatabase  # noqa: PLC0415 — see the docstring
+
+                    uri, user, password = key
+                    driver = GraphDatabase.driver(uri, auth=(user, password), connection_timeout=5)
+                    _DRIVERS[key] = driver
+        return driver.session()
+
+    return sessions
+
+
 def graph_roster_from_env(env: Mapping[str, str] | None = None) -> GraphShopRoster | None:
     """A :class:`GraphShopRoster` on the configured Neo4j, or ``None`` when unconfigured.
 
-    **Returns ``None`` rather than raising, and never connects here.** The composition root
-    runs on the first served request, and a driver built eagerly against a graph that is down
-    would take the whole exchange with it — including the roster-in-the-body path, which
-    needs no graph at all. The driver is therefore constructed lazily, once, on the first
-    solicitation, and a failure to build or connect it lands on
-    :meth:`GraphShopRoster.solicit`'s own catch-all as an empty roster with a reason.
+    **Returns ``None`` rather than raising, and never connects here** — see
+    :func:`graph_sessions_from_env`, which owns the lazy driver. A failure to build or connect
+    it lands on :meth:`GraphShopRoster.solicit`'s own catch-all as an empty roster with a
+    reason.
 
     Configured means ``EXCHANGE_SHOP_ROSTER=graph``. It is opt-in because it is a real
     deployment change: ``apps/exchange/Dockerfile`` ships ``ingest.graph`` but the ``neo4j``
@@ -498,30 +559,4 @@ def graph_roster_from_env(env: Mapping[str, str] | None = None) -> GraphShopRost
     source = dict(os.environ if env is None else env)
     if str(source.get("EXCHANGE_SHOP_ROSTER", "")).strip().lower() != "graph":
         return None
-
-    holder: dict[str, Any] = {}
-    # A lock, because `app.state` is shared by every worker thread and the first solicitation
-    # may arrive on several at once. Two drivers would not be wrong so much as leaked: the
-    # loser of the race is never closed, and a `neo4j.Driver` owns a connection pool.
-    building = threading.Lock()
-
-    def sessions() -> Any:
-        driver = holder.get("driver")
-        if driver is None:
-            with building:
-                driver = holder.get("driver")
-                if driver is None:
-                    from neo4j import GraphDatabase  # noqa: PLC0415 — see the docstring
-
-                    driver = GraphDatabase.driver(
-                        source.get("NEO4J_URI", "bolt://localhost:7687"),
-                        auth=(
-                            source.get("NEO4J_USER", "neo4j"),
-                            source.get("NEO4J_PASSWORD", "proxyshop_dev_pw"),
-                        ),
-                        connection_timeout=5,
-                    )
-                    holder["driver"] = driver
-        return driver.session()
-
-    return GraphShopRoster(sessions)
+    return GraphShopRoster(graph_sessions_from_env(source))
