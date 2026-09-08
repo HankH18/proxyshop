@@ -23,11 +23,18 @@ connecting them.
 
 What is pinned here, in the order the sections run:
 
-1. the resolver is the ONLY place in product code that supplies a ``NEO4J_PASSWORD`` default;
-2. all three paths offer the SAME ``(user, password)`` for the same environment — driven, not
-   inferred, by capturing what each one hands ``neo4j.GraphDatabase.driver``;
-3. what an operator SEES when the password is wrong or unset, and that the password itself is
-   in none of it.
+1. the resolver is the ONLY place in product code that supplies a ``NEO4J_PASSWORD`` default —
+   swept with :mod:`ast`, and the sweep's own sensitivity is asserted against a corpus of
+   seven reintroductions before it is trusted;
+2. all three paths offer the SAME ``(user, password)`` for the same environment AND get it
+   from the one resolver — driven, not inferred, by capturing what each one hands
+   ``neo4j.GraphDatabase.driver``, first for a stated environment and then for a sentinel
+   credential no environment can produce. The stated half alone is vacuous: the pre-repair
+   code read those same variables, so a revert leaves it green. Plus the driver POOL's key,
+   which has to include the password or a rotated deployment is served its refused driver
+   forever;
+3. what an operator SEES when the password is wrong or unset, and that no password is in any
+   of it — including one the operator embedded in ``NEO4J_URI`` or ``NEO4J_USER`` themselves.
 """
 
 from __future__ import annotations
@@ -76,12 +83,12 @@ SENTINEL = GraphCredentials(
 )
 
 #: Seven realistic ways a lane could put a second ``NEO4J_PASSWORD`` default back into the
-#: tree, and the corpus :func:`_password_defaults_in` is graded against. Five of these survived
-#: the substring predicate this sweep used to be — it required a double-quoted literal, a
-#: ``.get(`` and a comma **on one physical line**, so single quotes, the resolver's own
-#: ``ENV_PASSWORD`` constant, a call wrapped over two lines and an ``or`` fallback all walked
-#: straight through it. A gate that detects nothing is the classic false green, so the corpus
-#: is asserted against rather than trusted.
+#: tree, and the corpus :func:`_password_defaults_in` is graded against. **Six of these seven
+#: survived the substring predicate this sweep used to be** — measured, by running the old
+#: predicate over this corpus. It required a double-quoted literal, a ``.get(`` and a comma all
+#: on one physical line, so everything except the first row below walked straight through it. A
+#: gate that detects nothing is the classic false green, so the corpus is asserted against
+#: rather than trusted.
 REINTRODUCTIONS: tuple[tuple[str, str], ...] = (
     ("double quotes", 'import os\nvalue = os.environ.get("NEO4J_PASSWORD", "pw")\n'),
     ("single quotes", "import os\nvalue = os.environ.get('NEO4J_PASSWORD', 'pw')\n"),
@@ -296,9 +303,10 @@ def test_the_sweep_catches_every_realistic_way_a_password_default_could_come_bac
 
     A source-text gate that detects nothing passes forever, and it passes loudest on the day
     the defect returns. This node writes each shape in :data:`REINTRODUCTIONS` into a real file
-    and requires the detector to flag it — measured against the substring predicate this sweep
-    used to be, five of the seven walked straight through: single quotes, ``os.getenv``, the
-    ``ENV_PASSWORD`` constant, a call wrapped over three lines, and ``... or "pw"``.
+    and requires the detector to flag it — run against the substring predicate this sweep used
+    to be, six of the seven walked straight through: single quotes, ``os.getenv``, a bare
+    ``getenv``, the ``ENV_PASSWORD`` constant, a call wrapped over three lines, and
+    ``... or "pw"``. Only the double-quoted one-liner was ever caught.
 
     :data:`INNOCENT` is the other half. A sweep that flags the resolver being called, or a
     ``NEO4J_URI`` default, is a sweep the next lane deletes rather than obeys.
@@ -654,13 +662,15 @@ def test_describe_strips_a_credential_the_operator_embedded_in_the_uri_or_the_us
     verbatim into a log an operator pastes into a ticket. Same for a colon-bearing
     ``NEO4J_USER``.
 
-    **The measured limit, stated rather than implied.** The strip is a ``urlsplit`` and it
-    therefore only reaches userinfo the URI grammar admits. A password whose ``/`` is
-    percent-encoded (``p%2Fss``) is stripped; a RAW ``/`` — ``bolt://neo4j:p/ss@host:7687``,
-    which is not a legal URI, because ``/`` is not in the userinfo character set — makes
-    ``urlsplit`` read the netloc as ``neo4j:p`` with no ``@`` in it, and the function returns
-    the string untouched, password included. That is not asserted here in either direction: it
-    is reported, and the assertions below cover the shapes that are legal URIs.
+    **The illegal-URI case is asserted too, and it is the likelier mistake.** ``urlsplit``
+    alone only reaches userinfo the URI grammar admits. A password whose ``/`` is
+    percent-encoded (``p%2Fss``) parses and is stripped; a RAW ``/`` —
+    ``bolt://neo4j:p/ss@host:7687``, not a legal URI because ``/`` is outside the userinfo
+    character set — makes ``urlsplit`` read the netloc as ``neo4j:p`` with no ``@`` in it, and
+    a single-pass strip hands the whole string back with the password in it. It is the
+    likelier of the two because a password with a ``/`` in it looks perfectly fine to the
+    person typing it. ``_without_userinfo`` has a second pass for exactly that, which
+    over-redacts rather than under-redacts, and both shapes are pinned below.
     """
     embedded_in_the_uri = graph_credentials(
         {ENV_URI: "bolt://neo4j:s3cr3t@host:7687", ENV_PASSWORD: "stated"}
@@ -699,6 +709,23 @@ def test_describe_strips_a_credential_the_operator_embedded_in_the_uri_or_the_us
         f"that stops at the first `@` leaves the tail of the password in the message"
     )
     assert "host:7687" in awkward, f"the host was lost with the credential: {awkward!r}"
+
+    # THE ILLEGAL URI, and the one a single `urlsplit` pass hands back verbatim. `/` is outside
+    # the userinfo character set, so the authority ends at it and `urlsplit` sees no `@` to
+    # strip — a password an operator typed with a slash in it is not exotic, it is a password.
+    raw_slash = graph_credentials(
+        {ENV_URI: "bolt://neo4j:p/ss@host:7687", ENV_PASSWORD: "stated"}
+    ).describe()
+
+    assert "p/ss" not in raw_slash and "ss@host" not in raw_slash, (
+        f"a password containing a RAW `/` was printed verbatim: {raw_slash!r}. `urlsplit` reads "
+        f"this netloc as 'neo4j:p' with no `@` in it, so a single-pass strip returns the whole "
+        f"string; the fallback pass is what has to catch it"
+    )
+    assert "host:7687" in raw_slash, (
+        f"the fallback pass took the server with the credential: {raw_slash!r}. It is allowed "
+        f"to over-redact, but an operator still has to be able to see which host was dialled"
+    )
 
     with caplog.at_level(logging.WARNING, logger=neo4j_auth.__name__):
         graph_credentials({ENV_URI: "bolt://neo4j:s3cr3t@host:7687"})

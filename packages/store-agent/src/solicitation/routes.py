@@ -48,6 +48,17 @@ agent the submission channel *is* the response body — and what this route serv
 back out of it, never ``entry.answer``. Both hold the same bid; only one holds it because the
 submission gate let it through.
 
+**A THIRD answer, and the one an integrator meets first: 422.** This is the external door of the
+product — it is how a store's agent, written by someone outside this repo, joins the network —
+and driven by hand with a plausible body it refused three times before accepting anything. Every
+refusal was correct and not one of them said what a valid body looks like. So the router carries
+:class:`~store_agent.solicitation.refusal.EnrichedRefusalRoute`, which keeps FastAPI's per-field
+detail, adds the permitted values and accepted keys DERIVED from the schema that did the
+refusing, points at :data:`CANONICAL_BID_REQUEST` in this service's own ``/openapi.json``, and
+drops the ``input`` echo that was quoting an unauthenticated caller's body back at them — and
+that turned ``1e400`` into an HTTP 500. Nothing about WHICH bodies are refused changes; see that
+module for the whole argument, including why a route class and not ``@app.exception_handler``.
+
 **A non-submitting store answers 204, not 403**, and the caller decides that rather than
 taste. ``exchange.composition.HttpBidSolicitor._refusal`` reads a 204 as this contract's
 decline and reports ``store_declined:<this header's reason>``; **every other status** becomes
@@ -68,8 +79,10 @@ from fastapi import APIRouter, Request, Response
 
 from ..runtime import Decline, DeclineReason, is_decline
 from .advocate import Advocate, advocate
+from .refusal import REFUSAL_SCHEMA, EnrichedRefusalRoute
 
 __all__ = [
+    "CANONICAL_BID_REQUEST",
     "DECLINE_REASON_HEADER",
     "KILLED_REASON",
     "NOT_ACTIVATED_REASON",
@@ -80,7 +93,52 @@ __all__ = [
     "router",
 ]
 
-router = APIRouter(tags=["solicitation"])
+#: **A body this door accepts**, published in the served ``/openapi.json`` and pointed at by
+#: every refusal this route issues. It is the same object
+#: ``packages/contracts/openapi/store-agent.openapi.json`` declares for this operation, and
+#: ``test_solicitation_refusal.py`` asserts that in both directions — a checked-in duplicate the
+#: build refuses to let drift, rather than a second example that can quietly stop matching.
+#:
+#: An example is worth publishing only if it is REAL. The contract's test suite already proved
+#: this one validates against the `BidRequest` schema; what nothing proved is the property an
+#: integrator actually depends on, which is that the DOOR takes it. So it is driven through the
+#: served route in the tests and required not to be refused. Schema-legal and door-accepted are
+#: different claims, and this file publishes the second one.
+#:
+#: Every optional field is filled in on purpose. A minimal example teaches the required set and
+#: leaves an integrator guessing about the rest; this one names all five `ProfileBuckets` keys
+#: and both `Intent` list shapes, which is exactly the vocabulary the three measured refusals
+#: were missing.
+CANONICAL_BID_REQUEST: dict[str, Any] = {
+    "auction_id": "auc-0001",
+    "intent": {
+        "intent_id": "int-0001",
+        "cluster_id": "cluster-serum",
+        "query": "gentle vitamin C serum for sensitive skin",
+        "category": "skincare",
+        "hard_constraints": [{"field": "fragrance_free", "op": "eq", "value": True}],
+        "preferences": [{"field": "price", "direction": "minimize", "weight": 0.6}],
+        "ship_to": "US-CA",
+        "currency": "USD",
+        "budget_band": "40-80",
+        "created_at": "2026-01-01T00:00:00Z",
+        "schema_version": "2.0.0",
+    },
+    "product_ref": "sku-serum-15",
+    "profile": {
+        "pseudonym": "psn-0001",
+        "buckets": {
+            "budget_band": "40-80",
+            "category_affinity": ["skincare"],
+            "frequency_tier": "occasional",
+            "region": "US-CA",
+            "first_time": False,
+        },
+    },
+    "respond_by": "2026-01-01T00:00:30Z",
+}
+
+router = APIRouter(tags=["solicitation"], route_class=EnrichedRefusalRoute)
 
 #: This module's logger. R7 asks for the shadow bid to be *logged*; the structured log a
 #: merchant reads is the runner's own sink (``Advocate.log``), and this is the operator-facing
@@ -124,6 +182,30 @@ KILLED_REASON = "store_killed"
                 "synthesized list-price fallback upstream, not by an empty bid here."
             )
         },
+        422: {
+            "description": (
+                "The body does not validate against `BidRequest`. `detail` is FastAPI's "
+                "per-field list (`loc`, `msg`, `type`). `help` adds what the refusal is "
+                "otherwise missing, derived from this schema rather than restated beside it: "
+                "`permitted_values` for a field whose schema is a closed set, `closed_objects` "
+                "for the accepted and required keys of an `additionalProperties: false` object, "
+                "and `example`, a JSON Pointer at the valid request body in this document. "
+                "**No value from the request is echoed** — the field is named, never what was "
+                "sent for it."
+            ),
+            # The SHAPE, not only the prose. Overriding this status replaces FastAPI's default
+            # entry outright, so a description on its own would have published a refusal whose
+            # body nothing declared — see `REFUSAL_SCHEMA`, which the tests validate real
+            # refusals against after reading it back out of this served document.
+            "content": {"application/json": {"schema": REFUSAL_SCHEMA}},
+        },
+    },
+    # Publishes the canonical body in the schema this PROCESS serves, which is the document an
+    # integrator can actually reach: `curl $AGENT/openapi.json`. The refusal's `help.example`
+    # pointer resolves here, so "what does a valid body look like" is answerable from the door
+    # itself and never requires a copy of this repository.
+    openapi_extra={
+        "requestBody": {"content": {"application/json": {"example": CANONICAL_BID_REQUEST}}}
     },
 )
 def answer_bid_request(bid_request: BidRequest, request: Request) -> Any:

@@ -23,7 +23,17 @@ exchange ran the unbounded process-local store. The seam tests drive that choice
 document, environment variable, and no document at all — against a fake ``worker_redis``, so
 they need no live Redis and touch no network.
 
-Nothing here sleeps: the TTL is driven with an injected ``clock``.
+**What a bound costs the doors in front of it**, pinned here too, because a cap is not free:
+a record that can stop existing mid-request makes ``POST /auctions`` able to fail between
+``create`` and ``open`` and between ``open`` and ``close``, which unguarded is an
+unauthenticated 500 on a door that had just answered 201; eviction has to step over the record
+a merchant is minting against, or a spent discount code outlives the auction it was minted
+for; and the store's own account of an absence has to name the bound that actually took the
+record, since "your 900s TTL had not run out" about a record 10,000 seconds old sends an
+operator to raise a capacity that was never the cause.
+
+Nothing here sleeps: the TTL is driven with an injected ``clock``, and the one node that grades
+``_lock`` forces the interleaving with ``sys.setswitchinterval`` rather than with timing.
 """
 
 from __future__ import annotations

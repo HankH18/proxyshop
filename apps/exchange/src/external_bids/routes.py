@@ -178,15 +178,20 @@ def configure_external_bids(
     ``auction/routes.py`` installs its bid book — a deployment that needs replay memory to
     outlive one process hands its own over here.
 
-    **That default store never forgets, and nothing in this tree purges it.**
-    :meth:`~store_agent.external.nonces.NonceStore.purge_expired` has no production caller, so
-    while each nonce's LENGTH is bounded (:data:`BOUNDED_IDENTIFIERS`) the COUNT is not:
-    measured, 200 admitted bids retain 200 entries and 74,504 bytes, with ``retain_until``
-    populated and never consulted. It takes a valid signing key to grow, so it is a channel
-    open to an admitted seller rather than to an anonymous caller, and closing it is an
-    eviction policy for ``NonceStore`` — a decision belonging to whoever owns that class and
-    the durable ``app.bid_nonces`` port it documents as its real implementation, not something
-    to improvise from this door. Reported rather than papered over.
+    **That default store used to never forget; it does now, and the fix is not in this file.**
+    This paragraph reported an unbounded nonce COUNT — each nonce's LENGTH was bounded by
+    :data:`BOUNDED_IDENTIFIERS` but nothing dropped an entry, so 200 admitted bids retained 200
+    entries and 74,504 bytes with ``retain_until`` populated and never consulted, because
+    :meth:`~store_agent.external.nonces.NonceStore.purge_expired` had no production caller. T-378
+    gave it one, and it is the very function this route delegates to:
+    ``store_agent.external.door.receive_bid`` sweeps at its replay gate, on the door's own
+    ``evaluated_at`` clock, before every consume. The same 200 admitted bids now retain 30
+    entries / 6,851 bytes — 30 being exactly the bids still inside the freshness window — and 2
+    when auction deadlines are supplied. ``NonceStore`` also refuses at ``MAX_TRACKED_NONCES``
+    rather than evicting an entry whose window is still open, which is what keeps the bound from
+    becoming a replay hole. A deployment that hands its own ``nonces`` over inherits neither
+    guarantee unless its object implements the same port; ``purge_expired`` is part of that port,
+    and a store lacking it fails the door **closed** rather than silently skipping the sweep.
 
     ``queue`` receives the verification work item for an ADMITTED submission. Admitted is not
     trusted: the seller-asserted claims are queued rather than believed (R18).
