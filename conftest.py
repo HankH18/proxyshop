@@ -637,6 +637,35 @@ def manual_clock() -> ManualClock:
 # --------------------------------------------------------------------------------------
 
 
+#: Environment variables that would point a test at a REAL, BILLED model provider.
+#:
+#: Cleared for every test, autouse, and the reason is not hypothetical. The runbook tells an
+#: operator to `set -a && . ./.env && set +a` before working — that is the documented path — and
+#: `.env` is where a live `ANTHROPIC_API_KEY` and `LLM_PROVIDER=anthropic` belong. A shell that
+#: has followed the runbook and then runs `pytest` was, until this fixture, a shell in which the
+#: suite could reach the network and spend money. Measured: two tests
+#: (`test_a_recorded_model_writes_the_pitch_through_the_same_served_door` and
+#: `test_a_store_taught_the_opposite_moves_the_opposite_way`) failed for exactly that reason and
+#: for no other, passing again the moment the variables were absent.
+#:
+#: D19 and D3 already say the offline double is the default and that tests reach no network. This
+#: is what makes the ambient environment unable to override them. A test that genuinely wants a
+#: live provider sets it itself with `monkeypatch.setenv`, which still works — this clears the
+#: INHERITED value, it does not forbid a deliberate one.
+LIVE_MODEL_ENV: tuple[str, ...] = (
+    "LLM_PROVIDER",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_BASE_URL",
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_ambient_model_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test inherits a live model provider from the shell that started it."""
+    for name in LIVE_MODEL_ENV:
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def llm_double() -> LLMDouble:
     """The deterministic offline LLM (D19: ``LLM_PROVIDER=double``; D3: no network).
