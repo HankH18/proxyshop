@@ -186,8 +186,12 @@ quietly omitted it would be the same claim as a green board over a broken system
 asserted from having read the source:
 
 1. **Reconciliation and the trust projection cannot run over the ledger chain the exchange
-   writes** — see 3.6/3.7. The chain itself is now real and is verified in front of you (3.8);
-   what it does not yet carry is two of the three kinds `reconcile` needs.
+   writes** — see 3.6/3.7. The chain itself is now real and is verified in front of you (3.8),
+   and it carries two of the three kinds `reconcile` needs — `accepted` and `order_paid`. This
+   line used to say it carried only one of the three, and to blame a kind with no producer
+   anywhere; all three have a served producer now. What blocks the fold is that the two halves
+   of the purchase name the seller differently, and what is merely absent is the third kind,
+   `checkout_pixel`, because this driver posts no beacon to the collector it could post one to.
 
 **This section used to list four.** Three of them have since been closed, and the driver
 measures all three every run rather than taking anyone's word for it:
@@ -283,11 +287,15 @@ document this driver writes**, not served by the trust service; which store gets
 of the split is read from `fixtures/manifest.json`. The derivation is exactly what 3.7 says the
 live beat cannot show.
 
-A filled slot is a `shown` event in the frozen vocabulary — but nothing under `apps/`,
-`packages/` or `services/` writes one. The scripted proof in section 4 emits its own from the
-ranker's real slots, and the S1 flow suite under `e2e/` guards that: it searches the tree for a
-producer of `shown`, `checkout_pixel` or `claim_verified` and turns red as soon as one appears. So
-the chain 3.8 serves has no `shown` row in it, and that absence is measured rather than assumed.
+A filled slot is a `shown` event in the frozen vocabulary, and `exchange.ranking.serving` writes
+one per slot on the served path (`SHOWN_KIND`). This paragraph used to say the opposite — that
+nothing under `apps/`, `packages/` or `services/` wrote one, that the scripted proof in section 4
+had to emit its own, and that the S1 flow suite searched the tree for a producer of `shown`,
+`checkout_pixel` or `claim_verified` and turned red as soon as one appeared. All three producers
+landed, and the S1 flow suite's guard inverted with them: it now names the module that must
+contain each producer and refuses a kind the driver writes for itself. The chain 3.8 serves
+carries a `shown` row per slot — three of them on the run measured there — and that presence is
+measured rather than assumed.
 
 ### 3.5 Acceptance, the single-use code and the simulated redirect
 
@@ -334,17 +342,22 @@ order redeemed nothing", not "the second attempt errored".
 
 Then it stops, and the reasons it prints are these:
 
-- `reconcile` needs three kinds — `accepted`, `checkout_pixel`, `order_paid` — and **two of the
-  three are on the served path now**. `accepted` carries the offer and the token; the two bridge
+- `reconcile` needs three kinds — `accepted`, `checkout_pixel`, `order_paid` — and **all three
+  have a served producer now**. `accepted` carries the offer and the token; the two bridge
   records `code_created` and `checkout_redirect` that carry the single-use code sit behind it
   (3.5); and the merchant's HMAC-verified `order_paid` is posted to the trust service over HTTP by
   a different application, so it lands in the same chain rather than in an in-process hand-off
-  buffer. `checkout_pixel` is the one kind with no producer: `pixel/src/beacon.ts` builds a
-  collector body out of a four-key allowlist and `merchant_svc.collector` really accepts one, but
-  the collector stops at a `PixelObservation` in memory and nothing turns that into a ledger
-  event. That costs *evidence* rather than the verdict — a group with no beacon grades
-  `pixel_missing`, which by design is not a blocker — and a driver that manufactured a beacon
-  would be supplying the evidence whose absence is the defect.
+  buffer. `checkout_pixel` used to be the one kind with no producer at all — the collector stopped
+  at a `PixelObservation` in memory and nothing turned that into a ledger event. It no longer
+  does: the merchant's served `POST /pixel/collect` writes a real `checkout_pixel` row, because
+  `merchant_svc.collector` now hands the observation to
+  `merchant_svc.composition.publish_pixel_observation`, and the S1 flow suite under `e2e/` drives
+  that route and reads the row back. What is missing here is
+  narrower and belongs to *this driver*: it never posts a beacon to the collector, so no
+  `checkout_pixel` lands in the chain this command writes. That costs *evidence* rather than the
+  verdict — a group with no beacon grades `pixel_missing`, which by design is not a blocker — and
+  a driver that manufactured a beacon rather than driving the route would be supplying the
+  evidence whose absence is the point.
 - **What returns nothing is the fold itself**, and the demo prints the number: 0 verdicts over the
   chain as served. `reconcile` namespaces every join key by the store that owns it, because a
   Shopify `order_id` is only unique within one shop, and the signed `order_paid` names the *shop
@@ -392,10 +405,15 @@ seam for it — and then asks a **different application** what it received: `GET
 page is a uvicorn instance in a thread of the one interpreter. What makes the read meaningful is
 the socket and the separate app state, and both of those are real.)
 
-What beat 7 prints is the chain itself: eight events (`auction_opened`, `auction_closed`,
-`auction_opened`, `auction_closed`, `accepted`, `code_created`, `checkout_redirect`,
-`order_paid`), each one's `prev_hash` equal to its predecessor's `event_hash`, followed by the
-service's verdict — `ok: true`, `verified: 8`, `anchor_ok: true`, and the head hash. `anchor_ok` is the half worth pointing at: the chain's
+What beat 7 prints is the chain itself, in eight kinds: `auction_opened`, one `bid_placed` per
+store that answered, `auction_closed` (twice over, because the driver runs two auctions), one
+`shown` per filled shortlist slot, then `accepted`, `code_created`, `checkout_redirect` and
+`order_paid`. Each one's `prev_hash` equals its predecessor's `event_hash`, and the service's
+verdict follows — `ok: true`, `verified: <the same count>`, `anchor_ok: true`, and the head hash.
+The count is a function of how many stores answer and how many slots fill, so read it off the run
+rather than from here; measured on one run, seventeen events. This paragraph used to say eight,
+in six kinds, from a run before `bid_placed` and `shown` had served producers. `anchor_ok` is the
+half worth pointing at: the chain's
 length and head are recorded outside the row list, so a stream truncated to a shorter but
 perfectly-linked prefix still fails verification. A flawless chain of the wrong length is still
 a tampered one.
@@ -447,15 +465,23 @@ means:
 The ledger is append-only and hash-chained, so the sequence is tamper-evident: an edited
 event breaks the chain rather than passing quietly.
 
-That table is what the *scripted proof* in section 4 produces. A **served** run now produces six
-of those kinds: `auction_opened` and `auction_closed` from the auction's state machine,
-`accepted`, `code_created` and `checkout_redirect` from the served accept, and `order_paid` posted
-by the merchant service. The `accepted` row still has a different provenance from the fifth row
-above — it is the state machine's own transition event, carrying the auction's `intent_id` and
-`cluster_id`, rather than the checkout port's copy of it, which is why exactly one `accepted`
-lands per acceptance. What has no emitter any route reaches is the rest of the table:
-`bid_placed`, `shown`, `claim_verified`, `checkout_pixel` and `reconciled`. 3.8 is where the
-served chain is shown and verified.
+That table is what the *scripted proof* in section 4 produces. A **served** run now produces
+eight of those kinds: `auction_opened` and `auction_closed` from the auction's state machine,
+`bid_placed` per solicited store from the auction route, `shown` per filled slot from
+`exchange.ranking.serving`, `accepted`, `code_created` and `checkout_redirect` from the served
+accept, and `order_paid` posted by the merchant service. This paragraph used to say six, and to
+name `bid_placed` and `shown` among the kinds no route reached. The `accepted` row still has a
+different provenance from the fifth row above — it is the state machine's own transition event,
+carrying the auction's `intent_id` and `cluster_id`, rather than the checkout port's copy of it,
+which is why exactly one `accepted` lands per acceptance.
+
+What is absent from *this run's* chain is `claim_verified`, `checkout_pixel` and `reconciled`, and
+none of the three is missing an emitter any more — each has one on a served path
+(`exchange.ranking.verification`, the merchant's `POST /pixel/collect`, and `trust.reconcile` on
+`POST /reconcile`). What this driver does not do is *reach* them: it posts no beacon to the
+collector (3.6), and the fold it prints is the one 3.6 explains returns nothing over a chain whose
+two halves name the seller differently. Read the beat-7 row list for what actually landed rather
+than taking this paragraph's word for it. 3.8 is where the served chain is shown and verified.
 
 ## Off the starting path: dev-store provisioning, the onboarding interview, and `make e2e-live`
 

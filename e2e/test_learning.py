@@ -51,15 +51,18 @@ called, no clock is read on either measured path, and nothing here needs compose
 
 What this file does NOT claim
 -----------------------------
-It does not claim that ``GET /auctions/{auction_id}/shortlist`` reorders. It cannot:
-``exchange.policy.bandit.exposure`` has no production call site — the served shortlist is built by
-``exchange.ranking`` and never reads the posterior book. ``exchange/policy/routes.py`` says so
-about itself, and it is measurable: ``grep -rn "exposure" apps/exchange/src --include="*.py"``
-returns the policy package plus one line of unrelated prose in ``auction/routes.py``, and no call.
+It does not assert that ``GET /auctions/{auction_id}/shortlist`` reorders. That used to be
+because it could not — ``exchange.policy.bandit.exposure`` had no production call site and the
+served shortlist never read the posterior book. It has one now:
+``exchange.policy.exploration.exposure_shares`` reads it, and ``exchange.ranking.serving``
+imports that module (``apps/exchange/src/ranking/serving.py:58``) and applies R12's exploration
+slice to the shortlist it serves.
 
-What is asserted here is the exposure ranking the exchange's policy produces, which is the *share
-of shortlist opportunity* per store; the wire from there into candidate selection is somebody's
-ticket, and when it lands these assertions are already the ones that say what the ordering must do.
+What is asserted here is still the exposure ranking the exchange's policy produces — the *share
+of shortlist opportunity* per store — and that remains the right measurement for R16, because the
+served slice is deliberately bounded (one slot of four, only among the already-eligible, only for
+a store the trust snapshot marks ``low_data``). A served-shortlist assertion would be a narrower
+claim about that bound, not a stronger one about the learning loop.
 """
 
 from __future__ import annotations

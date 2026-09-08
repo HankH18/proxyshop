@@ -78,10 +78,14 @@ PINNED_ROUTES: tuple[Route, ...] = (
     #
     #   * `GET /stores/{store_id}/trust` declares no identity parameter of any kind, so serving
     #     it as written hands any anonymous caller any store's full per-dimension posture. The
-    #     read that door describes is R9's — a merchant reading its OWN score and why — and R9's
-    #     dashboard does not exist (`apps/merchant/app/dashboard/` holds one empty `.gitkeep`).
-    #     `GET /snapshot` cannot stand in for it: it answers every store at once, which is the
-    #     one shape a shop-facing read must not have.
+    #     read that door describes is R9's — a merchant reading its OWN score and why. This
+    #     comment used to add that R9's dashboard did not exist; it does now
+    #     (`apps/merchant/app/dashboard/`: `Dashboard.tsx`, `Cards.tsx`, `api.ts`), and it reads
+    #     the merchant service's own same-origin `GET /stores/{store_id}/dashboard` rather than
+    #     this trust path — so the missing caller was never the reason for the unpin and the
+    #     arrival of one is not a reason to reverse it. The identity parameter still is.
+    #     `GET /snapshot` cannot stand in for it either: it answers every store at once, which is
+    #     the one shape a shop-facing read must not have.
     #   * `POST /feedback/{order_ref}` declares `matched_pitch` / `reason` /
     #     `pseudonymous_context` and no routing evidence, so serving it as written takes R14
     #     feedback from a buyer the network never routed. The routed-buyer gate already exists,

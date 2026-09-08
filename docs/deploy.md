@@ -109,9 +109,11 @@ docker compose ps          # every row (healthy) — and it now means something
 stack above is CONFIGURED now — `apps/exchange/compose.yaml` mounts a real deployment
 document and switches the graph roster on, `apps/buyer/compose.yaml` mounts the buyer's — but
 it holds an EMPTY Neo4j and serves no shopper page until two more steps run. For the whole
-shopper journey, follow `docs/demo/shopper-demo.md`, which adds the corpus load, the SPA
-build, the `demo` compose profile that starts four real store agents, and an after-deploy
-probe that drives a real auction rather than reading a health column.
+shopper journey, follow `docs/demo/shopper-demo.md`, which adds the corpus load, the `demo`
+compose profile that starts four real store agents and the `buyer-web` page container, and an
+after-deploy probe that drives a real auction rather than reading a health column. There is no
+SPA build step to run first, and this paragraph used to list one: `buyer-web` builds its own
+bundle inside its image rather than bind-mounting an artefact off the host.
 
 Take it down with `docker compose down`. Note that `make deps-down` is
 `docker compose down -v`, which destroys the pgdata and neo4jdata volumes.
@@ -203,8 +205,11 @@ $ PROXYSHOP_PG_DSN_ADMIN=postgresql://nobody@127.0.0.1:1/postgres \
 ```
 
 36 live-Postgres least-privilege checks for C3/S7 did not run, and the shell saw success.
-Repo-wide the class is 288 `docker`-marked tests. There is no CI here, so a green local run
-is the only signal anybody gets.
+Repo-wide the class is 288 `docker`-marked tests. This paragraph used to end "there is no CI
+here, so a green local run is the only signal anybody gets"; two pipeline definitions are
+tracked now (`.gitlab-ci.yml` and `.github/workflows/verify.yml` — see "Two files now, one
+gate" below), which changes where the signal comes from and changes nothing about the trap
+above: a run that skips the docker-marked class still exits 0.
 
 `verify.sh` now probes the three compose endpoints — through `proxyshop_support.reachability`,
 the same per-service prober the tests use, reading the same `PROXYSHOP_PG_DSN_ADMIN` /
@@ -483,12 +488,16 @@ and this is the record of what each one reads:
 
 | service       | reads                                                                        | how the fragment leaves it |
 |---------------|------------------------------------------------------------------------------|----------------------------|
-| `exchange`    | `EXCHANGE_DEPLOYMENT` (path) / `EXCHANGE_DEPLOYMENT_JSON` (inline)            | declared and **empty** — `apps/exchange/compose.yaml:83-84` |
-| `buyer-svc`   | `BUYER_DEPLOYMENT` (path) / `BUYER_DEPLOYMENT_JSON` (inline), else `EXCHANGE_URL` | `EXCHANGE_URL` is already **populated** — `apps/buyer/compose.yaml:47` |
-| `store-agent` | `STORE_AGENT_CONTEXT` (path)                                                  | declared and **empty** — `packages/store-agent/compose.yaml:56` |
+| `exchange`    | `EXCHANGE_DEPLOYMENT` (path) / `EXCHANGE_DEPLOYMENT_JSON` (inline)            | **populated and mounted** — `apps/exchange/compose.yaml:146` defaults the path to `/srv/deploy/exchange-deployment.json`, and `:157` bind-mounts `deploy/demo` read-only |
+| `buyer-svc`   | `BUYER_DEPLOYMENT` (path) / `BUYER_DEPLOYMENT_JSON` (inline), else `EXCHANGE_URL` | **populated and mounted** — `apps/buyer/compose.yaml:90` and `:128`; `EXCHANGE_URL` (`:56`) is the lowest rung and is populated too |
+| `store-agent` | `STORE_AGENT_CONTEXT` (path)                                                  | declared and **empty** on the unprofiled template — `packages/store-agent/compose.yaml:126`. The four hosted demo agents each name a real context file (`:172`, `:191`, `:210`, `:229`) |
 
-Every one of those roots is fail-closed and none of them defaults to anything: a service given
-no document binds no collaborators and refuses, rather than inventing a peer. A malformed
+The two rows above used to read "declared and **empty**": the compose fragments shipped no
+deployment document and a stack brought up from them refused every request. Both ship one now.
+
+Every one of those roots is still fail-closed, and the *composition roots in Python* still
+default to nothing — a service given no document binds no collaborators and refuses, rather
+than inventing a peer. What changed is that the shipped compose fragments hand them one. A malformed
 document is a `503` naming the offending key on the *next request* — not a `500`, and not a
 crash at boot — and the failure is not cached, so fixing the file serves the next request
 without a restart.

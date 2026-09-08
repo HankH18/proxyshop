@@ -27,8 +27,12 @@ test-py:    ; @./scripts/verify.sh pytest
 test-ts:    ; @./scripts/verify.sh vitest
 demo-seed:  ; @./.venv/bin/python -m fixtures.seed --category "$(SEED_CATEGORY)"
 # ── the compose shopper demo (docs/demo/shopper-demo.md) ────────────────────────────────
-# Build the SPA bundle `buyer-web` bind-mounts. Must precede demo-up: apps/buyer/dist is
-# gitignored, and Docker answers a missing bind source with an empty directory and a 403.
+# There is NO SPA build target here, and its absence is the fix rather than an omission. A
+# `demo-ui` target used to stand at this spot to build the bundle `buyer-web` bind-mounted,
+# because `apps/buyer/dist` is gitignored and Docker answers a missing bind source with an
+# empty directory and a 403 on a fresh clone. `buyer-web` now builds its own bundle in a
+# multi-stage image (db36a6f), so nothing has to precede `demo-up` and no host artefact is
+# mounted. If you find a runbook that still lists an SPA build step, that runbook is behind.
 # Load the ten recorded storefronts into Neo4j. Minutes, not seconds — 3,093 products and
 # 44,803 graph writes — and silent until it finishes, which is why the runbook watches the
 # product count rather than the log. Idempotent: a second run re-reads nothing unchanged.

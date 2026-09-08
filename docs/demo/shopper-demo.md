@@ -4,8 +4,11 @@ A shopper types what they want, real store agents pitch for the business over HT
 exchange ranks the sealed bids and returns a shortlist carrying both voices, and the shopper
 accepts one. All of it in a browser, on one laptop, out of a fresh clone.
 
-**This page is about the compose stack** — fourteen running containers under the `demo`
-profile, a real Postgres, a real Neo4j holding ten real storefronts. `starting-slice.md` beside it is about the in-process driver
+**This page is about the compose stack** — thirteen running containers after `make demo-up`,
+a real Postgres, a real Neo4j holding ten real storefronts. Thirteen is the ten services §3
+tables plus the three datastores their `depends_on` pulls in; this line used to promise
+fourteen, counting the generic unconfigured `store-agent` container that `demo-up` names no
+service for, on purpose (§3 says why). `starting-slice.md` beside it is about the in-process driver
 (`proxyshop_demo`), which starts its own servers on loopback ports, touches no datastore and
 takes about two seconds. That page is the beat to run in front of an audience; this one is
 the beat that proves the *deployment* works, which is a different claim and a harder one.
@@ -339,10 +342,15 @@ Re-run it after the corpus moves, and `--check` reports drift instead of writing
 
 ## What this page does not prove
 
-- **Reconciliation and the trust projection do not close from what this stack serves.**
-  `checkout_pixel` has no producer on any served path, so `reconcile` folds no verdict over
-  the chain the exchange writes. `starting-slice.md` §3.6/§3.7 measures that gap and
-  §4's scripted proof is where the whole loop is exercised.
+- **Reconciliation and the trust projection do not close from what this stack serves.** This
+  bullet used to blame a missing producer — "`checkout_pixel` has no producer on any served
+  path" — and that is no longer true: `POST /pixel/collect` on `merchant-svc` writes a real
+  `checkout_pixel` row to the chained ledger. What this stack does not do is *fire* the beacon.
+  `CHECKOUT_MODE` is `redirect`, so §5's acceptance mints a simulated permalink rather than
+  taking a shopper through a Shopify checkout, and nothing here posts a beacon or an
+  `orders/paid` webhook. So `reconcile` still folds no verdict over the chain the exchange
+  writes. `starting-slice.md` §3.6/§3.7 measures that gap and §4's scripted proof is where the
+  whole loop is exercised.
 - **The claim grading here is as good as the shipped catalogue snapshots.** They are trimmed
   to sixty products per hosted store; a `product_ref` the graph rosters from outside that
   window grades `ambiguous`, which R19 will not let satisfy a hard constraint.

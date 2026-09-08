@@ -21,22 +21,26 @@ mounted routers and all — reached over ASGI through ``TestClient``. No socket 
 no LLM is called, no clock is read and no database is touched, so the whole of S4 is checkable
 offline (C9) as one ordinary pytest run.
 
-Where the R16 loop is still open, said plainly
-----------------------------------------------
+What this harness measures, and what it deliberately does not
+--------------------------------------------------------------
 The exchange learns from conversion outcomes through a served, published door, and the posterior
 that door writes really does reorder the cluster's exposure — that is what
-:mod:`~e2e.support.learning.exchange_policy` measures, end to end, through HTTP. What does **not**
-exist anywhere in the tree is the consumer on the other side: ``exchange.policy.bandit.exposure``
-has no production call site, so ``GET /auctions/{auction_id}/shortlist`` is today ranked by
-``exchange.ranking`` alone and never reads the posterior book. ``exchange/policy/routes.py`` says
-so about itself, and it is measurable — ``grep -rn "exposure" apps/exchange/src`` names only the
-policy package.
+:mod:`~e2e.support.learning.exchange_policy` measures, end to end, through HTTP.
 
-So this harness reads the ordering the policy produces (``{store_id: share}`` for a cluster, which
-is the share of that cluster's shortlist opportunity each store draws) and calls it what it is: the
-exposure ranking, not the served shortlist. Claiming a served shortlist reorder here would be
-claiming a wire that is not in the tree. When somebody lands that wire, the assertions in
-``test_learning.py`` are the ones that already say what the ordering must do.
+This section used to go on to say that the consumer on the other side did not exist anywhere in
+the tree — that ``exchange.policy.bandit.exposure`` had no production call site and
+``GET /auctions/{auction_id}/shortlist`` was ranked by ``exchange.ranking`` alone. That gap is
+closed: ``exchange.policy.exploration.exposure_shares`` reads ``bandit.exposure``, and
+``exchange.ranking.serving`` imports it (``apps/exchange/src/ranking/serving.py:58``) and applies
+R12's exploration slice to the served shortlist.
+
+What this harness still measures is the ordering the policy produces (``{store_id: share}`` for a
+cluster, which is the share of that cluster's shortlist opportunity each store draws), and it
+calls it what it is: the exposure ranking, read at the policy, not a served shortlist read back
+through ``GET /auctions/{auction_id}/shortlist``. That is a property of this harness rather than
+of the tree — the slice the served path applies is bounded (one slot of four, only among the
+already-eligible, only for a ``low_data`` store), so a served-shortlist assertion is a different
+and narrower measurement than the one ``test_learning.py`` makes here.
 
 The R17 half has no such gap: the depth a store learns from its own outcomes travels all the way
 into the ``unit_price`` and ``offer.discount`` of the bid the agent really serves.

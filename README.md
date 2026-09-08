@@ -354,7 +354,7 @@ ports listed are what its Dockerfile's CMD binds.
 | `apps/buyer` | Three things in one directory: the Vite/React SPA (`@proxyshop/buyer`), the FastAPI buyer service (`buyer_svc`, port 8081), and `devstack/run.py`, the launcher demo 2 uses. Routes: `POST /buyer/intent/clarify`, `POST /buyer/intent/confirm`, `GET /buyer/auctions/{auction_id}`, `POST /buyer/shortlist/render`, `POST /buyer/shortlist/accept`, `POST /buyer/feedback` and `/prompt`, plus the auth and profile routes. |
 | `apps/exchange` | The auction itself (`exchange`, port 8083): `POST /auctions`, `GET /auctions/{id}`, `GET /auctions/{id}/shortlist`, `POST /auctions/{id}/accept`. |
 | `apps/merchant` | A React-Router/Shopify-Polaris embedded admin app (`@proxyshop/merchant`) plus the FastAPI merchant service (`merchant_svc`, port 8082): `GET /install`, `/install/callback`, `/install/shops`, `POST /webhooks/shopify/{topic}`, `POST /pixel/collect`, `POST /codes`, `GET\|PUT /stores/{id}/envelope`, `POST /stores/{id}/kill`. |
-| `apps/trust` | The hash-chained, append-only event ledger plus scoring, reconciliation and snapshots (`trust`, port 8084). It mounts four routers and serves ten operations: `POST\|GET /events`, `/events/head`, `/events/verify`, `/events/replay`, `/events/{id}`, `POST /claims/verifications`, `GET /snapshot`, and `GET\|POST /reconcile`. Two published paths are still served by nothing — see [What is not finished](#what-is-not-finished). |
+| `apps/trust` | The hash-chained, append-only event ledger plus scoring, reconciliation and snapshots (`trust`, port 8084). It mounts four routers and serves ten operations: `POST\|GET /events`, `/events/head`, `/events/verify`, `/events/replay`, `/events/{id}`, `POST /claims/verifications`, `GET /snapshot`, and `GET\|POST /reconcile`. Those ten are exactly the ten `trust.openapi.json` declares — the drift both ways is closed. |
 | `apps/seller-reference` | **Not a service.** Its whole tracked source is `src/__init__.py` and `src/personas/__init__.py` — no `main.py`, no `routes.py` — and its Dockerfile CMD is a one-shot self-check that builds every persona and exits. |
 
 ### `services/`
@@ -402,10 +402,14 @@ snapshot the ranker filters on.
 Both halves exist, are tested, and are now wired to each other. `POST /reconcile` is a served
 route on `apps/trust`. A served accept files the whole C11 trio into the chain — `accepted`
 from the state machine's own transition, then `code_created` and `checkout_redirect` forwarded
-by `_record_checkout_bridge` (`apps/exchange/src/accept/routes.py:856`) — and the merchant
-posts its HMAC-verified `order_paid` to the trust service over HTTP. Measured on one run of
-demo 1: eight events in six kinds, written by two different applications, read back through
-`GET /events` and verified as an unbroken hash chain.
+by `_record_checkout_bridge` (`apps/exchange/src/accept/routes.py:692`, called at `:901`) — and
+the merchant posts its HMAC-verified `order_paid` to the trust service over HTTP. Measured on one
+run of demo 1: **seventeen** events in eight kinds — `auction_opened`, `bid_placed`,
+`auction_closed`, `shown`, `accepted`, `code_created`, `checkout_redirect`, `order_paid` —
+written by two different applications, read back through `GET /events` and verified as an
+unbroken hash chain. (This paragraph said eight events in six kinds, from a run before
+`bid_placed` and `shown` had served producers. The count moves with how many stores answer and
+how many slots fill: read it off the run.)
 
 **The fold over that chain still returns 0 verdicts.** Two things stop it, and the demo
 measures both rather than asserting them:
@@ -419,45 +423,64 @@ measures both rather than asserting them:
    `app.sellers` roster — but that table is Postgres, and neither demo starts one. The demo
    prints a *probe* beside the real answer: state the names and the same events, the same
    webhook and the same fold produce one real verdict, price honoured, `389.0 / 389.0`.
-2. **`checkout_pixel` has no producer.** `pixel/src/beacon.ts` builds a collector body and
-   `merchant_svc.collector` really accepts one — beat 6 reads one, in process — but the
-   collector stops at a `PixelObservation` held in memory
-   (`apps/merchant/svc/src/collector/routes.py:100`), and nothing writes a `checkout_pixel`
-   ledger event anywhere in the repo. That costs *evidence* rather than the verdict: a group
-   with no beacon grades `pixel_missing`, which by design is not a blocker. A driver that
-   manufactured a beacon would be supplying the evidence whose absence is the defect.
+2. **This driver never posts a beacon, so the run's chain carries no `checkout_pixel`.** The
+   *producer* is no longer missing, and that is the part that changed: `POST /pixel/collect`
+   writes a real `checkout_pixel` row to the chained ledger
+   (`apps/merchant/svc/src/collector/routes.py:115` → `composition.publish_pixel_observation`),
+   and the e2e S1 driver drives that served route and gets one. What the CLI demo does not do
+   is call it — beat 6 reads a `PixelObservation` in process and stops there — so this run's
+   fold sees no beacon. That costs *evidence* rather than the verdict: a group with no beacon
+   grades `pixel_missing`, which by design is not a blocker. Until the CLI driver posts to the
+   collector the way the e2e one does, this stays a gap in the demo rather than in the tree.
 
-### The three things the buyer UI itself says are not wired
+### The four things the buyer UI itself says are not wired
 
-The running page renders a "What is not wired yet" panel. It is down to three items from five:
-sign-in and the browser-minted pseudonym both closed, and the page now signs in by magic link
-(`apps/buyer/app/journey/SignIn.tsx`, `journey/magic-link.ts`) rather than minting a pseudonym
-client-side and throwing it away on reload. What the panel still lists:
+The running page renders a "What is not wired yet" panel
+(`apps/buyer/app/journey/Journey.tsx:757`). Read the page, not this list — the panel is
+measured on the stack in front of you and this paragraph is not. At the time of writing it
+carries four items, and the earlier three this section used to name are gone: sign-in and the
+browser-minted pseudonym both closed (the page signs in by magic link —
+`apps/buyer/app/journey/SignIn.tsx`, `journey/magic-link.ts`), price landed on the slot, and
+so did the store domain — `ShortlistSlot.store_domain`
+(`packages/contracts/src/generated/protocol.py:694`) is written from the platform's registry
+and never from the bid, so the redirect guard *can* pin a checkout host to a named store. The
+four the panel lists now:
 
-1. **The store domain is not pinned.** `ShortlistSlot`
-   (`packages/contracts/src/generated/protocol.py:628`) carries no `store_domain`, so the
-   checkout host can only be checked for scheme and host presence — it cannot be pinned to a
-   named store. Still true.
-2. **Price is not on the slot.** This item is itself out of date, and the panel is the thing
-   that is now wrong: `ShortlistSlot` declares `product`, `price` and `commitments`, and
-   `exchange.ranking.serving._with_offer_fields` fills them on both served doors. The page
-   still joins prices out of `entries[]` and labels them *recorded* rather than *current*,
-   which is a page that has not caught up rather than a field that is missing.
-3. **The clarifying questions came from no live model.** With `LLM_PROVIDER` unset,
-   `build_llm("buyer")` returns the offline double `<DeterministicLLM role='buyer'>`,
+1. **Whose price it is: not on the slot** (`gap-fallback`). When a store does not answer, the
+   exchange stands in for it at its roster list price and that number reaches the card as the
+   slot's `price` like any other. `ShortlistSlot` declares no `fallback` flag, so a card
+   cannot say which of the two happened; `entries[]` can, per store.
+2. **Product: a reference, not a name** (`gap-product-name`). The slot carries `product_ref`
+   (and `variant_ref` where the bid named one), which is what the roster and the offer agree
+   on. Nothing in this app resolves a title, so the card shows the reference rather than
+   inventing a name.
+3. **The shop's own voice does not reach the page** (`gap-store-voice`). A store agent really
+   does write a per-shopper pitch onto `Bid.message`, and `POST /buyer/shortlist/render`
+   really does carry one back verbatim when a slot arrives holding one — but
+   `contracts.protocol.ShortlistSlot` is `extra="forbid"` and declares no message field, so
+   the seller's words are dropped at that boundary. Every slot shows the organic voice only.
+4. **The clarifying questions came from no live model** (`gap-model`). With `LLM_PROVIDER`
+   unset, `build_llm("buyer")` returns the offline double `<DeterministicLLM role='buyer'>`,
    `model="double:buyer"`. That is the intended default rather than a failure, but it means
-   the questions and the extraction are the buyer service's own wording, not a model's. Still
-   true.
+   the questions and the extraction are the buyer service's own wording, not a model's.
 
-### The trust service publishes two paths that no route serves
+### The trust service's contract and its routes now name the same ten
 
-`packages/contracts/openapi/trust.openapi.json` declares ten operations. `apps/trust` mounts
-four routers and serves ten — but they are not the same ten. Eight are in both. The two that
-are published and reachable at no route are `GET /stores/{store_id}/trust` and
-`POST /feedback/{order_ref}`; the two the app serves and the contract does not declare are
-`GET /reconcile` and `POST /reconcile`.
+This section used to say the two drifted: the contract declared `GET /stores/{store_id}/trust`
+and `POST /feedback/{order_ref}` and no route served them, while `GET|POST /reconcile` were
+served and undeclared. Both directions are closed.
+`packages/contracts/openapi/trust.openapi.json` declares ten operations and `apps/trust` serves
+the same ten — `GET|POST /events`, `/events/head`, `/events/verify`, `/events/replay`,
+`/events/{event_id}`, `POST /claims/verifications`, `GET /snapshot`, `GET|POST /reconcile`.
 
-The direction that used to matter most is closed. The trust score the ranker filters on no
+The two published-but-unserved paths were *unpinned* rather than served, and the reason matters
+because it is a standing rule rather than a deferral: each was unservable as published — the
+per-store read declared no identity parameter of any kind, and the feedback path declared no
+routing evidence. `packages/contracts/src/openapi.py` carries the ruling and
+`apps/trust/tests/test_contract_surface.py` holds it. Re-pin either one in the change that
+serves it, with an identity parameter and with the caller that reads it.
+
+The direction that used to matter most is closed too. The trust score the ranker filters on no
 longer has to be typed into a deployment document by hand: `GET /snapshot` is served, and
 `exchange.composition.bind_trust_snapshot_reader` points `app.state.trust_snapshot` at it on
 every rung, so a document that states no `trust_snapshot` gets a live view instead of `{}`. A
@@ -467,20 +490,30 @@ does not overrule it.
 ### Where the rest of the known defects are written down
 
 The strict xfails a full `make verify` reports are this repository's open-defect register, and
-each one carries its reason in its own decorator. There are **eight**, naming eight tickets in
-seven files:
+each one carries its reason in its own decorator. **Run the grep rather than trusting the list
+below** — the register moves as tickets close, and a count typed here goes stale the moment one
+does:
 
 ```sh
 grep -rn "^@pytest.mark.xfail" --include='*.py' apps packages services proxyshop_support
 ```
 
 That grep is the locator, not `git ls-files | grep test_repro_open_tickets.py`, which is what
-this section used to say: eleven files match that name and six of them now carry no xfail at
-all, while two of the eight live in files it does not match
-(`apps/exchange/tests/test_accept_denials.py` and
-`proxyshop_support/tests/test_repro_ticket_graph.py`). The eight are T-204 (contracts), T-321
-(store-agent), T-325, T-158 and T-312 (exchange), T-302 (trust), T-142 (buyer) and T-262
-(`proxyshop_support`).
+this section used to say: eleven files match that name and nine of them carry no xfail at all,
+while three markers live in files it does not match
+(`apps/exchange/tests/test_accept_denials.py`,
+`proxyshop_support/tests/test_repro_ticket_graph.py` and
+`services/ingest/tests/test_embedding_ranking_gate.py`).
+
+Measured at the time of writing: **six** markers in five files, of which **four** fire under a
+default `make verify` and name a ticket — T-158 and T-325 (exchange), T-142 (buyer) and T-262
+(`proxyshop_support`). The other two are the pair in
+`services/ingest/tests/test_embedding_ranking_gate.py`, conditional on
+`EMBEDDING_PROVIDER=hash`; the default is `lexical` (D19 as amended), so on an ordinary run
+they do not fire and they name no ticket — they are a guard on a provider choice, not an open
+defect. An earlier version of this section claimed eight markers naming T-204 (contracts),
+T-321 (store-agent), T-312 (exchange) and T-302 (trust) alongside the four above; none of those
+four markers exists in the tree.
 
 Some of what they name is larger than anything listed above. Read them before assuming a
 behaviour works.
@@ -489,10 +522,18 @@ Nothing else in this repo should be read as a promise. If a behaviour is not dem
 one of the two demos or by the test suite, treat it as unbuilt.
 
 Where prose and a demo run disagree, believe the run: the gap list the driver prints is
-measured on the spot, and the prose is not. Two pieces of prose are known to be behind the
-tree right now, both of them stating that `pixel/src/` holds nothing but an empty `.gitkeep` —
-`proxyshop_demo/s1.py` in its `DOES NOT RUN YET` block, and `e2e/support/s1/flow.py`. The
-directory holds five TypeScript modules.
+measured on the spot, and the prose is not.
+
+**And do not trust a list of stale prose either — including this one.** This paragraph used to
+name `proxyshop_demo/s1.py` and `e2e/support/s1/flow.py` as the two files claiming `pixel/src/`
+held nothing but an empty `.gitkeep`; both were corrected in the very commit that wrote the
+list, and other stale files it did not name existed at the same time. A register of stale text
+is stale by construction, because the thing that makes an entry wrong — somebody fixing the
+code — is exactly the thing that does not update the register. The durable rule is the one
+above it: measure the tree, and treat a present-tense claim in any comment, docstring, runbook
+or README bullet as a claim to re-check rather than a fact. Roughly a third of the apparent
+defects found in this repository over a two-cycle audit were prose asserting a defect that had
+already been fixed.
 
 ---
 
@@ -580,4 +621,6 @@ exits non-zero — 2 means a live precondition is unmet, 3 means all the precond
 the live driver itself is missing. A non-zero exit from it is not news. Exit 3 is currently
 permanent: the driver lives in `docs/demo/shopify-onboarding-extension.md`, which
 `docs/demo/e2e_live.sh:36` names and which does not exist — `git ls-files docs/demo` returns
-only `e2e_live.sh` and `starting-slice.md`.
+`e2e_live.sh`, `shopper-demo.md` and `starting-slice.md`, and no fourth entry. (That
+enumeration used to name only the first and last of the three; `shopper-demo.md` landed after
+it was written and is not the missing extension runbook.)
