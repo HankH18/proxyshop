@@ -100,7 +100,10 @@ minversion = "8.2"
 addopts = "--import-mode=importlib --strict-markers --strict-config --timeout=300 -ra"
 consider_namespace_packages = true
 pythonpath = [".", ".pkgroot"]   # .pkgroot: flat-src import namespaces (R1b)
-testpaths = ["packages","apps","services","pixel","fixtures","e2e","docs","proxyshop_support"]
+# `scripts` is here because a producer's tests are worth no more than their collection: 18
+# tests for the seed-artefact builders shipped uncollected by a bare `pytest`, which is the
+# same "green that graded nothing" shape the note below is about, one directory over.
+testpaths = ["packages","apps","services","pixel","fixtures","e2e","docs","proxyshop_support","scripts"]
 norecursedirs = [".*", "node_modules", "dist", "build", ".venv", "*.egg-info", ".swarm-loop"]
 # `.swarm-loop` STAYS in that list, and it is not what hid the frozen acceptance suite.
 #
