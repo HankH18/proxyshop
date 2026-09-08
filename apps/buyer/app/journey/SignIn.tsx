@@ -61,7 +61,12 @@ export function SignIn({ onRequestLink, linkExpiresAt, busy = false }: SignInPro
           onChange={(event) => setEmail(event.target.value)}
           disabled={busy}
         />
-        <button type="submit" disabled={busy || email.trim() === ''}>
+        {/* `primary`, because on the signed-out page this is THE act — the design system's
+            rule is that the accent marks exactly one act per screen, and there is no confirm
+            button in the document until there is a session. It is a class rather than a
+            colour decided in the stylesheet by position, so the button keeps its meaning if
+            this panel is ever mounted somewhere else. */}
+        <button type="submit" className="primary" disabled={busy || email.trim() === ''}>
           Email me a link
         </button>
       </form>

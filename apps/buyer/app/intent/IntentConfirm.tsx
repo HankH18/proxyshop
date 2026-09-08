@@ -156,7 +156,13 @@ export function IntentConfirm({
         </p>
       ) : null}
 
-      <button type="button" onClick={submitConfirmation} disabled={busy || sent}>
+      {/* `primary`: the one act on this screen, and the only gesture on the whole journey
+          that leaves this origin. The stylesheet also reaches it positionally, through the
+          section `Journey` wraps it in; the class says the same thing about the button
+          itself, so it does not stop being the primary act when it is mounted elsewhere.
+          Nothing about the class gates the click — `submitConfirmation`'s once-per-mount ref
+          is what does that. */}
+      <button type="button" className="primary" onClick={submitConfirmation} disabled={busy || sent}>
         Confirm and ask stores
       </button>
       <p>Nothing is ordered until you press that.</p>

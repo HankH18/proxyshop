@@ -59,10 +59,21 @@
  * 3. **A failure shows the status and the service's own words.** `instrumentFetcher` keeps
  *    the refused body so a bare `HTTP 503` from a reused module can be printed with the
  *    reason the service gave for it. Nothing is swallowed.
- * 4. **The gaps are on the screen, permanently.** The exchange's slot carries neither a store
- *    domain nor a price, and the clarifying questions come from the buyer service's offline
- *    model double rather than a live model. All three are stated in the UI rather than faked,
+ * 4. **The gaps are on the screen, permanently.** Whichever of a price and a stand-in the
+ *    slot is carrying is not on the slot; the product arrives as a reference rather than a
+ *    name; the shop's own voice is dropped at the exchange's shortlist contract; step 5's
+ *    order is seeded; and the clarifying questions come from the buyer service's offline
+ *    model double rather than a live model. All five are stated in the UI rather than faked,
  *    because a demo that supplies its own join is the defect this app exists to not be.
+ *
+ *    That sentence used to open "the exchange's slot carries neither a store domain nor a
+ *    price", and BOTH of those gaps have since closed — the list below carries neither
+ *    `gap-price` nor `gap-domain` and `journey.test.tsx` asserts their absence. Re-measured
+ *    on the devstack for this change: a slot comes back with `price` on it, and with
+ *    `store_domain` set to the platform registry's answer (`demo-woolworks.example.com`),
+ *    which `ShortlistView` now prints at the head of the card. `contracts.protocol
+ *    .ShortlistSlot` declares `store_domain: str | None`, and `ranking/serving.py` joins it
+ *    on. An exchange with no registry still publishes none, and the card says so.
  *
  *    Two entries used to sit at the top of that list and are gone because the gap closed
  *    rather than because the sentence was softened. They said sign-in could not complete in a
@@ -722,25 +733,44 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
                     currency only where the exchange named one.
                   </p>
 
-                  <ul className="mono provenance-source" aria-label="Where each label came from">
-                    {stage.slots.map((slot) => (
-                      <li key={slot.bid_ref} data-testid={`labels-source-${slot.bid_ref}`}>
-                        {storeIdFromBidRef(slot.bid_ref, stage.record.auction_id) ?? slot.bid_ref}
-                        {' — '}
-                        {slot.bid_ref}: labels_source {slot.labels_source}
-                        <br />
-                        trust_summary {describeTrust(slot.trust_fields)}
-                        <br />
-                        {rankLine(
-                          rankedForSlot(stage.record, slot.bid_ref),
-                          stage.record.recorded_at === '',
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                  <details data-testid="verbatim-auction">
-                    <summary>The service&rsquo;s answer, verbatim</summary>
-                    <pre className="mono">{JSON.stringify(stage.record.raw, null, 2)}</pre>
+                  {/* THE RECORD, folded away. Design system section 06, rule 3: "Provenance
+                      is on the row, not behind a hover. The RECORD folds away; the LABELS
+                      never do." Everything inside this fold is a value the system wrote —
+                      which label came from where, what the exchange ranked each slot at, and
+                      the whole answer verbatim — and none of it is something a shopper has to
+                      open in order to choose. Nothing was hidden to get here: both blocks
+                      below are the same blocks that used to sit open on the page, moved
+                      wholesale into one gesture.
+
+                      What is deliberately NOT in here is the provenance pill row on each card
+                      above, and it must stay out. Those are the labels, and a label a buyer
+                      has to go looking for is a label they did not have when they chose —
+                      `ShortlistView`'s own docstring, rule 1. `.trace` styles this fold. */}
+                  <details className="trace" data-trace="auction-record" data-testid="auction-record">
+                    <summary>
+                      Show the record &mdash; where each label came from, what the exchange
+                      ranked each slot at, and the service&rsquo;s whole answer verbatim
+                    </summary>
+                    <ul className="mono provenance-source" aria-label="Where each label came from">
+                      {stage.slots.map((slot) => (
+                        <li key={slot.bid_ref} data-testid={`labels-source-${slot.bid_ref}`}>
+                          {storeIdFromBidRef(slot.bid_ref, stage.record.auction_id) ?? slot.bid_ref}
+                          {' — '}
+                          {slot.bid_ref}: labels_source {slot.labels_source}
+                          <br />
+                          trust_summary {describeTrust(slot.trust_fields)}
+                          <br />
+                          {rankLine(
+                            rankedForSlot(stage.record, slot.bid_ref),
+                            stage.record.recorded_at === '',
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                    <details data-testid="verbatim-auction">
+                      <summary>The service&rsquo;s answer, verbatim</summary>
+                      <pre className="mono">{JSON.stringify(stage.record.raw, null, 2)}</pre>
+                    </details>
                   </details>
               </>
             )}

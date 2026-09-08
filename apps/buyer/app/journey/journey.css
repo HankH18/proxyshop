@@ -1,502 +1,773 @@
 /*
- * Plain, self-contained CSS for the buyer journey. No CDN, no framework, no design system.
+ * Proxyshop — buyer journey stylesheet. Design direction: "Market Floor".
  *
- * It styles the existing components by the hooks they already publish — the `aria-label` on
- * each section and the `data-tone` on each provenance label — rather than by asking those
- * components to grow class names. Nothing here hides a value: every rule is spacing, weight
- * or colour.
+ * Drop-in replacement for apps/buyer/app/journey/journey.css. Same contract as the file it
+ * replaces: it styles the components by the hooks they already publish — the `aria-label` on
+ * each section, the `data-tone` on each provenance label, the `data-voice` on each voice —
+ * and asks no component to grow a class name. Nothing here hides a value; every rule is
+ * spacing, weight, colour or type.
+ *
+ * Two additions to the original, both additive:
+ *   * a token block, so the same values can be reused by any surface (see dashboard.css);
+ *   * `[data-trace]` / `.trace`, an optional wrapper for the diagnostics a demo wants folded
+ *     away by default and openable in one gesture. Absent, everything renders as before.
+ *
+ * ---------------------------------------------------------------------------------------
+ * FOUR THINGS THIS TREE ADDED TO THE FILE AS IT WAS HANDED OVER, each marked `[buyer lane]`
+ * below so a future diff against the designer's copy stays readable:
+ *
+ *   1. The `@font-face` block. The handed-over file NAMES 'Archivo', 'Instrument Sans' and
+ *      'DM Mono' and nothing in this app loaded them, so every rule below silently resolved
+ *      to the system faces while every test stayed green. They are now SELF-HOSTED, same
+ *      origin, out of `./fonts/` — see the block's own comment for why, not a CDN.
+ *   2. Wider fallback stacks and `color-scheme`. The stacks named only the Apple/`ui-*`
+ *      generics; a Windows or Linux reader fell through them to the browser default. The
+ *      fallback is genuinely exercised — `unicode-range` keeps the webfonts to latin and
+ *      latin-ext, so a seller's pitch in another script renders in the fallback by design.
+ *   3. The `.trace` / `[data-trace]` RULES. The header above promises this hook and the file
+ *      as handed over declares no rule for it anywhere, so the fold it describes had no
+ *      styling to apply. The rules are written to the record treatment in section 05 of the
+ *      design system: a hairline above, a link-weight summary, mono rows inside.
+ *   4. Two small component rules the SCREENS document draws and this stylesheet has no
+ *      selector for: the store's domain on a slot card, and the post-purchase prompt's
+ *      answers as chips rather than as stacked block labels. Both are marked below.
+ * ---------------------------------------------------------------------------------------
  */
 
-:root {
-  --ink: #16181d;
-  --ink-soft: #4a5160;
-  --paper: #f6f6f4;
-  --card: #ffffff;
-  --rule: #d9dae0;
-  --accent: #1d4ed8;
-  --alarm: #a8200d;
-  --confirmed: #0f6b3f;
-  --observed: #7a4a06;
-  --unverified: #8a1c1c;
-  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+/* ---- the three faces, self-hosted ------------------------------------ [buyer lane] ----
+ *
+ * SELF-HOSTED rather than linked from fonts.googleapis.com, and the reason is this page's
+ * own copy rather than performance. Step 1 tells a signed-out visitor, in so many words,
+ * that "what you type here goes to this origin's own buyer service and no further" — and a
+ * stylesheet `<link>` to a third party would hand that visitor's IP and User-Agent to
+ * Google on page load, before they have typed anything, to render the sentence making the
+ * claim. The demo runbook also promises this stack runs offline, and a CDN font fails by
+ * falling back silently: the page still renders, in the wrong faces, with every test green.
+ * That is the exact defect class this file's third rule exists to prevent.
+ *
+ * These are the files behind the design document's own Google Fonts URL. Archivo and
+ * Instrument Sans arrive as VARIABLE fonts — Google serves one file per subset for every
+ * weight — so they are declared once each with a weight range rather than five times with
+ * five identical copies. DM Mono is static and has one file per weight. `latin` and
+ * `latin-ext` only; anything outside those ranges is handed to the fallback stack, which is
+ * what `unicode-range` is for and is the right answer for a seller's untrusted prose.
+ *
+ * `url()` is relative, so vite hashes each file into `dist/assets/` — which is the one
+ * prefix `deploy/buyer-web/nginx.conf` gives `Cache-Control: immutable` and `=404` on a
+ * miss, instead of the SPA fallback quietly answering with index.html.
+ */
+
+@font-face {
+  font-family: 'Archivo';
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url('./fonts/archivo-400-800var-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Archivo';
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url('./fonts/archivo-400-800var-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+    U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0,
+    U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'Instrument Sans';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('./fonts/instrument-sans-400-700var-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'Instrument Sans';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('./fonts/instrument-sans-400-700var-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+    U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0,
+    U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'DM Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/dm-mono-400-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'DM Mono';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url('./fonts/dm-mono-400-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+    U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0,
+    U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: 'DM Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./fonts/dm-mono-500-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: 'DM Mono';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url('./fonts/dm-mono-500-latin-ext.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304,
+    U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0,
+    U+2113, U+2C60-2C7F, U+A720-A7FF;
 }
 
-* {
-  box-sizing: border-box;
+:root {
+  /* ink */
+  --ps-ink: #14161c;
+  --ps-ink-2: #45443f;
+  --ps-ink-3: #6f6d66;
+  --ps-on-dark: #ffffff;
+
+  /* ground */
+  --ps-paper: #fbfaf8;
+  --ps-card: #ffffff;
+  --ps-sunk: #f7f6f3;
+  --ps-rule: #dcdad4;
+  --ps-rule-soft: #ece9e3;
+
+  /* accent */
+  --ps-accent: #4f2ee8;
+  --ps-accent-press: #3a1fc4;
+  --ps-accent-wash: #efeaff;
+  --ps-accent-edge: #ddd6fb;
+
+  /* provenance tones — these carry meaning, not decoration */
+  --ps-confirmed: #0f6b3f;
+  --ps-confirmed-wash: #e6f4ec;
+  --ps-observed: #7a4a06;
+  --ps-observed-wash: #fbf1de;
+  --ps-unverified: #8a1c1c;
+  --ps-unverified-wash: #fbe9e7;
+  --ps-unknown: #6f6d66;
+  --ps-unknown-wash: #eef0f3;
+
+  /* failure */
+  --ps-alarm: #a8200d;
+  --ps-alarm-wash: #fdecea;
+  --ps-alarm-edge: #f0b3aa;
+
+  /* The paper ground is a decision, not an inheritance (design system, section 07), so the
+     browser is told which scheme this page is in. Without it a reader on a dark-mode OS gets
+     dark form-control chrome, dark scrollbars and a dark caret against a #fbfaf8 sheet.
+     [buyer lane] */
+  color-scheme: light;
+
+  /* type
+   *
+   * [buyer lane] The tail of each stack is longer than the handed-over file's. These are not
+   * decorative: `unicode-range` on the faces above deliberately covers latin and latin-ext
+   * only, so a seller's pitch outside those ranges renders from this list rather than from
+   * the webfont — and a reader on Windows or Linux fell straight past `ui-sans-serif` and
+   * `-apple-system` to whatever the browser defaults to. Each name below exists on a
+   * platform this app is actually opened on. */
+  --ps-display: 'Archivo', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --ps-sans: 'Instrument Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+    'Helvetica Neue', Arial, sans-serif;
+  --ps-mono: 'DM Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas,
+    'Liberation Mono', monospace;
+  --mono: var(--ps-mono); /* the name the original file published */
+
+  /* space + radius */
+  --ps-1: 4px;  --ps-2: 8px;  --ps-3: 12px; --ps-4: 16px;
+  --ps-5: 20px; --ps-6: 28px; --ps-7: 40px;
+  --ps-r-sm: 6px; --ps-r-md: 9px; --ps-r-lg: 12px; --ps-r-xl: 14px; --ps-r-pill: 999px;
+
+  /* names the original published, kept so nothing downstream breaks */
+  --ink: var(--ps-ink);
+  --ink-soft: var(--ps-ink-3);
+  --paper: var(--ps-paper);
+  --card: var(--ps-card);
+  --rule: var(--ps-rule);
+  --accent: var(--ps-accent);
+  --alarm: var(--ps-alarm);
+  --confirmed: var(--ps-confirmed);
+  --observed: var(--ps-observed);
+  --unverified: var(--ps-unverified);
 }
+
+* { box-sizing: border-box; }
 
 body {
   margin: 0;
-  background: var(--paper);
-  color: var(--ink);
-  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--ps-paper);
+  color: var(--ps-ink);
+  font: 16px/1.55 var(--ps-sans);
+  -webkit-font-smoothing: antialiased;
 }
 
-.journey {
-  max-width: 54rem;
-  margin: 0 auto;
-  padding: 2rem 1.25rem 5rem;
-}
+a { color: var(--ps-accent); text-decoration: none; }
+a:hover { color: var(--ps-accent-press); text-decoration: underline; }
 
+.journey { max-width: 60rem; margin: 0 auto; padding: var(--ps-6) var(--ps-5) 5rem; }
+
+/* ---- masthead ------------------------------------------------------------- */
+
+.masthead {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ps-2);
+  margin-bottom: var(--ps-6);
+}
 .masthead h1 {
-  margin: 0 0 0.25rem;
-  font-size: 1.9rem;
-  letter-spacing: -0.02em;
+  margin: 0;
+  font-family: var(--ps-display);
+  font-size: clamp(28px, 4vw, 38px);
+  font-weight: 800;
+  letter-spacing: -0.03em;
 }
-
 .lede {
-  margin: 0 0 1.75rem;
-  max-width: 44rem;
-  color: var(--ink-soft);
+  margin: 0;
+  max-width: 46rem;
+  color: var(--ps-ink-2);
+  font-size: 15px;
+  text-wrap: pretty;
 }
 
 /* ---- steps ---------------------------------------------------------------- */
 
-.step,
-.gaps,
-.diagnostics {
-  background: var(--card);
-  border: 1px solid var(--rule);
-  border-radius: 10px;
-  padding: 1.25rem 1.4rem;
-  margin: 0 0 1.25rem;
+.step, .gaps, .diagnostics {
+  background: var(--ps-card);
+  border: 1px solid var(--ps-rule);
+  border-radius: var(--ps-r-xl);
+  padding: var(--ps-5) var(--ps-5) var(--ps-6);
+  margin: 0 0 var(--ps-4);
+  box-shadow: 0 1px 2px rgba(20, 22, 28, 0.05);
 }
 
-.step > h2,
-.gaps > h2 {
+.step > h2, .gaps > h2 {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
-  margin: 0 0 0.9rem;
-  font-size: 1.15rem;
-  letter-spacing: 0.01em;
-  border-bottom: 1px solid var(--rule);
-  padding-bottom: 0.6rem;
+  gap: var(--ps-3);
+  margin: 0 0 var(--ps-4);
+  padding-bottom: var(--ps-3);
+  border-bottom: 1px solid var(--ps-rule-soft);
+  font-family: var(--ps-display);
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
 }
 
 .ordinal {
   display: inline-grid;
   place-items: center;
-  width: 1.7rem;
-  height: 1.7rem;
-  border-radius: 50%;
-  background: var(--ink);
-  color: var(--card);
-  font-size: 0.9rem;
-  font-weight: 700;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--ps-r-pill);
+  background: var(--ps-accent);
+  color: var(--ps-on-dark);
+  font-family: var(--ps-display);
+  font-size: 14px;
+  font-weight: 800;
 }
 
 .step h3 {
-  margin: 1.1rem 0 0.4rem;
-  font-size: 1rem;
+  margin: var(--ps-4) 0 var(--ps-1);
+  font-family: var(--ps-display);
+  font-size: 16px;
+  font-weight: 700;
 }
 
 .step h4 {
-  margin: 1rem 0 0.35rem;
-  font-size: 0.9rem;
+  margin: var(--ps-4) 0 var(--ps-2);
+  font-family: var(--ps-mono);
+  font-size: 11px;
+  font-weight: 400;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--ink-soft);
+  letter-spacing: 0.12em;
+  color: var(--ps-ink-3);
 }
 
-.gloss {
-  color: var(--ink-soft);
-  font-size: 0.9rem;
-}
+.gloss { color: var(--ps-ink-3); font-size: 13px; text-wrap: pretty; }
 
 /* ---- form controls -------------------------------------------------------- */
 
-label {
-  display: block;
-  font-weight: 600;
-  margin-bottom: 0.35rem;
-}
+label { display: block; font-weight: 600; font-size: 14px; margin-bottom: var(--ps-1); }
 
 textarea,
 input[type="text"],
-/* The sign-in field. `input:not([type])` below cannot match it — an email input has a
-   type — so without this line the one control a signed-out visitor is offered was the one
-   unstyled box on the page. */
 input[type="email"],
 input:not([type]) {
   width: 100%;
   font: inherit;
-  padding: 0.6rem 0.7rem;
-  border: 1px solid var(--rule);
-  border-radius: 7px;
-  background: var(--card);
-  color: var(--ink);
+  padding: 11px 13px;
+  border: 1px solid var(--ps-rule);
+  border-radius: var(--ps-r-md);
+  background: var(--ps-card);
+  color: var(--ps-ink);
 }
-
-textarea {
-  resize: vertical;
+textarea { resize: vertical; }
+textarea:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--ps-accent);
+  outline-offset: 1px;
+  border-color: var(--ps-accent);
 }
+::placeholder { color: var(--ps-ink-3); }
 
 button {
-  font: inherit;
-  font-weight: 600;
-  margin-top: 0.7rem;
-  padding: 0.5rem 1rem;
-  border: 1px solid var(--ink);
-  border-radius: 7px;
-  background: var(--ink);
-  color: var(--card);
+  font: 700 15px var(--ps-sans);
+  margin-top: var(--ps-3);
+  padding: 12px 20px;
+  border: 0;
+  border-radius: var(--ps-r-md);
+  background: var(--ps-ink);
+  color: var(--ps-on-dark);
   cursor: pointer;
 }
+button:hover { background: #23262f; }
+button:disabled { opacity: 0.4; cursor: not-allowed; background: var(--ps-ink); }
+button:focus-visible { outline: 2px solid var(--ps-accent); outline-offset: 2px; }
 
-button:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
+/* The one control that opens an auction. Accent, because it is the page's primary act. */
+section[aria-label="Step 2 - check what we understood"] button[type="button"],
+button.primary {
+  background: var(--ps-accent);
 }
+section[aria-label="Step 2 - check what we understood"] button[type="button"]:hover,
+button.primary:hover { background: var(--ps-accent-press); }
 
 button.linkish {
   margin: 0;
-  padding: 0 0.2rem;
-  border: 0;
+  padding: 0 2px;
   background: none;
-  color: var(--accent);
+  color: var(--ps-accent);
+  font-weight: 600;
   text-decoration: underline;
 }
+button.linkish:hover { background: none; color: var(--ps-accent-press); }
 
 .cta {
   display: inline-block;
-  margin-top: 0.4rem;
-  padding: 0.55rem 1.1rem;
-  border-radius: 7px;
-  background: var(--accent);
-  color: #fff;
-  font-weight: 600;
+  margin-top: var(--ps-2);
+  padding: 13px 22px;
+  border-radius: var(--ps-r-md);
+  background: var(--ps-accent);
+  color: var(--ps-on-dark);
+  font-weight: 700;
   text-decoration: none;
 }
+.cta:hover { background: var(--ps-accent-press); color: var(--ps-on-dark); text-decoration: none; }
 
 /* ---- transcript ----------------------------------------------------------- */
 
-.transcript {
-  margin: 0;
-  padding-left: 1.2rem;
-}
-
+.transcript { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--ps-2); }
 .transcript li {
-  margin-bottom: 0.3rem;
+  align-self: flex-start;
+  max-width: 82%;
+  padding: 11px 15px;
+  border-radius: var(--ps-r-xl) var(--ps-r-xl) var(--ps-r-xl) var(--ps-r-sm);
+  background: var(--ps-accent);
+  color: var(--ps-on-dark);
+  font-size: 15px;
+}
+.transcript li:nth-child(even) {
+  align-self: flex-start;
+  background: var(--ps-sunk);
+  color: var(--ps-ink);
+  border: 1px solid var(--ps-rule);
 }
 
 /* ---- the reused components ------------------------------------------------ */
 
 section[aria-label="Clarifying question"] p[data-testid="question-counter"] {
-  font-size: 0.85rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--ink-soft);
   margin-top: 0;
+  font-family: var(--ps-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--ps-ink-3);
 }
 
-section[aria-label="Confirm what we will shop for"] dl {
-  display: grid;
-  grid-template-columns: minmax(9rem, 14rem) 1fr;
-  gap: 0.35rem 1rem;
-  margin: 0 0 0.8rem;
-}
-
-section[aria-label="Confirm what we will shop for"] dt,
-.facts dt {
-  font-weight: 600;
-  color: var(--ink-soft);
-}
-
-section[aria-label="Confirm what we will shop for"] dd,
-.facts dd {
-  margin: 0;
-}
-
+section[aria-label="Confirm what we will shop for"] dl,
 .facts {
   display: grid;
-  grid-template-columns: minmax(9rem, 18rem) 1fr;
-  gap: 0.35rem 1rem;
-  margin: 0.6rem 0 0.9rem;
+  grid-template-columns: minmax(9rem, 15rem) 1fr;
+  gap: var(--ps-2) var(--ps-4);
+  margin: var(--ps-3) 0 var(--ps-4);
+}
+section[aria-label="Confirm what we will shop for"] dt,
+.facts dt { font-weight: 600; font-size: 14px; color: var(--ps-ink-3); }
+section[aria-label="Confirm what we will shop for"] dd,
+.facts dd { margin: 0; font-size: 14px; }
+
+/* ---- the shortlist -------------------------------------------------------- */
+
+section[aria-label="Shortlist"] h2 {
+  margin: 0 0 var(--ps-1);
+  font-family: var(--ps-display);
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+section[aria-label="Shortlist"] p[data-testid="slot-count"] {
+  margin: 0 0 var(--ps-4);
+  font-family: var(--ps-mono);
+  font-size: 12px;
+  color: var(--ps-ink-3);
 }
 
 section[aria-label="Shortlist"] ul[aria-label="Options"] {
   display: grid;
-  gap: 0.9rem;
-  margin: 0.5rem 0 0;
+  gap: var(--ps-4);
+  margin: 0;
   padding: 0;
   list-style: none;
 }
 
 section[aria-label="Shortlist"] ul[aria-label="Options"] > li {
-  border: 1px solid var(--rule);
-  border-left: 4px solid var(--ink);
-  border-radius: 8px;
-  padding: 0.8rem 1rem;
+  border: 1px solid var(--ps-rule);
+  border-radius: var(--ps-r-lg);
+  background: var(--ps-card);
+  padding: 0 var(--ps-4) var(--ps-4);
+  overflow: hidden;
 }
 
+/* The slot name is the card's banner: fit / value / reliability. */
 section[aria-label="Shortlist"] ul[aria-label="Options"] > li > h3 {
-  margin: 0 0 0.25rem;
-  font-size: 1.05rem;
-  text-transform: capitalize;
+  margin: 0 calc(var(--ps-4) * -1) var(--ps-4);
+  padding: 10px var(--ps-4);
+  background: var(--ps-accent-wash);
+  border-bottom: 1px solid var(--ps-accent-edge);
+  font-family: var(--ps-display);
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ps-accent-press);
 }
 
-section[aria-label="Shortlist"] ul[aria-label="Options"] > li > p {
-  margin: 0.15rem 0;
-  font-family: var(--mono);
-  font-size: 0.85rem;
-  color: var(--ink-soft);
+/* WHOSE SHOP IT IS ----------------------------------------------------- [buyer lane] ----
+ *
+ * Both design documents put the store's own identity at the head of the card, above the
+ * product, and this stylesheet as handed over has no selector for it. It is the host the
+ * checkout permalink is pinned against, so it is the one line on the card a shopper can
+ * check the destination with before they accept rather than after.
+ */
+section[aria-label="Shortlist"] p.store-domain {
+  margin: 0 0 var(--ps-3);
+  font-family: var(--ps-mono);
+  font-size: 12px;
+  color: var(--ps-ink-3);
+  overflow-wrap: anywhere;
 }
 
-/* Provenance labels: visibly different by the tone `labelTone` picked for them. */
+/* WHAT IT IS / WHAT IT COSTS / the diagnostics, in the order ShortlistView renders them. */
+section[aria-label="Shortlist"] p.item {
+  margin: 0 0 var(--ps-2);
+  font-family: var(--ps-mono);
+  font-size: 13px;
+  color: var(--ps-ink-2);
+}
+section[aria-label="Shortlist"] p.price {
+  margin: 0 0 var(--ps-3);
+  font-family: var(--ps-display);
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  color: var(--ps-ink);
+}
+
+section[aria-label="Shortlist"] ul[aria-label^="What this store commits to"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ps-2);
+  margin: 0 0 var(--ps-3);
+  padding: 12px 14px;
+  list-style: none;
+  border-radius: var(--ps-r-md);
+  background: var(--ps-sunk);
+}
+section[aria-label="Shortlist"] ul[aria-label^="What this store commits to"] > li {
+  display: flex;
+  align-items: center;
+  gap: var(--ps-2);
+  font-size: 14px;
+}
+
+/* fit / trust: diagnostics, so they sit quiet and monospaced. */
+section[aria-label="Shortlist"] p[data-testid^="fit-"],
+section[aria-label="Shortlist"] p[data-testid^="trust-"] {
+  margin: 2px 0;
+  font-family: var(--ps-mono);
+  font-size: 12px;
+  color: var(--ps-ink-3);
+}
+
+/* Provenance labels: the aggregate line. */
 section[aria-label="Shortlist"] ul[aria-label^="Where this came from"] {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.4rem;
-  margin: 0.55rem 0 0.2rem;
+  gap: var(--ps-1) 6px;
+  margin: var(--ps-3) 0 var(--ps-4);
   padding: 0;
   list-style: none;
 }
 
-li[data-tone] {
-  padding: 0.15rem 0.55rem;
-  border-radius: 999px;
+li[data-tone], span[data-tone] {
+  padding: 3px 9px;
+  border-radius: var(--ps-r-pill);
   border: 1px solid currentColor;
-  font-size: 0.8rem;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+span[data-tone] { display: inline-block; padding: 2px 8px; }
+
+li[data-tone="confirmed"], span[data-tone="confirmed"] { color: var(--ps-confirmed); background: var(--ps-confirmed-wash); }
+li[data-tone="observed"], span[data-tone="observed"] { color: var(--ps-observed); background: var(--ps-observed-wash); }
+li[data-tone="unverified"], span[data-tone="unverified"] { color: var(--ps-unverified); background: var(--ps-unverified-wash); }
+li[data-tone="unknown"], span[data-tone="unknown"] { color: var(--ps-unknown); background: var(--ps-unknown-wash); }
+
+/* ---- the two voices (D55) --------------------------------------------------
+ *
+ * The organic case and the sponsored one, on one card. The words do the work — each block
+ * carries an attribution sentence naming its author — and these rules only make the boundary
+ * impossible to miss. Strip this file out and the two blocks still say who wrote them.
+ */
+
+.pitch {
+  margin: 0 0 var(--ps-3);
+  padding-top: var(--ps-4);
+  border-top: 1px solid var(--ps-rule-soft);
+}
+.pitch > h4 { margin: 0 0 var(--ps-3); }
+
+.voice { margin: 0 0 var(--ps-3); padding: 0; border: 0; }
+
+.voice-attribution {
+  margin: 0 0 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ps-ink-3);
+}
+.voice-body {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  text-wrap: pretty;
 }
 
-li[data-tone="confirmed"] {
-  color: var(--confirmed);
-  background: #e6f4ec;
-}
+/* The PLATFORM voice is body copy: it is the page's own sentence and needs no container. */
+.voice[data-voice="platform"] .voice-attribution strong { color: var(--ps-accent-press); }
+.voice[data-voice="platform"] .voice-body { color: var(--ps-ink); }
 
-li[data-tone="observed"] {
-  color: var(--observed);
-  background: #fbf1de;
+/* The STORE voice is a quoted block with visible attribution: somebody else is talking. */
+.voice[data-voice="store"] {
+  padding: 13px 15px;
+  border-radius: var(--ps-r-md);
+  background: var(--ps-observed-wash);
+  border: 1px solid #f0e2c2;
+  border-left: 4px solid var(--ps-observed);
 }
+.voice[data-voice="store"] .voice-attribution { color: var(--ps-observed); }
+.voice[data-voice="store"] .voice-attribution strong { color: var(--ps-observed); }
+.voice[data-voice="store"] .voice-body { color: #2f2510; }
 
-li[data-tone="unverified"] {
-  color: var(--unverified);
-  background: #fbe9e7;
-}
-
-li[data-tone="unknown"] {
-  color: var(--ink-soft);
-  background: #eef0f3;
+.pitch details { margin-top: var(--ps-2); }
+.pitch .facts {
+  grid-template-columns: minmax(8rem, 14rem) 1fr;
+  margin: var(--ps-3) 0 var(--ps-1);
+  font-size: 13px;
 }
 
 /* ---- errors and refusals -------------------------------------------------- */
 
-.failure,
-[role="alert"] {
-  color: var(--alarm);
-}
+[role="alert"] { color: var(--ps-alarm); }
 
 .failure {
-  background: #fdecea;
-  border: 1px solid #f0b3aa;
-  border-radius: 8px;
-  padding: 0.75rem 1rem;
-  margin: 0 0 1.25rem;
+  margin: 0 0 var(--ps-4);
+  padding: 13px 16px;
+  border-radius: var(--ps-r-lg);
+  background: var(--ps-alarm-wash);
+  border: 1px solid var(--ps-alarm-edge);
+  border-left: 4px solid var(--ps-alarm);
+  color: var(--ps-alarm);
+  font-size: 14px;
 }
+.failure .gloss { color: #7d3b2d; }
 
-/* ---- diagnostics ---------------------------------------------------------- */
+/* ---- the record: quiet by default, one gesture to open --------------------
+ *
+ * `details` is the whole affordance. The summary is a link-weight line rather than a button,
+ * because opening it asserts nothing and changes nothing.
+ */
 
-.mono,
-code,
-pre {
-  font-family: var(--mono);
-  font-size: 0.83rem;
-}
-
-.diagnostics {
-  border-left: 4px solid var(--alarm);
-}
-
-.diagnostics ul.mono {
-  list-style: none;
-  margin: 0.3rem 0 0.6rem;
-  padding: 0;
-}
-
-.diagnostics ul.mono > li {
-  border-top: 1px solid var(--rule);
-  padding: 0.4rem 0;
-  overflow-wrap: anywhere;
-}
-
-.diagnostics ul.mono > li ul {
-  margin: 0.25rem 0 0;
-  padding-left: 1.1rem;
-}
-
-.diagnostics .key {
-  font-weight: 700;
-}
-
-.provenance-source {
-  list-style: none;
-  margin: 0.7rem 0 0;
-  padding: 0;
-  color: var(--ink-soft);
-}
-
-.permalink {
-  overflow-wrap: anywhere;
-  background: #eef0f3;
-  border: 1px solid var(--rule);
-  border-radius: 7px;
-  padding: 0.55rem 0.7rem;
-}
-
-details {
-  margin-top: 0.9rem;
-}
-
+details { margin-top: var(--ps-3); }
 summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
   cursor: pointer;
-  color: var(--ink-soft);
-  font-size: 0.9rem;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ps-accent);
+  list-style: none;
+}
+summary::-webkit-details-marker { display: none; }
+summary::before {
+  content: '\25B8';
+  font-family: var(--ps-mono);
+  font-size: 11px;
+  transition: transform 120ms ease;
+}
+details[open] > summary::before { transform: rotate(90deg); }
+summary:hover { color: var(--ps-accent-press); }
+
+/* THE RECORD ITSELF ---------------------------------------------------- [buyer lane] ----
+ *
+ * The rules for the hook this file's own header promises and, as handed over, declares
+ * nowhere. Written to the record treatment in section 05 of the design system and to rule 3
+ * of section 06 — "the RECORD folds away; the LABELS never do" — so this styles only the
+ * machine rows a reader opens on purpose, and never a provenance pill.
+ *
+ * The hairline is on the fold rather than on the page, so a page with no record on it has
+ * no rule floating at the bottom of a card.
+ */
+details.trace,
+details[data-trace] {
+  margin-top: var(--ps-4);
+  padding-top: var(--ps-3);
+  border-top: 1px solid var(--ps-rule-soft);
+}
+details.trace[open] > summary,
+details[data-trace][open] > summary { margin-bottom: var(--ps-3); }
+
+/* Everything inside is a value the system wrote, so it is mono by default. A nested fold
+   keeps its own summary at sentence weight rather than inheriting the mono. */
+details.trace > *:not(summary),
+details[data-trace] > *:not(summary) {
+  font-family: var(--ps-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--ps-ink-2);
+}
+details.trace > details,
+details[data-trace] > details { font-family: var(--ps-sans); }
+details.trace > details > summary,
+details[data-trace] > details > summary { font-size: 13px; }
+
+.mono, code, pre { font-family: var(--ps-mono); font-size: 12.5px; }
+
+code {
+  padding: 1px 5px;
+  border-radius: var(--ps-r-sm);
+  background: var(--ps-accent-wash);
+  color: var(--ps-accent-press);
 }
 
 pre {
   max-height: 26rem;
   overflow: auto;
-  background: #1e2128;
-  color: #e8eaf0;
-  padding: 0.8rem 0.9rem;
-  border-radius: 8px;
+  margin: var(--ps-3) 0 0;
+  padding: 14px 16px;
+  border-radius: var(--ps-r-md);
+  background: #14161c;
+  color: #e8e6f0;
+  line-height: 1.6;
+}
+pre code { background: none; color: inherit; padding: 0; }
+
+/* ---- the recorded report -------------------------------------------------- */
+
+.diagnostics { border-left: 4px solid var(--ps-ink); }
+.diagnostics h3 {
+  margin: 0 0 var(--ps-2);
+  font-family: var(--ps-display);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.diagnostics ul.mono { list-style: none; margin: var(--ps-2) 0 var(--ps-4); padding: 0; }
+.diagnostics ul.mono > li {
+  border-top: 1px solid var(--ps-rule-soft);
+  padding: 9px 0;
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+  color: var(--ps-ink-2);
+}
+.diagnostics ul.mono > li ul { margin: var(--ps-1) 0 0; padding-left: 18px; }
+.diagnostics .key { font-weight: 500; color: var(--ps-ink); }
+
+.provenance-source {
+  list-style: none;
+  margin: var(--ps-4) 0 0;
+  padding: 0;
+  color: var(--ps-ink-3);
+  line-height: 1.7;
+}
+.provenance-source > li { padding: 8px 0; border-top: 1px solid var(--ps-rule-soft); }
+
+.permalink {
+  overflow-wrap: anywhere;
+  padding: 12px 14px;
+  border-radius: var(--ps-r-md);
+  background: var(--ps-sunk);
+  border: 1px solid var(--ps-rule);
+  color: var(--ps-ink);
 }
 
-/* ---- the honest gaps ------------------------------------------------------ */
+/* ---- the gaps panel -------------------------------------------------------
+ *
+ * Deliberately NOT alarming. These are stated facts about a working system, not warnings, so
+ * the panel reads as a footnote: no wash, no coloured rail, muted body copy.
+ */
 
 .gaps {
-  border-left: 4px solid var(--observed);
+  background: var(--ps-sunk);
+  border: 1px solid var(--ps-rule);
+  box-shadow: none;
 }
+.gaps > h2 { border-bottom-color: var(--ps-rule); font-size: 17px; }
+.gaps ul { margin: 0; padding-left: 18px; }
+.gaps li { margin-bottom: var(--ps-3); font-size: 14px; color: var(--ps-ink-2); }
+.gaps li strong { color: var(--ps-ink); }
 
-.gaps ul {
-  margin: 0;
-  padding-left: 1.1rem;
-}
-
-.gaps li {
-  margin-bottom: 0.6rem;
-}
-
-/* ---- the two voices (D55) -------------------------------------------------
+/* ---- the seeded panel -----------------------------------------------------
  *
- * The organic result and the sponsored one, on one card. The words do the work —
- * each block carries an attribution sentence naming its author — and these rules
- * only make the boundary between them impossible to miss at a glance. Nothing
- * here is the ONLY carrier of the distinction: strip this file out entirely and
- * the two blocks still say who wrote them, in prose, above the prose.
+ * Marked in the chrome as well as in the copy: a reader skimming should not have to read a
+ * paragraph to learn a panel is manufactured. The hatch is unlike every other card here.
  */
-.pitch {
-  margin: 0.85rem 0 0.2rem;
-  padding-top: 0.7rem;
-  border-top: 1px solid var(--rule);
-}
 
-.pitch > h4 {
-  margin: 0 0 0.5rem;
-}
-
-.voice {
-  margin: 0 0 0.7rem;
-  padding: 0.6rem 0.85rem;
-  border-radius: 8px;
-  border: 1px solid var(--rule);
-  border-left-width: 5px;
-}
-
-/* The SPONSORED voice: the shop's own advocate, which the shop pays for. */
-.voice[data-voice="store"] {
-  border-left-color: var(--observed);
-  background: #fdf7ea;
-}
-
-/* The ORGANIC voice: the platform's own case, written for every candidate. */
-.voice[data-voice="platform"] {
-  border-left-color: var(--accent);
-  background: #eef2fd;
-}
-
-.voice-attribution {
-  margin: 0 0 0.45rem;
-  font-size: 0.82rem;
-  line-height: 1.45;
-  color: var(--ink-soft);
-}
-
-.voice[data-voice="store"] .voice-attribution strong {
-  color: var(--observed);
-}
-
-.voice[data-voice="platform"] .voice-attribution strong {
-  color: var(--accent);
-}
-
-/* The prose itself: the seller's bytes, or the platform's sentence. Plain text in
-   both cases — `overflow-wrap` because a seller may write a URL and this page will
-   not turn it into a link, so it has to wrap somewhere. */
-.voice-body {
-  margin: 0;
-  font-size: 0.95rem;
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-}
-
-.pitch details {
-  margin-top: 0.2rem;
-}
-
-.pitch .facts {
-  grid-template-columns: minmax(8rem, 14rem) 1fr;
-  margin: 0.5rem 0 0.2rem;
-  font-size: 0.88rem;
-}
-
-/* A provenance badge beside one fact, and beside one commitment. Same pill the
-   slot's aggregate labels get; `li[data-tone]` above cannot reach either, because
-   both are spans inside a row that carries no tone of its own. */
-span[data-tone] {
-  display: inline-block;
-  padding: 0.05rem 0.5rem;
-  border-radius: 999px;
-  border: 1px solid currentColor;
-  font-size: 0.75rem;
-  font-weight: 700;
-}
-
-span[data-tone="confirmed"] {
-  color: var(--confirmed);
-  background: #e6f4ec;
-}
-
-span[data-tone="observed"] {
-  color: var(--observed);
-  background: #fbf1de;
-}
-
-span[data-tone="unverified"] {
-  color: var(--unverified);
-  background: #fbe9e7;
-}
-
-span[data-tone="unknown"] {
-  color: var(--ink-soft);
-  background: #eef0f3;
-}
-
-/*
- * The seeded panel. Marked in the CHROME as well as in the copy, because a reader skimming
- * the page should not have to read a paragraph to learn that a panel is manufactured — and
- * because a badge that is only a sentence is a badge a later edit deletes without noticing.
- * The hatched border is deliberately unlike every other card on this page.
- */
 .step.seeded {
-  border: 1px dashed var(--observed);
+  border: 1px dashed var(--ps-observed);
+  box-shadow: none;
   background: repeating-linear-gradient(
     135deg,
-    var(--card),
-    var(--card) 14px,
+    var(--ps-card),
+    var(--ps-card) 14px,
     #fdfaf2 14px,
     #fdfaf2 28px
   );
@@ -504,12 +775,72 @@ span[data-tone="unknown"] {
 
 .seeded-badge {
   margin-left: auto;
-  padding: 0.15rem 0.5rem;
-  border: 1px solid var(--observed);
-  border-radius: 999px;
-  background: #fbf1de;
-  color: var(--observed);
-  font-size: 0.7rem;
-  font-weight: 700;
-  letter-spacing: 0.12em;
+  padding: 3px 9px;
+  border: 1px solid var(--ps-observed);
+  border-radius: var(--ps-r-pill);
+  background: var(--ps-observed-wash);
+  color: var(--ps-observed);
+  font-family: var(--ps-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+}
+
+/* ---- the post-purchase answers, as chips ----------------------------- [buyer lane] ----
+ *
+ * The screens document draws step 5's five answers as chips and this stylesheet has no
+ * selector for them, so the global `label { display: block }` above was stacking them as
+ * five full-width rows. They stay RADIOS in the markup — `FeedbackPromptView` has no text
+ * input by design and its suite asserts every input is a radio — and this only changes how
+ * a radio and its label are drawn. Selected is accent-washed and accent-bordered, never
+ * accent-filled (design system, section 04): a picked answer is not a submit.
+ */
+section[aria-label="Feedback"] fieldset {
+  margin: 0 0 var(--ps-2);
+  padding: 0;
+  border: 0;
+}
+section[aria-label="Feedback"] legend {
+  padding: 0;
+  margin: 0 0 var(--ps-3);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+section[aria-label="Feedback"] fieldset label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 6px 7px 0;
+  padding: 7px 13px;
+  border: 1px solid var(--ps-rule);
+  border-radius: var(--ps-r-pill);
+  background: var(--ps-card);
+  color: var(--ps-ink-2);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+}
+section[aria-label="Feedback"] fieldset label:hover { border-color: var(--ps-ink-3); }
+section[aria-label="Feedback"] fieldset label:has(input:checked) {
+  border-color: var(--ps-accent);
+  background: var(--ps-accent-wash);
+  color: var(--ps-accent-press);
+}
+section[aria-label="Feedback"] fieldset label:focus-within {
+  outline: 2px solid var(--ps-accent);
+  outline-offset: 2px;
+}
+section[aria-label="Feedback"] fieldset input[type="radio"] {
+  width: auto;
+  margin: 0;
+  accent-color: var(--ps-accent);
+}
+
+@media (max-width: 640px) {
+  .journey { padding: var(--ps-5) var(--ps-4) 4rem; }
+  .step, .gaps, .diagnostics { padding: var(--ps-4); border-radius: var(--ps-r-lg); }
+  section[aria-label="Confirm what we will shop for"] dl,
+  .facts, .pitch .facts { grid-template-columns: 1fr; gap: 2px var(--ps-4); }
+  .facts dt { margin-top: var(--ps-2); }
 }

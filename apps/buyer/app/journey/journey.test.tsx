@@ -191,11 +191,28 @@ const RAW_SLOT = {
 
 // The shape `POST /buyer/shortlist/render` answers with. MEASURED against the devstack
 // (`apps/buyer/devstack/run.py`, three real store agents + the real exchange + the real buyer
-// service): `product`, `price` and `commitments` come back on every slot, the commitment
-// carries a `label` the buyer service derived from the claim's own provenance, and
-// `store_domain` really is `''` — `contracts.protocol.ShortlistSlot` has no such field, so a
-// slot served through the pinned model cannot carry one. The AUCTION ID here is this file's
-// (`auc-demo-1`); the run's was a uuid, and every other value below is the run's own.
+// service): `product`, `price` and `commitments` come back on every slot, and the commitment
+// carries a `label` the buyer service derived from the claim's own provenance. The AUCTION ID
+// here is this file's (`auc-demo-1`); the run's was a uuid, and every other value below is
+// the run's own.
+//
+// `store_domain: ''` NEEDS ITS OWN SENTENCE, because the one that used to be here is false.
+// It read: "`store_domain` really is `''` — `contracts.protocol.ShortlistSlot` has no such
+// field, so a slot served through the pinned model cannot carry one." Both halves are now
+// wrong, and the same change is what retired `gap-domain` further down this file:
+// `ShortlistSlot` declares `store_domain: str | None = None`, and `ranking/serving.py` joins
+// the platform registry's answer onto the slot before the shortlist is served. Re-measured on
+// the devstack this run, the two bidding slots came back
+// `demo-woolworks.example.com` and `demo-alpine-supply.example.com`.
+//
+// The VALUE stays `''` on purpose rather than being updated to a domain, because `''` is
+// still a served shape and it is the one nothing else here covers. `serving.py` publishes
+// `None` — never `''` — when the deployment has no platform registry to answer from, and
+// `readRenderedSlots` reads that absence back as `''`. So this fixture is the "the exchange
+// vouches for no host" slot: `acceptSlot` sends `expected_domain: null` for it, which is what
+// the accept-body assertion at the end of the four-beats test pins, and `ShortlistView` prints
+// the absence sentence rather than a blank line. The populated case is asserted directly, on
+// both branches, in `shortlist.test.tsx`'s "names whose shop it is".
 const RENDERED_SLOT = {
   slot: 'fit',
   bid_ref: BID_REF,
@@ -843,6 +860,12 @@ describe('the four beats', () => {
     // WHAT THE THING IS, WHAT IT COSTS, WHAT THE STORE COMMITS TO — off the slot itself,
     // which is the LIVE half of the answer, re-fetched for this page. There is no longer a
     // price list joined out of the RECORDED `entries[]` beside it.
+    // WHOSE SHOP IT IS, at the head of the card. This fixture is the slot an exchange with no
+    // platform registry serves, so the card says the domain is absent rather than going quiet
+    // about who is offering — the same rule the price and the product line follow.
+    expect(screen.getByTestId(`store-domain-${BID_REF}`).textContent).toContain(
+      'named no domain',
+    )
     expect(screen.getByTestId(`product-${BID_REF}`).textContent).toContain('beanie-merino-01')
     expect(screen.getByTestId(`product-${BID_REF}`).textContent).toContain('44352913')
     const shownPrice = screen.getByTestId(`price-${BID_REF}`).textContent ?? ''
@@ -864,6 +887,28 @@ describe('the four beats', () => {
     expect(verbatim).toContain('"recorded_at": "2026-09-05T00:00:01Z"')
     expect(verbatim).toContain('"rank_score": 0.564')
     expect(verbatim).toContain('"unit_price": 78')
+
+    // THE RECORD FOLDS AWAY AND THE LABELS DO NOT \u2014 the design system's third rule, asserted
+    // as a containment rather than as a look, so it survives any restyling of the fold.
+    //
+    // The two claims are separable and both matter. A build that folded the machine rows and
+    // ALSO folded the provenance pills would satisfy the first half and break R2: a label a
+    // buyer has to go looking for is a label they did not have when they chose. A build that
+    // folded neither is the page as it was, with two blocks of mono between the shopper and
+    // the next step.
+    const record = screen.getByTestId('auction-record') as HTMLDetailsElement
+    expect(record.tagName).toBe('DETAILS')
+    // Shut until it is asked for. Opening it asserts nothing and changes nothing, which is
+    // why it is a fold rather than a route.
+    expect(record.open).toBe(false)
+    // Both machine blocks are INSIDE it, so nothing the fold claims to hold was left out.
+    expect(record.contains(screen.getByTestId(`labels-source-${BID_REF}`))).toBe(true)
+    expect(record.contains(screen.getByTestId('verbatim-auction'))).toBe(true)
+    // The provenance label on the card is NOT, and this is the half that must never fold.
+    expect(record.contains(label)).toBe(false)
+    // Neither is the sentence about where the price came from: that is a claim this page
+    // makes about provenance, not a value the system wrote, so it stays on the page.
+    expect(record.contains(screen.getByTestId('price-provenance'))).toBe(false)
 
     // The exchange sent one slot and one slot survived labelling, so the fault notice that
     // exists for the other case is correctly absent.

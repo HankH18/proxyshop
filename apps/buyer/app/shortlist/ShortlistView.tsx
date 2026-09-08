@@ -83,6 +83,29 @@ function trustLine(slot: ShortlistSlot): string {
 }
 
 /**
+ * WHOSE SHOP THIS IS.
+ *
+ * Both design documents put the store's identity at the head of the card, and until now the
+ * card named no store at all: a shopper comparing two slots saw `fit` against `value`, two
+ * product refs and two prices, with nothing on either card saying who was offering them.
+ *
+ * The domain is the right field for it rather than a display name, and not only because it is
+ * the one the exchange sends. It is the host the accepted permalink is PINNED against —
+ * `permalinkRefusal` checks the minted URL's host against this exact string, and a permalink
+ * that names anything else is refused before a browser is sent to it. Putting it on the card
+ * is therefore the shopper seeing where Accept will take them BEFORE they press it, rather
+ * than on the handoff screen afterwards.
+ *
+ * Absent is an ordinary answer and gets a sentence, never a blank line: an exchange with no
+ * platform registry behind it publishes no domain, which is a deployment saying it vouches
+ * for no host — not a store without one.
+ */
+function storeDomainLine(domain: string | undefined): string {
+  const named = typeof domain === 'string' ? domain.trim() : ''
+  return named === '' ? 'The exchange named no domain for this store.' : named
+}
+
+/**
  * WHAT THE THING IS.
  *
  * The exchange sends a catalogue *reference*, deliberately — a title belongs to the store's
@@ -348,6 +371,14 @@ export function ShortlistView({
         {shortlist.slots.map((slot) => (
           <li key={slot.bid_ref} data-testid={`slot-${slot.bid_ref}`}>
             <h3>{slot.slot}</h3>
+
+            {/* WHOSE SHOP IT IS — see `storeDomainLine`. Above the product and the price
+                because that is the order both design documents put them in, and because it
+                is the host Accept will hand the browser to. Text, never a link: there is no
+                `href` anywhere in this file and this string is not the exception. */}
+            <p className="store-domain" data-testid={`store-domain-${slot.bid_ref}`}>
+              {storeDomainLine(slot.store_domain)}
+            </p>
 
             {/* WHAT THE THING IS, WHAT IT COSTS, WHAT THE STORE COMMITS TO — in that order,
                 above the diagnostics, because that is the order a person decides in. Each

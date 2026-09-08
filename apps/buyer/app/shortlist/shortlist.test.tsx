@@ -351,6 +351,34 @@ describe('what the shopper can read on a slot', () => {
     expect(product).toContain('var-m-navy')
   })
 
+  it('names whose shop it is, with the host the accept will be pinned against', () => {
+    render(
+      <ShortlistView
+        shortlist={one({ ...PRICED_SLOT, store_domain: STORE })}
+        onAccept={vi.fn()}
+      />,
+    )
+    // The exchange's own field, printed. It is the platform REGISTRY's answer rather than
+    // anything the store put on its bid, and it is the string `permalinkRefusal` pins the
+    // minted permalink's host against — so a shopper reading it is reading where Accept will
+    // send them, before they press it rather than on the handoff screen afterwards.
+    expect(screen.getByTestId('store-domain-bid-e7-7').textContent).toBe(STORE)
+    // A host on a card is still not a destination. There is no `href` in this component and
+    // this line is not the exception one could arrive through.
+    expect(screen.queryAllByRole('link')).toHaveLength(0)
+  })
+
+  it('says the exchange named no domain rather than leaving the store nameless', () => {
+    // `store_domain` is `str | None` on `contracts.protocol.ShortlistSlot` and the exchange
+    // publishes `None` — never `''` — when it has no platform registry to answer from. That
+    // is a deployment saying it vouches for no host, which is a different sentence from a
+    // store that has none, and either way the card may not go quiet about who is offering.
+    render(<ShortlistView shortlist={one(PRICED_SLOT)} onAccept={vi.fn()} />)
+    const absent = screen.getByTestId('store-domain-bid-e7-7').textContent ?? ''
+    expect(absent).toContain('named no domain')
+    expect(absent).not.toContain('undefined')
+  })
+
   it('shows what it costs, with the currency the exchange named and no invented symbol', () => {
     render(<ShortlistView shortlist={one(PRICED_SLOT)} onAccept={vi.fn()} />)
     const price = screen.getByTestId('price-bid-e7-7').textContent ?? ''
