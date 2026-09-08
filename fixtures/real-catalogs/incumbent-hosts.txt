@@ -1,0 +1,36 @@
+# incumbent-hosts.txt — the ten storefronts the committed corpus was collected from
+#
+# These same ten hosts are hard-coded in scripts/collect_real_catalogs.py as RELEVANT_HOSTS
+# and NEGATIVE_CONTROL_HOSTS, and running the collector with NO --hosts-file still walks
+# exactly them. This file exists for two reasons and neither is "so the tuples can go away":
+#
+#   1. It proves the hosts-file format can express the roster the corpus was actually built
+#      from, category and role included. `hosts_file_matches_builtin_roster()` compares this
+#      file against `builtin_roster()` element for element, and the collector's test suite
+#      fails if the two ever drift.
+#   2. It composes. `--hosts-file` is repeatable, so
+#          --hosts-file incumbent-hosts.txt --hosts-file candidate-hosts.txt
+#      walks the existing corpus AND the breadth candidates in one roster, which is the only
+#      way to grow the corpus without dropping the stores its current gates pin.
+#
+# Format: `<host> <category> [<role>]`, `#` starts a comment, role defaults to `relevant`.
+#
+# The category is `supplements` for all ten, and that is the finding this whole exercise
+# started from: every store in the corpus sells supplements, so "a walnut coffee table for
+# the lounge" retrieves liver capsules. Retrieval is not the bug. The roster is.
+#
+# The two negative controls carry no liver-support inventory at all — measured, not assumed —
+# and they are on the roster because a shortlist that never has to reject anybody demonstrates
+# nothing. Note that the label is per QUERY, not per store: for a protein query these two are
+# among the six that stock it and four of the "relevant" eight have none.
+
+gaiaherbs.com                supplements                     # 111 products in the committed corpus
+bulksupplements.com          supplements                     # 805 — the largest store in it
+nutricost.com                supplements                     # 755
+oregonswildharvest.com       supplements                     # 189
+toniiq.com                   supplements                     # 103; product_type empty on 100% of them
+doublewoodsupplements.com    supplements                     # 201
+purebulk.com                 supplements                     # 550; 4,649 chars of body_html on average
+paradiseherbs.com            supplements                     # 90; zero tags on every product
+livemomentous.com            supplements  negative_control   # no liver-support inventory: answers milk thistle with whey
+nakednutrition.com           supplements  negative_control   # no liver-support inventory: answers milk thistle with protein stacks

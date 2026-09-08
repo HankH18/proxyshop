@@ -1,0 +1,165 @@
+# candidate-hosts.txt — 43 direct-to-consumer storefronts proposed for a BROAD corpus
+#
+# ======================================================================================
+# Why this file exists
+# ======================================================================================
+# The demo's most visible flaw is that `"a walnut coffee table for the lounge"` comes back
+# with four liver supplements. That is not a retrieval defect. Every one of the ten stores in
+# `fixtures/real-catalogs/` sells supplements (see `incumbent-hosts.txt`), so there is no
+# coffee table in the corpus to find. **Category breadth is the fix, and it is a hostname-list
+# problem** — which is why the list is a reviewable file rather than a tuple in the collector.
+#
+# This is a CANDIDATE list, not a collected corpus. Nothing here has been fetched. Fetching it
+# is `scripts/collect_real_catalogs.py fetch --hosts-file fixtures/real-catalogs/candidate-hosts.txt`
+# and it will take roughly nine minutes of deliberately slow, serial requests; the collector
+# records the outcome of every host, including the ones that turn out not to serve the
+# endpoint. Expect misses. See "What is measured and what is not", below.
+#
+# ======================================================================================
+# Format
+# ======================================================================================
+#   <host> <category> [<role>]        # note
+#
+# `#` starts a comment; a note on a host's own line is recorded against that host in
+# `collection.json`. Role defaults to `relevant` and is one of:
+#
+#   relevant              expect a catalogue.
+#   negative_control      expect a catalogue that answers the HEADLINE query with nothing.
+#   off_platform_control  expect NO catalogue — measured to be off Shopify entirely. A skip
+#                         here is the CORRECT result. Two of these are on the roster on
+#                         purpose (bottom of the file) so that "the endpoint is not there"
+#                         can be told apart from "the endpoint was there and we failed": the
+#                         collector counts them separately and shouts if one answers.
+#
+# ======================================================================================
+# What is measured and what is not — read this before quoting any number here
+# ======================================================================================
+# MEASURED, by the feasibility study, over 80 fresh DTC brands and 209 serial requests:
+#   * 66% of those 80 brands serve the public `/products.json` endpoint this collector uses.
+#   * Live inventory was confirmed by category: coffee 9/10, outdoor 8/10, apparel 6/11,
+#     home/kitchen 6/9, pet 6/9, sports 5/5, food 4/5, furniture 3/4, tools 2/4, beauty 2/4,
+#     electronics 1/4. The category mix below is weighted by those rates — furniture gets the
+#     most hosts because it is the query that fails today, tools/beauty/electronics get the
+#     fewest because they are where the endpoint is thinnest.
+#   * Big-box retail (Home Depot, LEGO, Anker, Chewy, REI, Petco) is off-platform and
+#     unreachable. That is where the two `off_platform_control` rows come from.
+#   * Three specific stores were counted: cotopaxi.com 1,430 products (walked to exhaustion),
+#     marinelayer.com >=1,901, taylorstitch.com >=1,235. For scale, the largest store in the
+#     current corpus is bulksupplements.com at 805.
+#   * Serial at this collector's own pacing: 209 requests across 80 zones, ZERO blocks.
+#     Parallel: 8 concurrent connections across 30 Cloudflare-fronted zones drew an IP-WIDE
+#     429 at request 41, 5.9 seconds in, on hosts that run had never touched. The 2.0s
+#     per-host floor is 73-74% of wall-clock and it is the reason the egress IP still works.
+#     Do not move it, and never fetch these hosts concurrently.
+#
+# MEASURED HERE, 2026-09-08, by a three-host serial plumbing probe (first page only, 6
+# requests, 7.3 seconds) while this file was being written:
+#   * onyxcoffeelab.com  HTTP 200, 248 products on page one. A hit.
+#   * homedepot.com      HTTP 404 on /products.json. The off-platform control behaved.
+#   * thuma.co           HTTP 404 on /products.json — 3.2 MB of HTML 404 page. A MISS, and it
+#                        was a furniture candidate, which is the category that matters most.
+#                        It has been moved to the misses block at the bottom rather than
+#                        quietly deleted: a candidate list that hides the ones that failed
+#                        teaches the next person the wrong hit rate.
+#
+# NOT MEASURED: whether any OTHER individual host below serves the endpoint, what it stocks,
+# or how many products it has. Per-host claims are absent from the notes for that reason. At a
+# 66% hit rate, expect roughly a dozen of the 40 `relevant` rows to come back with nothing,
+# and expect that to be recorded rather than hidden — `collection.json` carries every host's
+# robots decision and `walk_outcome`, and a store that answers nothing is a recorded skip.
+#
+# ======================================================================================
+# Selection rules
+# ======================================================================================
+# * Real, well-known direct-to-consumer brands. Nobody's hobby store.
+# * Physical goods with titles, prices and variants — the shape entity resolution has to eat.
+# * Eleven categories, minimum two hosts each, so no single category can dominate the way
+#   supplements dominate today.
+# * No supplement retailers: that category is already covered by `incumbent-hosts.txt`, and
+#   `--hosts-file` is repeatable so both rosters can be walked as one.
+# * No marketplaces and no big-box retail: off-platform, and their catalogues are not one
+#   merchant's shelf.
+
+# -------- furniture: the query that fails today, so the deepest coverage --------------
+burrow.com                   furniture
+floydhome.com                furniture
+industrywest.com             furniture              # replaced thuma.co, which was probed and missed
+sabai.design                 furniture
+polyandbark.com              furniture
+branchfurniture.com          furniture              # desks and chairs: office rather than lounge, on purpose
+
+# -------- coffee: the study's strongest category (9/10) --------------------------------
+onyxcoffeelab.com            coffee
+deathwishcoffee.com          coffee
+vervecoffee.com              coffee
+counterculturecoffee.com     coffee
+
+# -------- apparel ----------------------------------------------------------------------
+taylorstitch.com             apparel                # MEASURED >=1,235 products
+marinelayer.com              apparel                # MEASURED >=1,901 products — likely the largest store on this list
+allbirds.com                 apparel
+bombas.com                   apparel
+
+# -------- outdoor gear -----------------------------------------------------------------
+cotopaxi.com                 outdoor                # MEASURED 1,430 products, walked to exhaustion
+nemoequipment.com            outdoor
+hyperlitemountaingear.com    outdoor
+rumpl.com                    outdoor
+
+# -------- pet --------------------------------------------------------------------------
+wildone.com                  pet
+maxbone.com                  pet
+fablepets.com                pet
+pupford.com                  pet
+
+# -------- home / kitchen ---------------------------------------------------------------
+madeincookware.com           home-kitchen
+carawayhome.com              home-kitchen
+fellowproducts.com           home-kitchen           # brews coffee; a deliberate overlap with the coffee category
+fromourplace.com             home-kitchen
+
+# -------- tools: thin on this endpoint (2/4), so specialists rather than brands ---------
+katzmosestools.com           tools
+taylortoolworks.com          tools
+bridgecitytools.com          tools
+
+# -------- food -------------------------------------------------------------------------
+flybyjing.com                food
+omsom.com                    food
+graza.co                     food
+
+# -------- beauty -----------------------------------------------------------------------
+iliabeauty.com               beauty
+youthtothepeople.com         beauty
+versedskin.com               beauty
+
+# -------- sports / fitness equipment ---------------------------------------------------
+fringesport.com              sports
+titan.fitness                sports
+tenthousand.cc               sports                 # training apparel: overlaps apparel, which is the point
+
+# -------- electronics / accessories: thinnest of all (1/4) -----------------------------
+nomadgoods.com               electronics
+peakdesign.com               electronics
+
+# ======================================================================================
+# The deliberate misses
+# ======================================================================================
+# All three were MEASURED to serve no catalogue at this endpoint. They are on the roster so
+# the corpus has, on the record, cases where the collector asked and correctly got nothing:
+# without one, a skip in `collection.json` is ambiguous between "this merchant does not serve
+# the endpoint" and "the collector broke". Each costs at most two requests.
+#
+# The first two are the big-box counterparts of categories above — Home Depot to the three
+# tool specialists, Chewy to the four pet brands — so they say something about the platform
+# boundary rather than just being hosts that fail. The third is more useful than either: a
+# DTC brand of exactly the shape every `relevant` row below has, which nonetheless does not
+# serve the endpoint. Big-box misses are easy to predict; that one is not, and it is the
+# honest face of the 66% hit rate.
+#
+# If any of these ever DOES return a catalogue, `main()` prints a warning and
+# `collection.json`'s `totals.off_platform_controls_that_answered` goes non-zero. That is the
+# control failing open, and the roster is wrong until somebody looks.
+homedepot.com                tools     off_platform_control    # MEASURED 2026-09-08: /products.json -> HTTP 404. Big-box, not Shopify
+chewy.com                    pet       off_platform_control    # big-box, not Shopify (feasibility study)
+thuma.co                     furniture off_platform_control    # MEASURED 2026-09-08: /products.json -> HTTP 404 with 3.2 MB of HTML. A DTC brand that simply does not serve it

@@ -1,0 +1,3539 @@
+{
+  "corpus_version": "2.1.0",
+  "collected_at": "2026-09-08T22:50:34.239557+00:00",
+  "collected_span": {
+    "earliest": "2026-09-08T22:42:58.145187+00:00",
+    "latest": "2026-09-08T22:50:34.591446+00:00",
+    "days": 0.005
+  },
+  "run": {
+    "complete": true,
+    "roster_size": 53,
+    "restricted_to": [],
+    "pending": [],
+    "reused_from_earlier_runs": [
+      "gaiaherbs.com",
+      "bulksupplements.com",
+      "nutricost.com",
+      "oregonswildharvest.com",
+      "toniiq.com",
+      "doublewoodsupplements.com",
+      "purebulk.com",
+      "paradiseherbs.com",
+      "livemomentous.com",
+      "nakednutrition.com",
+      "burrow.com",
+      "floydhome.com",
+      "industrywest.com",
+      "sabai.design",
+      "polyandbark.com",
+      "branchfurniture.com",
+      "onyxcoffeelab.com",
+      "deathwishcoffee.com",
+      "vervecoffee.com",
+      "counterculturecoffee.com",
+      "taylorstitch.com",
+      "marinelayer.com",
+      "allbirds.com",
+      "cotopaxi.com",
+      "nemoequipment.com",
+      "hyperlitemountaingear.com",
+      "rumpl.com",
+      "wildone.com",
+      "maxbone.com",
+      "fablepets.com",
+      "pupford.com",
+      "madeincookware.com",
+      "carawayhome.com",
+      "fellowproducts.com",
+      "fromourplace.com",
+      "taylortoolworks.com",
+      "bridgecitytools.com",
+      "flybyjing.com",
+      "omsom.com",
+      "graza.co",
+      "iliabeauty.com",
+      "youthtothepeople.com",
+      "versedskin.com",
+      "fringesport.com",
+      "titan.fitness",
+      "tenthousand.cc",
+      "nomadgoods.com",
+      "peakdesign.com",
+      "homedepot.com",
+      "chewy.com",
+      "thuma.co"
+    ]
+  },
+  "collector": "scripts/collect_real_catalogs.py",
+  "user_agent": "ProxyShopBot/0.1 (catalog research; contact: hank.holcomb@challenger.gauntletai.com)",
+  "politeness": {
+    "robots_txt": "fetched and respected per host",
+    "min_seconds_between_requests_per_host": 2.0,
+    "max_requests_per_host": 45,
+    "max_pages_per_host": 40,
+    "page_size": 250,
+    "crawl_delay": "a declared Crawl-delay widens the interval and never narrows it",
+    "retries": "none — 403/404/429 is a recorded outcome, not something to retry around",
+    "scope": "public catalogue data only",
+    "concurrency": "none — one host at a time, one request at a time. Measured: 8 concurrent connections across 30 Cloudflare-fronted zones drew an IP-wide 429 at request 41, 5.9 seconds in; the same 80 zones serially cost 209 requests and zero blocks.",
+    "resume": "a store already walked to a non-retryable outcome under these same settings is not re-fetched; every skip is checked against the page digests on disk"
+  },
+  "selection": {
+    "policy": "entire catalogue — every product on every page, nothing filtered",
+    "why": "A category-biased corpus builds a system that can only answer one question and silently removes the hardest part of retrieval: discriminating relevant inventory from a large body of irrelevant inventory. The irrelevant stock is not overhead, it is the test.",
+    "dropped": "exact duplicate product ids across pages only; counted per store"
+  },
+  "storage": {
+    "compressed": true,
+    "format": "gzip (mtime=0, level 9) over JSONL",
+    "note": "A storage decision only. No product is dropped and no field is trimmed, so what is stored is the whole catalogue."
+  },
+  "notes": [
+    "POINT-IN-TIME SNAPSHOT of other companies' public catalogues. Prices and inventory move; assert shape and relationships, never a dollar amount.",
+    "Product records are the exact bytes the storefront served, unnormalised.",
+    "Collected by hand. No test in this repository opens a socket (D3/C9)."
+  ],
+  "stores": [
+    {
+      "host": "gaiaherbs.com",
+      "role": "relevant",
+      "category": "supplements",
+      "note": "111 products in the committed corpus",
+      "roster_source": "incumbent-hosts.txt:27",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.gaiaherbs.com",
+      "robots": {
+        "url": "https://www.gaiaherbs.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:43:38.679020+00:00",
+        "sha256": "63be68c09c2111befd22af92922da4e53913417b9e9d99c82834ee0ce6a49aa6",
+        "bytes": 3634,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.gaiaherbs.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:43:40.680620+00:00",
+          "sha256": "51af09a765f5111c953b851ae8c4af66c7095af8b0ffa0e52f4000059a5e162c",
+          "bytes": 410123,
+          "elapsed_ms": 2281,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 111,
+      "products_recorded": 111,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/gaiaherbs.com.products.jsonl.gz",
+        "provenance": "stores/gaiaherbs.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "62331c8a61f22b5c9e11a64c9b61b82e4c27430bdc7821db6faf32dcfe6e3a70",
+        "provenance": "97854005f06fde233f9fa2c1495c227ff96d43014b8955e5f2341552a8f91657"
+      },
+      "bytes": {
+        "products": {
+          "raw": 410109,
+          "on_disk": 51695
+        },
+        "provenance": {
+          "raw": 43872,
+          "on_disk": 7829
+        }
+      }
+    },
+    {
+      "host": "bulksupplements.com",
+      "role": "relevant",
+      "category": "supplements",
+      "note": "805 — the largest store in it",
+      "roster_source": "incumbent-hosts.txt:28",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.bulksupplements.com",
+      "robots": {
+        "url": "https://www.bulksupplements.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:43:42.967218+00:00",
+        "sha256": "b3b75ef965f3922f40688be5558ea0f59dc84c4a6c01c58f108eb629b02ba391",
+        "bytes": 3660,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.bulksupplements.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:43:44.967240+00:00",
+          "sha256": "1da394a7331cbb412d1ea5ec19108f7e2163122b5a348f5e93ddcd96e3660fce",
+          "bytes": 2018279,
+          "elapsed_ms": 1208,
+          "note": ""
+        },
+        {
+          "url": "https://www.bulksupplements.com/products.json?limit=250&page=2",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:43:46.967602+00:00",
+          "sha256": "5161be7d010b77407141421ac9dab4d75499469a14ae7a7d858323bee5197bce",
+          "bytes": 2154987,
+          "elapsed_ms": 971,
+          "note": ""
+        },
+        {
+          "url": "https://www.bulksupplements.com/products.json?limit=250&page=3",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:43:48.971558+00:00",
+          "sha256": "18fd08e2aa456ba41785b53d3df0be71450bb19fe44ee092b0d33504cdd76c81",
+          "bytes": 2239545,
+          "elapsed_ms": 936,
+          "note": ""
+        },
+        {
+          "url": "https://www.bulksupplements.com/products.json?limit=250&page=4",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:43:50.974828+00:00",
+          "sha256": "2e670d764821359b78d7755eb62c5cb17899fe21f5c3297dba9e7e873c4c0a3f",
+          "bytes": 501267,
+          "elapsed_ms": 340,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 4,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 805,
+      "products_recorded": 805,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/bulksupplements.com.products.jsonl.gz",
+        "provenance": "stores/bulksupplements.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "8881f7db88a41bd5870ce8308f126a8ae52ca21d2b2f8ba4109ce9ecb21e4dd1",
+        "provenance": "3a0a34d6c30caffcd8777103355d1dfaec6b90a7d746b30bbe941bab4e3fa57a"
+      },
+      "bytes": {
+        "products": {
+          "raw": 6914022,
+          "on_disk": 843277
+        },
+        "provenance": {
+          "raw": 326631,
+          "on_disk": 55668
+        }
+      }
+    },
+    {
+      "host": "nutricost.com",
+      "role": "relevant",
+      "category": "supplements",
+      "note": "755",
+      "roster_source": "incumbent-hosts.txt:29",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://nutricost.com",
+      "robots": {
+        "url": "https://nutricost.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:43:51.320280+00:00",
+        "sha256": "530dc2c86b7abe30c5dda8437c5370b26cebe416b73ffde861b2531d8ca7dcd3",
+        "bytes": 3620,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://nutricost.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:43:53.325292+00:00",
+          "sha256": "3112f135a5545dbb2f5d91e07a30f65214dd9d7861f10528b2f3a3bfc85da416",
+          "bytes": 1218702,
+          "elapsed_ms": 547,
+          "note": ""
+        },
+        {
+          "url": "https://nutricost.com/products.json?limit=250&page=2",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:43:55.328125+00:00",
+          "sha256": "325ca5d4b790ae666b067b01526debf6c54f1bcb5d2982261bdea9bd6cb7c7ff",
+          "bytes": 1010158,
+          "elapsed_ms": 532,
+          "note": ""
+        },
+        {
+          "url": "https://nutricost.com/products.json?limit=250&page=3",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:43:57.332819+00:00",
+          "sha256": "0a2c3f2ff5fa5b24c14b4f96fb7f2e8767acce206a99c274c680a19ca15159cf",
+          "bytes": 1052206,
+          "elapsed_ms": 777,
+          "note": ""
+        },
+        {
+          "url": "https://nutricost.com/products.json?limit=250&page=4",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:43:59.333824+00:00",
+          "sha256": "3a314831b54b3a2cecced66094d489b92183c7c0498d19a861785171e4f450cf",
+          "bytes": 35349,
+          "elapsed_ms": 134,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 4,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 755,
+      "products_recorded": 755,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/nutricost.com.products.jsonl.gz",
+        "provenance": "stores/nutricost.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "aca0d0239c48427f8f63a23aee4ba2f705d7d35a9955829b31e04778a2a6b79a",
+        "provenance": "ab25c7406bc2a8fa6242a49daccf173571aadab73226f1acd9f4905397dc11a7"
+      },
+      "bytes": {
+        "products": {
+          "raw": 3316359,
+          "on_disk": 375089
+        },
+        "provenance": {
+          "raw": 308133,
+          "on_disk": 53740
+        }
+      }
+    },
+    {
+      "host": "oregonswildharvest.com",
+      "role": "relevant",
+      "category": "supplements",
+      "note": "189",
+      "roster_source": "incumbent-hosts.txt:30",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://oregonswildharvest.com",
+      "robots": {
+        "url": "https://oregonswildharvest.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:43:59.470790+00:00",
+        "sha256": "569fba514927869d4ae010da3993e38a9b1229e4fb99a6f472dc17eba85d225d",
+        "bytes": 3654,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://oregonswildharvest.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:01.471878+00:00",
+          "sha256": "56b397c183ca0d4c43164756d3c1985deb28fff4ae39c3b0c6829c31fd20b050",
+          "bytes": 729036,
+          "elapsed_ms": 248,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 189,
+      "products_recorded": 189,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/oregonswildharvest.com.products.jsonl.gz",
+        "provenance": "stores/oregonswildharvest.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "08c0672b44d177e5da550ae8d3b26f6b4433d7483bb8c00ba3cd2444c3197672",
+        "provenance": "4a22f224b05c0b40aeddbe329f71106c9af9f96b774d7a00b34a74bdd6fdec66"
+      },
+      "bytes": {
+        "products": {
+          "raw": 729022,
+          "on_disk": 77596
+        },
+        "provenance": {
+          "raw": 76347,
+          "on_disk": 12749
+        }
+      }
+    },
+    {
+      "host": "toniiq.com",
+      "role": "relevant",
+      "category": "supplements",
+      "note": "103; product_type empty on 100% of them",
+      "roster_source": "incumbent-hosts.txt:31",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.toniiq.com",
+      "robots": {
+        "url": "https://www.toniiq.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:01.726908+00:00",
+        "sha256": "8e8cffee119c3dadaaa558a029aac57811844e953e3b4aa44976a21b0ffe5a25",
+        "bytes": 3616,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.toniiq.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:03.731923+00:00",
+          "sha256": "7216762158b10b4648b23d46c903dc1768945654a0fefb603d690cf756c00bc5",
+          "bytes": 379408,
+          "elapsed_ms": 424,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 103,
+      "products_recorded": 103,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/toniiq.com.products.jsonl.gz",
+        "provenance": "stores/toniiq.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "fd110415b8f62b1dcc5851ccc7bfa74df6a314a6947cde614364f3454d763959",
+        "provenance": "665b1686aa6303ed4b564f6f0bcc2c017ced33389b7a71457a0cd991984c532b"
+      },
+      "bytes": {
+        "products": {
+          "raw": 379394,
+          "on_disk": 44501
+        },
+        "provenance": {
+          "raw": 39936,
+          "on_disk": 7382
+        }
+      }
+    },
+    {
+      "host": "doublewoodsupplements.com",
+      "role": "relevant",
+      "category": "supplements",
+      "note": "201",
+      "roster_source": "incumbent-hosts.txt:32",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://doublewoodsupplements.com",
+      "robots": {
+        "url": "https://doublewoodsupplements.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:04.161152+00:00",
+        "sha256": "194ee62ea0e371d70faecf681ddc70f517bce99963aa6374be589cfa58adc9f3",
+        "bytes": 3660,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://doublewoodsupplements.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:06.161428+00:00",
+          "sha256": "fc2635af3d6f5299d80f2e102cf0490514213a3717fbbdd54f41961fb76dbe94",
+          "bytes": 1040016,
+          "elapsed_ms": 758,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 201,
+      "products_recorded": 201,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/doublewoodsupplements.com.products.jsonl.gz",
+        "provenance": "stores/doublewoodsupplements.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "316f54bb4b6d17b33a51c05431e6d4bc92e131257ea79818dbbaff3b5fb8f3b8",
+        "provenance": "400cebf33f55b4a41c4465bf5d084848af18b29a1e952f95392631b4a0bf742b"
+      },
+      "bytes": {
+        "products": {
+          "raw": 1040002,
+          "on_disk": 146679
+        },
+        "provenance": {
+          "raw": 81261,
+          "on_disk": 14544
+        }
+      }
+    },
+    {
+      "host": "purebulk.com",
+      "role": "relevant",
+      "category": "supplements",
+      "note": "550; 4,649 chars of body_html on average",
+      "roster_source": "incumbent-hosts.txt:33",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://purebulk.com",
+      "robots": {
+        "url": "https://purebulk.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:06.928291+00:00",
+        "sha256": "aab07d5799505735637eb3ebd4b26fc9bbad6878dc5c1e5a4daed7d6c08d8938",
+        "bytes": 3614,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://purebulk.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:08.933308+00:00",
+          "sha256": "7824deb577b70b3400161c23f9b089ad34ac811482de3b2fd257493cceb5f010",
+          "bytes": 2050592,
+          "elapsed_ms": 1377,
+          "note": ""
+        },
+        {
+          "url": "https://purebulk.com/products.json?limit=250&page=2",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:10.938322+00:00",
+          "sha256": "17976fce5445f75493a785124753e947a306662b7985bc9e121235f66fa11dcf",
+          "bytes": 2386824,
+          "elapsed_ms": 1087,
+          "note": ""
+        },
+        {
+          "url": "https://purebulk.com/products.json?limit=250&page=3",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:12.940282+00:00",
+          "sha256": "b9aaa05242fda76d4dfc88275b30bbd72de52551b3b92718778b1e58526d3c2b",
+          "bytes": 524458,
+          "elapsed_ms": 280,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 3,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 550,
+      "products_recorded": 550,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/purebulk.com.products.jsonl.gz",
+        "provenance": "stores/purebulk.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "5bc386079c097217a17480385ef3a2b08d9da7de0d31dc33c55082095c004ca7",
+        "provenance": "9dbd649bd55e11288e54925dc8a0d964a978c3f70de85a261e7a1b1189605242"
+      },
+      "bytes": {
+        "products": {
+          "raw": 4961832,
+          "on_disk": 740899
+        },
+        "provenance": {
+          "raw": 218397,
+          "on_disk": 37397
+        }
+      }
+    },
+    {
+      "host": "paradiseherbs.com",
+      "role": "relevant",
+      "category": "supplements",
+      "note": "90; zero tags on every product",
+      "roster_source": "incumbent-hosts.txt:34",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://paradiseherbs.com",
+      "robots": {
+        "url": "https://paradiseherbs.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:13.225751+00:00",
+        "sha256": "273293d0c0a673963074ed0c67a2955bf2397d88b62f9dacb96d6de94238b560",
+        "bytes": 3636,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://paradiseherbs.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:15.225962+00:00",
+          "sha256": "7951d72688013df2dfec0729c98c93167b2be4c06a23f8285d34c397f66bb1bb",
+          "bytes": 229627,
+          "elapsed_ms": 251,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 90,
+      "products_recorded": 90,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/paradiseherbs.com.products.jsonl.gz",
+        "provenance": "stores/paradiseherbs.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "89245db203844b3018b75f8920a8e174bc12b4a75588d471561e9a0905776788",
+        "provenance": "d9c278063a22fccc0809d32b26a49f6e4d7166fe0a0da41654a126de009a86bd"
+      },
+      "bytes": {
+        "products": {
+          "raw": 229613,
+          "on_disk": 32767
+        },
+        "provenance": {
+          "raw": 36076,
+          "on_disk": 6638
+        }
+      }
+    },
+    {
+      "host": "livemomentous.com",
+      "role": "negative_control",
+      "category": "supplements",
+      "note": "no liver-support inventory: answers milk thistle with whey",
+      "roster_source": "incumbent-hosts.txt:35",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.livemomentous.com",
+      "robots": {
+        "url": "https://www.livemomentous.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:15.481247+00:00",
+        "sha256": "d7e081ebbdb64e4af6808d15ea14e26d3ef01afe97367f14d1065bb1d334fc98",
+        "bytes": 3646,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.livemomentous.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:17.482260+00:00",
+          "sha256": "320d3210010b6c0146484afb54651bc23c85bfa077989251431c741a6f6664fb",
+          "bytes": 416034,
+          "elapsed_ms": 356,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 89,
+      "products_recorded": 89,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/livemomentous.com.products.jsonl.gz",
+        "provenance": "stores/livemomentous.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "60448444d07ee601de2ea4f95d3c6a05af65ad8d6d499f4d76d4d6c47f026d6b",
+        "provenance": "9eed31bc4ee39a4fa4ae88aad8f53958ba49be6248d8b2abc5d7ce7ba40dac1f"
+      },
+      "bytes": {
+        "products": {
+          "raw": 416020,
+          "on_disk": 66296
+        },
+        "provenance": {
+          "raw": 35785,
+          "on_disk": 6528
+        }
+      }
+    },
+    {
+      "host": "nakednutrition.com",
+      "role": "negative_control",
+      "category": "supplements",
+      "note": "no liver-support inventory: answers milk thistle with protein stacks",
+      "roster_source": "incumbent-hosts.txt:36",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://nakednutrition.com",
+      "robots": {
+        "url": "https://nakednutrition.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:17.843328+00:00",
+        "sha256": "8b25002a8cbe994e1edeaabc1197485ac7c65c320d34f1beaa267ba8eca9b06b",
+        "bytes": 7399,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://nakednutrition.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:19.843440+00:00",
+          "sha256": "6db23a1406e0d9c0ba7eb46579d0928dd935a2825786f3f731c05de24c8dbb9e",
+          "bytes": 714737,
+          "elapsed_ms": 52,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 199,
+      "products_recorded": 199,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/nakednutrition.com.products.jsonl.gz",
+        "provenance": "stores/nakednutrition.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "65ae5f35e2417a0de6d16084e6cf91a379ae5e9b7f8b9d21d9d4c2c6ddbc731e",
+        "provenance": "4eb8482d069f9f35d7e1a4a656890c925cb423c9ba4d8cad1ee8eadd32d88d8e"
+      },
+      "bytes": {
+        "products": {
+          "raw": 714723,
+          "on_disk": 100417
+        },
+        "provenance": {
+          "raw": 80880,
+          "on_disk": 13589
+        }
+      }
+    },
+    {
+      "host": "burrow.com",
+      "role": "relevant",
+      "category": "furniture",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:84",
+      "walk_outcome": "http_404",
+      "effective_origin": "https://burrow.com",
+      "robots": {
+        "url": "https://burrow.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:19.902051+00:00",
+        "sha256": "b8a695b213594299fb58a62b096e9227a71880c724d5ad67dc16535980893a34",
+        "bytes": 3470,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": {
+        "reason": "page 1 returned HTTP 404"
+      },
+      "fetches": [
+        {
+          "url": "https://burrow.com/products.json?limit=250&page=1",
+          "status": 404,
+          "fetched_at": "2026-09-08T22:44:21.902822+00:00",
+          "sha256": "0019dfc4b32d63c1392aa264aed2253c1e0c2fb09216f8e2cc269bbfb8bb49b5",
+          "bytes": 9,
+          "elapsed_ms": 101,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 0,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "page 1 returned HTTP 404",
+      "products_seen": 0,
+      "products_recorded": 0,
+      "duplicates_dropped": 0,
+      "files": {},
+      "file_sha256": {},
+      "bytes": {}
+    },
+    {
+      "host": "floydhome.com",
+      "role": "relevant",
+      "category": "furniture",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:85",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://floydhome.com",
+      "robots": {
+        "url": "https://floydhome.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:22.006373+00:00",
+        "sha256": "a65ac4fad13da5a6fac3faab9d97914f3f21baaa60c97621681f9e6ca278087f",
+        "bytes": 3620,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://floydhome.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:24.006489+00:00",
+          "sha256": "eb8a229c70c3e41145bed8b394b81d03e73bd1c8b68fcd79ed397ed9eedba690",
+          "bytes": 3716072,
+          "elapsed_ms": 2061,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 173,
+      "products_recorded": 173,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/floydhome.com.products.jsonl.gz",
+        "provenance": "stores/floydhome.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "56847143a9f5f9fe4d3bbcc6ac34b42ad034ebb2926f27411ef9a8c3cf05ad3c",
+        "provenance": "6c6ec16849c849b8a433a30bd3e49dab2ed5fbafde88c62fb4e8016ea4a2a6fa"
+      },
+      "bytes": {
+        "products": {
+          "raw": 3716058,
+          "on_disk": 332756
+        },
+        "provenance": {
+          "raw": 69253,
+          "on_disk": 12211
+        }
+      }
+    },
+    {
+      "host": "industrywest.com",
+      "role": "relevant",
+      "category": "furniture",
+      "note": "replaced thuma.co, which was probed and missed",
+      "roster_source": "candidate-hosts.txt:86",
+      "walk_outcome": "robots_http_403",
+      "effective_origin": "https://industrywest.com",
+      "robots": {
+        "url": "https://industrywest.com/robots.txt",
+        "status": 403,
+        "fetched_at": "2026-09-08T22:50:26.592571+00:00",
+        "sha256": "889403e5cfbb7981f7a26aced0d7492524e5397d6996f7fccd67562d2a4a71a3",
+        "bytes": 52,
+        "products_json_allowed": false,
+        "crawl_delay_seconds": 2.0,
+        "note": "robots.txt returned 403"
+      },
+      "skipped": {
+        "reason": "robots.txt for industrywest.com could not be read, so https://industrywest.com/products.json was not fetched — robots.txt returned 403"
+      },
+      "fetches": [],
+      "pages_fetched": 0,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 0,
+      "products_recorded": 0,
+      "duplicates_dropped": 0,
+      "files": {},
+      "file_sha256": {},
+      "bytes": {}
+    },
+    {
+      "host": "sabai.design",
+      "role": "relevant",
+      "category": "furniture",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:87",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://sabai.design",
+      "robots": {
+        "url": "https://sabai.design/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:26.372991+00:00",
+        "sha256": "a353067a30343e1e3d5f5b138e56a66589a7e7b748030583271ee8ce7dea981f",
+        "bytes": 3614,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://sabai.design/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:28.373102+00:00",
+          "sha256": "d2c9bff076fe62e350da4e1bf723e407e66ae8eaee730840ae498819e3096dea",
+          "bytes": 7341849,
+          "elapsed_ms": 2578,
+          "note": ""
+        },
+        {
+          "url": "https://sabai.design/products.json?limit=250&page=2",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:31.001111+00:00",
+          "sha256": "88f4573b3bb2efda8abe53b386ced47992abfbb43ab5ddef93fa7c1d47f036a8",
+          "bytes": 1927051,
+          "elapsed_ms": 829,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 2,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 321,
+      "products_recorded": 321,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/sabai.design.products.jsonl.gz",
+        "provenance": "stores/sabai.design.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "9067daebcd6c5458bf7c0eb5f95bb49b8bb9fae1cb01a353be49a55113db1025",
+        "provenance": "76024ebf208b9e1a68569d3160489522064caeb87b31098c60499f8f50671b8d"
+      },
+      "bytes": {
+        "products": {
+          "raw": 9268872,
+          "on_disk": 682936
+        },
+        "provenance": {
+          "raw": 131102,
+          "on_disk": 21463
+        }
+      }
+    },
+    {
+      "host": "polyandbark.com",
+      "role": "relevant",
+      "category": "furniture",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:88",
+      "walk_outcome": "http_404",
+      "effective_origin": "https://www.polyandbark.com",
+      "robots": {
+        "url": "https://www.polyandbark.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:31.844205+00:00",
+        "sha256": "f1c08c7ac9cb3d62bb9035f9c054a160a55ae15095412ab9586b070cccfbdd6a",
+        "bytes": 1728,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": {
+        "reason": "page 1 returned HTTP 404"
+      },
+      "fetches": [
+        {
+          "url": "https://www.polyandbark.com/products.json?limit=250&page=1",
+          "status": 404,
+          "fetched_at": "2026-09-08T22:44:33.844338+00:00",
+          "sha256": "797a5190f421438d2e0ba5fffb5e2618c9e34410b93fe4716b17fadccd515b20",
+          "bytes": 1842457,
+          "elapsed_ms": 871,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 0,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "page 1 returned HTTP 404",
+      "products_seen": 0,
+      "products_recorded": 0,
+      "duplicates_dropped": 0,
+      "files": {},
+      "file_sha256": {},
+      "bytes": {}
+    },
+    {
+      "host": "branchfurniture.com",
+      "role": "relevant",
+      "category": "furniture",
+      "note": "desks and chairs: office rather than lounge, on purpose",
+      "roster_source": "candidate-hosts.txt:89",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.branchfurniture.com",
+      "robots": {
+        "url": "https://www.branchfurniture.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:34.717685+00:00",
+        "sha256": "8c21333755650059f6f3f3a1be8a04b1037125617f9a2abcd3de281c8e222e54",
+        "bytes": 3679,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.branchfurniture.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:36.719299+00:00",
+          "sha256": "befef9c358419434e5d17b5183e5d7822eadf105a1111efaa49cbe6f3e457379",
+          "bytes": 5434683,
+          "elapsed_ms": 2148,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 220,
+      "products_recorded": 220,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/branchfurniture.com.products.jsonl.gz",
+        "provenance": "stores/branchfurniture.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "46c4dc4c097b2e52c2a780eb35663d8f774307a5f29848d93269ac0bb8d6f202",
+        "provenance": "a8aee83e315e269f3c408c086210508e1f414daf9472e6225cabe1c87db17938"
+      },
+      "bytes": {
+        "products": {
+          "raw": 5434669,
+          "on_disk": 463522
+        },
+        "provenance": {
+          "raw": 89321,
+          "on_disk": 14808
+        }
+      }
+    },
+    {
+      "host": "onyxcoffeelab.com",
+      "role": "relevant",
+      "category": "coffee",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:92",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://onyxcoffeelab.com",
+      "robots": {
+        "url": "https://onyxcoffeelab.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:38.905091+00:00",
+        "sha256": "ab7aa7417599ffe29cab7e86d9751f2bade96152c8cbc2bcef3caa6e26558be7",
+        "bytes": 5501,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://onyxcoffeelab.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:40.909547+00:00",
+          "sha256": "bb24487351dfffa29effb15d71ca4585504df32a9b9323f6681143860d31d4c7",
+          "bytes": 558016,
+          "elapsed_ms": 397,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 248,
+      "products_recorded": 248,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/onyxcoffeelab.com.products.jsonl.gz",
+        "provenance": "stores/onyxcoffeelab.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "1ec655af9f8f2d9764a656eb2e12d76d4f73523afbc215200aae918a2ab01543",
+        "provenance": "dcbc9ea0f75e18033bbcb68486d6d844be5b96307f4a735e0b3e9776f806ece8"
+      },
+      "bytes": {
+        "products": {
+          "raw": 558002,
+          "on_disk": 86965
+        },
+        "provenance": {
+          "raw": 99423,
+          "on_disk": 17933
+        }
+      }
+    },
+    {
+      "host": "deathwishcoffee.com",
+      "role": "relevant",
+      "category": "coffee",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:93",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.deathwishcoffee.com",
+      "robots": {
+        "url": "https://www.deathwishcoffee.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:41.312567+00:00",
+        "sha256": "cb9518026264803874325deb47586dc2422dd0b1415c6802653f64eb6f1b6629",
+        "bytes": 3652,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.deathwishcoffee.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:43.312610+00:00",
+          "sha256": "d4688f4b5ca2ed44dd6c0ac0cfa8a19a9078c35da52de35ec5115579ca6e0fb8",
+          "bytes": 625217,
+          "elapsed_ms": 385,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 142,
+      "products_recorded": 142,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/deathwishcoffee.com.products.jsonl.gz",
+        "provenance": "stores/deathwishcoffee.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "1ead4b8ef0634cc359c8273faecedb51f5cf9602cb8cb7b63f51b3982e9c95b9",
+        "provenance": "db7769275e1852da6695cb3825669adb01408fb4e8057b8e900476fb218fed84"
+      },
+      "bytes": {
+        "products": {
+          "raw": 625203,
+          "on_disk": 78319
+        },
+        "provenance": {
+          "raw": 58002,
+          "on_disk": 10358
+        }
+      }
+    },
+    {
+      "host": "vervecoffee.com",
+      "role": "relevant",
+      "category": "coffee",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:94",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.vervecoffee.com",
+      "robots": {
+        "url": "https://www.vervecoffee.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:43.705516+00:00",
+        "sha256": "321f34a4fa0988583132274415075e678bc2ea43cc73c675e8b62de8aead1a8a",
+        "bytes": 3634,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.vervecoffee.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:45.705536+00:00",
+          "sha256": "4154d1785cf556f01f90843ff3ff708ad494c43183b12111a3400f53e2550ace",
+          "bytes": 1438848,
+          "elapsed_ms": 565,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 175,
+      "products_recorded": 175,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/vervecoffee.com.products.jsonl.gz",
+        "provenance": "stores/vervecoffee.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "1983615ee1a669ce635154d114eb3fee64da8e5884680c51154c70b495e9c4e5",
+        "provenance": "65114aba26f184c131e3c57826a9f94b1fbace032754bbfa3a29da6dcc52b53d"
+      },
+      "bytes": {
+        "products": {
+          "raw": 1438834,
+          "on_disk": 119166
+        },
+        "provenance": {
+          "raw": 69926,
+          "on_disk": 12366
+        }
+      }
+    },
+    {
+      "host": "counterculturecoffee.com",
+      "role": "relevant",
+      "category": "coffee",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:95",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://counterculturecoffee.com",
+      "robots": {
+        "url": "https://counterculturecoffee.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:46.280991+00:00",
+        "sha256": "9fb2c30aeba54cbd2d68f21f2e7a561e934945dd9bdd12bdab3f4add75331ab7",
+        "bytes": 5705,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://counterculturecoffee.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:48.282306+00:00",
+          "sha256": "5f6d6b9bcdc74c72d8867d767c67304c2fd05268f1bee411fcd7957387a9e3a1",
+          "bytes": 561849,
+          "elapsed_ms": 1341,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 176,
+      "products_recorded": 176,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/counterculturecoffee.com.products.jsonl.gz",
+        "provenance": "stores/counterculturecoffee.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "bbbd4ec39f15930acffcb3955a72df109ced3e434fac9ab3ce852e0876685424",
+        "provenance": "4116412261f531e41dde33720f673c81f3b973a5a07839c2b24e957717ce9a0f"
+      },
+      "bytes": {
+        "products": {
+          "raw": 561835,
+          "on_disk": 105443
+        },
+        "provenance": {
+          "raw": 70813,
+          "on_disk": 12483
+        }
+      }
+    },
+    {
+      "host": "taylorstitch.com",
+      "role": "relevant",
+      "category": "apparel",
+      "note": "MEASURED >=1,235 products",
+      "roster_source": "candidate-hosts.txt:98",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.taylorstitch.com",
+      "robots": {
+        "url": "https://www.taylorstitch.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:49.629413+00:00",
+        "sha256": "b341826b1a27478e2c74f6b84d9e214a20dfce3fec00a237c29329ebecbc690c",
+        "bytes": 5793,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.taylorstitch.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:51.629701+00:00",
+          "sha256": "d624ff916900f620efb682c0e05bc95afeba92e7f09ff229da34cbe2b2608b7e",
+          "bytes": 1663954,
+          "elapsed_ms": 802,
+          "note": ""
+        },
+        {
+          "url": "https://www.taylorstitch.com/products.json?limit=250&page=2",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:53.632277+00:00",
+          "sha256": "5f89e8548bdc81e903cc369b8c2d63b261fb00de4be7f15b53aedf11b1cbddd3",
+          "bytes": 1607508,
+          "elapsed_ms": 937,
+          "note": ""
+        },
+        {
+          "url": "https://www.taylorstitch.com/products.json?limit=250&page=3",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:55.632474+00:00",
+          "sha256": "3bbed55bea03cd10e8343060b46ffa37cfeb9e6a032525aaef2c5ad1c5e92192",
+          "bytes": 1765674,
+          "elapsed_ms": 660,
+          "note": ""
+        },
+        {
+          "url": "https://www.taylorstitch.com/products.json?limit=250&page=4",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:57.632559+00:00",
+          "sha256": "010d04a5138143580cfaf680a6ea48b3469df4a5adb003f1b86614a4bf93b574",
+          "bytes": 1474199,
+          "elapsed_ms": 751,
+          "note": ""
+        },
+        {
+          "url": "https://www.taylorstitch.com/products.json?limit=250&page=5",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:59.632700+00:00",
+          "sha256": "e053b11b7a9d9ef379572623ca4ca58a829cdc8dcf6f67ce7a8f9766e695f98b",
+          "bytes": 1654682,
+          "elapsed_ms": 857,
+          "note": ""
+        },
+        {
+          "url": "https://www.taylorstitch.com/products.json?limit=250&page=6",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:01.634673+00:00",
+          "sha256": "cadaddae8e35447fcab24941c14407ab170ed07842cb478573c2fd6148e03035",
+          "bytes": 1598985,
+          "elapsed_ms": 1948,
+          "note": ""
+        },
+        {
+          "url": "https://www.taylorstitch.com/products.json?limit=250&page=7",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:03.639682+00:00",
+          "sha256": "bede740f44db4d4543c49ea0788dd0ed3701b46d0cc0375be5b575551a8b0f33",
+          "bytes": 1361187,
+          "elapsed_ms": 1804,
+          "note": ""
+        },
+        {
+          "url": "https://www.taylorstitch.com/products.json?limit=250&page=8",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:05.640408+00:00",
+          "sha256": "ad9768373837e9e86556af25116b7df187046fb2c2ad1573f451ad4224a111f0",
+          "bytes": 1622547,
+          "elapsed_ms": 834,
+          "note": ""
+        },
+        {
+          "url": "https://www.taylorstitch.com/products.json?limit=250&page=9",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:07.645419+00:00",
+          "sha256": "99ebc46a78d4b43719daedecab1b48f708a0bd5ee1b5764d12b9c7bb71bd7a18",
+          "bytes": 1623412,
+          "elapsed_ms": 1373,
+          "note": ""
+        },
+        {
+          "url": "https://www.taylorstitch.com/products.json?limit=250&page=10",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:09.651764+00:00",
+          "sha256": "761382ce82e44ecad911ad3dad97501ae5edbe89f707546551a0556409964da6",
+          "bytes": 1432306,
+          "elapsed_ms": 1201,
+          "note": ""
+        },
+        {
+          "url": "https://www.taylorstitch.com/products.json?limit=250&page=11",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:11.651907+00:00",
+          "sha256": "698cc114b0ce9b84d14c70a8f4854dd12814116fdf9d82a9670a0eb74e0466ba",
+          "bytes": 1691305,
+          "elapsed_ms": 718,
+          "note": ""
+        },
+        {
+          "url": "https://www.taylorstitch.com/products.json?limit=250&page=12",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:13.655802+00:00",
+          "sha256": "f6aceb613f4f8dc19c74f73bbe943cf0756daeea2b3b1c44076242914cf253bf",
+          "bytes": 1743733,
+          "elapsed_ms": 2119,
+          "note": ""
+        },
+        {
+          "url": "https://www.taylorstitch.com/products.json?limit=250&page=13",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:15.785906+00:00",
+          "sha256": "0747d9a7038a1bcda9f6e118b14f4f928467cd524a8a25346aac75f1fd829103",
+          "bytes": 1316561,
+          "elapsed_ms": 1199,
+          "note": ""
+        },
+        {
+          "url": "https://www.taylorstitch.com/products.json?limit=250&page=14",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:17.786635+00:00",
+          "sha256": "91e9d051ec8e658d8c153a8bb433336aa29cf811207775e4e375af5cc56f667b",
+          "bytes": 1379386,
+          "elapsed_ms": 702,
+          "note": ""
+        },
+        {
+          "url": "https://www.taylorstitch.com/products.json?limit=250&page=15",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:19.793977+00:00",
+          "sha256": "de7ed25703c6fecd584589fffba55f73f1cfcddb741e61c8d5715fbf9eedb424",
+          "bytes": 1625468,
+          "elapsed_ms": 1662,
+          "note": ""
+        },
+        {
+          "url": "https://www.taylorstitch.com/products.json?limit=250&page=16",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:21.794037+00:00",
+          "sha256": "3047d2f1f8f423acac51fb5a8a235a62ee573da79bd4d3b968cebec92f19674d",
+          "bytes": 394837,
+          "elapsed_ms": 281,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 16,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 3805,
+      "products_recorded": 3805,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/taylorstitch.com.products.jsonl.gz",
+        "provenance": "stores/taylorstitch.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "793b4d48bc5e341e9c62d6f482dc96f7b063d0e356009974f9ff48bb540da56b",
+        "provenance": "8391d60020d5a4edc1b117dfb6114e2beb79d24537a8f842f38169eb5b13ea3a"
+      },
+      "bytes": {
+        "products": {
+          "raw": 23955520,
+          "on_disk": 1991991
+        },
+        "provenance": {
+          "raw": 1585567,
+          "on_disk": 264018
+        }
+      }
+    },
+    {
+      "host": "marinelayer.com",
+      "role": "relevant",
+      "category": "apparel",
+      "note": "MEASURED >=1,901 products — likely the largest store on this list",
+      "roster_source": "candidate-hosts.txt:99",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.marinelayer.com",
+      "robots": {
+        "url": "https://www.marinelayer.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:45:22.079867+00:00",
+        "sha256": "03e34e1902da762865e3c25f23c54b7f9c8b05fb859b16601c1f8631b641bb91",
+        "bytes": 3636,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.marinelayer.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:24.080833+00:00",
+          "sha256": "c331ba1c81a126ad29ae03f7782d7f2ba15ee4bc4e2dc829cbe319e53afbe432",
+          "bytes": 1137662,
+          "elapsed_ms": 565,
+          "note": ""
+        },
+        {
+          "url": "https://www.marinelayer.com/products.json?limit=250&page=2",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:26.082625+00:00",
+          "sha256": "91b8a8b1c5efa8d8c39bbcf878678b0b828f5e1b3f91fdd53ef818006f7712a5",
+          "bytes": 1134369,
+          "elapsed_ms": 744,
+          "note": ""
+        },
+        {
+          "url": "https://www.marinelayer.com/products.json?limit=250&page=3",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:28.082700+00:00",
+          "sha256": "319f8499d406c81ba8814bdc8c1ef7240aa433fda5ee9cecec8be8f8005a368a",
+          "bytes": 1174436,
+          "elapsed_ms": 583,
+          "note": ""
+        },
+        {
+          "url": "https://www.marinelayer.com/products.json?limit=250&page=4",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:30.083340+00:00",
+          "sha256": "74134ba51dbb1081364a24cecf81b08628836d5670b9860015ebb4176627a933",
+          "bytes": 1217146,
+          "elapsed_ms": 535,
+          "note": ""
+        },
+        {
+          "url": "https://www.marinelayer.com/products.json?limit=250&page=5",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:32.085107+00:00",
+          "sha256": "0b73f9a393f4c093f1627f89bbebe5a0b0d2b862dbbd78e69c8ddbfa42bd99d1",
+          "bytes": 1269874,
+          "elapsed_ms": 453,
+          "note": ""
+        },
+        {
+          "url": "https://www.marinelayer.com/products.json?limit=250&page=6",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:34.089475+00:00",
+          "sha256": "552920d641ea15d157a65ecb861b4da594bedeb72d9e9abc672b71cb2dab7faf",
+          "bytes": 1243900,
+          "elapsed_ms": 600,
+          "note": ""
+        },
+        {
+          "url": "https://www.marinelayer.com/products.json?limit=250&page=7",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:36.090114+00:00",
+          "sha256": "8d1f4f1dd0fe3a8f658fd12fa33abf52913ba489764491ef03fe379c4001b381",
+          "bytes": 1319476,
+          "elapsed_ms": 544,
+          "note": ""
+        },
+        {
+          "url": "https://www.marinelayer.com/products.json?limit=250&page=8",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:38.090866+00:00",
+          "sha256": "373661e2630035f107bdacb54ed4a9f349f076cf3173050d2f7d2111e8fa68bc",
+          "bytes": 1330970,
+          "elapsed_ms": 609,
+          "note": ""
+        },
+        {
+          "url": "https://www.marinelayer.com/products.json?limit=250&page=9",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:40.100879+00:00",
+          "sha256": "714a73d3f8802652204004bb8fbf78f1279eb0f71a55591e9ab807a48ea0e3b3",
+          "bytes": 1219892,
+          "elapsed_ms": 924,
+          "note": ""
+        },
+        {
+          "url": "https://www.marinelayer.com/products.json?limit=250&page=10",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:42.101453+00:00",
+          "sha256": "e12f2ddd9109ea9d9cbdb3e3db4b05602d08d284d891827e4f706172cba0a058",
+          "bytes": 1242709,
+          "elapsed_ms": 762,
+          "note": ""
+        },
+        {
+          "url": "https://www.marinelayer.com/products.json?limit=250&page=11",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:44.102257+00:00",
+          "sha256": "573de9cebb5dcaf93c7078813f4e087064d756f572d5c364e6110c6030ab937e",
+          "bytes": 283535,
+          "elapsed_ms": 683,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 11,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 2556,
+      "products_recorded": 2556,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/marinelayer.com.products.jsonl.gz",
+        "provenance": "stores/marinelayer.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "187889f376c21ca10007790cf4630908e318cc054253a9e375c94a4f4b1e960c",
+        "provenance": "cea070cfce635ff7eb36b0a4e6cc457f7ea10dc49190360444feb4c598e027ce"
+      },
+      "bytes": {
+        "products": {
+          "raw": 12573815,
+          "on_disk": 965584
+        },
+        "provenance": {
+          "raw": 1034410,
+          "on_disk": 168117
+        }
+      }
+    },
+    {
+      "host": "allbirds.com",
+      "role": "relevant",
+      "category": "apparel",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:100",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.allbirds.com",
+      "robots": {
+        "url": "https://www.allbirds.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:45:44.789489+00:00",
+        "sha256": "c9733b5b6b448f7056fe3a3d8140cee3784e8b9ef075a9c5002f41b73c9d9bca",
+        "bytes": 5495,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.allbirds.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:46.792366+00:00",
+          "sha256": "32846784d580ce42edf5004974c59a22eaa0ccf3e0ed2a76f69939b27bb5eaf8",
+          "bytes": 1614637,
+          "elapsed_ms": 1022,
+          "note": ""
+        },
+        {
+          "url": "https://www.allbirds.com/products.json?limit=250&page=2",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:48.794372+00:00",
+          "sha256": "5a13aa1d218ac3b9dba4da6f4ffaf1af081b40ebd149fe7c1e12f133a232f1e4",
+          "bytes": 223327,
+          "elapsed_ms": 205,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 2,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 294,
+      "products_recorded": 294,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/allbirds.com.products.jsonl.gz",
+        "provenance": "stores/allbirds.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "45668b879f6f06f11e2d6818859b883b57fad84c4b130ea608dec45bb7760f68",
+        "provenance": "b1947576ebf732765860086870071c6c3ea4913cf6a770a76ad4093f5d1365da"
+      },
+      "bytes": {
+        "products": {
+          "raw": 1837936,
+          "on_disk": 154210
+        },
+        "provenance": {
+          "raw": 120460,
+          "on_disk": 19875
+        }
+      }
+    },
+    {
+      "host": "bombas.com",
+      "role": "relevant",
+      "category": "apparel",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:101",
+      "walk_outcome": "robots_http_429",
+      "effective_origin": "https://bombas.com",
+      "robots": {
+        "url": "https://bombas.com/robots.txt",
+        "status": 429,
+        "fetched_at": "2026-09-08T22:50:34.374313+00:00",
+        "sha256": "f98699bf6ad96a45976ff6e2a180286f9e659412155ae3f2135d9c8d116032c1",
+        "bytes": 32182,
+        "products_json_allowed": false,
+        "crawl_delay_seconds": 2.0,
+        "note": "robots.txt returned 429"
+      },
+      "skipped": {
+        "reason": "robots.txt for bombas.com could not be read, so https://bombas.com/products.json was not fetched — robots.txt returned 429"
+      },
+      "fetches": [],
+      "pages_fetched": 0,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 0,
+      "products_recorded": 0,
+      "duplicates_dropped": 0,
+      "files": {},
+      "file_sha256": {},
+      "bytes": {}
+    },
+    {
+      "host": "cotopaxi.com",
+      "role": "relevant",
+      "category": "outdoor",
+      "note": "MEASURED 1,430 products, walked to exhaustion",
+      "roster_source": "candidate-hosts.txt:104",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.cotopaxi.com",
+      "robots": {
+        "url": "https://www.cotopaxi.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:45:49.181019+00:00",
+        "sha256": "7c051f6dfc87a9c256f1cd46c086471e3d4bb0a795932b4e4d5dc38766651ce1",
+        "bytes": 3624,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.cotopaxi.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:51.187868+00:00",
+          "sha256": "d2f597b2be30701272f68fc53fa053204249ebf6f9beccb86d00e79c9de7a317",
+          "bytes": 3074539,
+          "elapsed_ms": 1098,
+          "note": ""
+        },
+        {
+          "url": "https://www.cotopaxi.com/products.json?limit=250&page=2",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:53.188664+00:00",
+          "sha256": "fcc60712578b1d073fbdf3a433b62cb1e0a6f7dd720b44ce09db3cff65464d13",
+          "bytes": 3828459,
+          "elapsed_ms": 1347,
+          "note": ""
+        },
+        {
+          "url": "https://www.cotopaxi.com/products.json?limit=250&page=3",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:55.196236+00:00",
+          "sha256": "e8f8ecfaba6294a547af626d40fb3b64a7dac4fca751196154e7579bd764792c",
+          "bytes": 3980257,
+          "elapsed_ms": 1192,
+          "note": ""
+        },
+        {
+          "url": "https://www.cotopaxi.com/products.json?limit=250&page=4",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:57.204564+00:00",
+          "sha256": "4f51ea5dfbef3e00ece16faf2d04eeb08b3f5897fe9b051738ec01dd00125140",
+          "bytes": 4103450,
+          "elapsed_ms": 1279,
+          "note": ""
+        },
+        {
+          "url": "https://www.cotopaxi.com/products.json?limit=250&page=5",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:45:59.214573+00:00",
+          "sha256": "5e7e993772d52fbe56e4c91d1b27dda5db61f72e228d5ce2bdbe231e606e5fa1",
+          "bytes": 4431997,
+          "elapsed_ms": 1141,
+          "note": ""
+        },
+        {
+          "url": "https://www.cotopaxi.com/products.json?limit=250&page=6",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:01.221269+00:00",
+          "sha256": "4f7811c37d3c9038f5363557c93f1c1bb524fc13d64b41cde10439c3986995ea",
+          "bytes": 3842166,
+          "elapsed_ms": 1033,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 6,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 1432,
+      "products_recorded": 1432,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/cotopaxi.com.products.jsonl.gz",
+        "provenance": "stores/cotopaxi.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "3eb72eb31e297c3d9a48e04e6c922b78abd9800cb8a744074c211aecdaaa29a3",
+        "provenance": "ad6dcd122e1035433426a297215bf1eb935392fd2d0c8477c9c5dcba7f8d8740"
+      },
+      "bytes": {
+        "products": {
+          "raw": 23260784,
+          "on_disk": 1847053
+        },
+        "provenance": {
+          "raw": 581109,
+          "on_disk": 96569
+        }
+      }
+    },
+    {
+      "host": "nemoequipment.com",
+      "role": "relevant",
+      "category": "outdoor",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:105",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.nemoequipment.com",
+      "robots": {
+        "url": "https://www.nemoequipment.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:02.281725+00:00",
+        "sha256": "7ad2a156480ce39b7312e88347c330a6db8630ae7ebd5d2717e841305b27db5e",
+        "bytes": 3652,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.nemoequipment.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:04.282742+00:00",
+          "sha256": "a0ad2e42be1a26e78926314b3e20fafa4f01c12269740b2bc8b1c3932f75c645",
+          "bytes": 585626,
+          "elapsed_ms": 518,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 97,
+      "products_recorded": 97,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/nemoequipment.com.products.jsonl.gz",
+        "provenance": "stores/nemoequipment.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "49a9e16921072b4df80e398304fdd05fb43fb2e8514abe29ca1c008ef99eb63f",
+        "provenance": "3db17ae7f18cc3c634cb523df4eeede0fd884a52cca7d684dcd6f060bef652cd"
+      },
+      "bytes": {
+        "products": {
+          "raw": 585612,
+          "on_disk": 85626
+        },
+        "provenance": {
+          "raw": 40307,
+          "on_disk": 6926
+        }
+      }
+    },
+    {
+      "host": "hyperlitemountaingear.com",
+      "role": "relevant",
+      "category": "outdoor",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:106",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://hyperlitemountaingear.com",
+      "robots": {
+        "url": "https://hyperlitemountaingear.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:04.806630+00:00",
+        "sha256": "2b3ef6f764a2f340b11fb96c83d6578ec7b5b3fc81c1c12f2b7b2a7ad9ac524a",
+        "bytes": 3667,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://hyperlitemountaingear.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:06.815392+00:00",
+          "sha256": "0ee4d9322ad54af844f6bc3c03d2d7c49562d4e9612ab1d8292bb86cf3970213",
+          "bytes": 956862,
+          "elapsed_ms": 673,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 119,
+      "products_recorded": 119,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/hyperlitemountaingear.com.products.jsonl.gz",
+        "provenance": "stores/hyperlitemountaingear.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "0facaf0b4d6fc057604aaf5dca51db475046f6288845ded157ac2e8ab10de30f",
+        "provenance": "b297719294db13143edc1c79cae5459dcce0a4c3cab6cb430628940a32ebc1b0"
+      },
+      "bytes": {
+        "products": {
+          "raw": 956848,
+          "on_disk": 122156
+        },
+        "provenance": {
+          "raw": 47928,
+          "on_disk": 8603
+        }
+      }
+    },
+    {
+      "host": "rumpl.com",
+      "role": "relevant",
+      "category": "outdoor",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:107",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.rumpl.com",
+      "robots": {
+        "url": "https://www.rumpl.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:07.497008+00:00",
+        "sha256": "10f3c4ec57bcd5df4268186f6b8e8805630c38bcf052f54406ca5edc3b5a4d12",
+        "bytes": 7877,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.rumpl.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:09.503721+00:00",
+          "sha256": "490a7bdb243a367aedbb01468c27469de67c0691c7f0215d1429ec32a6c4ccc1",
+          "bytes": 1241056,
+          "elapsed_ms": 468,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 248,
+      "products_recorded": 248,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/rumpl.com.products.jsonl.gz",
+        "provenance": "stores/rumpl.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "48c49ae65503daf085e9d6c33a89072b7b75e6ee3dd820ea969c9e39918554eb",
+        "provenance": "d5f4ea9b3600bd7e32684a4ff23ff40e10d81cc0aed46c0edaac7074d630f50f"
+      },
+      "bytes": {
+        "products": {
+          "raw": 1241042,
+          "on_disk": 120396
+        },
+        "provenance": {
+          "raw": 101661,
+          "on_disk": 16682
+        }
+      }
+    },
+    {
+      "host": "wildone.com",
+      "role": "relevant",
+      "category": "pet",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:110",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://wildone.com",
+      "robots": {
+        "url": "https://wildone.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:09.981237+00:00",
+        "sha256": "b6eab14bd2eff6a32d2e4127de94535aff4653d6f8f614c5179a96d22d790c7c",
+        "bytes": 3610,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://wildone.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:11.981525+00:00",
+          "sha256": "f697197116ed4ebe523faa99acbb709e1aac2943e48c0e111bbb593672600847",
+          "bytes": 712779,
+          "elapsed_ms": 333,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 57,
+      "products_recorded": 57,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/wildone.com.products.jsonl.gz",
+        "provenance": "stores/wildone.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "54cf95949edff5f6a7dbec7972a0b18fd62e92ef435cbc18790d86dc21ffa443",
+        "provenance": "275617dff62b5cc3c3c893c0f6196826f2f1c7af5dd64c7000aacd9e447e5603"
+      },
+      "bytes": {
+        "products": {
+          "raw": 712765,
+          "on_disk": 77787
+        },
+        "provenance": {
+          "raw": 22453,
+          "on_disk": 4109
+        }
+      }
+    },
+    {
+      "host": "maxbone.com",
+      "role": "relevant",
+      "category": "pet",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:111",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.maxbone.com",
+      "robots": {
+        "url": "https://www.maxbone.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:12.322903+00:00",
+        "sha256": "524cf35ad5dba6165c4e4a3f4602198d18e00a233a7ecd806eaf04c3c8208ce8",
+        "bytes": 3620,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.maxbone.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:14.323241+00:00",
+          "sha256": "f78b5080bb3154748e37f6505f6046eed999bec120b79c731e7a26fcc20544d5",
+          "bytes": 867499,
+          "elapsed_ms": 393,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 96,
+      "products_recorded": 96,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/maxbone.com.products.jsonl.gz",
+        "provenance": "stores/maxbone.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "9bfd1d2928ce98004f887f6bbd85f3746bf3329e563b237fd345ddd2655cc934",
+        "provenance": "23f8751666f31dcbf053ab3aa601f94709a9a3d5685933ac328cd8ba9dffbb08"
+      },
+      "bytes": {
+        "products": {
+          "raw": 867485,
+          "on_disk": 94334
+        },
+        "provenance": {
+          "raw": 38302,
+          "on_disk": 7004
+        }
+      }
+    },
+    {
+      "host": "fablepets.com",
+      "role": "relevant",
+      "category": "pet",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:112",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://fablepets.com",
+      "robots": {
+        "url": "https://fablepets.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:14.725051+00:00",
+        "sha256": "4fdc77e15a455b3e463d32abaac3bd51af70a502af86b0b06600981733c4e4d5",
+        "bytes": 5439,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://fablepets.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:16.727487+00:00",
+          "sha256": "2d6bca5612de34959baf3d79ebc0f0a431496296671afed6485e78e4d57465b2",
+          "bytes": 657952,
+          "elapsed_ms": 355,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 67,
+      "products_recorded": 67,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/fablepets.com.products.jsonl.gz",
+        "provenance": "stores/fablepets.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "fd45605b4c50be15ae71b1ac0390a4d8630a1f24bc0c87201672909c3500454f",
+        "provenance": "60b2bcf3b94f7d87fd3ee3939fcb6262f3f0130e20f6a3b25ff7c699aaf4308f"
+      },
+      "bytes": {
+        "products": {
+          "raw": 657938,
+          "on_disk": 82797
+        },
+        "provenance": {
+          "raw": 26754,
+          "on_disk": 5199
+        }
+      }
+    },
+    {
+      "host": "pupford.com",
+      "role": "relevant",
+      "category": "pet",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:113",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://pupford.com",
+      "robots": {
+        "url": "https://pupford.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:17.089210+00:00",
+        "sha256": "2abf606a447426b62570176b94acb8f7bbce7541d7c0d2fe15c8523390d9a8fe",
+        "bytes": 5498,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://pupford.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:19.091110+00:00",
+          "sha256": "b233463b1f1a766e24437308905b97a5713eb806acc0c447ffadbe265ec1a43f",
+          "bytes": 920353,
+          "elapsed_ms": 897,
+          "note": ""
+        },
+        {
+          "url": "https://pupford.com/products.json?limit=250&page=2",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:21.091121+00:00",
+          "sha256": "0d86abeef50f9c09d526a7b8e51f3c01f9bad1bcb3cef6e6093bcca42618ce6c",
+          "bytes": 326781,
+          "elapsed_ms": 366,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 2,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 315,
+      "products_recorded": 315,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/pupford.com.products.jsonl.gz",
+        "provenance": "stores/pupford.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "e2b53194325d830660b62a68aebb31648205d19be915a29443cf7e84e1262f15",
+        "provenance": "5873d229b430640e14d3386f6dd9fcb16acfa43095715ddabbb8fe49bb63e0b7"
+      },
+      "bytes": {
+        "products": {
+          "raw": 1247106,
+          "on_disk": 142442
+        },
+        "provenance": {
+          "raw": 125419,
+          "on_disk": 21114
+        }
+      }
+    },
+    {
+      "host": "madeincookware.com",
+      "role": "relevant",
+      "category": "home-kitchen",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:116",
+      "walk_outcome": "http_403",
+      "effective_origin": "https://madeincookware.com",
+      "robots": {
+        "url": "https://madeincookware.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:21.462352+00:00",
+        "sha256": "f64530aa51d8aad6de11076a74e64779f93f9cf0c938807800c3353d30f75bbe",
+        "bytes": 329,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": {
+        "reason": "page 1 returned HTTP 403"
+      },
+      "fetches": [
+        {
+          "url": "https://madeincookware.com/products.json?limit=250&page=1",
+          "status": 403,
+          "fetched_at": "2026-09-08T22:46:23.470260+00:00",
+          "sha256": "f351eb12dec2e409c95e625555c6276293eaaa008832a4d849b2990da2fd052d",
+          "bytes": 93,
+          "elapsed_ms": 50,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 0,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "page 1 returned HTTP 403",
+      "products_seen": 0,
+      "products_recorded": 0,
+      "duplicates_dropped": 0,
+      "files": {},
+      "file_sha256": {},
+      "bytes": {}
+    },
+    {
+      "host": "carawayhome.com",
+      "role": "relevant",
+      "category": "home-kitchen",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:117",
+      "walk_outcome": "http_404",
+      "effective_origin": "https://www.carawayhome.com",
+      "robots": {
+        "url": "https://www.carawayhome.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:23.523422+00:00",
+        "sha256": "b2bea8b0520045999e71938e1a1f25f22f178e134bd8430543813ce52b941afc",
+        "bytes": 107,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": {
+        "reason": "page 1 returned HTTP 404"
+      },
+      "fetches": [
+        {
+          "url": "https://www.carawayhome.com/products.json?limit=250&page=1",
+          "status": 404,
+          "fetched_at": "2026-09-08T22:46:25.527029+00:00",
+          "sha256": "fe5c3346419a3eac8c24d9f0b9245dc45930a5a85a4607a910ca1ea86690b7d6",
+          "bytes": 745346,
+          "elapsed_ms": 101,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 0,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "page 1 returned HTTP 404",
+      "products_seen": 0,
+      "products_recorded": 0,
+      "duplicates_dropped": 0,
+      "files": {},
+      "file_sha256": {},
+      "bytes": {}
+    },
+    {
+      "host": "fellowproducts.com",
+      "role": "relevant",
+      "category": "home-kitchen",
+      "note": "brews coffee; a deliberate overlap with the coffee category",
+      "roster_source": "candidate-hosts.txt:118",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://fellowproducts.com",
+      "robots": {
+        "url": "https://fellowproducts.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:25.630916+00:00",
+        "sha256": "206a94ab98a11f789513d6f2f2b72f223bb60ac4d056f2dfad898a616734c97a",
+        "bytes": 5394,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://fellowproducts.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:27.631704+00:00",
+          "sha256": "f6f24c41d8f0b8b8c95da2ca41cfb0999db24eac3f64618da792adcfdf54478d",
+          "bytes": 664843,
+          "elapsed_ms": 531,
+          "note": ""
+        },
+        {
+          "url": "https://fellowproducts.com/products.json?limit=250&page=2",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:29.631913+00:00",
+          "sha256": "8a922101b27b25547788647b3a633eb3bf95a539e1fe0e53e00e485c9dab65e4",
+          "bytes": 907269,
+          "elapsed_ms": 1651,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 2,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 441,
+      "products_recorded": 441,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/fellowproducts.com.products.jsonl.gz",
+        "provenance": "stores/fellowproducts.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "1d447b8546d9ce9f441510b254d86a01c898fdd84a56fa650a432812e28e67d6",
+        "provenance": "f83b3ff2c60017b0c24769ce2f5d718e88851b8a59efce330457db4cc21d5b5f"
+      },
+      "bytes": {
+        "products": {
+          "raw": 1572084,
+          "on_disk": 231583
+        },
+        "provenance": {
+          "raw": 176667,
+          "on_disk": 31532
+        }
+      }
+    },
+    {
+      "host": "fromourplace.com",
+      "role": "relevant",
+      "category": "home-kitchen",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:119",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://fromourplace.com",
+      "robots": {
+        "url": "https://fromourplace.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:31.292697+00:00",
+        "sha256": "c8424ff99e6c8615d43c7774e32a3cc558e4115959ae2a183cf44414a6fca5f6",
+        "bytes": 13168,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://fromourplace.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:33.295418+00:00",
+          "sha256": "0a12414898c7c118ef89519abeaace86b982fa08660bf0abce362b9c52c5ebb6",
+          "bytes": 1084090,
+          "elapsed_ms": 528,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 123,
+      "products_recorded": 123,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/fromourplace.com.products.jsonl.gz",
+        "provenance": "stores/fromourplace.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "a299c3712b4aced8db587d090f98d1cbb55ab1160017c3c795b0fb4b48c7e1ae",
+        "provenance": "e196fc88e921feb8b55a797d962f74d88172e16feb7f0392d9d61d9613885981"
+      },
+      "bytes": {
+        "products": {
+          "raw": 1084076,
+          "on_disk": 112284
+        },
+        "provenance": {
+          "raw": 48629,
+          "on_disk": 8495
+        }
+      }
+    },
+    {
+      "host": "katzmosestools.com",
+      "role": "relevant",
+      "category": "tools",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:122",
+      "walk_outcome": "robots_transport_error",
+      "effective_origin": "https://katzmosestools.com",
+      "robots": {
+        "url": "https://katzmosestools.com/robots.txt",
+        "status": 0,
+        "fetched_at": "2026-09-08T22:50:34.591446+00:00",
+        "sha256": "",
+        "bytes": 0,
+        "products_json_allowed": false,
+        "crawl_delay_seconds": 2.0,
+        "note": "robots.txt returned 0"
+      },
+      "skipped": {
+        "reason": "robots.txt for katzmosestools.com could not be read, so https://katzmosestools.com/products.json was not fetched — robots.txt returned 0"
+      },
+      "fetches": [],
+      "pages_fetched": 0,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 0,
+      "products_recorded": 0,
+      "duplicates_dropped": 0,
+      "files": {},
+      "file_sha256": {},
+      "bytes": {}
+    },
+    {
+      "host": "taylortoolworks.com",
+      "role": "relevant",
+      "category": "tools",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:123",
+      "walk_outcome": "http_404",
+      "effective_origin": "https://taylortoolworks.com",
+      "robots": {
+        "url": "https://taylortoolworks.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:33.884065+00:00",
+        "sha256": "fd89345af6aca5dab85f2aa6a830e270a362b1fa6b5f19607ddd773a081ed651",
+        "bytes": 14,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": {
+        "reason": "page 1 returned HTTP 404"
+      },
+      "fetches": [
+        {
+          "url": "https://taylortoolworks.com/products.json?limit=250&page=1",
+          "status": 404,
+          "fetched_at": "2026-09-08T22:46:35.885465+00:00",
+          "sha256": "ea95db8321039d1f62c91af2de6ba785edab554c161c331ec0564e5458a4a153",
+          "bytes": 1807,
+          "elapsed_ms": 77,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 0,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "page 1 returned HTTP 404",
+      "products_seen": 0,
+      "products_recorded": 0,
+      "duplicates_dropped": 0,
+      "files": {},
+      "file_sha256": {},
+      "bytes": {}
+    },
+    {
+      "host": "bridgecitytools.com",
+      "role": "relevant",
+      "category": "tools",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:124",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://bridgecitytools.com",
+      "robots": {
+        "url": "https://bridgecitytools.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:35.965821+00:00",
+        "sha256": "391c569b29bef08f02485f559d49d1b45aece0c4ba949dfa9a4ccd94b115adbb",
+        "bytes": 3642,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://bridgecitytools.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:37.970455+00:00",
+          "sha256": "24c643e8eff0ae76ab512e536db11dbe905d66799bd6b9df1aa2a81dd055ac6a",
+          "bytes": 391812,
+          "elapsed_ms": 689,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 77,
+      "products_recorded": 77,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/bridgecitytools.com.products.jsonl.gz",
+        "provenance": "stores/bridgecitytools.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "b1d22adf7605cd78c2bc52dc2313e09467cacf2772993574bf64abad82bf577f",
+        "provenance": "282f481c87dd8be5aee94346c91b5ff1e7a91abeb527d2bda01fedaffaa9c2d5"
+      },
+      "bytes": {
+        "products": {
+          "raw": 391798,
+          "on_disk": 67950
+        },
+        "provenance": {
+          "raw": 30933,
+          "on_disk": 5705
+        }
+      }
+    },
+    {
+      "host": "flybyjing.com",
+      "role": "relevant",
+      "category": "food",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:127",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://flybyjing.com",
+      "robots": {
+        "url": "https://flybyjing.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:38.664774+00:00",
+        "sha256": "c2456eeb5472bd3a9de723be75b7f26f4c47f748437a83cc0b58fe131cef3826",
+        "bytes": 3618,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://flybyjing.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:40.665007+00:00",
+          "sha256": "b8aeefe6797987784607356bcddfd39ae7587fcfff2fc4070f3fca75255bc2d9",
+          "bytes": 130234,
+          "elapsed_ms": 164,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 32,
+      "products_recorded": 32,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/flybyjing.com.products.jsonl.gz",
+        "provenance": "stores/flybyjing.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "5a1dc837d26d9056645d8634c60b4ddb81a7c8273ddaaab5b57134f055b9f262",
+        "provenance": "322ed29373609dc46838d1228bbb9eef754014843e722e93676f33185b27a803"
+      },
+      "bytes": {
+        "products": {
+          "raw": 130220,
+          "on_disk": 20560
+        },
+        "provenance": {
+          "raw": 12453,
+          "on_disk": 2500
+        }
+      }
+    },
+    {
+      "host": "omsom.com",
+      "role": "relevant",
+      "category": "food",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:128",
+      "walk_outcome": "http_404",
+      "effective_origin": "https://omsom.com",
+      "robots": {
+        "url": "https://omsom.com/robots.txt",
+        "status": 404,
+        "fetched_at": "2026-09-08T22:46:40.833444+00:00",
+        "sha256": "4ae7de8164074ebd8763d7c98c47a2f780b6ce0936f2110c581dd3b281f21403",
+        "bytes": 587,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": "robots.txt returned 404 (absent robots.txt: RFC 9309 treats 404 as unrestricted)"
+      },
+      "skipped": {
+        "reason": "page 1 returned HTTP 404"
+      },
+      "fetches": [
+        {
+          "url": "https://omsom.com/products.json?limit=250&page=1",
+          "status": 404,
+          "fetched_at": "2026-09-08T22:46:42.834057+00:00",
+          "sha256": "4ae7de8164074ebd8763d7c98c47a2f780b6ce0936f2110c581dd3b281f21403",
+          "bytes": 587,
+          "elapsed_ms": 152,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 0,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "page 1 returned HTTP 404",
+      "products_seen": 0,
+      "products_recorded": 0,
+      "duplicates_dropped": 0,
+      "files": {},
+      "file_sha256": {},
+      "bytes": {}
+    },
+    {
+      "host": "graza.co",
+      "role": "relevant",
+      "category": "food",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:129",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.graza.co",
+      "robots": {
+        "url": "https://www.graza.co/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:42:58.145187+00:00",
+        "sha256": "e67725cac91cc23bd7ce6a57d37e37f29965ae883bc752018d4ddb6d223755ca",
+        "bytes": 3616,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.graza.co/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:43:00.150205+00:00",
+          "sha256": "7d936e86a3345f2e6a1fb285920424d820f4fddbefe014e0b5ca143465903a04",
+          "bytes": 257598,
+          "elapsed_ms": 442,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 80,
+      "products_recorded": 80,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/graza.co.products.jsonl.gz",
+        "provenance": "stores/graza.co.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "99a8ccbe4c75d1d7806a46ddaef2877e22ec86f6942df2f3a70a54a3d1d029a0",
+        "provenance": "5c5e20cecf21d38d69e14512cc896eacf23ce763557a7e0f56da20d238e81b99"
+      },
+      "bytes": {
+        "products": {
+          "raw": 257584,
+          "on_disk": 24906
+        },
+        "provenance": {
+          "raw": 31262,
+          "on_disk": 5477
+        }
+      }
+    },
+    {
+      "host": "iliabeauty.com",
+      "role": "relevant",
+      "category": "beauty",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:132",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://iliabeauty.com",
+      "robots": {
+        "url": "https://iliabeauty.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:42.991728+00:00",
+        "sha256": "aa3bc69d3c94838470fa08cd1be1be02ced34c62d270e68e0205a33eedc5395b",
+        "bytes": 3624,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://iliabeauty.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:44.994533+00:00",
+          "sha256": "f56c373aceee93c829317d1fdbf3db9a12a9919a20c2c94a6bc6eacd827fc7eb",
+          "bytes": 618730,
+          "elapsed_ms": 527,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 80,
+      "products_recorded": 80,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/iliabeauty.com.products.jsonl.gz",
+        "provenance": "stores/iliabeauty.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "521368ae358f747a3d4a8bd4aa48e55c7e10a103b20605dddc5f110d1a95f9d1",
+        "provenance": "e212d879d1c1fc7220d3557bba80231f0f2f63fb6cfc21472524c50f708b0b50"
+      },
+      "bytes": {
+        "products": {
+          "raw": 618716,
+          "on_disk": 84951
+        },
+        "provenance": {
+          "raw": 32190,
+          "on_disk": 6098
+        }
+      }
+    },
+    {
+      "host": "youthtothepeople.com",
+      "role": "relevant",
+      "category": "beauty",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:133",
+      "walk_outcome": "http_403",
+      "effective_origin": "https://www.youthtothepeople.com",
+      "robots": {
+        "url": "https://www.youthtothepeople.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:45.528606+00:00",
+        "sha256": "a052258143a321968505b6d23d6868ec0e5e2bb30313e61455fb0fe1a705e9cb",
+        "bytes": 852,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 5.0,
+        "note": "crawl-delay 5.0s declared; honoured as max(delay, --min-interval)"
+      },
+      "skipped": {
+        "reason": "page 1 returned HTTP 403"
+      },
+      "fetches": [
+        {
+          "url": "https://www.youthtothepeople.com/products.json?limit=250&page=1",
+          "status": 403,
+          "fetched_at": "2026-09-08T22:46:50.537057+00:00",
+          "sha256": "bebf0a8aa2242e3c7dc10ce92ed198368183daed3f1a920a682d75d837dc293d",
+          "bytes": 5833,
+          "elapsed_ms": 21,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 0,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "page 1 returned HTTP 403",
+      "products_seen": 0,
+      "products_recorded": 0,
+      "duplicates_dropped": 0,
+      "files": {},
+      "file_sha256": {},
+      "bytes": {}
+    },
+    {
+      "host": "versedskin.com",
+      "role": "relevant",
+      "category": "beauty",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:134",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://versedskin.com",
+      "robots": {
+        "url": "https://versedskin.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:50.566629+00:00",
+        "sha256": "ea3fb3ae09ce2ee69b88299e5113551fed0f702921d7d33bac377bfb74eb1fa5",
+        "bytes": 3624,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://versedskin.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:52.571372+00:00",
+          "sha256": "c33c343f010eed29bbf57451777a852c5817ea02d3de56777c79187b6510768a",
+          "bytes": 842288,
+          "elapsed_ms": 561,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 76,
+      "products_recorded": 76,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/versedskin.com.products.jsonl.gz",
+        "provenance": "stores/versedskin.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "cdc07354a7018ebd3685330be325dc29b61bde5477c8960596c29fcd3b2eb71a",
+        "provenance": "43c51d81d94c0fb54ea29d43a9e6cc1317244bf48ae8204da0e3f81f21e0f87b"
+      },
+      "bytes": {
+        "products": {
+          "raw": 842274,
+          "on_disk": 70900
+        },
+        "provenance": {
+          "raw": 29698,
+          "on_disk": 5327
+        }
+      }
+    },
+    {
+      "host": "fringesport.com",
+      "role": "relevant",
+      "category": "sports",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:137",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.fringesport.com",
+      "robots": {
+        "url": "https://www.fringesport.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:53.140629+00:00",
+        "sha256": "9b8b8d1cfc13d5ef27c1fc8204fd860c8627947fd6b88ab211cbeeccc18e4092",
+        "bytes": 3634,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.fringesport.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:55.140719+00:00",
+          "sha256": "d9eac82b433d527ff9e22fc21def71a06f8f9c45889885f7b898144e8d36beeb",
+          "bytes": 2786344,
+          "elapsed_ms": 2119,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 227,
+      "products_recorded": 227,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/fringesport.com.products.jsonl.gz",
+        "provenance": "stores/fringesport.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "eef636ce8774a4dc2ef823b0df42d5a600b4cc8536e6e79880a3011dfd070375",
+        "provenance": "dbf0e272036813410a690a2a76d7fc33aa116e891f3339229a7c4d95817255be"
+      },
+      "bytes": {
+        "products": {
+          "raw": 2786330,
+          "on_disk": 416631
+        },
+        "provenance": {
+          "raw": 91925,
+          "on_disk": 16591
+        }
+      }
+    },
+    {
+      "host": "titan.fitness",
+      "role": "relevant",
+      "category": "sports",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:138",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://titan.fitness",
+      "robots": {
+        "url": "https://titan.fitness/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:57.278521+00:00",
+        "sha256": "854b66ff9ca8cc3af6af3b90e35f83090c802c5a5477b360b23750f85502f584",
+        "bytes": 5766,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://titan.fitness/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:59.288559+00:00",
+          "sha256": "146d2e32c27a014711e082febfe2e7cd6e8c0020e39e78cbd7834ee2cf23dd89",
+          "bytes": 1286266,
+          "elapsed_ms": 889,
+          "note": ""
+        },
+        {
+          "url": "https://titan.fitness/products.json?limit=250&page=2",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:47:01.298606+00:00",
+          "sha256": "94128c93c9ec82a81aaca09b183932c6ffc3629df59095e0e7cb891f8f797634",
+          "bytes": 1834562,
+          "elapsed_ms": 691,
+          "note": ""
+        },
+        {
+          "url": "https://titan.fitness/products.json?limit=250&page=3",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:47:03.299602+00:00",
+          "sha256": "93ed25bf790df5a89896eddca498f4a6e77abfd9b7fe978c2ff594f3485eaa00",
+          "bytes": 1285554,
+          "elapsed_ms": 577,
+          "note": ""
+        },
+        {
+          "url": "https://titan.fitness/products.json?limit=250&page=4",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:47:05.307152+00:00",
+          "sha256": "6958f1a3127d160459af5b0109617002bd4fd5b92ac79b7241743fe411367757",
+          "bytes": 1264789,
+          "elapsed_ms": 378,
+          "note": ""
+        },
+        {
+          "url": "https://titan.fitness/products.json?limit=250&page=5",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:47:07.317202+00:00",
+          "sha256": "268c515092f62945460a79e3db6d3369b8378960651169080d8f4116e712111a",
+          "bytes": 1603592,
+          "elapsed_ms": 998,
+          "note": ""
+        },
+        {
+          "url": "https://titan.fitness/products.json?limit=250&page=6",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:47:09.318981+00:00",
+          "sha256": "247f507ab7ed013725e8a57b18f1efad9f32058c6d591b67c6f8946b7237e6d8",
+          "bytes": 960460,
+          "elapsed_ms": 410,
+          "note": ""
+        },
+        {
+          "url": "https://titan.fitness/products.json?limit=250&page=7",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:47:11.322929+00:00",
+          "sha256": "befc69784eabdf90d4df874d9ca8c266542c482a7a8fb6741cb98e4a9113bf47",
+          "bytes": 976258,
+          "elapsed_ms": 487,
+          "note": ""
+        },
+        {
+          "url": "https://titan.fitness/products.json?limit=250&page=8",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:47:13.332942+00:00",
+          "sha256": "0a74088c27979f2df8e113f839caf003d9ba6d0bdf049097621a314d331f3afa",
+          "bytes": 943888,
+          "elapsed_ms": 470,
+          "note": ""
+        },
+        {
+          "url": "https://titan.fitness/products.json?limit=250&page=9",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:47:15.337034+00:00",
+          "sha256": "eae3d7dd33a2e96cc2ea9c6a9df13fef45ec52c58ba15128675bca6a5e55da70",
+          "bytes": 913276,
+          "elapsed_ms": 761,
+          "note": ""
+        },
+        {
+          "url": "https://titan.fitness/products.json?limit=250&page=10",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:47:17.347049+00:00",
+          "sha256": "4ea4c72c79ac543329dbc7ab4da7dec285391c4604be42e84c40dba7a11dcbca",
+          "bytes": 1088960,
+          "elapsed_ms": 343,
+          "note": ""
+        },
+        {
+          "url": "https://titan.fitness/products.json?limit=250&page=11",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:47:19.356785+00:00",
+          "sha256": "73e18be70e18a4dc9f91ea30d569757d08e3f7c4eb393910853e887487995cef",
+          "bytes": 450105,
+          "elapsed_ms": 237,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 11,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 2564,
+      "products_recorded": 2564,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/titan.fitness.products.jsonl.gz",
+        "provenance": "stores/titan.fitness.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "ec811b6eb1c8f7168ac77ec1f534d100f597a5e2b05ead5ec125036fabd9431b",
+        "provenance": "eb18a10044328306e1fa70d8d00d02e88bcd0ed2ede0693db61367dd2f8eee36"
+      },
+      "bytes": {
+        "products": {
+          "raw": 12607556,
+          "on_disk": 1379088
+        },
+        "provenance": {
+          "raw": 1069543,
+          "on_disk": 174400
+        }
+      }
+    },
+    {
+      "host": "tenthousand.cc",
+      "role": "relevant",
+      "category": "sports",
+      "note": "training apparel: overlaps apparel, which is the point",
+      "roster_source": "candidate-hosts.txt:139",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.tenthousand.cc",
+      "robots": {
+        "url": "https://www.tenthousand.cc/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:47:19.600636+00:00",
+        "sha256": "ab45d917e67310ec42fd9447956bce195408b0fa49a62f6e9b5b17297b65402c",
+        "bytes": 3672,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.tenthousand.cc/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:47:21.610666+00:00",
+          "sha256": "a1b316264babe5efdf143d838e83c5e117fa078d04819248c6a7b88dcc954b15",
+          "bytes": 4673129,
+          "elapsed_ms": 1557,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 76,
+      "products_recorded": 76,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/tenthousand.cc.products.jsonl.gz",
+        "provenance": "stores/tenthousand.cc.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "32678322ece888215abb2961d4b2dcc5c85e4755735b8d9d33159a3a338ff6dc",
+        "provenance": "afd14b4d8acf43a1ce10b30910b111ceda3698ea6cd33e462c51a5b7705954ec"
+      },
+      "bytes": {
+        "products": {
+          "raw": 4673115,
+          "on_disk": 315435
+        },
+        "provenance": {
+          "raw": 30213,
+          "on_disk": 5270
+        }
+      }
+    },
+    {
+      "host": "nomadgoods.com",
+      "role": "relevant",
+      "category": "electronics",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:142",
+      "walk_outcome": "http_404",
+      "effective_origin": "https://nomadgoods.com",
+      "robots": {
+        "url": "https://nomadgoods.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:47:23.199912+00:00",
+        "sha256": "6bd47b7cc5c1165cf21ddc9c1e3e42ea62cb53420355dfb44501ddef3bf5b1e6",
+        "bytes": 3699,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": {
+        "reason": "page 1 returned HTTP 404"
+      },
+      "fetches": [
+        {
+          "url": "https://nomadgoods.com/products.json?limit=250&page=1",
+          "status": 404,
+          "fetched_at": "2026-09-08T22:47:25.204029+00:00",
+          "sha256": "0db1562da9ff27cafd35e2d52b0014e331b23a35843d3e7a21e68729bea85fea",
+          "bytes": 300170,
+          "elapsed_ms": 1233,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 0,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "page 1 returned HTTP 404",
+      "products_seen": 0,
+      "products_recorded": 0,
+      "duplicates_dropped": 0,
+      "files": {},
+      "file_sha256": {},
+      "bytes": {}
+    },
+    {
+      "host": "peakdesign.com",
+      "role": "relevant",
+      "category": "electronics",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:143",
+      "walk_outcome": "http_404",
+      "effective_origin": "https://www.peakdesign.com",
+      "robots": {
+        "url": "https://www.peakdesign.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:47:26.440665+00:00",
+        "sha256": "e08a460e3a572c5dfe294157186b645defe37a324d89ab1a539052ed93529f0f",
+        "bytes": 3866,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": {
+        "reason": "page 1 returned HTTP 404"
+      },
+      "fetches": [
+        {
+          "url": "https://www.peakdesign.com/products.json?limit=250&page=1",
+          "status": 404,
+          "fetched_at": "2026-09-08T22:47:28.448125+00:00",
+          "sha256": "f4572fabe0f6edec76f43e3b762bf41a3e0263731a8471dbb1398f46fd055f95",
+          "bytes": 106782,
+          "elapsed_ms": 898,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 0,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "page 1 returned HTTP 404",
+      "products_seen": 0,
+      "products_recorded": 0,
+      "duplicates_dropped": 0,
+      "files": {},
+      "file_sha256": {},
+      "bytes": {}
+    },
+    {
+      "host": "homedepot.com",
+      "role": "off_platform_control",
+      "category": "tools",
+      "note": "MEASURED 2026-09-08: /products.json -> HTTP 404. Big-box, not Shopify",
+      "roster_source": "candidate-hosts.txt:163",
+      "walk_outcome": "http_404",
+      "effective_origin": "https://www.homedepot.com",
+      "robots": {
+        "url": "https://www.homedepot.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:47:29.349788+00:00",
+        "sha256": "395b103de9406961b0e18f618d92a03303d175fcb681d3c3f40e917248e7d444",
+        "bytes": 1411,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": {
+        "reason": "page 1 returned HTTP 404"
+      },
+      "fetches": [
+        {
+          "url": "https://www.homedepot.com/products.json?limit=250&page=1",
+          "status": 404,
+          "fetched_at": "2026-09-08T22:47:31.359828+00:00",
+          "sha256": "39b11290814aa29d9ae9214699bb790500595ff1b5992d2e2754624ea368c18e",
+          "bytes": 2522,
+          "elapsed_ms": 116,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 0,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "page 1 returned HTTP 404",
+      "products_seen": 0,
+      "products_recorded": 0,
+      "duplicates_dropped": 0,
+      "files": {},
+      "file_sha256": {},
+      "bytes": {}
+    },
+    {
+      "host": "chewy.com",
+      "role": "off_platform_control",
+      "category": "pet",
+      "note": "big-box, not Shopify (feasibility study)",
+      "roster_source": "candidate-hosts.txt:164",
+      "walk_outcome": "http_404",
+      "effective_origin": "https://www.chewy.com",
+      "robots": {
+        "url": "https://www.chewy.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:47:31.479409+00:00",
+        "sha256": "222b0261ee4d989851592e7ede082076354b032c04bce9998052ba7cce54632f",
+        "bytes": 2513,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": {
+        "reason": "page 1 returned HTTP 404"
+      },
+      "fetches": [
+        {
+          "url": "https://www.chewy.com/products.json?limit=250&page=1",
+          "status": 404,
+          "fetched_at": "2026-09-08T22:47:33.483528+00:00",
+          "sha256": "",
+          "bytes": 0,
+          "elapsed_ms": 175,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 0,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "page 1 returned HTTP 404",
+      "products_seen": 0,
+      "products_recorded": 0,
+      "duplicates_dropped": 0,
+      "files": {},
+      "file_sha256": {},
+      "bytes": {}
+    },
+    {
+      "host": "thuma.co",
+      "role": "off_platform_control",
+      "category": "furniture",
+      "note": "MEASURED 2026-09-08: /products.json -> HTTP 404 with 3.2 MB of HTML. A DTC brand that simply does not serve it",
+      "roster_source": "candidate-hosts.txt:165",
+      "walk_outcome": "http_404",
+      "effective_origin": "https://www.thuma.co",
+      "robots": {
+        "url": "https://www.thuma.co/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:47:33.662505+00:00",
+        "sha256": "1ffe87f5af391353525931debd4bea4b8cd3ad5cf35f1e129bd2d4b92cc9fd2f",
+        "bytes": 3452,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": {
+        "reason": "page 1 returned HTTP 404"
+      },
+      "fetches": [
+        {
+          "url": "https://www.thuma.co/products.json?limit=250&page=1",
+          "status": 404,
+          "fetched_at": "2026-09-08T22:47:35.664032+00:00",
+          "sha256": "ada52e69678f961e18475b82a05bdaa37d5b4a3f8abb040ad10aa57b4d6d54df",
+          "bytes": 3281285,
+          "elapsed_ms": 488,
+          "note": ""
+        }
+      ],
+      "pages_fetched": 0,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "page 1 returned HTTP 404",
+      "products_seen": 0,
+      "products_recorded": 0,
+      "duplicates_dropped": 0,
+      "files": {},
+      "file_sha256": {},
+      "bytes": {}
+    }
+  ],
+  "totals": {
+    "stores_collected": 38,
+    "stores_skipped": 15,
+    "stores_truncated": 0,
+    "products": 17409,
+    "duplicates_dropped": 0,
+    "requests_made": 155,
+    "bytes_raw": 140688214,
+    "bytes_on_disk": 13954284,
+    "categories": 11,
+    "off_platform_controls": 3,
+    "off_platform_controls_that_answered": 0
+  },
+  "per_store_counts": {
+    "gaiaherbs.com": 111,
+    "bulksupplements.com": 805,
+    "nutricost.com": 755,
+    "oregonswildharvest.com": 189,
+    "toniiq.com": 103,
+    "doublewoodsupplements.com": 201,
+    "purebulk.com": 550,
+    "paradiseherbs.com": 90,
+    "livemomentous.com": 89,
+    "nakednutrition.com": 199,
+    "floydhome.com": 173,
+    "sabai.design": 321,
+    "branchfurniture.com": 220,
+    "onyxcoffeelab.com": 248,
+    "deathwishcoffee.com": 142,
+    "vervecoffee.com": 175,
+    "counterculturecoffee.com": 176,
+    "taylorstitch.com": 3805,
+    "marinelayer.com": 2556,
+    "allbirds.com": 294,
+    "cotopaxi.com": 1432,
+    "nemoequipment.com": 97,
+    "hyperlitemountaingear.com": 119,
+    "rumpl.com": 248,
+    "wildone.com": 57,
+    "maxbone.com": 96,
+    "fablepets.com": 67,
+    "pupford.com": 315,
+    "fellowproducts.com": 441,
+    "fromourplace.com": 123,
+    "bridgecitytools.com": 77,
+    "flybyjing.com": 32,
+    "graza.co": 80,
+    "iliabeauty.com": 80,
+    "versedskin.com": 76,
+    "fringesport.com": 227,
+    "titan.fitness": 2564,
+    "tenthousand.cc": 76
+  },
+  "categories": {
+    "apparel": {
+      "stores": [
+        "taylorstitch.com",
+        "marinelayer.com",
+        "allbirds.com",
+        "bombas.com"
+      ],
+      "stores_with_inventory": [
+        "taylorstitch.com",
+        "marinelayer.com",
+        "allbirds.com"
+      ],
+      "products": 6655
+    },
+    "beauty": {
+      "stores": [
+        "iliabeauty.com",
+        "youthtothepeople.com",
+        "versedskin.com"
+      ],
+      "stores_with_inventory": [
+        "iliabeauty.com",
+        "versedskin.com"
+      ],
+      "products": 156
+    },
+    "coffee": {
+      "stores": [
+        "onyxcoffeelab.com",
+        "deathwishcoffee.com",
+        "vervecoffee.com",
+        "counterculturecoffee.com"
+      ],
+      "stores_with_inventory": [
+        "onyxcoffeelab.com",
+        "deathwishcoffee.com",
+        "vervecoffee.com",
+        "counterculturecoffee.com"
+      ],
+      "products": 741
+    },
+    "electronics": {
+      "stores": [
+        "nomadgoods.com",
+        "peakdesign.com"
+      ],
+      "stores_with_inventory": [],
+      "products": 0
+    },
+    "food": {
+      "stores": [
+        "flybyjing.com",
+        "omsom.com",
+        "graza.co"
+      ],
+      "stores_with_inventory": [
+        "flybyjing.com",
+        "graza.co"
+      ],
+      "products": 112
+    },
+    "furniture": {
+      "stores": [
+        "burrow.com",
+        "floydhome.com",
+        "industrywest.com",
+        "sabai.design",
+        "polyandbark.com",
+        "branchfurniture.com",
+        "thuma.co"
+      ],
+      "stores_with_inventory": [
+        "floydhome.com",
+        "sabai.design",
+        "branchfurniture.com"
+      ],
+      "products": 714
+    },
+    "home-kitchen": {
+      "stores": [
+        "madeincookware.com",
+        "carawayhome.com",
+        "fellowproducts.com",
+        "fromourplace.com"
+      ],
+      "stores_with_inventory": [
+        "fellowproducts.com",
+        "fromourplace.com"
+      ],
+      "products": 564
+    },
+    "outdoor": {
+      "stores": [
+        "cotopaxi.com",
+        "nemoequipment.com",
+        "hyperlitemountaingear.com",
+        "rumpl.com"
+      ],
+      "stores_with_inventory": [
+        "cotopaxi.com",
+        "nemoequipment.com",
+        "hyperlitemountaingear.com",
+        "rumpl.com"
+      ],
+      "products": 1896
+    },
+    "pet": {
+      "stores": [
+        "wildone.com",
+        "maxbone.com",
+        "fablepets.com",
+        "pupford.com",
+        "chewy.com"
+      ],
+      "stores_with_inventory": [
+        "wildone.com",
+        "maxbone.com",
+        "fablepets.com",
+        "pupford.com"
+      ],
+      "products": 535
+    },
+    "sports": {
+      "stores": [
+        "fringesport.com",
+        "titan.fitness",
+        "tenthousand.cc"
+      ],
+      "stores_with_inventory": [
+        "fringesport.com",
+        "titan.fitness",
+        "tenthousand.cc"
+      ],
+      "products": 2867
+    },
+    "supplements": {
+      "stores": [
+        "gaiaherbs.com",
+        "bulksupplements.com",
+        "nutricost.com",
+        "oregonswildharvest.com",
+        "toniiq.com",
+        "doublewoodsupplements.com",
+        "purebulk.com",
+        "paradiseherbs.com",
+        "livemomentous.com",
+        "nakednutrition.com"
+      ],
+      "stores_with_inventory": [
+        "gaiaherbs.com",
+        "bulksupplements.com",
+        "nutricost.com",
+        "oregonswildharvest.com",
+        "toniiq.com",
+        "doublewoodsupplements.com",
+        "purebulk.com",
+        "paradiseherbs.com",
+        "livemomentous.com",
+        "nakednutrition.com"
+      ],
+      "products": 3092
+    },
+    "tools": {
+      "stores": [
+        "katzmosestools.com",
+        "taylortoolworks.com",
+        "bridgecitytools.com",
+        "homedepot.com"
+      ],
+      "stores_with_inventory": [
+        "bridgecitytools.com"
+      ],
+      "products": 77
+    }
+  }
+}

@@ -176,22 +176,89 @@ do not, and which is which changes with the question.
    "milk thistle costs $5.75". Live prices rot within weeks; ratios and "this store stocks
    none of it" survive.
 
+## Where the roster comes from — and the one thing wrong with this corpus
+
+Every store above sells supplements. That is this corpus's single real limitation, and it is
+visible in the demo: **`"a walnut coffee table for the lounge"` returns four liver
+supplements.** Retrieval is working; there is no coffee table in the corpus to find. Breadth is
+a *hostname* problem, so the roster now lives in reviewable files rather than a tuple in the
+collector:
+
+| file | what it is |
+|---|---|
+| `incumbent-hosts.txt` | these ten, restated in the roster format. A test asserts it matches the collector's built-in `RELEVANT_HOSTS`/`NEGATIVE_CONTROL_HOSTS` exactly, so the two cannot drift. |
+| `candidate-hosts.txt` | **43 proposed** direct-to-consumer storefronts across **11 categories** — furniture, coffee, apparel, outdoor, pet, home/kitchen, tools, food, beauty, sports, electronics — with three deliberate misses. Nothing in it has been collected. |
+
+The format is one host per line with its **category** beside it, `#` for comments:
+
+```
+burrow.com            furniture
+homedepot.com         tools     off_platform_control   # measured: not a Shopify store
+```
+
+The category is not decoration. `collection.json` carries a `categories` block giving the
+stores and product count per category, so a corpus that has quietly narrowed back into one
+category can be *seen* to have done so rather than being taken on trust.
+
+`off_platform_control` is the third role, beside `relevant` and `negative_control`. It marks a
+host measured **not** to serve `/products.json` at all, so that a skip in `collection.json`
+can be read: without it, "this merchant does not serve the endpoint" and "the collector broke"
+leave the same record. The collector counts them separately and shouts if one of them answers.
+
 ## Re-collecting
 
-The collector is two phases on purpose. `fetch` is the only phase that opens a socket and
-should be run **once**; `build` derives the committed corpus from the saved response bodies and
-never fetches, so any later decision about the corpus's *shape* costs those businesses nothing.
+The collector is two phases on purpose. `fetch` is the only phase that opens a socket;
+`build` derives the committed corpus from the saved response bodies and never fetches, so any
+later decision about the corpus's *shape* costs those businesses nothing.
 
 ```sh
-# phase one — the only network pass
+# phase one — the only network pass. The ten stores above, unchanged:
 .venv/bin/python scripts/collect_real_catalogs.py fetch --raw-dir /tmp/rc-raw
+
+# ...or a broader roster. --hosts-file is repeatable, so the incumbents and the candidates
+# can be walked as ONE roster and the corpus grows without losing the stores its gates pin:
+.venv/bin/python scripts/collect_real_catalogs.py fetch --raw-dir /tmp/rc-raw \
+    --hosts-file fixtures/real-catalogs/incumbent-hosts.txt \
+    --hosts-file fixtures/real-catalogs/candidate-hosts.txt
 
 # phase two — offline, repeatable, deterministic
 .venv/bin/python scripts/collect_real_catalogs.py build \
     --raw-dir /tmp/rc-raw --out fixtures/real-catalogs
 ```
 
-`--no-compress` writes plain `.jsonl` for eyeballing; `--only <host>` restricts the roster.
+`--no-compress` writes plain `.jsonl` for eyeballing. `--only <host>` narrows whichever roster
+is in play, and a `--only` naming a host the roster does not carry is an **error** — it used to
+be filtered against the built-in tuple and nothing else, so `--only allbirds.com` produced an
+empty roster, fetched nothing and exited 0.
+
+### Resume — `fetch` is interruptible now
+
+`fetchlog.json` used to be written once, after the last store. A crash at store 900 threw away
+hours of deliberately slow fetching *and* re-hit 900 merchants on the retry. Now each store's
+record lands in `<raw-dir>/<host>/store.json` the moment that store finishes, the log is
+rewritten after every store, and **`--resume` is on by default**: re-running the same command
+picks up where it stopped.
+
+A store is skipped only when all four of these hold, and the run says on stdout which one
+failed when they do not:
+
+1. the record exists and parses — it is written temp-file-plus-rename, so it is never half-there;
+2. it ended on an **answer** — a short page, a page cap, a robots decision, a 403/404. A
+   transport error, a 429, a 5xx, an empty body, an unparseable page or an unreadable
+   `robots.txt` are *retryable* and the store is walked again. An outcome the collector does
+   not recognise is retryable too: re-walking a store is the cheap error, skipping one that
+   never finished is not;
+3. the settings that decide the *result* are unchanged — page size, page cap, request cap,
+   collector version, User-Agent. Raise `--max-pages` and every record taken under the old cap
+   is invalidated, so a truncated catalogue cannot survive as "already collected";
+4. every page file it names still exists **and still matches its recorded digest**.
+
+Point 4 is the one the mechanism exists for. A page truncated mid-product still parses as a
+file and still has the right name; only the digest knows. Measured, on a real page: truncating
+`onyxcoffeelab.com/page-001.json` by five bytes made the next run print
+`re-walking: page file … no longer matches its recorded digest` and fetch it again.
+
+`--no-resume` forces a clean re-walk of everything.
 
 **A re-collection changes the counts, and that is meant to be noticed.** The per-store totals
 above and the pinned counts in `fixtures/tests/test_real_catalogs.py` will fail until they are
