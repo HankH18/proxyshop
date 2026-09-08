@@ -258,7 +258,7 @@ def _completed_fallback_offer(offer: Any, registered_domain: str | None) -> Any:
       platform-built one.
 
       **But "hosted" is not the complement of "fallback", and an earlier draft of this bullet
-      claimed it was.** ``entry.fallback`` is true for every one of the NINE reasons in
+      claimed it was.** ``entry.fallback`` is true for every one of the TWELVE reasons in
       :data:`~apps.exchange.src.auction.collect.FALLBACK_REASONS`, not only ``no_response``, so
       a store CAN reach this completion by answering — it just has to answer *unusably*.
       Measured over the HTTP door: a reply whose ``offer`` is ``[]``, ``"free"``, ``null``, ``3``
@@ -266,9 +266,12 @@ def _completed_fallback_offer(offer: Any, registered_domain: str | None) -> Any:
       bid_price_unreconcilable``, and the entry is completed and shortlisted. So is a Tier-0
       store, and so is one the T-177 price wall degraded.
 
-      The count is nine rather than seven since ``store_declined`` and ``store_refused`` landed:
-      a store that answers ``204`` with a decline reason, or ``422``, is no longer flattened
-      into ``no_response`` but is still a fallback, so it is completed too. That makes the point
+      The count is twelve rather than seven since ``store_declined`` and ``store_refused``
+      landed, and since the fan-out began minting ``response_timed_out``,
+      ``fan_out_capacity_exhausted`` and ``arrival_stamp_unparseable`` rather than flattening
+      all three into ``no_response``: a store that answers ``204`` with a decline reason, or
+      ``422``, or that answers correctly but after the window closed, is no longer recorded as
+      silence but is still a fallback, so it is completed too. That makes the point
       sharper rather than weaker — a store can now reach this branch by *explicitly refusing*
       to bid, which is as deliberate as an act gets. What it collects for doing so is unchanged,
       and is the paragraph below.
@@ -347,7 +350,7 @@ def candidate_from_entry(
     # say whose price it is publishing (R10/D55). It is the exchange's fact, in exactly the
     # sense `store_domain` is: `entry.fallback` is set on the branch that DISCARDED whatever
     # arrived under this store's name and substituted a catalogue offer the exchange wrote, and
-    # `entry.fallback_reason` is one of the nine values in `collect.FALLBACK_REASONS`. Neither is
+    # `entry.fallback_reason` is one of the twelve values in `collect.FALLBACK_REASONS`. Neither is
     # reachable from `bid`, so this widens nothing a bidder can write — `Bid` declares neither
     # name and forbids extra properties, and a store that DID somehow state one would be
     # overwritten here by the entry's answer rather than believed.

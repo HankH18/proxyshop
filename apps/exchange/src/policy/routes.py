@@ -58,8 +58,8 @@ so a lost posterior costs exploration accuracy, never money and never a wrong sh
 state this door writes", and that was true when this door was written: the WRITE half existed
 and the READ half did not. It does now. :mod:`exchange.policy.exploration` is the call site —
 :func:`~exchange.policy.exploration.exposure_shares` reads :func:`~.bandit.exposure`, and
-:mod:`exchange.ranking.serving` runs it (imported at ``ranking/serving.py:58``, applied to the
-shortlist), so R12's exploration slice on a served auction really does consume the posteriors
+:mod:`exchange.ranking.serving` runs it (it imports ``exposure_shares`` and ``plan_exploration``
+from this package and applies them to the shortlist), so R12's exploration slice on a served auction really does consume the posteriors
 ``POST /internal/outcomes`` writes. The bound on what that slice may cost a shopper — one slot
 of four, only among the already-eligible, only for a store the trust snapshot positively marks
 ``low_data`` — is stated in :mod:`exchange.policy.exploration`, not here.

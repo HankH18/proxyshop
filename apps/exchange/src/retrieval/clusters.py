@@ -33,7 +33,7 @@ repository publishes one. That is measured, not assumed:
   ``IntentCluster`` node whose own docstring calls it "the retrieval-side grouping T-031 and
   the exchange key off". It has **zero callers of any kind** — its only other mentions are
   two ``__all__`` entries, one re-export in ``services/ingest/src/graph/__init__.py``, and a
-  string inside a skip-set in ``services/ingest/tests/test_graph.py:1092``. The
+  string inside a skip-set in ``services/ingest/tests/test_graph.py``. The
   ``IntentCluster`` dataclass is constructed exactly once repo-wide, in a ``parametrize``
   lambda that never touches a session. ``apply_upserts`` is a closed dispatcher over eight
   ``UpsertOp`` kinds and ``intent_cluster`` is not one of them, so no catalog ingest can

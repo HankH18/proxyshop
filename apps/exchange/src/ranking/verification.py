@@ -17,7 +17,8 @@ the answer, and attests it.
 The catalog is the exchange's, never the bidder's
 -------------------------------------------------
 This is the whole security argument, so it is stated rather than implied. The claim comes
-from the store; the SNAPSHOT it is graded against comes from :class:`CatalogSnapshots`, a
+from the store; the SNAPSHOT it is graded against comes from the catalog source -- :class:`NoCatalogSnapshots`,
+:class:`StaticCatalogSnapshots` or :class:`~exchange.retrieval.catalogue.GraphCatalogSnapshots` -- a
 collaborator wired into the app (``configure_ranking(catalog=…)``) exactly the way the trust
 snapshot and the registered-domain registry already are. A store that could supply both the
 claim and the evidence would be marking its own homework — which is the same failure

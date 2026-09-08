@@ -27,13 +27,14 @@ all — the answer is the trust source's, read through :func:`~.read_eligibility
 
 * trust **unreachable**                 -> ``UNAVAILABLE`` (denies), reason names the service;
 * trust reachable, **no row**           -> ``UNAVAILABLE`` (denies), reason says so;
+* ``blacklisted`` **is not a bool**     -> ``UNAVAILABLE`` (denies), unreadable is not "fine";
 * trust says **delisted**               -> ``BLACKLISTED`` (denies);
 * trust says otherwise                  -> ``ELIGIBLE``.
 
 An unmentioned store falling through to trust is a strengthening, not a loosening: it
 previously answered ``static-eligibility: <store> is unavailable`` — a denial from a source
 that had never been asked anything — and now it answers with whatever trust actually says,
-which denies in exactly the same three of four cases.
+which denies in exactly the same four of five cases.
 
 INTERFACE VERSION
 -----------------
