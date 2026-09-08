@@ -37,6 +37,27 @@ Three states, and the second is the reason this module is not just an SMTP clien
 * **A deployment that DEMANDS the console gets the console** —
   :data:`MAGIC_LINK_TRANSPORT_ENV` set to exactly ``console``, and nothing else reaches it.
 
+What the transport now also decides: whether a shopper is asked to log in at all
+--------------------------------------------------------------------------------
+The three states above are about what happens to a link once it is minted. They now also
+decide whether the SPA ever asks for an address, and the reason is a defect that was visible
+on the hosted demo: `apps/buyer/app/journey/SignIn.tsx` said "No password. We email you a
+single-use link" on a deployment running ``console`` with every SMTP variable empty. The
+owner asked for a link, no mail arrived, and the screen had promised one — a surface making
+a claim the system contradicts.
+
+:func:`magic_link_is_mailed` is the fact that fixes it, served as one boolean by
+``GET /buyer/auth/sign-in`` and read by the page on load. The sign-in form renders only where
+that answers ``True``; on every other deployment the journey opens with no login gate and the
+exchange names the shopper per auction. **Nothing is switched off by a new flag** — there is
+no new variable to set and none to remember. Configure an MTA and the login comes back on its
+own, which is the whole reason the fact is derived from the transport rather than from a knob
+beside it.
+
+The routes are untouched: ``POST /buyer/auth/magic-link`` and ``POST /buyer/auth/session``
+answer exactly as they did for anyone who calls them, under every transport. What changed is
+which deployments' pages offer the gesture.
+
 The third state, and why it is not a hole in the second
 -------------------------------------------------------
 :func:`~buyer_svc.auth.magic_link._drop`'s docstring states the rule this module keeps: "a
@@ -165,6 +186,7 @@ __all__ = [
     "MagicLinkTransportMisconfigured",
     "MagicLinkUndeliverable",
     "build_magic_link_delivery",
+    "magic_link_is_mailed",
 ]
 
 #: Which transport this deployment CHOSE, spelled out. The only variable that can reach the
@@ -956,6 +978,58 @@ def _selected_transport() -> str | None:
     return stated
 
 
+def _mta_url_from_env() -> str | None:
+    """The MTA this deployment named, stripped, or ``None`` when it named none.
+
+    One spelling of "is there an MTA?", shared by :func:`build_magic_link_delivery` and
+    :func:`magic_link_is_mailed`, because those two must never disagree: the first decides
+    what this process DOES with a login link and the second decides whether the sign-in form
+    is offered at all, and a deployment whose page offers a login its service refuses is the
+    exact defect the second one exists to remove.
+    """
+    url = os.environ.get(MAGIC_LINK_SMTP_URL_ENV)
+    stripped = url.strip() if url else ""
+    return stripped or None
+
+
+def magic_link_is_mailed() -> bool:
+    """Would this deployment really hand a sign-in link to a mail transfer agent?
+
+    The question the SPA asks before it renders a login form, and it is deliberately about
+    CAPABILITY rather than about the spelling of one variable. Three deployments answer
+    ``True``/``False`` and the middle one is why this is not
+    ``os.environ.get(MAGIC_LINK_TRANSPORT_ENV) == SMTP_TRANSPORT``:
+
+    * :data:`MAGIC_LINK_TRANSPORT_ENV` = ``smtp`` with an MTA named — ``True``.
+    * TRANSPORT unset with an MTA named — ``True``, and it has to be. ``.env.example`` says
+      of ``smtp``: "Same as leaving this blank, except that a deployment which says ``smtp``
+      and configures no MTA is a boot failure". So a deployment that sets only
+      :data:`MAGIC_LINK_SMTP_URL_ENV` and :data:`MAGIC_LINK_SENDER_ENV` genuinely mails, and
+      reading the literal word would hide the login from an operator whose email works.
+    * ``console``, or nothing configured, or a transport word this service does not know —
+      ``False``. None of those puts a link in a mailbox, so none of them should be shown a
+      form that says one is coming.
+
+    Never raises. A stated-but-unknown transport is a boot failure at
+    :func:`build_magic_link_delivery` and stays one for ``POST /buyer/auth/magic-link``; here
+    it is simply "this deployment does not mail", because a page that cannot render is worse
+    than a page that offers one gesture fewer.
+
+    What this canNOT see is a HALF-configured mail transport — an MTA named with no sender, a
+    base URL that is not a URL. That deployment names an MTA, so this answers ``True`` while
+    :func:`build_magic_link_delivery` raises. The route that serves this fact resolves that
+    last gap by building the (cached) service before it answers; see
+    :func:`~buyer_svc.auth.routes.read_sign_in_offered`.
+    """
+    try:
+        selected = _selected_transport()
+    except MagicLinkTransportMisconfigured:
+        return False
+    if selected == CONSOLE_TRANSPORT:
+        return False
+    return _mta_url_from_env() is not None
+
+
 def _base_url_from_env(*, chosen: str) -> str:
     """The validated front door every transport builds its link from.
 
@@ -1023,8 +1097,8 @@ def build_magic_link_delivery() -> Callable[[str, str, datetime], None]:
         _announce_console(base_url)
         return _console_delivery(base_url)
 
-    url = os.environ.get(MAGIC_LINK_SMTP_URL_ENV)
-    if not url or not url.strip():
+    url = _mta_url_from_env()
+    if url is None:
         if selected == SMTP_TRANSPORT:
             # An operator who wrote `smtp` here told this service what they meant to do, so
             # the silent 503 below would be a working-looking deployment that logs nobody in
@@ -1053,4 +1127,4 @@ def build_magic_link_delivery() -> Callable[[str, str, datetime], None]:
     )
     _sender_address(sender)
     base_url = _base_url_from_env(chosen=chosen)
-    return _smtp_delivery(url.strip(), sender, base_url)
+    return _smtp_delivery(url, sender, base_url)

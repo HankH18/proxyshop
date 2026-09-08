@@ -27,10 +27,12 @@ import {
   PROFILE_PATH,
   SESSION_HEADER,
   SESSION_PATH,
+  SIGN_IN_PATH,
   assertPseudonymOnly,
   closeSession,
   IdentityLeakError,
   loadProfile,
+  readSignInOffered,
   redeemMagicLink,
   requestMagicLink,
   type BuyerSession,
@@ -159,6 +161,37 @@ describe('the pseudonym boundary on the client', () => {
   it('reports a refused sign-out rather than reporting success', async () => {
     const fetcher: Fetcher = async () => jsonResponse({ detail: 'no live buyer session' }, 401)
     await expect(closeSession(SESSION, fetcher)).rejects.toThrow(/HTTP 401/)
+  })
+
+  it('reads the sign-in capability as a boolean, and only a literal true is yes', async () => {
+    // WHY THIS IS STRICT. The value decides whether a shopper is shown a form that says "we
+    // email you a single-use link". A truthy-but-not-true answer — `"true"` from a proxy
+    // that stringified the body, `1` from a different service on the path, an empty object
+    // from a 200 that served the wrong thing — must not put that promise back on the page,
+    // because the deployment behind it may have no MTA at all. Only the service saying yes
+    // in the shape the service says it counts as yes.
+    const answers: readonly [unknown, boolean][] = [
+      [{ offered: true }, true],
+      [{ offered: false }, false],
+      [{ offered: 'true' }, false],
+      [{ offered: 1 }, false],
+      [{}, false],
+    ]
+    for (const [body, expected] of answers) {
+      const fetcher: Fetcher = vi.fn(async () => jsonResponse(body))
+      await expect(readSignInOffered(fetcher)).resolves.toBe(expected)
+      expect(fetcher).toHaveBeenCalledWith(SIGN_IN_PATH)
+    }
+  })
+
+  it('throws on an HTTP failure rather than quietly answering no', async () => {
+    // "I could not ask" and "the answer is no" put the same page on screen, and this module
+    // still refuses to conflate them. The decision to treat them alike is a rendering
+    // decision and belongs to `Journey`, which catches this and says why in one place; a
+    // helper that swallowed it here would make a service outage indistinguishable from a
+    // deployment choice at every future call site.
+    const fetcher: Fetcher = async () => jsonResponse({ detail: 'nope' }, 503)
+    await expect(readSignInOffered(fetcher)).rejects.toThrow(/HTTP 503/)
   })
 
   it('spells the four routes the service serves', () => {

@@ -153,6 +153,18 @@ services:
       #
       # Blank is neither: the deliberate 503. The service prints a banner at boot when
       # `console` is set, so `docker compose logs buyer-svc | head` says which one is running.
+      #
+      # ⚠️ IT ALSO DECIDES WHETHER THE SHOPPER PAGE SHOWS A SIGN-IN AT ALL. `buyer-web` reads
+      # one boolean from `GET /buyer/auth/sign-in` and renders the login form only where this
+      # service can really deliver a link — i.e. only under `smtp` with an MTA behind it.
+      # With `console`, or blank, there is no form and no gate: the journey opens straight
+      # away and the exchange names the shopper `anon-<auction id>` per auction. That is
+      # deliberate. The form's own words are "we email you a single-use link", and on a
+      # deployment with no MTA that sentence is false and the gesture cannot be completed, so
+      # the product sat behind a door with no key.
+      #
+      # There is no separate switch for it, on purpose: filling in the SMTP variables below
+      # brings the login back by itself, and the auth routes answer every caller either way.
       PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT: "${PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT:-}"
       PROXYSHOP_BUYER_MAGIC_LINK_SMTP_URL: "${PROXYSHOP_BUYER_MAGIC_LINK_SMTP_URL:-}"
       PROXYSHOP_BUYER_MAGIC_LINK_SENDER: "${PROXYSHOP_BUYER_MAGIC_LINK_SENDER:-}"

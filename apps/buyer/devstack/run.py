@@ -391,12 +391,20 @@ def _further_answers_line(conversation: dict[str, Any]) -> str:
 
 
 def _sign_in_lines(buyer_url: str, transport: str) -> list[str]:
-    """The sign-in beat, in the banner, because the journey stops without it.
+    """The sign-in beat, in the banner — or the fact that there is not one.
 
-    Step 2's confirm button is ABSENT from the page until there is a session
-    (``Journey.tsx``: ``gateOnSignIn``), so a reader who does not know a sign-in is coming
-    reads a working gate as a broken demo. Says where the link will appear rather than that
-    one was sent: on this stack it is printed into this same terminal.
+    WHAT THIS USED TO SAY AND WHY IT COULD NOT STAY. Under the console transport it walked
+    the reader through a login: "type any address into 'Email address' and press 'Email me a
+    link'", then read the link out of this terminal. Every step of that named a control the
+    page no longer has. `Journey.tsx` asks `GET /buyer/auth/sign-in` on load and renders the
+    sign-in form only where the buyer service holds a real mail transport; this launcher sets
+    ``console``, which puts no link in any mailbox, so on this stack there is no form, no
+    gate, and nothing to do before typing. A banner instructing a developer to press a button
+    that is not in the document is the same defect as a page promising a mail nothing sends.
+
+    So the console branch now says what actually happens. The MAIL branch is unchanged in
+    substance and is the one that still describes a gate, because on a stack configured to
+    mail there really is one.
     """
     from buyer_svc.auth.delivery import CONSOLE_TRANSPORT  # noqa: PLC0415
 
@@ -409,21 +417,22 @@ def _sign_in_lines(buyer_url: str, transport: str) -> list[str]:
         ]
     return [
         "",
-        "  SIGN IN    step 2's confirm button is absent until you have a session - the",
-        "             exchange is told a pseudonym minted by the buyer service's vault, and",
-        "             the page cannot mint one. Do this FIRST, before typing the",
-        "             conversation: redeeming the link reloads the page and a conversation",
-        "             started beforehand is gone.",
+        "  SIGN IN    nothing to do - this stack does not ask you to. It runs",
+        "             PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT=console, which mails nothing, so",
+        "             the page offers no sign-in form and no gate: open it and start typing.",
         "",
         f"             1. open {buyer_url}",
-        "             2. type any address into 'Email address' and press 'Email me a link'",
-        "                (nothing is mailed and no mailbox has to exist)",
-        "             3. the link is PRINTED IN THIS TERMINAL, below this banner. Open it.",
+        "             2. type what you are shopping for. Every beat runs without a session.",
         "",
-        "             That link carries a live single-use sign-in token, printed because",
-        "             this launcher set PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT=console. It is",
-        "             a local-development transport: never set it on a deployment whose",
-        "             stdout anyone else can read.",
+        "             What that costs, so the shortlist does not surprise you: with no",
+        "             session there is no vault-minted pseudonym, so the exchange names the",
+        "             shopper 'anon-<auction id>' for that one auction and the stores are",
+        "             given empty buckets. The page says so under step 1.",
+        "",
+        "             The login itself is not gone - POST /buyer/auth/magic-link still",
+        "             answers, and the link is still printed in this terminal, for anyone",
+        "             driving it directly. Configure an MTA and the form comes back on its",
+        "             own; there is no separate switch for it.",
     ]
 
 

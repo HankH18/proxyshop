@@ -181,7 +181,7 @@ export function navDestinations(
       href: `${buyerBase}${JOURNEY_HASH}`,
       external: crossing,
       hint:
-        'The buyer portal: sign in, say what you need, see what the stores answered.' +
+        'The buyer portal: say what you need, and see what the stores answered.' +
         buyerPortNote,
     },
     {

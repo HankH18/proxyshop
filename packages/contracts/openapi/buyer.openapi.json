@@ -751,6 +751,38 @@
         }
       }
     },
+    "/buyer/auth/sign-in": {
+      "get": {
+        "operationId": "signInOffered",
+        "summary": "Whether this deployment can deliver a login link, so the page knows to ask.",
+        "responses": {
+          "200": {
+            "description": "`true` means this deployment holds a real mail transport and a magic-link login can actually be completed; `false` means it cannot, and the page renders no form promising a mail that nothing would send. Unauthenticated on purpose: it takes no credential, spends no login budget, mints no link, and answers every caller the same standing fact about the deployment — one `POST /buyer/auth/magic-link` already discloses by answering 202 rather than 503.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "offered": {
+                      "type": "boolean",
+                      "title": "Offered"
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "offered"
+                  ],
+                  "title": "SignInOffered",
+                  "description": "Whether this deployment can complete a login, as one boolean and nothing else.\n\nDeliberately not \"the transport\", \"the configuration\", or anything an operator's\nenvironment could be reconstructed from. The page needs to decide one thing — do I render\na form that says a mail is coming — and the smallest true answer to that is a ``bool``.\nA field naming the transport would ship a piece of deployment configuration to every\nbrowser for no gain, and would invite a second reader to branch on the word."
+                },
+                "example": {
+                  "offered": false
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/buyer/feedback": {
       "post": {
         "operationId": "submitFeedback",

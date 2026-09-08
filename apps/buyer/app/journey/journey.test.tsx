@@ -43,6 +43,7 @@ import {
   PROFILE_PATH,
   SESSION_HEADER,
   SESSION_PATH,
+  SIGN_IN_PATH,
 } from '../chat/session'
 import { CLARIFY_PATH, CONFIRM_PATH, type Intent } from '../intent/intent'
 import { REMEMBERED_AUCTION_KEY } from '../metrics/telemetry'
@@ -427,6 +428,14 @@ const CLARIFY_ANSWER = {
  */
 function authAnswer(path: string, init: RequestInit | undefined): Response | undefined {
   switch (path) {
+    // A DEPLOYMENT THAT CAN MAIL, which is what this whole fixture has always described and
+    // what every gate assertion in this file is about. `Journey` asks this before it renders
+    // anything and shows the sign-in only when it answers `true`, so without this line the
+    // fixture would describe a deployment with no mail transport and the gate tests below
+    // would be asserting the gate of a page that correctly has none. The no-mail deployment
+    // is a fixture of its own — see `withoutMailTransport`.
+    case SIGN_IN_PATH:
+      return json({ offered: true })
     case MAGIC_LINK_PATH:
       return json({ expires_at: '2026-09-05T00:15:00Z' }, 202)
     case SESSION_PATH:
@@ -2563,3 +2572,245 @@ describe('the demonstration code, and the seeded beat after the handoff', () => 
     ).toHaveLength(0)
   })
 })
+
+/**
+ * The deployment that CANNOT deliver a login link, which is most of them (SPEC R5).
+ *
+ * WHAT THIS BLOCK IS ABOUT, because it is the newer half of a pair and the pair is the whole
+ * point. Everything above renders the journey behind a sign-in gate, and that is still exactly
+ * what happens — on a deployment whose buyer service holds a real mail transport. The shared
+ * `authAnswer` fixture describes such a deployment; it answers `GET /buyer/auth/sign-in` with
+ * `{offered: true}` and every gate assertion above is unchanged.
+ *
+ * This block describes the other one, and it is not a corner case: the hosted demo runs
+ * `PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT=console` with every SMTP variable empty, and no MTA
+ * exists anywhere in this project to point at. On that deployment the sign-in panel's own
+ * words — "No password. We email you a single-use link" — were false, the link never came,
+ * and the entire product sat behind a door with no key. `Journey` now asks the service
+ * whether a login can be completed and offers the form only where it can.
+ *
+ * So the two things asserted here are: nothing on screen mentions email where no email can be
+ * sent, and the journey a shopper reaches instead is the WHOLE journey rather than a degraded
+ * one — same five beats, same real requests, with the exchange naming the shopper per auction
+ * because there is no vault-minted handle to send.
+ */
+describe('R5 — a deployment with no mail transport asks nobody to sign in', () => {
+  /** `demoService`, with the one answer that says this deployment cannot mail. */
+  function withoutMailTransport(options: Parameters<typeof demoService>[0] = {}) {
+    return demoService({
+      ...options,
+      auth: (path, init) =>
+        path === SIGN_IN_PATH ? json({ offered: false }) : options.auth?.(path, init),
+    })
+  }
+
+  it('opens on the journey, with no form and no word about email', async () => {
+    signedOut()
+    const { fetcher, calls } = withoutMailTransport()
+    render(<Journey fetcher={fetcher} />)
+
+    // The composer, which is the gate's own proof in every test above: reaching it means the
+    // wall is not there.
+    expect(await screen.findByLabelText('What are you shopping for?')).toBeInTheDocument()
+
+    // Not merely "the form is hidden" — the whole section is gone, heading included. A
+    // deployment that cannot log anybody in should not have a "Sign in" heading with an
+    // apology under it; it should look like a product that does not ask.
+    expect(screen.queryByLabelText('Email address')).toBeNull()
+    expect(screen.queryByTestId('signin')).toBeNull()
+    expect(screen.queryByTestId('why-sign-in')).toBeNull()
+    expect(screen.queryByTestId('signin-unknown')).toBeNull()
+    expect(screen.queryByRole('button', { name: /sign out/i })).toBeNull()
+
+    // THE DEFECT THIS EXISTS TO CLOSE, asserted over the whole document rather than over the
+    // component that used to carry it: a deployment that cannot send mail must not talk
+    // about sending you mail. Checked as a substring sweep and not against the sign-in
+    // component, because the failure being prevented is a sentence surviving somewhere
+    // nobody thought to look.
+    //
+    // ONE MENTION OF THE WORD SURVIVES, and it is deliberately allowed. Step 5's seeded
+    // panel ends "We do not pass your name, your address or your email to the store" —
+    // `feedback/FeedbackPromptView.tsx`. That is a claim about what reaches a STORE, it is
+    // true on every deployment, and it promises the shopper nothing. The defect is a page
+    // saying a mail is coming; a page saying one is not being forwarded is the opposite of
+    // it. So the sweep runs over everything OUTSIDE that panel, which keeps the check strict
+    // where it matters without pretending a true sentence is a false one.
+    const step5 = screen.getByLabelText('Step 5 - after your purchase (seeded)')
+    const elsewhere = (document.body.textContent ?? '')
+      .replace(step5.textContent ?? '', '')
+      .toLowerCase()
+    expect(elsewhere).not.toContain('email')
+    expect(elsewhere).not.toContain('mailbox')
+    expect(elsewhere).not.toContain('sign in')
+    expect(elsewhere).not.toContain('single-use link')
+
+    // And it asked for no link and redeemed no token to get here. The only auth call made is
+    // the capability question itself.
+    const authCalls = calls
+      .map((call) => call.path)
+      .filter((path) => path.startsWith('/buyer/auth') || path === PROFILE_PATH)
+    expect(authCalls).toEqual([SIGN_IN_PATH])
+  })
+
+  it('runs the whole journey with no session, naming no handle it did not send', async () => {
+    signedOut()
+    const { fetcher, calls } = withoutMailTransport()
+    render(<Journey fetcher={fetcher} />)
+
+    // The same walk the signed-in tests do, minus the wait for a session there is none of.
+    fireEvent.change(await screen.findByLabelText('What are you shopping for?'), {
+      target: { value: 'I want a warm merino wool beanie for winter, under $100' },
+    })
+    fireEvent.submit(screen.getByLabelText('What are you shopping for?').closest('form')!)
+    const question = await screen.findByLabelText('What is your budget?')
+    fireEvent.change(question, { target: { value: 'about $100' } })
+    fireEvent.submit(question.closest('form')!)
+
+    fireEvent.click(await screen.findByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Shortlist')
+
+    // BEAT BY BEAT, and every one of them a real request. This is the claim that matters:
+    // the sessionless page is not a preview or a subset, it is the journey.
+    const reached = calls.map((call) => call.path)
+    expect(reached).toContain(CLARIFY_PATH)
+    expect(reached).toContain(CONFIRM_PATH)
+    expect(reached).toContain(auctionPath(AUCTION_ID))
+    expect(reached).toContain(RENDER_PATH)
+
+    // THE ONE ROUTE THAT REALLY NEEDS A SESSION IS NOT CALLED. `GET /buyer/profile` answers
+    // 401 without an `X-Buyer-Session` header, so calling it here would put a refusal on
+    // screen that the shopper caused by existing. Not called at all is the coherent answer.
+    expect(reached).not.toContain(PROFILE_PATH)
+    // Nothing anywhere sent a session header, because there is no session to send.
+    expect(calls.every((call) => bodyHasNoSessionHeader(call.init))).toBe(true)
+
+    // THE CONFIRMATION CARRIES NO PROFILE, and that is deliberate rather than an omission:
+    // `exchange.composition.solicitation_profile` mints `anon-{auction_id}` with empty
+    // buckets for a confirmation that names none, and the stores bid against it normally. A
+    // `profile` field here would be this page naming a buyer it cannot name.
+    const confirmed = bodyOf(calls.find((call) => call.path === CONFIRM_PATH)?.init) as Record<
+      string,
+      unknown
+    >
+    expect(Object.keys(confirmed).sort()).toEqual(['confirmed', 'intent'])
+    expect(confirmed.confirmed).toBe(true)
+
+    // The label render is asked the same way, so the buyer-side case is written in its
+    // unconditioned voice rather than addressed to a shopper this page invented.
+    const rendered = bodyOf(calls.find((call) => call.path === RENDER_PATH)?.init) as Record<
+      string,
+      unknown
+    >
+    expect('profile' in rendered).toBe(false)
+
+    // AND THE PAGE SAYS SO. It does not print a handle, and it does not print the signed-in
+    // line claiming a vault minted one.
+    expect(screen.queryByTestId('pseudonym')).toBeNull()
+    expect(screen.queryByTestId('signed-in')).toBeNull()
+    const anonymous = screen.getByTestId('pseudonym-anonymous').textContent ?? ''
+    expect(anonymous).toContain('anon-')
+    expect(anonymous).toContain('empty set of buckets')
+    // No vault pseudonym anywhere on the page, because none was ever minted for this visitor.
+    expect(document.body.textContent ?? '').not.toMatch(/psn-/)
+  })
+
+  it('shows the journey rather than a wall when it cannot ask the service at all', async () => {
+    // THE FALLBACK, DRIVEN. An old service with no such route, or a proxy that eats it, is a
+    // deployment this page cannot PROVE can deliver a login — and "cannot prove it can" has
+    // to land on the same page as "cannot", because failing the other way puts a shopper in
+    // front of a gate nothing has said anyone can pass. It must also be silent: this is a
+    // question the page asked itself, not a gesture anybody made, so it earns no banner.
+    signedOut()
+    const { fetcher } = demoService({
+      auth: (path) => (path === SIGN_IN_PATH ? json({ detail: 'no such route' }, 404) : undefined),
+    })
+    render(<Journey fetcher={fetcher} />)
+
+    expect(await screen.findByLabelText('What are you shopping for?')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Email address')).toBeNull()
+    expect(screen.queryByTestId('journey-error')).toBeNull()
+  })
+
+  it('still gates, unchanged, the moment the service says it can mail', async () => {
+    // THE OTHER DIRECTION, side by side with its opposite so the pair cannot drift apart.
+    // This is the assertion that will rot silently if it is not here: nothing on the local
+    // stack runs an MTA, so every hand-driven check of this change exercises the no-mail
+    // branch, and a predicate that accidentally answered `false` everywhere would delete the
+    // login from a working deployment with every other test still green.
+    signedOut()
+    const { fetcher } = demoService()
+    render(<Journey fetcher={fetcher} />)
+
+    expect(await screen.findByLabelText('Email address')).toBeInTheDocument()
+    expect(screen.getByTestId('why-sign-in')).toBeInTheDocument()
+    // And the wall is a real wall: not one beat of the journey is in the document.
+    expect(screen.queryByLabelText('What are you shopping for?')).toBeNull()
+    expect(screen.queryByTestId('transcript')).toBeNull()
+    expect(screen.queryByTestId('pseudonym-anonymous')).toBeNull()
+  })
+
+  it('lets somebody holding an old link sign in, and sign back out, with no form on offer', async () => {
+    // A STATE THAT IS REACHABLE AND WOULD OTHERWISE TRAP SOMEBODY. `Journey` redeems a
+    // `?token=` out of the address bar whatever this deployment can or cannot mail, so a link
+    // issued before the MTA was switched off — or read out of a `console` deployment's own
+    // log — still opens a real session. The sign-in section is where the Sign out button
+    // lives, so hiding it purely on `offered === false` would leave that person signed in
+    // with no way to end it, and step 1 printing a vault pseudonym on a page that otherwise
+    // claims to have no login at all.
+    arrivingFromTheMailbox()
+    const { fetcher } = withoutMailTransport()
+    render(<Journey fetcher={fetcher} />)
+
+    // Signed in, and the panel that says so is on the page.
+    await screen.findByTestId('signed-in')
+    const signOut = screen.getByRole('button', { name: /sign out/i })
+    // But no FORM: nothing offers a link this deployment could not send.
+    expect(screen.queryByLabelText('Email address')).toBeNull()
+    expect(screen.queryByTestId('why-sign-in')).toBeNull()
+    // And the journey is open, because a session is not what gates it here.
+    expect(screen.getByLabelText('What are you shopping for?')).toBeInTheDocument()
+    // With a real handle, so the anonymous line correctly stands down.
+    expect(screen.getByTestId('pseudonym').textContent).toContain(VAULT_PSEUDONYM)
+    expect(screen.queryByTestId('pseudonym-anonymous')).toBeNull()
+
+    // Signing out ends it and leaves the shopper in the journey rather than at a wall.
+    fireEvent.click(signOut)
+    await waitFor(() => expect(screen.queryByTestId('signed-in')).toBeNull())
+    expect(screen.getByLabelText('What are you shopping for?')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Email address')).toBeNull()
+    expect(screen.getByTestId('pseudonym-anonymous')).toBeInTheDocument()
+  })
+
+  it('shows neither the form nor the journey until the service has answered', async () => {
+    // The third state, and it is not decoration. Opening on the form and removing it says
+    // "sign in" to a deployment that cannot log anyone in; opening on the journey and then
+    // walling it throws away whatever a visitor had begun typing. So the page commits to
+    // neither until it knows, and this drives that window rather than assuming it is brief.
+    signedOut()
+    let answer!: (offered: boolean) => void
+    const pending = new Promise<boolean>((resolve) => {
+      answer = resolve
+    })
+    const inner = demoService()
+    const fetcher: Fetcher = async (path, init) =>
+      path === SIGN_IN_PATH ? json({ offered: await pending }) : inner.fetcher(path, init)
+
+    render(<Journey fetcher={fetcher} />)
+
+    await screen.findByTestId('signin-unknown')
+    expect(screen.queryByLabelText('Email address')).toBeNull()
+    expect(screen.queryByLabelText('What are you shopping for?')).toBeNull()
+
+    answer(false)
+    expect(await screen.findByLabelText('What are you shopping for?')).toBeInTheDocument()
+    expect(screen.queryByTestId('signin-unknown')).toBeNull()
+  })
+})
+
+/** True when `init` carries no `X-Buyer-Session` header, however the headers were spelled. */
+function bodyHasNoSessionHeader(init: RequestInit | undefined): boolean {
+  const headers = init?.headers
+  if (headers === undefined) return true
+  const asRecord = headers as Record<string, unknown>
+  return asRecord[SESSION_HEADER] === undefined
+}

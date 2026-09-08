@@ -169,6 +169,17 @@ PINNED_ROUTES: tuple[Route, ...] = (
     Route("buyer", "post", "/buyer/auth/session"),
     Route("buyer", "get", "/buyer/auth/session"),
     Route("buyer", "delete", "/buyer/auth/session"),
+    # The sign-in OFFER, and it is not one of the fourteen above — it did not exist when the
+    # buyer's document was published. One boolean: does this deployment hold a real mail
+    # transport, so a magic-link login can actually be completed? `console`, no transport, an
+    # unknown transport word and a half-configured MTA all answer `false`.
+    # `apps/buyer/app/journey/Journey.tsx` reads it and renders the sign-in form only when it is
+    # `true`, so a deployment that can send no mail does not show a form promising "we email you
+    # a single-use link" that nothing could fulfil. Unauthenticated, and declared here under the
+    # same rule as everything below: a route the service ANSWERS is declared here. It discloses
+    # nothing `POST /buyer/auth/magic-link` does not already disclose by answering 202 rather
+    # than 503, and unlike that door it spends no rate-limit budget and mints no link.
+    Route("buyer", "get", "/buyer/auth/sign-in"),
     Route("buyer", "get", "/buyer/profile"),
     # The store's read of the buyer window, not the shopper's: it takes a store-scoped
     # bearer and refuses a live buyer session. D5 already entitled the store side and

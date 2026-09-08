@@ -638,20 +638,37 @@ export function describeComponents(components: Readonly<Record<string, number>>)
  * `confirmed` is the literal boolean `true`. The service types it `StrictBool`, so the
  * string `"true"` is a 422 — and, worse, a lax `bool` field would have coerced it and
  * opened an auction.
+ *
+ * **`profile` may be `null`, and that is a different thing from a profile with no
+ * pseudonym.** `null` is the page stating that it has no handle of its own to send: on a
+ * deployment that cannot deliver a login link there is no sign-in, so no session, so no
+ * vault-minted pseudonym, and `exchange.composition.solicitation_profile` names the shopper
+ * `anon-{auction_id}` for that one auction with empty buckets. The solicitation is a valid
+ * `BidRequest` and the stores bid on it — measured in that function's own docstring:
+ * `omitted -> 201 fallback=False shortlist 1`.
+ *
+ * A profile OBJECT whose `pseudonym` is blank is still `MissingProfileError`, and the
+ * distinction is exactly what that error's docstring is about: it refuses "a page that
+ * thinks it named the buyer and did not". A page passing `null` knows it has not named the
+ * buyer and says so on screen; a page passing `{pseudonym: ''}` believes it has.
  */
 export async function confirmWithProfile(
   intent: unknown,
-  profile: BuyerProfile,
+  profile: BuyerProfile | null,
   fetcher: Fetcher,
 ): Promise<AuctionCreated> {
   assertConfirmable(intent)
-  if (!isNonEmptyString(profile.pseudonym)) {
+  if (profile !== null && !isNonEmptyString(profile.pseudonym)) {
     throw new MissingProfileError('the profile carries no pseudonym')
   }
-  const body: { intent: Intent; confirmed: true; profile: BuyerProfile } = {
+  const body: { intent: Intent; confirmed: true; profile?: BuyerProfile } = {
     intent,
     confirmed: true,
-    profile,
+    // Omitted rather than sent as `null`: `CreateAuctionRequest.profile` is `dict | None`, so
+    // both are legal on the wire, and the field being ABSENT is the honest spelling of "this
+    // page has no handle" — a `null` reads as a handle that was looked up and came back
+    // empty. `solicitation_profile` treats them identically.
+    ...(profile === null ? {} : { profile }),
   }
   const response = await fetcher(CONFIRM_PATH, {
     method: 'POST',

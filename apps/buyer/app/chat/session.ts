@@ -78,6 +78,15 @@ export type Fetcher = (input: string, init?: RequestInit) => Promise<Response>
 export const MAGIC_LINK_PATH = '/buyer/auth/magic-link'
 export const SESSION_PATH = '/buyer/auth/session'
 export const PROFILE_PATH = '/buyer/profile'
+/**
+ * `GET /buyer/auth/sign-in` — one boolean saying whether this deployment can deliver a link.
+ *
+ * Not a route that logs anybody in. It exists so a page can avoid PROMISING a mail that
+ * nothing will send: the shipped sign-in panel said "we email you a single-use link" on a
+ * deployment whose transport was `console` and whose SMTP variables were all empty, so the
+ * one gesture standing between a shopper and the product could never be completed.
+ */
+export const SIGN_IN_PATH = '/buyer/auth/sign-in'
 
 /** The header the service reads a session id out of. Spelled once, here. */
 export const SESSION_HEADER = 'X-Buyer-Session'
@@ -87,6 +96,28 @@ const JSON_HEADERS = { 'Content-Type': 'application/json' }
 async function readJson(response: Response, where: string): Promise<unknown> {
   if (!response.ok) throw new Error(`${where} failed with HTTP ${response.status}`)
   return assertPseudonymOnly((await response.json()) as unknown, where)
+}
+
+/**
+ * GET /buyer/auth/sign-in — is a magic-link login completable on this deployment?
+ *
+ * `true` only when the buyer service holds a mail transport it could really hand a link to.
+ * `console`, no transport at all, an unknown transport word, and a half-configured MTA all
+ * answer `false`, because none of them puts a link in anybody's mailbox.
+ *
+ * Throws on an HTTP failure, exactly like the other calls in this module, rather than
+ * quietly answering `false`. "I could not ask" and "the answer is no" put the same page on
+ * screen, but they are different facts and the decision to treat them alike belongs to the
+ * caller that renders — see `Journey.tsx`, which catches this and says why in one place.
+ *
+ * The body is read defensively: only the literal `true` turns the login on. A server that
+ * answered something else has not said yes.
+ */
+export async function readSignInOffered(fetcher: Fetcher): Promise<boolean> {
+  const body = (await readJson(await fetcher(SIGN_IN_PATH), 'sign-in')) as {
+    offered?: unknown
+  }
+  return body.offered === true
 }
 
 /** POST /buyer/auth/magic-link — asks for a link. Resolves with the link's expiry. */

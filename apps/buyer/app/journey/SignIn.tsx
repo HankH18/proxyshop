@@ -6,6 +6,20 @@
  * `Journey` — and the only thing that ever imported it was its own test, so it was deleted
  * rather than mounted beside the journey. This is the part of it that was doing real work.
  *
+ * **WHEN THIS IS MOUNTED AT ALL, and why the promise below is safe to make.** Every sentence
+ * here is about email — "We email you a single-use link" — and on a deployment with no mail
+ * transport that was simply false: the hosted demo ran the console transport with no MTA
+ * anywhere behind it, so the link this panel promised could not be sent and the whole journey
+ * sat behind a door with no key. The words are not hedged; the panel is. `Journey` asks
+ * `GET /buyer/auth/sign-in` before it renders anything, and mounts this only where the buyer
+ * service really holds a transport that would put a link in a mailbox. Where it does not,
+ * there is no sign-in section at all and the journey opens with no gate.
+ *
+ * So: this component may keep saying "we email you", and must keep being mounted only where
+ * that is true. Do not soften the copy to make it renderable somewhere else — the condition
+ * is the fix, and a hedged sentence would put a form back in front of a shopper who has no
+ * way through it.
+ *
  * It performs no I/O: `Journey` owns the wire, `chat/session.ts` owns the requests. What this
  * component owns is the one property worth stating about a login form on a page whose whole
  * claim is pseudonymity — **the address goes up and never comes back down.** It is held in

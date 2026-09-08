@@ -139,24 +139,52 @@ def test_an_operator_who_chose_a_transport_is_not_overruled(
     )
 
 
-def test_the_banner_tells_a_reader_the_journey_has_a_sign_in_step(
+def test_the_console_banner_tells_a_reader_there_is_no_sign_in_step_to_do(
     devstack: ModuleType, no_transport: None
 ) -> None:
-    """A gate nobody was told about reads as a broken demo.
+    """On a stack that mails nothing, the page asks for no login — and the banner says so.
 
-    The confirm button is absent rather than disabled, so there is nothing on the page to
-    click and nothing to hover. The banner is where a reader finds out that a sign-in is
-    coming, where the link will appear, and that it must be done before typing the
-    conversation — redeeming reloads the page.
+    WHAT THIS TEST USED TO ASSERT, AND WHY THE CONTRACT CHANGED. It was
+    ``test_the_banner_tells_a_reader_the_journey_has_a_sign_in_step``, and it required the
+    console banner to contain "confirm" and "reload" — the beats of a walkthrough that told
+    the reader to type an address into 'Email address', press 'Email me a link', find the
+    link in this terminal, and do it all BEFORE typing the conversation because redeeming
+    reloads the page. Every one of those sentences was true of the page as it was built.
+
+    None of them is true now, and the change is the owner's rather than this file's:
+    ``Journey.tsx`` asks ``GET /buyer/auth/sign-in`` on load and renders the sign-in form only
+    where the buyer service holds a transport that can really deliver a link. This launcher
+    sets ``console``, which puts nothing in any mailbox, so there is no form to type into, no
+    button to press, no redemption and therefore no reload. The old assertions did not become
+    "too strict"; their subject stopped existing. Asserting them would keep a banner on screen
+    that instructs a developer to press a control the page does not have — the same defect,
+    in a terminal instead of a browser, that the SPA change exists to remove.
+
+    So this pins the contract that replaced it, and pins it at least as tightly: the banner
+    must say there is nothing to do, say where to open the page, and name what the sessionless
+    path costs. That last one is not decoration — a reader who is not told will see the
+    shortlist name the shopper ``anon-<auction id>`` and read a working demo as a broken one,
+    which is exactly the failure the retired assertions were guarding against.
     """
     lines = "\n".join(devstack._sign_in_lines("http://127.0.0.1:8100", "console")).casefold()
 
-    assert "sign in" in lines
-    for fragment in ("terminal", "confirm", "reload"):
-        assert fragment in lines, f"the banner never mentions {fragment!r}:\n{lines}"
+    assert "sign in" in lines, "the banner does not address signing in at all"
     assert "8100" in lines, "the banner does not say where to open the page"
-    assert "local-development" in lines or "development" in lines, (
-        "the banner does not say that printing sign-in tokens is a development-only posture"
+    # It says there is NOTHING to do, rather than walking a login that is not on the page.
+    assert "nothing to do" in lines, (
+        f"the banner does not tell the reader this stack asks for no sign-in:\n{lines}"
+    )
+    for gone in ("email me a link", "email address"):
+        assert gone not in lines, (
+            f"the banner still names {gone!r}, a control this stack's page does not render"
+        )
+    # And it names the cost, so an anonymous handle in the shortlist is not a surprise.
+    assert "anon-" in lines, (
+        f"the banner never says the exchange names the shopper per auction:\n{lines}"
+    )
+    # The capability is hidden, not deleted, and a reader driving the API needs to know.
+    assert "magic-link" in lines, (
+        f"the banner implies the login was removed rather than not offered:\n{lines}"
     )
 
 

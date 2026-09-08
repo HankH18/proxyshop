@@ -142,8 +142,39 @@
  *    worse than the sentence saying why it is not there. That sentence names no single
  *    cause — the exchange's own 404 lists four and picks none, and the buyer service passes
  *    on a bare `null` with no reason attached.
- * 6. **Sign in first, then the journey.** A blocking gate: a visitor with no session sees the
- *    sign-in form and no part of the journey.
+ * 6. **Sign in first, then the journey — on a deployment that can send the mail.** A blocking
+ *    gate: a visitor with no session sees the sign-in form and no part of the journey. Where
+ *    the buyer service holds no mail transport there is no gate, no form, and nothing on
+ *    screen about email; the journey is the page.
+ *
+ *    WHY THE GATE BECAME CONDITIONAL, which is the newest change here and the one most likely
+ *    to be misread as the wall being weakened. It is not: on every deployment that can deliver
+ *    a link, every sentence below is still exactly true, and the wall is exactly where it was.
+ *    What changed is the deployment that CANNOT. The hosted demo runs
+ *    `PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT=console` with every SMTP variable empty and no MTA
+ *    exists anywhere in this project, so the form's own words — "we email you a single-use
+ *    link" — were false there, the link never came, and the entire product sat behind a door
+ *    with no key. A gate nobody can pass is not a stricter gate; it is an outage with a form
+ *    in front of it.
+ *
+ *    So the page asks the service first: `GET /buyer/auth/sign-in` answers one boolean, and
+ *    the gate is rendered only where it answers `true`. There is NO new setting behind that —
+ *    the boolean is derived from the transport the deployment was already configuring, so
+ *    nothing has to be remembered, nothing defaults to off, and configuring an MTA turns the
+ *    login back on by itself. The auth routes are untouched and still serve anyone who calls
+ *    them under every transport; this is about what the page offers, not about what the
+ *    service can do.
+ *
+ *    THE SESSIONLESS PATH, stated because "no gate" is not the same as "same journey". Nothing
+ *    from step 1 to step 5 sends an `X-Buyer-Session` header — clarify, confirm, the auction
+ *    record, the label render, accept and the seeded feedback panel are all sessionless
+ *    already — so all of it runs. Two things are genuinely different, and both are on screen:
+ *    `POST /buyer/intent/confirm` carries no `profile`, so `exchange.composition
+ *    .solicitation_profile` names the shopper `anon-{auction_id}` with empty buckets instead
+ *    of the vault's rotating handle; and `/render` therefore writes each store's case in its
+ *    UNCONDITIONED voice rather than one addressed to a shopper it can name. `GET
+ *    /buyer/profile`, the one route that really needs a session, is not called at all rather
+ *    than called and shown 401ing.
  *
  *    WHAT THIS SECTION USED TO SAY, kept visible rather than deleted, because the reversal is
  *    the interesting part and a reader will find the old shape in the tests' history. It read
@@ -196,6 +227,7 @@ import {
 import {
   closeSession,
   loadProfile,
+  readSignInOffered,
   redeemMagicLink,
   requestMagicLink,
   type BuyerProfile,
@@ -228,7 +260,6 @@ import { SignIn } from './SignIn'
 import { WhyEmpty } from './WhyEmpty'
 import { strippedUrl, tokenFromSearch } from './magic-link'
 import {
-  MissingProfileError,
   confirmWithProfile,
   describeComponents,
   describeTrust,
@@ -302,6 +333,20 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
   const [profile, setProfile] = useState<BuyerProfile | null>(null)
   // What the service said the last accepted link expires at. Never a clock of this page's.
   const [linkExpiresAt, setLinkExpiresAt] = useState<string | undefined>(undefined)
+  // Whether this deployment can COMPLETE a magic-link login, straight from
+  // `GET /buyer/auth/sign-in`. Three values, and the third is not a formality:
+  //
+  //   true       an MTA is configured; the sign-in gate below is exactly what it was.
+  //   false      no mail transport (`console`, or none at all); no gate, no form, and
+  //              nothing on screen about email.
+  //   undefined  not asked yet.
+  //
+  // `undefined` renders NEITHER the form nor the journey, for one round trip against this
+  // same origin. Both alternatives flash something false: opening on the form and removing
+  // it says "sign in" to a deployment that cannot log anyone in, and opening on the journey
+  // and then walling it says the opposite — and would throw away whatever a visitor had
+  // begun typing when the gate arrived.
+  const [signInOffered, setSignInOffered] = useState<boolean | undefined>(undefined)
   const [turns, setTurns] = useState<readonly string[]>([])
   const [draft, setDraft] = useState('')
   const [outcome, setOutcome] = useState<ClarifyOutcome | undefined>(undefined)
@@ -349,6 +394,31 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
   // the first render commits — a second redemption of a single-use token is a 401, and it
   // would be this page showing a buyer a refusal it caused itself.
   const redeemed = useRef(false)
+
+  // Asked once per mount, before anything is rendered that depends on the answer.
+  //
+  // NOT inside `run`, and not a failure banner. `run` resets the wire, sets `busy` and puts
+  // whatever it catches at the top of the page, which is right for a gesture a person made
+  // and wrong for a question this page asked itself. A deployment where this call fails —
+  // an old service with no such route, a proxy that 502s it — is one this page cannot prove
+  // can deliver a login, and "cannot prove it can" is the same page as "cannot": the journey,
+  // with no form promising a mail. The alternative, failing closed onto the sign-in form,
+  // would put a shopper in front of a gate this page has no evidence anyone can pass.
+  useEffect(() => {
+    let live = true
+    void (async () => {
+      let offered = false
+      try {
+        offered = await readSignInOffered(wire.fetcher)
+      } catch {
+        offered = false
+      }
+      if (live) setSignInOffered(offered)
+    })()
+    return () => {
+      live = false
+    }
+  }, [wire])
 
   useEffect(() => {
     if (redeemed.current) return
@@ -439,24 +509,27 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
   const confirm = useCallback(
     async (intent: Intent) => {
       await run(async () => {
-        if (profile === null) {
-          // Defence in depth, and it should be unreachable: the control that calls this is
-          // not in the document while `session` is null. Reusing `MissingProfileError`
-          // rather than inventing a second one — its message already says the right thing
-          // about what sending nothing would cost.
-          throw new MissingProfileError(
-            'this browser has no signed-in session, so there is no vault-minted pseudonym ' +
-              'to open an auction under',
-          )
-        }
         // R5's two halves, both the service's: the rotating pseudonym its vault minted and
         // the coarsened buckets it built. Neither is composed here, and the session id — a
         // bearer credential for this origin — is not among them.
-        const created = await confirmWithProfile(
-          intent,
-          { pseudonym: profile.pseudonym, buckets: profile.buckets },
-          wire.fetcher,
-        )
+        //
+        // `null` WHEN THERE IS NO SESSION, and it is a statement rather than a fallback. This
+        // used to throw `MissingProfileError` here, on the reasoning that the control calling
+        // it "is not in the document while `session` is null" — true while every deployment
+        // offered a login, and false on one that cannot deliver a link, where there is no
+        // sign-in at all and the journey is the whole page. So the refusal would have fired
+        // on the ordinary path of the ordinary deployment: a shopper pressing Confirm and
+        // being told this browser has no pseudonym, which is true and is not their problem.
+        //
+        // What goes out instead is a confirmation with NO profile field, which
+        // `exchange.composition.solicitation_profile` names `anon-{auction_id}` — a handle
+        // good for one auction, with empty buckets, which the stores bid against normally.
+        // The page says so where the vault's pseudonym would otherwise be printed; it does
+        // not claim a handle it did not send. A profile that EXISTS and carries no pseudonym
+        // is still refused, inside `confirmWithProfile`.
+        const sending =
+          profile === null ? null : { pseudonym: profile.pseudonym, buckets: profile.buckets }
+        const created = await confirmWithProfile(intent, sending, wire.fetcher)
         const record = await loadAuction(created.auction_id, wire.fetcher)
         // `/render` labels a shortlist AND writes each candidate's case (D55). When the
         // exchange has forgotten this auction there is no shortlist to label — not an empty
@@ -476,7 +549,14 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
             ? []
             : await renderShortlist(record.shortlist, wire.fetcher, {
                 intent,
-                profile: { pseudonym: profile.pseudonym, buckets: profile.buckets },
+                // The same object the confirm above sent, `null` and all. `renderShortlist`
+                // omits the field when it is null, so a sessionless journey gets the
+                // UNCONDITIONED reading of each case — "Offer held until: …. Also price:
+                // 78.00 USD" rather than "You said price was a must-have, and here it is".
+                // Both are the platform's own voice; only the second is conditioned on a
+                // shopper the page can name. Sending a profile it does not have is the one
+                // thing it must not do.
+                ...(sending === null ? {} : { profile: sending }),
               })
         setStage({ created, record, slots })
         // Leave the auction id where the demo's metrics page can offer it, so a driver who
@@ -554,6 +634,20 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
   // page can no longer enter. The single structural gate is the guard; there is no second one
   // to fall out of step with it.
   const signedIn = session !== null && profile !== null
+  // THE GATE IS NOW CONDITIONAL ON THE DEPLOYMENT, and this is the whole of that change.
+  //
+  // `signedIn` above is unchanged and still means what it said. What changed is that being
+  // signed out only WALLS the journey where signing in is possible. On a deployment with no
+  // mail transport the sign-in form was a door with no key: it said "we email you a
+  // single-use link" and no MTA existed to send one, so the gesture could not be completed
+  // and everything behind it was unreachable. The gate now stands only where the key exists.
+  //
+  //   askingToSignIn  the deployment can deliver a link and nobody has signed in yet.
+  //                   Exactly the old behaviour, unchanged, on exactly those deployments.
+  //   journeyOpen     the answer is in and it is not a wall: either signed in, or a
+  //                   deployment that never asks. `undefined` opens nothing — see the state.
+  const askingToSignIn = signInOffered === true && !signedIn
+  const journeyOpen = signInOffered !== undefined && !askingToSignIn
   const permalink = accepted?.permalink_url
   const refusal =
     permalink === undefined
@@ -589,6 +683,33 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
         </p>
       ) : null}
 
+      {/*
+       * THE WHOLE SIGN-IN SECTION IS CONDITIONAL, heading included.
+       *
+       * `signInOffered === false` means this deployment has no mail transport, so there is
+       * no link it could send and nothing here would be true. Rendering the heading with an
+       * explanation underneath was the tempting middle option and it is worse than nothing:
+       * it puts "Sign in" on a page that has no sign-in, and invites a reader to look for a
+       * control that is deliberately absent. A deployment that cannot log anybody in should
+       * look like a product that does not ask you to, which is what it is.
+       *
+       * `undefined` renders the neutral line below rather than this section OR the journey,
+       * for the length of one same-origin request. See the state's own comment.
+       *
+       * `|| signedIn` IS NOT BELT AND BRACES — it covers a state that is genuinely reachable.
+       * The redemption effect above runs whenever the address bar carries a `?token=`, and it
+       * does not consult this flag: somebody holding a link issued before the MTA was turned
+       * off (or read out of a `console` deployment's log) still arrives with a live session.
+       * Without this clause they would be signed in with no way to sign out — the panel that
+       * holds the Sign out button is this one — and the page would print a vault pseudonym in
+       * step 1 while claiming, by omission, that this deployment has no login. Whoever has a
+       * session can always end it.
+       */}
+      {signInOffered === undefined ? (
+        <p role="status" data-testid="signin-unknown" className="gloss">
+          Starting up &mdash; asking this deployment whether it can sign you in.
+        </p>
+      ) : signInOffered === false && !signedIn ? null : (
       <section aria-label="Sign in" className="step" data-testid="signin">
         <h2>Sign in</h2>
         {session === null || profile === null ? (
@@ -647,10 +768,23 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
           </>
         )}
       </section>
+      )}
 
       {/*
-       * THE GATE. Everything from step 1 to step 5 is the journey, and the journey needs a
-       * session — so a visitor without one sees the sign-in panel above and nothing of this.
+       * THE GATE. Everything from step 1 to step 5 is the journey. Where a login can be
+       * completed the journey needs a session, and a visitor without one sees the sign-in
+       * panel above and nothing of this. Where it cannot — no MTA anywhere in the deployment
+       * — there is no panel and no wall, and the journey is the page.
+       *
+       * WHAT THAT COSTS, and it is not nothing: without a session there is no vault-minted
+       * pseudonym, so the exchange names the shopper `anon-{auction_id}` for the one auction
+       * and the stores are told empty buckets. Step 1's handle line says exactly that instead
+       * of naming a handle. Nothing else in the journey reads a session — clarify, confirm,
+       * the auction record, the label render, accept and the seeded feedback panel all take
+       * no `X-Buyer-Session` header — so the rest renders and behaves identically.
+       *
+       * The one route that genuinely needs a session, `GET /buyer/profile`, is not called at
+       * all on this path rather than being called and having its 401 shown.
        *
        * WHAT IS DELIBERATELY OUTSIDE IT, in both directions:
        *
@@ -667,7 +801,7 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
        * post-purchase prompt, and showing a purchase-feedback form to a visitor who has not
        * signed in would be the page telling a story about a journey they have not had.
        */}
-      {!signedIn ? null : (
+      {!journeyOpen ? null : (
         <>
       <section aria-label="Step 1 - say what you need" className="step">
         <h2>
@@ -705,23 +839,34 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
           </ol>
         )}
         {/*
-         * This used to branch on `profile === null`, with a signed-out arm reading "No store
-         * has been told anything about you, and there is no handle to tell them with: you are
-         * not signed in. What you type here goes to this origin's own buyer service and no
-         * further until you sign in and confirm."
+         * THIS BRANCH IS BACK, and its history is worth keeping because it was deleted for a
+         * reason that has since stopped being true. It originally had a signed-out arm; when
+         * the sign-in gate went in front of the whole journey that arm became unreachable —
+         * `profile` could not be null inside the gate — and it was removed as dead code, its
+         * privacy sentence moved onto the gate where a signed-out visitor could still read it.
          *
-         * That arm is unreachable now — this section is inside the gate, so `profile` is
-         * never null here — and an unreachable branch that carries the page's only signed-out
-         * privacy statement is worse than dead code: the sentence would render in NO state at
-         * all. Its claim is still true and still worth making, so it moved to where a
-         * signed-out visitor can actually read it, on the sign-in gate above, rather than
-         * being deleted along with the branch that had stopped being reachable.
+         * A deployment that cannot deliver a login link has no gate, so the state is reachable
+         * again: the journey renders with `profile === null` and nobody was ever asked to sign
+         * in. What goes here is NOT the old sentence, though. That one said "you are not
+         * signed in", which reads as an instruction to go and sign in, and on this deployment
+         * there is nowhere to do that. It says what actually happens instead: the exchange
+         * names the shopper itself, per auction, and the stores learn nothing else.
          */}
-        <p className="gloss" data-testid="pseudonym">
-          The stores are told you are <strong>{profile.pseudonym}</strong>, and nothing else.
-          That handle was minted by the buyer service&rsquo;s pseudonym vault when you signed
-          in &mdash; this browser cannot mint one &mdash; and signing out retires it.
-        </p>
+        {profile === null ? (
+          <p className="gloss" data-testid="pseudonym-anonymous">
+            The stores are told nothing about you and this page sends no handle of its own.
+            When you confirm, the exchange mints a name for that one auction &mdash;{' '}
+            <code>anon-&lt;auction id&gt;</code> &mdash; and the stores are given it with an
+            empty set of buckets. It belongs to the auction rather than to you: the next one
+            gets a different name, and nothing joins them up.
+          </p>
+        ) : (
+          <p className="gloss" data-testid="pseudonym">
+            The stores are told you are <strong>{profile.pseudonym}</strong>, and nothing else.
+            That handle was minted by the buyer service&rsquo;s pseudonym vault when you signed
+            in &mdash; this browser cannot mint one &mdash; and signing out retires it.
+          </p>
+        )}
       </section>
 
       {outcome !== undefined && stage === undefined ? (

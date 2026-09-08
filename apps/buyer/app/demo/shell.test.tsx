@@ -26,12 +26,26 @@ afterEach(() => {
   window.location.hash = ''
 })
 
+// WHAT THESE WAIT ON, AND WHY IT CHANGED FROM 'Email address'.
+//
+// Nothing in this file passes a fetcher, so `Journey` runs against jsdom's own `fetch` and
+// reaches no service at all. These waits used to name the sign-in form, which rendered in
+// that state because the form was unconditional. It is not any more: `Journey` asks
+// `GET /buyer/auth/sign-in` whether this deployment can deliver a login link, and a
+// deployment it cannot ask is one it cannot prove can — so it opens the journey with no gate,
+// exactly as a deployment with no mail transport does.
+//
+// The composer is the same signal these assertions always wanted — "the shopper journey is
+// the page that rendered" — and it is the element `journey.test.tsx` uses for it too. The
+// subjects of these tests are the hash routing and where the nav bar's links live; none of
+// them is about the gate, and none of them has been loosened.
+const SHOPPER_PAGE = 'What are you shopping for?'
+
 describe('the demo shell chooses a page from the hash', () => {
   it('renders the shopper journey by default', async () => {
     window.location.hash = ''
     render(<DemoShell />)
-    // The journey is behind its sign-in gate, so what a signed-out visitor gets is the form.
-    expect(await screen.findByLabelText('Email address')).toBeInTheDocument()
+    expect(await screen.findByLabelText(SHOPPER_PAGE)).toBeInTheDocument()
     expect(screen.queryByTestId('metrics-page')).toBeNull()
   })
 
@@ -39,13 +53,13 @@ describe('the demo shell chooses a page from the hash', () => {
     window.location.hash = '#/metrics'
     render(<DemoShell />)
     expect(await screen.findByTestId('metrics-page')).toBeInTheDocument()
-    expect(screen.queryByLabelText('Email address')).toBeNull()
+    expect(screen.queryByLabelText(SHOPPER_PAGE)).toBeNull()
   })
 
   it('switches pages when the hash changes, with no reload', async () => {
     window.location.hash = ''
     render(<DemoShell />)
-    await screen.findByLabelText('Email address')
+    await screen.findByLabelText(SHOPPER_PAGE)
 
     window.location.hash = '#/metrics'
     window.dispatchEvent(new HashChangeEvent('hashchange'))
@@ -53,7 +67,7 @@ describe('the demo shell chooses a page from the hash', () => {
 
     window.location.hash = '#/'
     window.dispatchEvent(new HashChangeEvent('hashchange'))
-    await waitFor(() => expect(screen.getByLabelText('Email address')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByLabelText(SHOPPER_PAGE)).toBeInTheDocument())
   })
 })
 
@@ -75,7 +89,7 @@ describe('the bar and the root, put together the way main.tsx does', () => {
     try {
       mountDemoNav({ surface: 'buyer' })
       const { container } = render(<DemoShell />, { container: root })
-      await screen.findByLabelText('Email address')
+      await screen.findByLabelText(SHOPPER_PAGE)
 
       const bar = document.getElementById(DEMO_NAV_ID)
       expect(bar).not.toBeNull()

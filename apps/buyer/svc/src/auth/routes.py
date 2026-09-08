@@ -43,6 +43,7 @@ from .delivery import (
     MagicLinkTransportMisconfigured,
     MagicLinkUndeliverable,
     build_magic_link_delivery,
+    magic_link_is_mailed,
 )
 from .magic_link import (
     DEFAULT_LINK_TTL,
@@ -1265,6 +1266,19 @@ class ProfileView(BaseModel):
     buckets: dict[str, Any]
 
 
+class SignInOffered(BaseModel):
+    """Whether this deployment can complete a login, as one boolean and nothing else.
+
+    Deliberately not "the transport", "the configuration", or anything an operator's
+    environment could be reconstructed from. The page needs to decide one thing — do I render
+    a form that says a mail is coming — and the smallest true answer to that is a ``bool``.
+    A field naming the transport would ship a piece of deployment configuration to every
+    browser for no gain, and would invite a second reader to branch on the word.
+    """
+
+    offered: bool
+
+
 def _require_session_header(session_id: str | None) -> str:
     if not session_id:
         raise HTTPException(
@@ -1272,6 +1286,61 @@ def _require_session_header(session_id: str | None) -> str:
             detail="an X-Buyer-Session header is required",
         )
     return session_id
+
+
+@router.get(
+    "/auth/sign-in",
+    status_code=status.HTTP_200_OK,
+    response_model=SignInOffered,
+    summary="Whether this deployment can deliver a login link, so the page knows to ask",
+)
+def read_sign_in_offered() -> SignInOffered:
+    """One boolean: can this deployment actually complete a magic-link login?
+
+    Exists because a sign-in form is a PROMISE. The shipped page said "we email you a
+    single-use link" on a deployment whose transport was ``console`` and whose every SMTP
+    variable was empty — no MTA existed anywhere in the project to point at — so the owner
+    asked for a link, waited for a mail nothing would send, and could not reach the product
+    behind the gate. The page now asks this first and offers the form only where the sentence
+    is true.
+
+    Two questions, and both have to be asked here rather than in the browser:
+
+    1. :func:`~buyer_svc.auth.delivery.magic_link_is_mailed` — does this deployment name an
+       MTA and not the console? It never raises, so an unknown transport word reads as "does
+       not mail" rather than as a page that cannot render.
+    2. Does the login stack actually BUILD? A half-configured transport — an MTA named with
+       no sender, a base URL that is not a URL — passes (1) and then raises
+       :class:`~buyer_svc.auth.delivery.MagicLinkTransportMisconfigured` at construction, so
+       ``POST /buyer/auth/magic-link`` answers ``503``. Offering a form that can only fail
+       would be the same broken promise in a different costume, so it is asked here.
+       :func:`auth_service` caches, which is what keeps this a cheap call and keeps it from
+       re-running the transport's boot announcement.
+
+    Takes no credential and answers the same value to everybody, which is why it is safe to
+    serve unauthenticated: it is a standing fact about this deployment's configuration, not
+    state a caller could probe. It is also already inferable — ``POST /buyer/auth/magic-link``
+    answers ``202`` on a deployment that can deliver and ``503`` on one that cannot — so this
+    route discloses nothing that door does not, and unlike that door it costs no rate-limit
+    budget and mints no link to find out.
+
+    NOT a switch. There is no environment variable here that a deployment sets to hide or
+    show a login; there is only the transport it was already configuring. Set
+    :data:`~buyer_svc.auth.delivery.MAGIC_LINK_TRANSPORT_ENV` to ``smtp`` with an MTA behind
+    it and this answers ``True`` with nothing else to remember.
+    """
+    if not magic_link_is_mailed():
+        return SignInOffered(offered=False)
+    try:
+        auth_service()
+    except MagicLinkTransportMisconfigured as exc:
+        # The same fact `get_auth_service` turns into a 503 for the login door, answered here
+        # as "do not offer the form". Logged at the same level and with the same words,
+        # because an operator who half-configured a transport needs to find out from the log
+        # either way — the page going quiet must not be the only symptom.
+        _log.error("sign-in is not offered: magic-link transport is misconfigured: %s", exc)
+        return SignInOffered(offered=False)
+    return SignInOffered(offered=True)
 
 
 @router.post(

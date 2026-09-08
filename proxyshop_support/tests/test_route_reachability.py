@@ -127,9 +127,13 @@ UNDRIVEN_ALLOWLIST: dict[tuple[str, str, str], str] = {}
 #: can tell a real drift from a deliberate addition.
 EXPECTED_COUNTS: dict[str, int] = {
     "exchange": 7,
-    "buyer": 16,  # 14 at first census; +GET /buyer/store-window (T-142, the store's read of
+    "buyer": 17,  # 14 at first census; +GET /buyer/store-window (T-142, the store's read of
     # the buyer window), +POST /buyer/feedback/order (the order reference R14's
-    # post-purchase prompt needs, fetched from the network's own reconciled record)
+    # post-purchase prompt needs, fetched from the network's own reconciled record),
+    # +GET /buyer/auth/sign-in — one boolean saying whether this deployment holds a mail
+    # transport it could really deliver a login link through. The SPA reads it on load and
+    # renders the sign-in form only when it is true, so a deployment with no MTA stops
+    # showing a panel that says "we email you a single-use link" and cannot.
     "merchant": 13,  # +1: POST /stores/{id}/revive, the kill switch's other half
     # (12 was 11 routes + the /dashboard SPA mount)
     "trust": 10,

@@ -115,6 +115,13 @@ export const PINNED_ROUTES: readonly Route[] = [
   {domain: "buyer", method: "post", path: "/buyer/auth/session"},
   {domain: "buyer", method: "get", path: "/buyer/auth/session"},
   {domain: "buyer", method: "delete", path: "/buyer/auth/session"},
+  // The sign-in OFFER, added after the fourteen above: one boolean saying whether this
+  // deployment holds a real mail transport and can therefore finish a magic-link login.
+  // `apps/buyer/app/journey/Journey.tsx` reads it and renders the sign-in form only when it is
+  // true, so a deployment that can send no mail never promises a link nothing would send. It
+  // discloses nothing `POST /buyer/auth/magic-link` does not by answering 202 rather than 503.
+  // The Python twin carries the full reasoning.
+  {domain: "buyer", method: "get", path: "/buyer/auth/sign-in"},
   {domain: "buyer", method: "get", path: "/buyer/profile"},
   // The store's read of the buyer window, not the shopper's: a store-scoped bearer, and a live
   // buyer session is refused. It reached `openapi.py` and `buyer.openapi.json` with T-142 and
