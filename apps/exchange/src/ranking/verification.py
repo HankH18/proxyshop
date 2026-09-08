@@ -59,7 +59,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from copy import deepcopy
-from typing import Any
+from typing import Any, NamedTuple
 
 from claim_verification import attribute_value, verify
 from claim_verification.pitch import (
@@ -83,6 +83,7 @@ __all__ = [
     "CLAIM_VERIFIED_KIND",
     "DEFAULT_VERIFIER_VERSION",
     "MAX_CATALOG_PRODUCTS",
+    "CatalogueReadings",
     "NoCatalogSnapshots",
     "PITCH_FIELD",
     "StaticCatalogSnapshots",
@@ -90,8 +91,10 @@ __all__ = [
     "UNDECIDABLE_KEY_REASON",
     "attest_candidate_claims",
     "attest_candidates",
+    "catalog_identity",
     "catalog_unit",
     "catalog_units",
+    "catalogue_readings",
     "claim_ref_for",
     "claim_verdict_payload",
     "declared_attributes",
@@ -533,6 +536,191 @@ def catalog_units(snapshot: Any, product_ref: Any) -> dict[str, Any]:
     return units
 
 
+def _identity_text(value: Any) -> str | None:
+    """``value`` as a non-empty string, or ``None``. No ``str()`` on a non-string."""
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def catalog_identity(snapshot: Any, product_ref: Any) -> dict[str, Any] | None:
+    """WHAT THE PLATFORM CRAWLED about this product, as a name a person can read, or ``None``.
+
+    This is the organic half of D55 published rather than merely used. A shortlist slot carried
+    ``product_ref`` and ``variant_ref`` and nothing else, so a shopper was asked to choose
+    between two opaque references — and the reason the exchange never sent a name was an
+    argument on ``ShortlistProduct`` that measured false: it said a title "belongs to the
+    catalogue the buyer app already resolves refs against", and there is no such catalogue on
+    the buyer's side of the wire. The platform's OWN crawl is a different fact from the store's
+    catalogue, and it is the same document this module already grades the store's claims
+    against, which is what makes publishing it consistent rather than a bolt-on: a name the
+    platform observed is exactly as platform-authored as the platform's pitch is.
+
+    **Nothing here is reachable from a bid.** The only input is the snapshot ``snapshot_for``
+    returned, whose served implementation
+    (:class:`~exchange.retrieval.catalogue.GraphCatalogSnapshots`) is gated in Cypher to
+    ``Source`` rows the platform observed itself, so ``seller_asserted`` and ``owner_statement``
+    rows cannot become a slot title. A store that could write the buyer-facing NAME of the thing
+    it is selling would hold a persuasion lever with none of the grading ``message`` goes
+    through — see :data:`PITCH_FIELD`.
+
+    Resolution follows the two shapes this tree actually produces, in the verifier's own order
+    of authority. ``title`` is the product row's ``canonical_name``: the crawl writes it as a
+    bare field on the row (``retrieval.catalogue.GraphCatalogSnapshots.as_snapshot``) and so does
+    an operator deployment document. ``brand`` is read off the row first and out of the typed
+    ``attributes`` block second, through :func:`claim_verification.attribute_value` — the same
+    reader ``catalog_units`` uses — because the crawl states it bare while a deployment document
+    states it as an attribute.
+
+    ``None`` unless a title resolves. A row with no readable name has no identity to publish, and
+    an identity carrying only a brand would be a slot naming a manufacturer where a shopper
+    expects a product.
+
+    ``source`` is the snapshot's own ``snapshot_id`` and is REQUIRED by the published shape, so
+    a snapshot that will not name itself publishes no identity at all. That is the traceability
+    rule ``VerificationResult.catalog_snapshot`` already keeps: a rendered name a reader cannot
+    trace back to the record that produced it cannot be told apart from one the exchange made
+    up, and the distinction between a name decided against the crawl and one decided against an
+    operator's document is exactly what the field exists to preserve.
+
+    ``observed_at`` is the product row's own stamp where it has one and the snapshot's
+    ``captured_at`` otherwise — WHEN the platform saw this, which is what lets a reader distrust
+    a stale name. It is carried verbatim in whatever spelling the snapshot used, for the reason
+    ``CatalogueEntry.observed_at`` is: re-rendering an instant here would publish a second
+    spelling of a fact this module does not own.
+
+    What is deliberately NOT here: ``product_type``, ``handle`` and images. The recorded corpus
+    holds all three for its 3,093 products, but ``ingest.graph.query.catalogue_entry`` returns
+    only ``canonical_name``, ``brand`` and ``status`` off the ``Product`` node, so an exchange
+    cannot read them without a change to that query. Guessing them from the ``attributes`` block
+    would publish them for a deployment document and never for the crawl, which is the wrong way
+    round for a field whose whole claim is "this is what the platform observed".
+    """
+    if snapshot is None:
+        return None
+    wanted = None if product_ref is None else str(product_ref)
+    products = read(snapshot, "products", None) or ()
+    for product in products:
+        if wanted is not None and str(read(product, "product_ref", "")) != wanted:
+            continue
+        title = _identity_text(read(product, "canonical_name", None))
+        if title is None:
+            if wanted is not None:
+                break
+            continue
+        source = _identity_text(read(snapshot, "snapshot_id", None))
+        if source is None:
+            if wanted is not None:
+                break
+            continue
+        brand = _identity_text(read(product, "brand", None))
+        if brand is None:
+            attributes = read(product, "attributes", None)
+            if isinstance(attributes, Mapping) and "brand" in attributes:
+                brand = _identity_text(attribute_value(attributes["brand"])[0])
+        observed_at = _identity_text(read(product, "observed_at", None)) or _identity_text(
+            read(snapshot, "captured_at", None)
+        )
+        identity: dict[str, Any] = {"title": title, "source": source}
+        if brand is not None:
+            identity["brand"] = brand
+        if observed_at is not None:
+            identity["observed_at"] = observed_at
+        return identity
+    return None
+
+
+class CatalogueReadings(NamedTuple):
+    """Everything one pass over this exchange's catalogue answers for one auction.
+
+    Two questions are asked of the same snapshots and were, in an earlier draft, asked by two
+    functions that each fetched them: which attributes this exchange can DECIDE a constraint on
+    (:func:`declared_attributes`), and what it can NAME each product as
+    (:func:`catalog_identity`). ``retrieval.catalogue.GraphCatalogSnapshots`` costs an indexed
+    point lookup per call and its own header bounds the served cost at ``2 x len(roster)``
+    lookups inside R10's synchronous window; a third pass would have made that ``3 x`` for a
+    field that is a rendering rather than a decision. One pass keeps the published bound.
+
+    Attributes:
+        attributes: :func:`declared_attributes`' answer — ``[{"key": ...}]``, or ``None`` when
+            this exchange can decide nothing for anybody. ``None`` is NOT the empty list; see
+            that function for why the distinction is load-bearing.
+        identities: ``{store_id: identity}`` for the stores a name resolved for, and no entry at
+            all for the ones it did not. Absent means "this exchange holds no crawled name for
+            this pair", which is the same "we have not checked" that grades a claim
+            ``unsupported``.
+        product_refs: the ref each identity was resolved AGAINST, per store. Published because
+            the consumer must not print a name beside a different product's reference — see
+            :func:`~.serving.shortlist_product`, which drops the identity when the two disagree.
+    """
+
+    attributes: list[dict[str, Any]] | None
+    identities: dict[str, dict[str, Any]]
+    product_refs: dict[str, str]
+
+
+def catalogue_readings(
+    catalog: Any,
+    store_ids: Iterable[Any],
+    *,
+    product_refs: Mapping[str, Any] | None = None,
+) -> CatalogueReadings:
+    """One pass over this exchange's catalogue, answering both questions it is asked per auction.
+
+    See :class:`CatalogueReadings` for what the two answers are and why they share a pass, and
+    :func:`declared_attributes` for the full argument about what ``attributes: None`` means.
+
+    ``product_refs`` is the AUCTION's roster map and is used unchanged for the attribute
+    vocabulary, so this function is a refactor of :func:`declared_attributes` and not a
+    redefinition of it: same inputs, same resolution rule, same answer. The one difference is a
+    store id repeated in ``store_ids``, which now costs ONE lookup instead of one per
+    occurrence — the key fold is a set either way, so the answer is identical and only the
+    catalogue is asked less.
+
+    **An identity is published only for a store the auction named a product for.** With no ref
+    the lookup resolves against the whole store document and lands on whichever row happens to
+    carry a name first, and the consumer would then print that name beside the ``product_ref``
+    the store's own offer states — two objects rendered as one, which is D58's defect class and
+    is invisible to the person reading it. ``None`` is the honest answer, and it is the same
+    answer this exchange gives when it holds no snapshot at all.
+
+    A store named twice keeps its FIRST answer and costs one lookup, matching
+    ``_best_bid_per_store``'s rule one module over: a duplicate id is two rows the exchange
+    cannot tell apart, and asking the catalogue twice would not make them distinguishable.
+    """
+    refs = dict(product_refs or {})
+    keys: list[str] = []
+    seen: set[str] = set()
+    identities: dict[str, dict[str, Any]] = {}
+    resolved_refs: dict[str, str] = {}
+    asked: set[str] = set()
+    for store_id in store_ids or ():
+        name = str(store_id or "")
+        if not name or name in asked:
+            continue
+        asked.add(name)
+        ref = refs.get(name)
+        snapshot = snapshot_for(catalog, name, ref)
+        if snapshot is None:
+            continue
+        for key in sorted(catalog_keys(snapshot, ref)):
+            if key not in seen:
+                seen.add(key)
+                keys.append(key)
+        if ref is None:
+            continue
+        identity = catalog_identity(snapshot, ref)
+        if identity is not None:
+            identities[name] = identity
+            resolved_refs[name] = str(ref)
+    return CatalogueReadings(
+        attributes=[{"key": key} for key in keys] or None,
+        identities=identities,
+        product_refs=resolved_refs,
+    )
+
+
 def declared_attributes(
     catalog: Any,
     store_ids: Iterable[Any],
@@ -574,24 +762,13 @@ def declared_attributes(
     shortlisted; with the same store claiming ``canonical_name`` falsely the shortlist came
     back empty. ``catalog_keys`` is the function that answers "what could this snapshot decide
     at all", which is this function's own question, so the two can no longer disagree.
+
+    **This is the ``attributes`` half of :func:`catalogue_readings` and delegates to it**, so
+    the served path can answer this question and "what may this product be called" out of ONE
+    pass over the catalogue instead of two. The published signature and the published answer are
+    unchanged; a caller that only wants the vocabulary keeps calling this.
     """
-    refs = dict(product_refs or {})
-    keys: list[str] = []
-    seen: set[str] = set()
-    for store_id in store_ids or ():
-        name = str(store_id or "")
-        if not name:
-            continue
-        snapshot = snapshot_for(catalog, name, refs.get(name))
-        if snapshot is None:
-            continue
-        for key in sorted(catalog_keys(snapshot, refs.get(name))):
-            if key not in seen:
-                seen.add(key)
-                keys.append(key)
-    if not keys:
-        return None
-    return [{"key": key} for key in keys]
+    return catalogue_readings(catalog, store_ids, product_refs=product_refs).attributes
 
 
 def catalog_unit(snapshot: Any, product_ref: Any, key: Any) -> Any:

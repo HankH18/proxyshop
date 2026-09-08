@@ -128,10 +128,25 @@ inversion of what a lever is.
 * :func:`.features.attach_features` neither reads nor produces it, so it is not an input to any
   published term. The pitch reaches the score only via the attested verdicts computed one step
   earlier, which is why :func:`.serving.rank_auction` runs the attestation BEFORE the features;
-* it is not re-published. ``collected_bid_records`` builds the accept-path record from four
-  named keys (``bid_id``, ``store_id``, ``offer``, ``store_domain``) and this is not among them,
-  and neither ``_ranked_out`` nor ``_excluded_out`` nor the shortlist carries it — so admitting
-  the prose here does not turn the auction response into a reflector for a store's text.
+* it is re-published on exactly ONE surface and nowhere else — the buyer-facing shortlist slot.
+  ``collected_bid_records`` builds the accept-path record from four named keys (``bid_id``,
+  ``store_id``, ``offer``, ``store_domain``) and this is not among them, and neither
+  ``_ranked_out`` nor ``_excluded_out`` carries it.
+
+  **That bullet used to say "it is not re-published" full stop, and D55 is why it no longer
+  does.** A shop's purchased message is the sponsored half of this market: it buys no
+  visibility and no score, and what it buys instead is the right to make its case in its own
+  voice. Computing it, grading it and then dropping it at the shortlist boundary meant the
+  platform's voice was the only one a shopper ever saw, so the one thing joining the network
+  buys was the one thing the product could not show. ``ShortlistSlot.message`` now carries it
+  (``SCHEMA_VERSION`` 3.0.0), verbatim, and :func:`.serving._with_offer_fields` is the single
+  producer. The reflector this creates is bounded and stated rather than denied: at most four
+  slots, at most ``maxLength: 1200`` characters each — the contract's bound, and the same one
+  ``buyer_svc.pitch.writing.MAX_STORE_PITCH_CHARS`` already refuses past — and a longer message
+  is published as ``null`` rather than cut, because a truncated pitch is words the store did not
+  write attributed to the store. What did NOT change is the grading: the string still reaches
+  ``rank_score`` only through verdicts this exchange attested under a MAC the bidder cannot
+  compute.
 
 **What it costs in memory: nothing new.** The string is already retained for the auction's TTL
 inside ``BidEntry.bid`` — bounded at collection by ``MAX_BID_RESPONSE_BYTES`` — and the
@@ -163,6 +178,8 @@ CANDIDATE_FIELDS: tuple[str, ...] = (
     "offer",
     "claims",
     "message",
+    "fallback",
+    "fallback_reason",
 )
 
 
@@ -326,7 +343,22 @@ def candidate_from_entry(
     store_id = str(getattr(entry, "store_id", "") or "")
     store_domain = _registered_domain(registered_domains, store_id)
     offer = read(bid, "offer", None)
-    if getattr(entry, "fallback", False):
+    # `collect_bids`' own verdict about this entry, carried under its own name so the SLOT can
+    # say whose price it is publishing (R10/D55). It is the exchange's fact, in exactly the
+    # sense `store_domain` is: `entry.fallback` is set on the branch that DISCARDED whatever
+    # arrived under this store's name and substituted a catalogue offer the exchange wrote, and
+    # `entry.fallback_reason` is one of the nine values in `collect.FALLBACK_REASONS`. Neither is
+    # reachable from `bid`, so this widens nothing a bidder can write — `Bid` declares neither
+    # name and forbids extra properties, and a store that DID somehow state one would be
+    # overwritten here by the entry's answer rather than believed.
+    #
+    # Read defensively because this projection accepts "anything exposing `store_id`, `bid` and
+    # `claims`": a caller-built entry that states nothing says `fallback: False`, which is the
+    # same answer a real bid gives and is the safe direction — the risk being guarded against is
+    # a stand-in presented as a quote, not the reverse.
+    fallback = bool(getattr(entry, "fallback", False))
+    reason = getattr(entry, "fallback_reason", None) if fallback else None
+    if fallback:
         # R10's second half. A COPY, never a mutation: the same offer dict is still inside the
         # `BidEntry` the route renders as `entries`, and a projection that edited its input
         # would be rewriting what the auction reports it collected.
@@ -345,6 +377,8 @@ def candidate_from_entry(
         # bidder-written PROSE. See the module header's "Why prose is safe here and a feature
         # key is not" for why widening the projection by this one key does not widen R11.
         "message": read(bid, "message", None),
+        "fallback": fallback,
+        "fallback_reason": None if reason is None else str(reason),
     }
 
 

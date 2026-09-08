@@ -485,18 +485,74 @@ export interface VerificationResult {
   verifier_version: string;
 }
 /**
+ * WHAT THE PLATFORM CRAWLED — a product name a person can read, in the platform's own voice (D55).
+ *
+ * This is the ORGANIC half of the market, published. D55's split is that a scraped shop is an
+ * organic result rendered by a platform-authored pitch, while an in-network shop is sponsored and
+ * buys the right to make its own case. A title the PLATFORM observed in its own crawl is a
+ * platform-authored fact about a product, exactly as the platform-authored pitch is a
+ * platform-authored case for a shop — so publishing it is the tenet applied, not a bolt-on to it.
+ *
+ * **Its source is the catalogue snapshot the exchange already grades claims against, and nothing
+ * else.** `exchange.ranking.verification.catalog_identity` reads it off the same document
+ * `claim_verification.verify` is handed, which for a served deployment is
+ * `exchange.retrieval.catalogue.GraphCatalogSnapshots` — gated in Cypher to `Source` rows whose
+ * `source_class` is in `ingest.graph.query.PLATFORM_OBSERVED_SOURCE_CLASSES`, so `seller_asserted`
+ * and `owner_statement` rows cannot reach it. **No field here is ever read off a bid.** A store
+ * that could write its own slot title would be writing the buyer-facing name of the thing it is
+ * selling, which is a persuasion lever with none of the grading the message goes through.
+ *
+ * `source` is the snapshot's own id (`neo4j-crawl:{store}:{product}` for the crawl), so a reader
+ * can trace a rendered name back to the record that produced it and tell a name decided against
+ * the crawl apart from one decided against an operator's deployment document. `observed_at` is
+ * that snapshot's `captured_at` — WHEN the platform saw this, which is the thing a shopper needs
+ * in order to distrust a stale name.
+ *
+ * **What is here is what the crawl reaches, and that is smaller than the crawl holds.** The
+ * recorded corpus carries `title`, `brand`, `product_type`, `handle` and image records for 3,093
+ * products, but `ingest.graph.query.catalogue_entry` returns only `canonical_name`, `brand` and
+ * `status` from the `Product` node — so `title` and `brand` are what an exchange can publish
+ * without a change to the ingest query. `product_type`, `handle` and images are absent rather than
+ * guessed at, and this sentence is here so the next reader looks at the Cypher rather than at this
+ * file.
+ *
+ * This interface was referenced by `ProxyShopProtocol`'s JSON-Schema
+ * via the `definition` "ShortlistProductIdentity".
+ */
+export interface ShortlistProductIdentity {
+  title: string;
+  brand?: string | null;
+  source: string;
+  observed_at?: string | null;
+}
+/**
  * R2's PRODUCT on a shortlist slot: WHICH catalogue thing this slot is offering.
  *
- * A reference, never a rendered name. The exchange holds `product_ref` (and, where the bid named
- * one, `variant_ref`) because that is what the roster and the offer agree on; a title, an image or
- * a description belongs to the catalogue the buyer app already resolves refs against, and copying
- * one through the exchange would publish a second, staler spelling of a fact the exchange does not
- * own.
+ * `product_ref` and `variant_ref` are REFERENCES, never a rendered name, and that is still true:
+ * they are what the roster and the offer agree on. What an earlier draft of this description got
+ * wrong is the sentence that followed — "a title, an image or a description belongs to the
+ * catalogue the buyer app already resolves refs against" — because there is no such catalogue on
+ * the buyer's side of the wire. Measured: `buyer_svc.accept.labels.slot_product` projects exactly
+ * `{product_ref, variant_ref}` and refuses to invent a title, `apps/buyer/app` resolves no refs
+ * against anything, and the shopper page therefore rendered two opaque references side by side and
+ * asked a person to choose between them.
+ *
+ * `identity` closes that, and it does NOT reopen the objection above, because the name it carries
+ * is not the store's catalogue's — it is the PLATFORM's, out of the platform's own crawl, carried
+ * under a key that says whose it is and names the snapshot it came from. See
+ * `ShortlistProductIdentity`. `null` where this exchange holds no crawled snapshot for the pair,
+ * which is the same "we have not checked" that grades every claim `unsupported`.
+ *
+ * **`identity` describes THIS slot's `product_ref` or it is absent.** The producer publishes it
+ * only when the ref it resolved the snapshot against is the ref published beside it, because a
+ * name read for one product printed above another product's reference is D58's own defect class —
+ * facts about two objects rendered as one — and a shopper cannot see the join to check it.
  *
  * `variant_ref` is optional for the same reason it is optional on `Offer`: cart permalinks are
  * variant-scoped (D25), but the frozen hosted-bid shape predates the field and a fallback offer
  * minted from a roster row names no variant at all. Absent means "the bid did not name one", never
- * "the default variant".
+ * "the default variant". `identity` is product-scoped and not variant-scoped for the same reason
+ * the snapshot's offer block is one listing: the crawl's `Product` node is what carries a name.
  *
  * This interface was referenced by `ProxyShopProtocol`'s JSON-Schema
  * via the `definition` "ShortlistProduct".
@@ -504,6 +560,7 @@ export interface VerificationResult {
 export interface ShortlistProduct {
   product_ref: string;
   variant_ref?: string | null;
+  identity?: ShortlistProductIdentity | null;
 }
 /**
  * R2's PRICE on a shortlist slot: what this store is asking, and until when.
@@ -543,7 +600,7 @@ export interface ShortlistPrice {
  * R2 asks one slot to show five things — PRODUCT, PRICE, COMMITMENTS, a store trust indicator and
  * provenance labels — and for a long time this object declared only the last two, so the other three
  * were dropped at the schema rather than anywhere in a service. `product`, `price` and `commitments`
- * close that. All three are OPTIONAL and all three admit `null`, deliberately on both counts:
+ * close that. All are OPTIONAL and all admit `null`, deliberately on both counts:
  * `additionalProperties: false` means every existing producer of a `Shortlist` would have had to be
  * changed on the same commit if they were required, and an R10 list-price fallback genuinely has no
  * priced offer to read when its roster row names no price the exchange could charge.
@@ -554,10 +611,34 @@ export interface ShortlistPrice {
  * the exchange's own two doors are exactly that case, one typing its body `Shortlist` and the other
  * `dict`, and they are asserted to serve byte-identical objects.
  *
- * All three are the EXCHANGE's reading of the bid, not the bid's own bytes. Nothing here is copied
- * verbatim from a store: a value the exchange cannot read as the shape declared below is nulled
- * rather than published, because the alternative is a buyer-facing route that a malformed bid can
- * turn into a 500.
+ * WHOSE WORDS EACH FIELD IS, because after `message` there are two answers and not one
+ * -------------------------------------------------------------------------------------
+ * `product`, `price` and `commitments` are the EXCHANGE's reading of the bid, not the bid's own
+ * bytes: a value the exchange cannot read as the shape declared below is nulled rather than
+ * published, because the alternative is a buyer-facing route that a malformed bid can turn into a
+ * 500. `trust_summary`, `provenance_labels`, `fit_score`, `store_domain`, `fallback` and
+ * `product.identity` are the PLATFORM's own facts and are reachable from no bid at all.
+ *
+ * `message` is the one field on this object that is the SELLER's bytes, verbatim, and it is what a
+ * shop buys by joining (D55). Admitting it is not a hole in `additionalProperties: false`; the
+ * refusal that matters is unchanged. A bidder still cannot state a feature, a score, a label, a
+ * domain or a verdict, because none of those is declared on `Bid` and none is copied through — see
+ * `exchange.ranking.candidates`, whose module header argues this key by key. What `message` is
+ * admitted AS is an assertion to check: its only consumer inside the exchange is
+ * `ranking.verification.pitch_text_of`, which decomposes it into claims stamped `seller_asserted`
+ * and verifies each against the platform's own catalogue snapshot under a MAC the bidder cannot
+ * compute. A sentence therefore earns what a structured claim earns — `verified` feeds
+ * `verified_claim_ratio`, `contradicted` costs the published penalty, `unsupported` and `ambiguous`
+ * are worth what silence is worth. **A store cannot score by writing prose; it can only be graded
+ * on it, and publishing the prose here changes neither half of that.**
+ *
+ * What publishing it DOES change, stated because an overclaiming description is how the next reader
+ * stops looking: this object now carries store-authored text to a buyer-facing origin, so the
+ * shortlist is a reflector for a bounded amount of a store's words. `maxLength` is the bound, and it
+ * is the same 1200 the buyer's own renderer (`buyer_svc.pitch.writing.MAX_STORE_PITCH_CHARS`)
+ * already refuses past, so the two ends of the wire refuse the same string rather than one
+ * publishing what the other silently drops. A longer message is published as `null` and never
+ * truncated: a truncated pitch is words the store did not write, attributed to the store.
  *
  * This interface was referenced by `ProxyShopProtocol`'s JSON-Schema
  * via the `definition` "ShortlistSlot".
@@ -574,6 +655,79 @@ export interface ShortlistSlot {
    * What this store is promising alongside the price — free returns, a shipping window, a warranty. Every entry is a published `Claim` with real provenance, which is what makes it gradeable later; a commitment the exchange cannot read as one is dropped rather than shown, because the buyer is being told this is a promise somebody can be held to. `null` is spelled out rather than left to `--strict-nullable` to widen (T-195): an optional non-nullable array generates as `list[Claim] | None` in Python regardless, and a schema that did not also say `null` would have pydantic accepting a payload ajv refuses.
    */
   commitments?: Claim[] | null;
+  /**
+   * THE SHOP'S OWN CASE, IN THE SHOP'S OWN WORDS — `Bid.message`, carried byte for byte (D55).
+   *
+   * This is the sponsored half of the market and the only thing a store buys by joining. It buys no
+   * visibility and no score: an in-network shop is ranked by the same published formula as every
+   * other candidate, and this string moves that formula only through verdicts the exchange itself
+   * attested. What it buys is the right to be heard in its own voice beside the platform's, which
+   * until this field existed was computed on both sides of the wire and dropped in the middle — a
+   * store agent wrote a per-shopper pitch, put it on `Bid.message`, and `POST /buyer/shortlist/render`
+   * would have carried it back verbatim as `pitch.store_pitch`, but this object was
+   * `additionalProperties: false` and declared no message field, so the seller's words died at this
+   * boundary and every slot on the shopper page showed the organic voice alone.
+   *
+   * **VERBATIM. Whitespace included.** No producer of this field may strip, collapse, re-wrap,
+   * re-encode or otherwise tidy it, and no consumer may either: `buyer_svc.pitch.writing.store_pitch_of`
+   * returns the seller's bytes unchanged and `apps/buyer/app/journey/wire.ts::readPitch` refuses to
+   * trim them, both on the stated ground that this is the last hop before a person reads them and a
+   * tidy-up here would be invisible to everyone. It reaches a browser as a text child, never as
+   * markup and never as a link.
+   *
+   * `null` means the exchange holds no message for this slot, and it means that for THREE different
+   * reasons a consumer must not conflate: the shop is not in the network and has no advocate; the
+   * shop is in the network and chose to say nothing; or the message it sent was longer than
+   * `maxLength` and was refused whole rather than cut. `fallback` distinguishes the first two often
+   * enough to be worth reading beside this.
+   *
+   * What this field is NOT is evidence. Nothing downstream may read a sentence here as a fact about
+   * the store, the product or the price — the fields that carry checkable facts are `commitments`,
+   * `price` and `product.identity`, each with its own provenance — and a renderer that presented this
+   * prose as though the platform vouched for it would be laundering an assertion into an observation,
+   * which is the exact asymmetry D55 exists to keep.
+   */
+  message?: string | null;
+  /**
+   * WHOSE PRICE THIS IS: `false` for a bid the store actually sent, `true` for a stand-in the exchange
+   * wrote for it at the roster's list price (R10).
+   *
+   * The exchange represents a rostered store that does not answer usably rather than dropping it, so
+   * the buyer sees the shop at its catalogue price instead of not seeing it at all. That price then
+   * reaches this slot's `price` like any other number. Without this flag the two are indistinguishable
+   * on the wire — the auction response has said so per store in `entries[]` all along, and the slot
+   * had no way to pass it on — so a card either presented a price nobody quoted as a quote, or (the
+   * honest version, and what the shopper page actually did) refused to say anything about provenance
+   * at all.
+   *
+   * `true` is not a verdict about the store's honesty and must not be rendered as one. It is reachable
+   * by every one of the nine `exchange.auction.collect.FALLBACK_REASONS` — silence, a Tier-0 store
+   * with no agent, a late reply, an unreadable offer, a discount that would not reconcile, a claim
+   * with no provenance, and an explicit decline or refusal among them — and a store that reaches it
+   * has already lost everything it could have offered: `_list_price_bid` rebuilds the offer from the
+   * ROSTER with an empty `claims` list, and the slot is labelled `unverified` rather than
+   * `store-confirmed`.
+   *
+   * `null` means the producer did not state whose price this is, which is what every `Shortlist`
+   * written before this field says. It is NOT a spelling of `false`: a consumer must render it as
+   * unknown provenance, never as a quoted bid.
+   */
+  fallback?: boolean | null;
+  /**
+   * WHY the exchange stood in, from `exchange.auction.collect.FALLBACK_REASONS`, or `null`.
+   *
+   * An OPEN string rather than a closed enum, for the reason `provenance_labels` is: the vocabulary is
+   * the exchange's and it has grown twice already (`store_declined` and `store_refused` took it from
+   * seven values to nine), and a closed enum here would make adding a reason a breaking protocol
+   * change rather than a more precise answer.
+   *
+   * Always `null` when `fallback` is not `true` — there is no reason to give for a bid that arrived.
+   * A `true` with a `null` reason is legal and means the producer stated the fact without the cause.
+   *
+   * It exists because "the exchange priced this one" and "the shop declined to bid for you" are
+   * different sentences to put in front of a shopper, and only the second is about the shop.
+   */
+  fallback_reason?: string | null;
   /**
    * The host the buyer's browser may be sent to for THIS slot, and the only value the buyer's redirect guard is allowed to pin the exchange's checkout permalink against (R3/D22/C10).
    *

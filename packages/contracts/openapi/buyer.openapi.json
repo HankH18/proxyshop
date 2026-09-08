@@ -1034,6 +1034,169 @@
         }
       }
     },
+    "/buyer/feedback/order": {
+      "post": {
+        "operationId": "feedbackOrder",
+        "summary": "The order the network routed this buyer to for one accepted slot, if there is one yet (R14).",
+        "description": "Answer what trust's reconciled record already says about a checkout this network made, so R14's prompt has a real purchase to be about.\n\nThe shopper leaves the checkout handoff holding no order reference, and one cannot be minted at accept without asserting that a purchase happened — an accept is a tab being opened, not an order. So the reference is FETCHED afterwards: this door takes only values the buyer already holds (`auction_id`, and optionally `bid_ref`) and reads trust's published `GET /reconcile`, whose own fold appends nothing.\n\nIt mints nothing, records nothing and reaches no ledger sink. A reference from here originated at the merchant's HMAC-signed `orders/paid` webhook and was paired with this buyer's accepted offer by `trust.reconcile`, which emits nothing for an order it cannot pair — so it is evidence a purchase happened.\n\n200 is the answer for both outcomes: `found: false` is a real answer about a real auction, not a missing resource.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "auction_id": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "minLength": 1,
+                    "pattern": "^[A-Za-z0-9_.:#/-]{1,200}$",
+                    "title": "Auction Id"
+                  },
+                  "bid_ref": {
+                    "type": "string",
+                    "maxLength": 200,
+                    "pattern": "^[A-Za-z0-9_.:#/-]{1,200}$|^$",
+                    "title": "Bid Ref",
+                    "default": ""
+                  }
+                },
+                "additionalProperties": false,
+                "type": "object",
+                "required": [
+                  "auction_id"
+                ],
+                "title": "OrderLookupBody",
+                "description": "The accept handle a buyer already holds, and nothing else.\n\nBoth fields are values ``POST /buyer/shortlist/accept`` already hands back — they are\npublished, required fields of that response today — so a buyer that accepted a slot can\nask this question with what it walked away with and nothing minted for the purpose.\n\nThere is deliberately no ``order_ref`` here. This is the route a caller reaches BECAUSE it\ndoes not have one; a lookup that took the answer as an argument would be the manufactured\nreference this whole path exists to avoid."
+              },
+              "example": {
+                "auction_id": "auc-capture-1",
+                "bid_ref": "auc-capture-1:store-one"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "What the network's reconciled record holds for this auction — an order, or a plain statement that there is none yet.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "found": {
+                      "type": "boolean",
+                      "title": "Found"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "title": "Reason",
+                      "default": ""
+                    },
+                    "order": {
+                      "anyOf": [
+                        {
+                          "properties": {
+                            "order_ref": {
+                              "type": "string",
+                              "title": "Order Ref"
+                            },
+                            "store_id": {
+                              "type": "string",
+                              "title": "Store Id"
+                            },
+                            "auction_id": {
+                              "type": "string",
+                              "title": "Auction Id"
+                            },
+                            "bid_ref": {
+                              "type": "string",
+                              "title": "Bid Ref"
+                            },
+                            "routed": {
+                              "type": "boolean",
+                              "title": "Routed"
+                            }
+                          },
+                          "type": "object",
+                          "required": [
+                            "order_ref",
+                            "store_id",
+                            "auction_id",
+                            "bid_ref",
+                            "routed"
+                          ],
+                          "title": "RoutedOrderView",
+                          "description": "The order the network says it routed this checkout to. Every field is the network's.\n\n``routed`` is always ``True`` on a body that exists at all: this view is built only from a\n``reconciled`` ledger record, and ``trust.reconcile.engine.reconcile`` emits none for an\norder it could not pair with the exchange's ``accepted`` promise. It is published rather\nthan implied because it is the field ``POST /buyer/feedback/prompt`` and\n``POST /buyer/feedback`` read, and a caller should be able to hand this object straight\nback as its ``order``."
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "found"
+                  ],
+                  "title": "OrderLookupResponse",
+                  "description": "Whether the network vouches for an order behind this accept handle, and if not, why not.\n\n200 with ``found: false`` rather than 404, for the same reason ``/prompt`` answers 200 with\n``offered: false``: \"has my order come through yet?\" is a question with two correct\nanswers, and the ordinary one — the webhook has not landed, or the fold has not seen it —\nis not an error the buyer did anything to cause."
+                },
+                "example": {
+                  "found": true,
+                  "order": {
+                    "order_ref": "gid://shopify/Order/5500000000001",
+                    "store_id": "store-one",
+                    "auction_id": "auc-capture-1",
+                    "bid_ref": "auc-capture-1:store-one",
+                    "routed": true
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "detail"
+                  ],
+                  "properties": {
+                    "detail": {
+                      "description": "FastAPI's refusal envelope, in the three shapes this service really answers with. An ARRAY of `{loc, msg, type}` is request validation — FastAPI's own, or `buyer_svc.intent.routes._BoundedBodyRoute`'s bounded rendering of it. A STRING is a handler's refusal that carries only a sentence. An OBJECT is a handler's refusal that carries a value the caller needs: the permalink already issued (409 on accept), the event id already recorded (409 on feedback), the choices that were offered (422 on an unknown feedback choice), or the reason an order was not routed (403).",
+                      "oneOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "array"
+                        },
+                        {
+                          "type": "object"
+                        }
+                      ]
+                    }
+                  }
+                },
+                "example": {
+                  "detail": {
+                    "message": "<7 characters, which is not an option id> is not one of this prompt's options. R14's prompt is structured: the answer must be one of ['yes_as_described', 'as_described_but_late', 'not_as_described', 'wrong_item', 'never_arrived'], and free text is not an option the buyer was offered — recording it would put a body on the ledger that 'feedback' has no published shape for.",
+                    "options": [
+                      "yes_as_described",
+                      "as_described_but_late",
+                      "not_as_described",
+                      "wrong_item",
+                      "never_arrived"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/buyer/feedback/prompt": {
       "post": {
         "operationId": "feedbackPrompt",
@@ -2789,6 +2952,28 @@
                               }
                             ],
                             "title": "Commitments"
+                          },
+                          "fallback": {
+                            "anyOf": [
+                              {
+                                "type": "boolean"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Fallback"
+                          },
+                          "fallback_reason": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "title": "Fallback Reason"
                           },
                           "pitch": {
                             "anyOf": [

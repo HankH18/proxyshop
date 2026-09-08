@@ -176,6 +176,11 @@ PINNED_ROUTES: tuple[Route, ...] = (
     Route("buyer", "get", "/buyer/store-window"),
     Route("buyer", "post", "/buyer/feedback/prompt"),
     Route("buyer", "post", "/buyer/feedback"),
+    # R14's prompt needs a real purchase to be about, and the shopper leaves the checkout
+    # handoff holding no order reference. One cannot be minted at accept — an accept is a tab
+    # being opened, not an order — so it is FETCHED afterwards from the network's own
+    # reconciled record. This door reads trust's published `GET /reconcile` and writes nothing.
+    Route("buyer", "post", "/buyer/feedback/order"),
     Route("buyer", "post", "/buyer/intent/clarify"),
     Route("buyer", "post", "/buyer/intent/confirm"),
     Route("buyer", "post", "/buyer/livecheck/run"),

@@ -124,6 +124,11 @@ export const PINNED_ROUTES: readonly Route[] = [
   {domain: "buyer", method: "get", path: "/buyer/store-window"},
   {domain: "buyer", method: "post", path: "/buyer/feedback/prompt"},
   {domain: "buyer", method: "post", path: "/buyer/feedback"},
+  // R14's post-purchase prompt needs a real order to be about, and it is FETCHED from trust's
+  // reconciled record rather than minted at accept. THREE places, not two: this mirror is the
+  // one a buyer route has been added without twice now, and both times `vitest
+  // packages/contracts` went red while the Python tuple and the JSON document agreed.
+  {domain: "buyer", method: "post", path: "/buyer/feedback/order"},
   {domain: "buyer", method: "post", path: "/buyer/intent/clarify"},
   {domain: "buyer", method: "post", path: "/buyer/intent/confirm"},
   {domain: "buyer", method: "post", path: "/buyer/livecheck/run"},

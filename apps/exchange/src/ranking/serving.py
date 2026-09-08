@@ -31,6 +31,26 @@ can only build the last two, because it is handed rank ROWS and a rank row carri
 the three offer-derived fields are read and merged here — see :func:`_with_offer_fields`, and see
 its docstring for why a field the exchange cannot read is served as ``null`` rather than dropped.
 
+**And D55's three, which are what makes the slot a market rather than a listing.** A shortlist
+answered four questions a shopper asks and silently refused three more, all for the same reason:
+the published slot did not carry enough.
+
+* WHOSE VOICE. ``message`` is the SHOP's own case in the shop's own words, carried verbatim
+  (:func:`slot_message`). Every card had Proxyshop's case on it and none had the seller's — not
+  because the page declined to show one, but because the pitch was computed, graded, and then
+  dropped at this boundary. What a shop buys by joining was the one thing the product could not
+  show. It buys no rank and no visibility here: the string reaches ``rank_score`` only through
+  verdicts this exchange attested, and publishing it changes neither half of that.
+* WHOSE PRICE. ``fallback`` / ``fallback_reason`` say whether a store answered or the exchange
+  stood in for it at the roster's list price (R10). The auction response has said so per store in
+  ``entries[]`` all along; the slot had no way to pass it on, so a card could not tell a quote
+  from a stand-in and the honest ones refused to guess.
+* WHOSE NAME. ``product.identity`` is the PLATFORM's own crawled name for the product
+  (:func:`~.verification.catalog_identity`), so a shopper compares two products rather than two
+  opaque refs. It comes out of the same catalogue snapshot this module already grades claims
+  against, and it is read in the SAME pass (:func:`~.verification.catalogue_readings`) so the
+  served cost does not grow.
+
 **And "hands them their inputs" is now literal.** :func:`rank_auction` is the only place that
 holds a served auction's bids, its roster and this exchange's catalogue at once, so it is the
 only place that can run :mod:`.verification` and then :mod:`.features` over them in that order
@@ -61,12 +81,14 @@ from . import shortlist as _shortlist
 from .candidates import candidates_from_entries
 from .features import attach_features
 from .filters import read, trust_row
-from .verification import NoCatalogSnapshots, attest_candidates, declared_attributes
+from .verification import NoCatalogSnapshots, attest_candidates, catalogue_readings
 
 __all__ = [
     "DEFAULT_SHORTLIST_CAPACITY",
     "ENV_RANKING_WEIGHTS",
+    "MAX_SLOT_MESSAGE_CHARS",
     "SHOWN_KIND",
+    "SLOT_CANDIDATE_FIELDS",
     "SLOT_OFFER_FIELDS",
     "ShortlistStore",
     "bandit_posteriors_of",
@@ -80,6 +102,7 @@ __all__ = [
     "shortlist_price",
     "shortlist_product",
     "shortlist_store",
+    "slot_message",
     "trust_snapshot_of",
     "weights_of",
     "with_intent_match",
@@ -93,6 +116,33 @@ SHOWN_KIND = "shown"
 #: Named as data so a test can assert the set rather than restate it, the same way
 #: :data:`~exchange.ranking.candidates.CANDIDATE_FIELDS` does for the projection.
 SLOT_OFFER_FIELDS: tuple[str, ...] = ("product", "price", "commitments")
+
+#: The three D55 fields this module reads off the projected CANDIDATE rather than off its offer.
+#:
+#: Named as data beside :data:`SLOT_OFFER_FIELDS` for the same reason that one is, and kept
+#: SEPARATE from it rather than folded in, because the two sets have different authors and a
+#: reader has to be able to tell which. Everything in ``SLOT_OFFER_FIELDS`` is the exchange's
+#: reading of the store's offer. ``message`` is the STORE's own bytes; ``fallback`` and
+#: ``fallback_reason`` are the EXCHANGE's verdict about whether there was a store answer at all.
+SLOT_CANDIDATE_FIELDS: tuple[str, ...] = ("message", "fallback", "fallback_reason")
+
+#: The longest seller message this exchange will publish on a shortlist slot.
+#:
+#: It is the ``maxLength`` the contract declares on ``ShortlistSlot.message``, restated here
+#: because this module has to REFUSE a longer one rather than discover it: the slot is
+#: re-validated through the pinned model in :func:`_with_offer_fields`, so a 2,000-character
+#: pitch that reached that line would raise a ``ValidationError`` and turn a live auction into a
+#: 500 for every other store in it. A store's own reply length is a store's own choice, and a
+#: buyer-facing route a bidder can crash by writing more is not one.
+#:
+#: The number is 1,200 because that is what ``buyer_svc.pitch.writing.MAX_STORE_PITCH_CHARS``
+#: already refuses past — one rule, applied at both ends of the wire, rather than an exchange
+#: publishing a string the renderer at the other end silently drops.
+#:
+#: A longer message is published as ``null`` and NEVER truncated. A cut pitch is words the store
+#: did not write, attributed to the store, which is the one failure mode this whole path is
+#: shaped to avoid.
+MAX_SLOT_MESSAGE_CHARS = 1200
 
 #: How many auctions' shortlists one process keeps at once.
 #:
@@ -355,7 +405,53 @@ def _text(value: Any) -> str | None:
     return stripped or None
 
 
-def shortlist_product(offer: Any) -> dict[str, Any] | None:
+def slot_message(candidate: Any) -> str | None:
+    """THE SHOP'S OWN WORDS for one slot, verbatim, or ``None`` (D55).
+
+    ``Bid.message`` as the projection in :mod:`.candidates` read it, carried byte for byte to a
+    buyer-facing surface for the first time. This is the sponsored half of the market: it buys
+    no visibility and no rank, and what it buys is the right to make the shop's case in the
+    shop's voice beside the platform's own. Before this the exchange computed the pitch, graded
+    it, and then dropped it here — so the one thing a shop got for joining was the one thing the
+    shopper page could not show.
+
+    **No strip, no collapse, no truncation, no escaping.** The bytes the store sent are the bytes
+    published, whitespace included, for the same reason
+    ``buyer_svc.pitch.writing.store_pitch_of`` returns them unchanged and
+    ``apps/buyer/app/journey/wire.ts::readPitch`` refuses to trim them: a tidy-up applied
+    somewhere in the middle of a chain that promises verbatim carriage is invisible to everyone,
+    and this is the seller's own sentence rather than the platform's rendering of it.
+
+    Three refusals, and each publishes ``None`` rather than a repaired value:
+
+    * **not a string.** ``Bid.message`` is store-written JSON that nothing on the auction path
+      validates against the schema (``validate_bid`` has no call site in ``apps/exchange/src``),
+      so a bid whose ``message`` is a list, a number or an object arrives here intact. Publishing
+      ``str(...)`` of it would put ``"{'a': 1}"`` in front of a shopper as a shop's own words.
+    * **blank.** A message that is empty or whitespace-only carries no voice, and a slot that
+      published one would render an empty quotation attributed to the store. It is the same
+      reading ``store_pitch_of`` and ``readPitch`` both make one and two hops later.
+    * **longer than** :data:`MAX_SLOT_MESSAGE_CHARS`. Refused WHOLE, never cut — see that
+      constant for why the bound exists at all and why truncating is the one thing this must not
+      do.
+
+    Length is measured in CHARACTERS, matching the contract's ``maxLength`` (JSON Schema counts
+    code points) and the buyer's ``len(text)``, rather than in encoded bytes, so all three ends
+    of the wire refuse exactly the same strings.
+    """
+    text = read(candidate, "message", None)
+    if not isinstance(text, str) or not text.strip():
+        return None
+    if len(text) > MAX_SLOT_MESSAGE_CHARS:
+        return None
+    return text
+
+
+def shortlist_product(
+    offer: Any,
+    identity: Any = None,
+    identity_ref: Any = None,
+) -> dict[str, Any] | None:
     """R2's PRODUCT for one slot: which catalogue thing this bid is offering.
 
     ``None`` — so the slot serves ``product: null`` — when the offer names no readable
@@ -363,6 +459,19 @@ def shortlist_product(offer: Any) -> dict[str, Any] | None:
     ``product_ref`` carries ``{"product_ref": None, ...}`` verbatim, because ``_list_price_bid``
     copies the row's value whatever it is, and a slot publishing ``{"product_ref": null}`` would
     fail the pinned ``ShortlistProduct`` and turn the buyer's own route into a 500.
+
+    ``identity`` is the PLATFORM's own crawled name for the product
+    (:func:`~.verification.catalog_identity`), and ``identity_ref`` is the ``product_ref`` that
+    name was resolved against. It is published **only when ``identity_ref`` is the ref this slot
+    is publishing.** The two can differ — the identity is resolved against the ref the AUCTION
+    named while ``product_ref`` here is read off the store's own offer, which is exactly the
+    disagreement D58 was written about — and a name printed above a different product's
+    reference is two objects rendered as one, with no join a shopper could check. Dropping it is
+    the same refusal every other reader on this path makes: a fact the exchange cannot establish
+    is served as absent, never as a guess.
+
+    Both arguments default to ``None`` so every existing caller — and every test that passes an
+    offer alone — keeps its previous answer exactly.
     """
     product_ref = _text(read(offer, "product_ref", None))
     if product_ref is None:
@@ -371,6 +480,8 @@ def shortlist_product(offer: Any) -> dict[str, Any] | None:
     variant_ref = _text(read(offer, "variant_ref", None))
     if variant_ref is not None:
         product["variant_ref"] = variant_ref
+    if identity and _text(identity_ref) == product_ref:
+        product["identity"] = dict(identity)
     return product
 
 
@@ -479,17 +590,26 @@ def shortlist_commitments(offer: Any) -> list[dict[str, Any]] | None:
     return commitments or None
 
 
-def _slot_offer_fields(offer: Any) -> dict[str, Any]:
+def _slot_offer_fields(
+    offer: Any,
+    identity: Any = None,
+    identity_ref: Any = None,
+) -> dict[str, Any]:
     """The three R2 fields this offer can support, with the ones it cannot left out."""
     fields = {
-        "product": shortlist_product(offer),
+        "product": shortlist_product(offer, identity, identity_ref),
         "price": shortlist_price(offer),
         "commitments": shortlist_commitments(offer),
     }
     return {key: value for key, value in fields.items() if value is not None}
 
 
-def _with_offer_fields(shortlist: Mapping[str, Any], candidates: Sequence[Any]) -> dict[str, Any]:
+def _with_offer_fields(
+    shortlist: Mapping[str, Any],
+    candidates: Sequence[Any],
+    identities: Mapping[str, Any] | None = None,
+    identity_refs: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """``shortlist`` with each slot carrying its candidate's product, price and commitments.
 
     ADDITIVE, and additive in the strict sense: a key the slot already carries a VALUE under is
@@ -512,10 +632,31 @@ def _with_offer_fields(shortlist: Mapping[str, Any], candidates: Sequence[Any]) 
     no ``price`` at all.
 
     A field the exchange could not read is therefore served as ``null`` rather than as an absent
-    key. That is the contract's own spelling for it (all three properties admit ``null``), it is
+    key. That is the contract's own spelling for it (every added property admits ``null``), it is
     the one spelling both doors can produce, and it is emphatically not a zero: a slot with no
     readable price says ``price: null``, never ``{"unit_price": 0.0}``.
+
+    **The three D55 fields join here too, and they are not offer-derived.** ``message`` is the
+    SELLER's own bytes (:func:`slot_message`); ``fallback`` and ``fallback_reason`` are the
+    EXCHANGE's verdict about whether a store answered at all, projected off the ``BidEntry`` by
+    :mod:`.candidates`. They are read off the same candidate the offer fields are, for the same
+    structural reason: this is the only place holding both the built shortlist and the projected
+    candidates, and a rank ROW carries none of them.
+
+    ``fallback`` is written even when it is ``False``, and that is deliberate rather than
+    incidental. The additive rule below only skips a key the slot already answers, and
+    ``ranking.shortlist.build`` answers none of these — so a slot from a real bid says
+    ``fallback: false`` and one the exchange stood in for says ``true``. A consumer that saw
+    ``null`` would be reading a producer older than this field, which is a third state and not a
+    spelling of "this was a real bid".
+
+    ``identities`` is ``{store_id: identity}`` and ``identity_refs`` is
+    ``{store_id: product_ref}``, both from :func:`~.verification.catalogue_readings`. They are
+    keyed by STORE while the slot join is keyed by ``bid_ref``, so the store is taken off the
+    candidate the slot resolved to — never off the slot, which carries none, and never off a bid.
     """
+    identity_by_store = dict(identities or {})
+    ref_by_store = dict(identity_refs or {})
     by_bid_id: dict[str, Any] = {}
     for candidate in candidates:
         bid_id = str(read(candidate, "bid_id", "") or "")
@@ -529,7 +670,25 @@ def _with_offer_fields(shortlist: Mapping[str, Any], candidates: Sequence[Any]) 
     for slot in shortlist.get("slots", ()) or ():
         enriched = dict(slot)
         candidate = by_bid_id.get(str(enriched.get("bid_ref", "")))
-        supported = _slot_offer_fields(read(candidate, "offer", None))
+        store_id = str(read(candidate, "store_id", "") or "")
+        supported = _slot_offer_fields(
+            read(candidate, "offer", None),
+            identity_by_store.get(store_id),
+            ref_by_store.get(store_id),
+        )
+        # D55's other half: the SHOP's own case, and whose price the buyer is looking at.
+        supported["message"] = slot_message(candidate)
+        # `bool(...)` rather than the raw value: the projection writes a real bool, but this
+        # function is also called with hand-built candidate sequences, and a slot publishing a
+        # truthy string under a boolean key would fail the pinned model and 500 the route.
+        # `None` only where no candidate resolved at all — the honest "this producer did not
+        # say", which the contract keeps distinct from `false`.
+        fallback = read(candidate, "fallback", None)
+        supported["fallback"] = None if candidate is None or fallback is None else bool(fallback)
+        reason = read(candidate, "fallback_reason", None)
+        supported["fallback_reason"] = (
+            str(reason) if supported["fallback"] and isinstance(reason, str) and reason else None
+        )
         # The store's REGISTERED domain, joined here for the same reason PRODUCT, PRICE and
         # COMMITMENTS are: this is the only place holding both the built shortlist and the
         # projected candidates. `ranking/shortlist.py` is handed rank ROWS, which carry no
@@ -893,6 +1052,21 @@ def rank_auction(
     # The PLATFORM's fit measurement, applied last so it is the last writer of the key. See
     # `with_intent_match` for what an unreadable measurement does and why it is refused here.
     candidates = with_intent_match(candidates, intent_match)
+    # ONE pass over this exchange's catalogue, answering both questions a served auction asks of
+    # it. `.attributes` is `declared_attributes`' answer, unchanged, and is handed to `rank()`
+    # below. `.identities` is the platform's own CRAWLED NAME for each store's product, which
+    # the shortlist slot publishes so a shopper compares two products instead of two opaque
+    # references (D55) — the organic half of the market, in the platform's own voice, out of the
+    # same snapshot this exchange already grades the store's claims against.
+    #
+    # Sharing the pass is what keeps the served cost at the `2 x len(roster)` point lookups
+    # `retrieval.catalogue.GraphCatalogSnapshots`' header documents, rather than raising it to
+    # `3 x` inside R10's synchronous window for a field that is a rendering, not a decision.
+    readings = catalogue_readings(
+        catalog,
+        [read(candidate, "store_id", None) for candidate in candidates],
+        product_refs=product_refs,
+    )
     ranked = rank(
         candidates,
         intent,
@@ -906,11 +1080,7 @@ def rank_auction(
         # "espresso" states a constraint no catalogue here carries, and before this the whole
         # shortlist was emptied by it with nothing said. `None` when the catalog is unwired or
         # declares nothing, and then nothing is ever relaxed (ESC-020's direction).
-        network_attributes=declared_attributes(
-            catalog,
-            [read(candidate, "store_id", None) for candidate in candidates],
-            product_refs=product_refs,
-        ),
+        network_attributes=readings.attributes,
     )
     # `projected`, ADDITIVE, and it is the repair for T-349. `rank()` answers with its own
     # ROW projection under `"candidates"` — `bid_id`, `eligible`, `rank_score`, the trust
@@ -943,7 +1113,12 @@ def rank_auction(
     shortlist = ranked["shortlist"] if explored is None else explored.shortlist
     return {
         **ranked,
-        "shortlist": _with_offer_fields(shortlist, candidates),
+        "shortlist": _with_offer_fields(
+            shortlist,
+            candidates,
+            readings.identities,
+            readings.product_refs,
+        ),
         "projected": list(candidates),
         # `None` on every auction that explored nothing, which is most of them. Published on
         # the RESPONSE rather than on the slot for the reason `relaxed_constraints` is:

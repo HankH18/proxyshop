@@ -84,6 +84,29 @@ PINNED_PROTOCOL_OBJECTS: tuple[str, ...] = (
 
 #: The wire version every protocol object is currently emitted at.
 #:
+#: ``3.0.0`` (was ``2.0.0``) for D55's four shortlist fields — the published slot now carries
+#: the SHOP's own message verbatim (``ShortlistSlot.message``), says whose price it is
+#: (``fallback`` / ``fallback_reason``), and names the product in the platform's own crawled
+#: words (``ShortlistProduct.identity`` -> ``ShortlistProductIdentity``).
+#:
+#: **MAJOR by the same rule the ``2.0.0`` note below establishes, and NOT because a reader in
+#: this tree breaks.** The rule is that the compatibility deciding a wire bump is the READER's
+#: and that every object here is closed, so a field added to any published body is refused by a
+#: counterparty pinned to the previous generation. That is a property of the schema, not of who
+#: happens to consume it today, so it applies to a response body exactly as it applied to
+#: ``BidRequest``.
+#:
+#: What differs is the ROLLOUT, and it is worth stating because it is the opposite shape of
+#: D58's. ``BidRequest`` is written by the exchange and read by third-party store agents, so
+#: that bump had to reach the readers first. ``ShortlistSlot`` is written by the exchange and,
+#: in this tree, read by nobody through a closed model: ``buyer_svc`` imports no
+#: ``contracts.protocol`` object at all and parses the shortlist as plain dicts
+#: (``composition.HttpExchangeClient.shortlist_for`` returns ``dict(...)``), and the SPA types
+#: it ``unknown`` and forwards it untouched. The one closed reader is the exchange's own
+#: ``GET /auctions/{auction_id}/shortlist``, whose ``response_model=Shortlist`` is generated
+#: from this schema and ships in the same image. So the exchange moves alone, and an external
+#: consumer pinned to ``2.0.0`` is the counterparty this bump is announcing itself to.
+#:
 #: ``2.0.0`` (was ``1.0.0``) for D58's ``BidRequest.product_ref`` — the exchange now names the
 #: product it is soliciting a bid on.
 #:
@@ -108,7 +131,7 @@ PINNED_PROTOCOL_OBJECTS: tuple[str, ...] = (
 #: is the whole sponsored half of the market (D55). ``HttpBidSolicitor.solicit`` therefore
 #: omits the key entirely when the auction names no product, so only the solicitations that
 #: actually need it can break a stale agent.
-SCHEMA_VERSION = "2.0.0"
+SCHEMA_VERSION = "3.0.0"
 
 __all__ = [
     "PINNED_PROTOCOL_OBJECTS",
