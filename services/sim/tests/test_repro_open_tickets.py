@@ -245,8 +245,12 @@ def _spy_sink(
     instances: list[Any] = []
 
     class _SpyLedgerSink(InMemoryLedgerSink):  # type: ignore[misc, valid-type]
-        def __init__(self) -> None:
-            super().__init__()
+        # ``**kwargs`` and not a bare signature: the runner builds its sink with an explicit
+        # ``capacity=None`` (it grades the WHOLE stream, so a bounded ring would silently make
+        # it grade a prefix), and a spy that cannot be constructed the way the code under test
+        # constructs the real class stops testing the run and starts testing the spy.
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
             self.real_indices: list[int] = []
             self.synthetic_indices: list[int] = []
             self._pool = list(cases)
@@ -266,14 +270,17 @@ def _spy_sink(
             for _ in range(how_many):
                 kind, dropped = self._pool[self._serial % len(self._pool)]
                 self._serial += 1
-                self.synthetic_indices.append(len(self.events))
-                self.events.append(_malformed_event(kind, dropped, self._serial))
+                self.synthetic_indices.append(len(self._ring))
+                # Into the ring the base class holds, not into ``self.events`` — that is a
+                # property returning a COPY, so appending to it stored nothing and left every
+                # recorded index pointing past the end of the real stream.
+                self._ring.append(_malformed_event(kind, dropped, self._serial))
 
         def emit(self, event: Mapping[str, Any]) -> None:
             if not self._opened:
                 self._opened = True
                 self._inject(head_batch)
-            self.real_indices.append(len(self.events))
+            self.real_indices.append(len(self._ring))
             super().emit(_degraded(event, self._degraded_seen) if degrade_real else event)
             self._inject(1)
 

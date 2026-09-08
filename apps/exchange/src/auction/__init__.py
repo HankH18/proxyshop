@@ -37,7 +37,9 @@ from .fanout import (
     sequential_fan_out,
 )
 from .ledger import (
+    DEFAULT_LEDGER_READBACK_CAPACITY,
     InMemoryLedgerSink,
+    LedgerReadbackEvicted,
     LedgerRecorder,
     LedgerSink,
     MalformedLedgerPayload,
@@ -98,6 +100,7 @@ __all__ = [
     "ArrivalClock",
     "AuctionRecord",
     "AuctionStateMachine",
+    "DEFAULT_LEDGER_READBACK_CAPACITY",
     "AuctionStore",
     "AuctionStoreUnavailable",
     "BidEntry",
@@ -106,6 +109,7 @@ __all__ = [
     "IllegalAuctionTransition",
     "InMemoryAuctionStore",
     "InMemoryLedgerSink",
+    "LedgerReadbackEvicted",
     "LedgerRecorder",
     "LedgerSink",
     "MalformedLedgerPayload",

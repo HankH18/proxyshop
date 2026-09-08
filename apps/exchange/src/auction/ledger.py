@@ -192,21 +192,79 @@ class LedgerSink(Protocol):
     def emit(self, event: Mapping[str, Any]) -> None: ...
 
 
-class InMemoryLedgerSink:
-    """The trust API stub: keeps every event, in emission order, and can be read back."""
+#: Ceiling on the events one process keeps for readback.
+#:
+#: The sink is a MIRROR. The durable record is the trust service's ledger, which
+#: :meth:`exchange.composition.HttpTrustLedgerSink.emit` posts every event to before this list
+#: is ever read, so dropping the oldest here costs a convenience read and no audit.
+#:
+#: Bounded for the reason :class:`InMemoryAuctionStore` and the shortlist store are: ``POST
+#: /auctions`` is unauthenticated and records two events per call, so an unbounded list is a
+#: memory-growth door open to any caller. MEASURED, the same 3,001-request loop both ways: as
+#: shipped, 6,002 events and 3,988 KiB with no ceiling at any N; at this capacity, 2,048
+#: events and 811 KiB, flat in N. 2,048 is ~1,024 auctions of history — far more than one
+#: shopper's session, which is the only readback anyone drives.
+DEFAULT_LEDGER_READBACK_CAPACITY = 2048
 
-    def __init__(self) -> None:
-        self.events: list[dict[str, Any]] = []
+
+class LedgerReadbackEvicted(LookupError):
+    """A readback whose honest answer is "I no longer know", rather than an empty list."""
+
+
+class InMemoryLedgerSink:
+    """The trust API stub: keeps the most recent events, in emission order, for readback.
+
+    Bounded by :data:`DEFAULT_LEDGER_READBACK_CAPACITY`. Pass ``capacity=None`` for an
+    unbounded sink, and only where a consumer grades the WHOLE stream and a truncated one
+    would be a wrong verdict rather than a short answer — ``services/sim``'s runner and the
+    e2e S1 flow are the two, and both are CLI harnesses, not served processes. Never in a
+    process that answers an unauthenticated request.
+    """
+
+    def __init__(self, *, capacity: int | None = DEFAULT_LEDGER_READBACK_CAPACITY) -> None:
+        self.capacity = None if capacity is None else max(1, int(capacity))
+        self._ring: deque[dict[str, Any]] = deque(maxlen=self.capacity)
+        #: How many events have fallen out of the ring. The witness that keeps an empty
+        #: readback distinguishable from an auction that emitted nothing.
+        self.evicted = 0
+
+    @property
+    def events(self) -> list[dict[str, Any]]:
+        """Every event still held, oldest first. A list, as it has always been.
+
+        A fresh COPY on each read, so mutating it changes nothing here -- write through
+        :meth:`emit`, or, in a subclass that needs to splice a row in, through ``self._ring``.
+        Worth stating because a test spy that had been doing ``sink.events.append(...)``
+        against the old attribute went on running and silently stored nothing.
+        """
+        return list(self._ring)
 
     def emit(self, event: Mapping[str, Any]) -> None:
-        self.events.append(dict(event))
+        if self._ring.maxlen is not None and len(self._ring) == self._ring.maxlen:
+            self.evicted += 1
+        self._ring.append(dict(event))
 
     @property
     def kinds(self) -> list[str]:
-        return [str(event["kind"]) for event in self.events]
+        return [str(event["kind"]) for event in self._ring]
 
     def for_auction(self, auction_id: str) -> list[dict[str, Any]]:
-        return [event for event in self.events if event.get("auction_id") == auction_id]
+        """This auction's events, or a refusal where an empty answer would be a lie.
+
+        Before the ring, an evicted auction and an auction that emitted nothing were the same
+        ``[]``, and no caller could tell them apart from the value. A sink that has evicted
+        NOTHING still answers ``[]`` for an unknown id -- so a fresh sink is unchanged, and
+        the refusal cannot fire on a process that has not yet overflowed.
+        """
+        rows = [event for event in self._ring if event.get("auction_id") == auction_id]
+        if not rows and self.evicted:
+            raise LedgerReadbackEvicted(
+                f"{self.evicted} event(s) have been recorded past this process's "
+                f"{self.capacity}-event readback ring, so an empty answer for "
+                f"{auction_id!r} cannot be distinguished from an auction whose events were "
+                f"evicted. The durable record is the trust service's ledger."
+            )
+        return rows
 
 
 def build_event(

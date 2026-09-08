@@ -596,7 +596,12 @@ def run_simulation(
         {str(row["store_id"]): str(row["store_domain"]) for row in roster}
     )
 
-    ledger_sink = InMemoryLedgerSink()
+    # UNBOUNDED, deliberately. This runner grades the WHOLE ledger stream below
+    # (`all_ledger_events`), so a silently truncated one is a wrong verdict rather than a
+    # short answer. The capacity that bounds the served exchange exists to close a
+    # memory-growth door on an unauthenticated route; this is a CLI that runs a finite
+    # simulation and exits, and it has no such door.
+    ledger_sink = InMemoryLedgerSink(capacity=None)
     auctions = AuctionStateMachine(InMemoryAuctionStore(), LedgerRecorder(ledger_sink))
     event_store = InMemoryEventStore()
     blacklist = _seeded_blacklist(manifest, Blacklist)

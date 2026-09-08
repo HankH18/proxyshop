@@ -460,7 +460,10 @@ def run_s1_flow() -> S1Run:
     run = S1Run(fixture=fixture)
     run.module_files = _resolved_module_files()
 
-    sink = InMemoryLedgerSink()
+    # UNBOUNDED for the same reason `services/sim`'s runner is: this flow reconciles every
+    # event the run emitted, so dropping the oldest would quietly change the reconciliation
+    # rather than shorten a readback. A finite CLI flow, not a served process.
+    sink = InMemoryLedgerSink(capacity=None)
     recorder = LedgerRecorder(sink)
     machine = AuctionStateMachine(InMemoryAuctionStore(), recorder)
     eligibility = StaticSellerEligibility(
