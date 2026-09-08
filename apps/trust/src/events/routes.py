@@ -104,6 +104,7 @@ __all__ = [
     "TRUST_EVENT_SINK_ATTR",
     "UNRENDERABLE_IDENTIFIER_CHARACTERS",
     "EventIn",
+    "notification_report",
     "router",
     "store_for",
     "trust_event_sink",
@@ -344,28 +345,43 @@ def trust_event_sink(request: Request) -> Any:
     """The sink R13 pushes one store's trust delta through, or ``None``.
 
     Resolution order mirrors :func:`store_for`: whatever was injected on
-    ``app.state.trust_event_sink`` wins, otherwise one is built from
-    :data:`~trust.feedback.notify.ENV_STORE_AGENT_ENDPOINTS` and cached on the application.
+    ``app.state.trust_event_sink`` wins, otherwise one is built from the environment
+    (:data:`~trust.feedback.notify.ENV_STORE_AGENT_ENDPOINTS` and
+    :data:`~trust.feedback.notify.ENV_EXCHANGE_OUTCOMES_URL`) and cached on the application.
 
-    ``None`` — the default in every deployment that has not been told where any store's agent
-    answers — means this door notifies nobody and behaves exactly as it did before R13 was
-    wired. That is deliberate: the alternative to an address is a guess, and a guessed address
-    is how one store's trust movement reaches a competitor.
+    **A sink is now built even when nothing is addressed, and that is the fix rather than a
+    detail.** This used to resolve to ``None`` whenever the address book was empty, and
+    :func:`_announce` then skipped the announce entirely — so an unaddressed deployment recorded
+    nothing and had no way, from inside the process, to tell "the learning loop is switched off"
+    from "nothing has happened yet". Now the non-delivery lands in a ring naming the variable
+    that would have addressed it, and ``GET /events/verify`` publishes the whole condition.
+
+    **What that costs, stated rather than implied.** An unaddressed sink opens no socket — the
+    alternative to an address is a guess, and a guessed address is how one store's trust
+    movement reaches a competitor — and it does not compute a delta either:
+    :func:`~trust.feedback.notify.announce_trust_event` asks the sink whether it can deliver
+    before it reads any history, so an append that nobody is listening for costs one dictionary
+    lookup and a ring entry, not a database round trip. What IS new in a stack with
+    ``TRUST_EXCHANGE_OUTCOMES_URL`` set and no store agents is a socket to the EXCHANGE, which
+    is the point of that variable.
+
+    ``None`` now means one of two things, and both are the same thing to this door: nothing was
+    injected and this build cannot compute deltas at all (``trust.feedback`` did not import), or
+    a caller injected ``app.state.trust_event_sink = None`` deliberately — which is how the
+    fixtures switch the push off. Either way the service appends and does not notify; neither
+    is a service that refuses appends.
 
     The import is function-local for the same reason ``_unreplayable_field``'s is: the ledger
     writer must stay importable and usable when the scorer is not installed, and
-    ``trust.feedback`` reaches the scorer to compute a delta. An ``ImportError`` here is
-    therefore "this build cannot compute deltas", which is a service that appends and does not
-    notify — never a service that refuses appends.
+    ``trust.feedback`` reaches the scorer to compute a delta.
     """
     if hasattr(request.app.state, TRUST_EVENT_SINK_ATTR):
         return getattr(request.app.state, TRUST_EVENT_SINK_ATTR)
     sink: Any = None
     try:
-        from ..feedback.notify import StoreAgentSink, store_agent_endpoints  # noqa: PLC0415
+        from ..feedback.notify import build_sink  # noqa: PLC0415
 
-        endpoints = store_agent_endpoints()
-        sink = StoreAgentSink(endpoints) if endpoints else None
+        sink = build_sink()
     except Exception:  # noqa: BLE001 - a notifier that cannot be built notifies nobody
         _log.warning(
             "the trust-event sink could not be built; appends continue and no store agent "
@@ -377,7 +393,44 @@ def trust_event_sink(request: Request) -> Any:
     return sink
 
 
-def _announce(request: Request, store: Any, outcome: Any) -> None:
+def notification_report(request: Request) -> dict[str, Any]:
+    """What this process's learning-loop pushes have done, for a reader. Never raises.
+
+    The READBACK the undelivered ring never had. Before this the ring was a ``deque`` on an
+    object reachable from nothing an operator can call: a delta that did not land was counted in
+    memory and could not be asked about, so "an operator cannot read what was lost" was literally
+    true. This is that question, answered.
+
+    It is served on ``GET /events/verify`` rather than on a route of its own, and that placement
+    is a constraint rather than a preference: ``apps/trust/tests/test_contract_surface.py``
+    requires the served surface to equal ``packages/contracts/openapi/trust.openapi.json``
+    exactly, and declaring a new operation means editing three files under
+    ``packages/contracts/`` — which this lane does not own. ``/events/verify`` is the service's
+    only always-200 "what is the state of this service" door, and "the notifications this ledger
+    produced did not land" is a break it should name.
+    """
+    sink = trust_event_sink(request)
+    if sink is None:
+        return {
+            "available": False,
+            "reason": (
+                "this build could not import trust.feedback, so no delta is computed and no "
+                "store agent or exchange is told anything"
+            ),
+        }
+    reporter = getattr(sink, "report", None)
+    if not callable(reporter):
+        return {
+            "available": False,
+            "reason": f"the wired sink {type(sink).__name__!r} reports nothing",
+        }
+    try:
+        return {"available": True, **reporter()}
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must not 500 the diagnostic door
+        return {"available": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
+def _announce(request: Request, store: Any, outcome: Any) -> dict[str, Any]:
     """Tell the affected store what the event just appended did to its posture.
 
     **This cannot fail the append, and that is the whole reason it is a function.** The event
@@ -394,24 +447,28 @@ def _announce(request: Request, store: Any, outcome: Any) -> None:
     ``push_trust_event`` is written around.
     """
     if not outcome.inserted:
-        return
+        return {"pushed": False, "reason": "this event_id was already in the chain"}
     sink = trust_event_sink(request)
     if sink is None:
-        return
+        return {
+            "pushed": False,
+            "reason": "this build cannot compute trust deltas; nothing was notified",
+        }
     try:
         from ..feedback.notify import announce_trust_event, store_history_reader  # noqa: PLC0415
 
-        announce_trust_event(
+        return announce_trust_event(
             outcome.event,
             history_reader=store_history_reader(store, before_seq=outcome.seq),
             sink=sink,
         )
-    except Exception:  # noqa: BLE001 - see the docstring
+    except Exception as exc:  # noqa: BLE001 - see the docstring
         _log.warning(
             "notifying the affected store about event %s failed; the event is in the ledger",
             str(outcome.event.get("event_id", "unknown")),
             exc_info=True,
         )
+        return {"pushed": False, "reason": f"{type(exc).__name__}: {exc}"}
 
 
 def _project(request: Request, store: Any, outcome: Any) -> int:
@@ -841,7 +898,7 @@ def post_event(
     # request the event arrived on; `_announce` is what guarantees it cannot cost that
     # request its 201. AFTER the projection, so an agent that reacts by reading
     # `GET /snapshot` cannot beat its own observation into the table.
-    _announce(request, store, outcome)
+    notification = _announce(request, store, outcome)
 
     return {
         "inserted": outcome.inserted,
@@ -849,6 +906,12 @@ def post_event(
         "head_hash": outcome.head_hash,
         "seq": outcome.seq,
         "length": outcome.length,
+        # What the notification did, said out loud on the same response. `observation_rows`
+        # below already establishes the rule this follows: a side effect the door performs
+        # best-effort must report what it did, because the alternative is that a producer
+        # cannot tell "no delta in this event" from "the delta was told to nobody" — and the
+        # second was, measured, the state of every shipped configuration.
+        "notification": notification,
         # What actually reached the door the exchange reads. Reported rather than assumed:
         # the write is best effort by design (the chain already holds the event), so a
         # deployment must be able to tell "no observation in this event" from "the
@@ -914,18 +977,26 @@ def get_head(request: Request) -> dict[str, Any]:
 
 @router.get("/verify", response_model=None, summary="Verify the chain and name any break")
 def get_verify(request: Request) -> dict[str, Any]:
-    """Verify links **and** anchor.
+    """Verify links **and** anchor, and report what the ledger's outbound pushes did.
 
     Always ``200``: "the ledger is broken" is an answer to the question, not a failure to
     answer it, and a 5xx here would be indistinguishable from the verifier being down --
     which is precisely the state an attacker who had just tampered with the ledger would
     like it to be confused with. Read ``ok``.
+
+    ``store_agent_notifications`` is the second break this door can now name, and the reason it
+    is here is argued in :func:`notification_report`. It costs no database statement -- the
+    numbers are counters on an in-process sink -- so the bound
+    ``test_events_dos_surface.test_no_route_on_this_router_issues_an_unbounded_read`` holds this
+    route to is untouched.
     """
     store = store_for(request)
     try:
-        return store.verify()
+        report = store.verify()
     except EventServiceError as exc:
         raise _refuse(exc) from exc
+    report["store_agent_notifications"] = notification_report(request)
+    return report
 
 
 @router.get("/replay", response_model=None, summary="Replay the chain out of the ledger")
@@ -1061,3 +1132,32 @@ def get_event(request: Request, event_id: str) -> dict[str, Any]:
             },
         )
     return {"event": found}
+
+
+# ==========================================================================================
+# BOOT
+# ==========================================================================================
+# Said ONCE, when the process starts, and this is the only place it can be said: `trust.main`
+# is orchestrator-owned and frozen (B6(iii)), so a worker cannot add a startup hook to it --
+# but `main.create_app()` imports this module by glob to mount `router`, and that import IS
+# this service's startup path. Two lines of environment, read at the moment a deployment
+# begins serving, before any traffic can make their absence look like quiet.
+#
+# The whole point is that "no store agent is addressed" and "no exchange is addressed" are
+# CONFIGURATION and were previously invisible: nothing logged them, nothing counted them and
+# nothing health-reported them, so a stack whose learning loop was switched off looked exactly
+# like a stack in which nothing had happened yet. `GET /events/verify` carries the same
+# condition for a reader who arrives after this line has scrolled away.
+#
+# Wrapped, because `trust.feedback` reaches the scorer: a build that ships the ledger writer
+# without it must still serve `POST /events`, which is the rule `trust_event_sink` follows for
+# the same import.
+try:  # pragma: no cover - exercised by every started process, and by `create_app()` in tests
+    from ..feedback.notify import log_learning_loop_state as _log_learning_loop_state
+
+    _log_learning_loop_state(log=_log)
+except Exception:  # noqa: BLE001 - a service that cannot describe its loop still serves appends
+    _log.warning(
+        "the trust learning-loop configuration could not be read at boot; appends continue",
+        exc_info=True,
+    )

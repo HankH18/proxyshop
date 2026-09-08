@@ -402,6 +402,26 @@ def _promised(accepted: Any) -> dict[str, Any]:
     }
 
 
+def _cluster_of(accepted: Any) -> Any:
+    """The cluster the auction behind this offer was decided in, or ``None`` if it named none.
+
+    Read off the ``accepted`` event's own payload and nowhere else. The exchange stamps
+    ``cluster_id`` into the body of every auction state transition it writes
+    (``apps/exchange/src/auction/state.py`` composes ``{state, intent_id, cluster_id}`` from
+    the auction record itself), so the accepted offer carries the exchange's OWN record of
+    which arm this purchase was routed through. The webhook, the pixel and the fulfilment are
+    the store's and the browser's words about an order; a cluster read off any of them would
+    let the graded party choose which arm its own trust delta lands on.
+
+    An empty or blank string is not a cluster — it names no arm, and a consumer cannot tell
+    it apart from a real one — so it is reported absent exactly like a missing key.
+    """
+    value = _payload(accepted).get("cluster_id")
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    return value
+
+
 #: Separator between a store scope and a join key. A control character, so it does not occur
 #: inside a checkout token or an order reference by accident and collapse two keys into one.
 #:
@@ -761,6 +781,7 @@ def reconciled_event(
     pixel: Any,
     ts: Any,
     bid_ref: Any = None,
+    cluster_id: Any = None,
     fulfilment: Any = None,
 ) -> dict[str, Any]:
     """Build the one ``reconciled`` event for one order.
@@ -775,6 +796,14 @@ def reconciled_event(
     paid for; R4's "the webhook is authoritative" is a rule about *what was charged*, and it
     was never a claim that ``orders/paid`` knows when the parcel left. It is authoritative
     here too, for the half it does know: the instant the promise clock starts.
+
+    ``cluster_id`` is the auction cluster the offer was decided in, carried through from the
+    ``accepted`` event (:func:`_cluster_of`) because it is the join back to the bandit arm
+    that chose this store: ``trust.feedback.engine`` reads ``payload["cluster_id"]`` off the
+    event to route the resulting trust delta to that arm's posterior. It is **left off the
+    payload entirely** when the offer named no cluster — never ``None``, ``""`` or a
+    stand-in — because a wrong cluster moves a posterior for an auction this purchase never
+    happened in, which is strictly worse than the arm learning nothing from it.
 
     The payload carries ``price_comparable`` / ``discount_comparable`` /
     ``delivery_comparable`` alongside the three verdicts. Read them: a verdict of ``False`` on
@@ -870,6 +899,48 @@ def reconciled_event(
         and abs(pixel_price - observed_price) <= PRICE_TOLERANCE
     )
 
+    payload: dict[str, Any] = {
+        "order_ref": order_ref,
+        "checkout_token": checkout_token,
+        "product_ref": promised.get("product_ref"),
+        # Carried from the accepted offer so a translated observation can name the bid it
+        # grades: `offer_integrity` publishes `bid_ref` in its body, and an integrity
+        # finding that cannot be traced back to the bid that made the promise is one a
+        # store can neither check nor contest.
+        "bid_ref": bid_ref,
+        # the verdicts — every one of them computed from the webhook
+        "price_honored": bool(price_honored),
+        "discount_honored": bool(discount_honored),
+        "price_comparable": bool(price_comparable),
+        "discount_comparable": bool(discount_comparable),
+        "observed_price": observed_price,
+        "observed_discount_percentage": observed_discount,
+        "promised_price": promised_price,
+        "promised_price_basis": promised_price_basis,
+        "promised_discount_percentage": promised_discount,
+        # the promise ledger: what the offer said about delivery, and what happened
+        "shipped_on_time": bool(shipped_on_time),
+        "delivery_comparable": bool(delivery_comparable),
+        "promised_delivery_days": promised_delivery_days,
+        "observed_dispatch_days": observed_dispatch_days,
+        "fulfilled_at": fulfilled_at,
+        "fulfilment_missing": fulfilment is None,
+        "authority": WEBHOOK_KIND,
+        # the pixel, recorded and never consulted
+        "pixel_missing": pixel is None,
+        "pixel_price": pixel_price,
+        "pixel_agrees": bool(pixel_agrees),
+    }
+    if cluster_id is not None:
+        # The auction's cluster, and the ONE key here that is absent rather than null when
+        # the record does not carry it. Every other field above is published for this kind
+        # and a reader can tell `None` from a value; `cluster_id` is a ROUTING key —
+        # `trust.feedback.engine` reads it to decide which bandit arm this delta updates —
+        # so a null, an empty string or a stand-in would be a cluster the consumer cannot
+        # distinguish from a real one, and would move a posterior for an auction this
+        # purchase never happened in. An absent key is a signal the arm simply does not get.
+        payload["cluster_id"] = cluster_id
+
     return {
         # Scoped by store for the same reason the join keys are: a platform `order_id` is a
         # per-shop number, so `reconciled:1001` alone is not a unique event id across shops —
@@ -880,38 +951,7 @@ def reconciled_event(
         "kind": RECONCILED_KIND,
         "store_id": store_id,
         "order_ref": order_ref,
-        "payload": {
-            "order_ref": order_ref,
-            "checkout_token": checkout_token,
-            "product_ref": promised.get("product_ref"),
-            # Carried from the accepted offer so a translated observation can name the bid it
-            # grades: `offer_integrity` publishes `bid_ref` in its body, and an integrity
-            # finding that cannot be traced back to the bid that made the promise is one a
-            # store can neither check nor contest.
-            "bid_ref": bid_ref,
-            # the verdicts — every one of them computed from the webhook
-            "price_honored": bool(price_honored),
-            "discount_honored": bool(discount_honored),
-            "price_comparable": bool(price_comparable),
-            "discount_comparable": bool(discount_comparable),
-            "observed_price": observed_price,
-            "observed_discount_percentage": observed_discount,
-            "promised_price": promised_price,
-            "promised_price_basis": promised_price_basis,
-            "promised_discount_percentage": promised_discount,
-            # the promise ledger: what the offer said about delivery, and what happened
-            "shipped_on_time": bool(shipped_on_time),
-            "delivery_comparable": bool(delivery_comparable),
-            "promised_delivery_days": promised_delivery_days,
-            "observed_dispatch_days": observed_dispatch_days,
-            "fulfilled_at": fulfilled_at,
-            "fulfilment_missing": fulfilment is None,
-            "authority": WEBHOOK_KIND,
-            # the pixel, recorded and never consulted
-            "pixel_missing": pixel is None,
-            "pixel_price": pixel_price,
-            "pixel_agrees": bool(pixel_agrees),
-        },
+        "payload": payload,
     }
 
 
@@ -1240,6 +1280,12 @@ def reconcile(events: Iterable[Any]) -> list[dict[str, Any]]:
                 pixel=pixel,
                 ts=_field(webhook, "ts"),
                 bid_ref=_payload(accepted).get("bid_ref"),
+                # The SAME `accepted` record that supplies the promise and the `bid_ref`, so
+                # the cluster names the auction whose offer is being graded and not some
+                # neighbouring one. A group holding two accepts keeps the first (`setdefault`
+                # above), which is the rule already in force for every other field read off
+                # this event — one promise per verdict, and one arm per promise.
+                cluster_id=_cluster_of(accepted),
                 fulfilment=fulfilments.get(identity),
             )
         )
@@ -1416,7 +1462,10 @@ def observation_events(reconciled: Any) -> list[dict[str, Any]]:
     Returns:
         ``offer_integrity`` events carrying the published body for that kind
         (``bid_ref`` / ``field`` / ``promised`` / ``observed``) plus the ``dim``, ``type`` and
-        ``observed_at`` the trust projection reads. ``event_id`` is
+        ``observed_at`` the trust projection reads, and ``cluster_id`` when the verdict names
+        one -- the arm the auction was decided in, omitted entirely when it does not, because
+        an invented one routes this purchase's trust delta to a cluster it never came out of.
+        ``event_id`` is
         ``offer_integrity:{store}:{order}:{field}`` — deterministic, and scoped by store for
         the same reason the reconciled event's is: a platform ``order_id`` is a PER-SHOP
         number, and ``event_id`` IS the ledger's idempotency key, so an unscoped one would
@@ -1430,9 +1479,32 @@ def observation_events(reconciled: Any) -> list[dict[str, Any]]:
             continue  # see `reconciled_observations` — nothing to attribute the finding to
         order_ref = payload.get("order_ref") or _field(event, "order_ref")
         observed_at = payload.get("observed_at") or _field(event, "ts")
+        # Carried straight through from the `reconciled` verdict, which read it off the
+        # `accepted` offer — this is the join back to the bandit arm the auction was decided
+        # in, and these observation events are what `trust.feedback.engine` turns into the
+        # delta it routes there. Read with `.get`, so a verdict minted before the cluster was
+        # carried (or from an offer that named none) simply produces observations without the
+        # key, rather than observations claiming a cluster nobody chose.
+        cluster_id = payload.get("cluster_id")
         for field, dimension, observation_type, promised_value, observed_value in _graded_fields(
             payload
         ):
+            body: dict[str, Any] = {
+                "bid_ref": payload.get("bid_ref"),
+                "field": field,
+                "promised": promised_value,
+                "observed": observed_value,
+                "dim": dimension,
+                "type": observation_type,
+                "observed_at": observed_at,
+                "reconciled_event_id": _field(event, "event_id"),
+                "authority": WEBHOOK_KIND,
+            }
+            if cluster_id is not None:
+                # Absent, never null: same rule and same reason as the verdict's own payload.
+                # A `cluster_id: null` reaching the arm router is a value it must special-case
+                # to avoid attributing this purchase to a cluster it did not come out of.
+                body["cluster_id"] = cluster_id
             events.append(
                 {
                     "event_id": (
@@ -1447,17 +1519,7 @@ def observation_events(reconciled: Any) -> list[dict[str, Any]]:
                     "kind": OBSERVATION_KIND,
                     "store_id": store_id,
                     "order_ref": order_ref,
-                    "payload": {
-                        "bid_ref": payload.get("bid_ref"),
-                        "field": field,
-                        "promised": promised_value,
-                        "observed": observed_value,
-                        "dim": dimension,
-                        "type": observation_type,
-                        "observed_at": observed_at,
-                        "reconciled_event_id": _field(event, "event_id"),
-                        "authority": WEBHOOK_KIND,
-                    },
+                    "payload": body,
                 }
             )
     return events

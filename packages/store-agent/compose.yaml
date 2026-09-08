@@ -75,6 +75,45 @@
 # one operation the contract publishes (T-309), so there is no /healthz to add without
 # breaking that gate. Read "healthy" as "the process is up", never as "the store is bidding";
 # the honest check is one real POST /v1/bid-requests after deploy.
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# THE SHOP'S OWN VOICE, which could not be switched on from compose at all until this block
+# existed — and the comment it replaces asserted that it never could.
+# ─────────────────────────────────────────────────────────────────────────────────────────
+# What stood on the `store-agent` service said: "NO LLM_PROVIDER. The agent negotiates from its
+# store context and a policy, not from a model: `packages/store-agent/Dockerfile` copies
+# contracts, proxyshop_support and `packages/store-agent/src` only — no `llm` package is in the
+# image — and nothing under that tree imports one." Every clause of that is now false, and two
+# of them are false in the source rather than in a build artifact:
+#
+#   * `packages/store-agent/Dockerfile:151` copies `packages/llm/src` into the image, and `:114`
+#     installs `anthropic==1.2.0`;
+#   * `runtime/pitch.py:101` and `solicitation/copywriter.py:68` both `import llm` at MODULE
+#     SCOPE — this image cannot import its own bidding runtime without the package.
+#
+# D55 is why withholding the provider was the wrong default rather than a cautious one. A
+# dedicated advocate that argues its store's case in the store's OWN voice is the service a
+# shop buys by joining the network; with no provider forwarded, every hosted agent ran the
+# offline double, and what a shopper read was the platform's deterministic slot-filled
+# fallback presented as the merchant's pitch.
+#
+# `double` remains the DEFAULT — D19/D20 keep the shipped stack offline and the suite off the
+# network — and `anthropic` is now reachable by setting one variable. Forwarding the key is
+# what makes that setting honest: `AnthropicLLM.__init__` does no I/O, so a container with the
+# provider set and no key did not fail at startup; it failed inside `compose_pitch`, which
+# caught the error and served the fallback at 200 OK while the healthcheck said (healthy).
+# With the key forwarded, `packages/llm` raises a legible MissingApiKeyError naming it.
+#
+# Empty is the offline default. Put a real key in `.env`, which is untracked; never in
+# `.env.example`, which is committed.
+x-store-agent-llm: &store-agent-llm
+  LLM_PROVIDER: "${LLM_PROVIDER:-double}"
+  ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+  # Model ids are config, not code (C4), and this one is written in three places pinned to
+  # each other: `packages/llm/src/config.py`'s DEFAULT_STORE_AGENT_MODEL, `.env.example`, and
+  # here. All three move together, or `test_the_documented_defaults_are_the_values_env_example
+  # _ships` goes red for no change in behaviour.
+  STORE_AGENT_MODEL: "${STORE_AGENT_MODEL:-claude-sonnet-5}"
+
 # The half every hosted agent shares: one image, one container port, one policy about what
 # this image may read. Defined as a compose extension field (`x-`) BEFORE `services:` so the
 # frozen textual compose parser in `.swarm-loop/acceptance/test_spec_criteria.py`, which stops
@@ -114,13 +153,8 @@ services:
     ports:
       - "${STORE_AGENT_PORT:-8086}:8086"
     environment:
+      <<: *store-agent-llm
       PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
-      # NO LLM_PROVIDER. The agent negotiates from its store context and a policy, not from a
-      # model: `packages/store-agent/Dockerfile` copies contracts, proxyshop_support and
-      # `packages/store-agent/src` only — no `llm` package is in the image — and nothing under
-      # that tree imports one (`grep -rnE "^\s*(from|import) llm\b" packages/store-agent/src`
-      # is empty). The line that used to stand here set a variable no process in this
-      # container could read, and implied a live model where there is none.
       # Unset by default, and deliberately: a default path would point at a store this
       # deployment never approved. See the header for what happens with them unset.
       STORE_AGENT_CONTEXT: "${STORE_AGENT_CONTEXT:-}"
@@ -164,6 +198,7 @@ services:
       # not need the mount rewritten. The env var below is what picks this store out of it.
       - ../../deploy/demo/store-contexts:/srv/store-contexts:ro
     environment:
+      <<: *store-agent-llm
       PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
       # The document names `store_id` and `store_domain` itself; the domain is repeated here
       # because `solicitation.serving` reads the env var when the context states none, and a
@@ -183,6 +218,7 @@ services:
       # not need the mount rewritten. The env var below is what picks this store out of it.
       - ../../deploy/demo/store-contexts:/srv/store-contexts:ro
     environment:
+      <<: *store-agent-llm
       PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
       # The document names `store_id` and `store_domain` itself; the domain is repeated here
       # because `solicitation.serving` reads the env var when the context states none, and a
@@ -202,6 +238,7 @@ services:
       # not need the mount rewritten. The env var below is what picks this store out of it.
       - ../../deploy/demo/store-contexts:/srv/store-contexts:ro
     environment:
+      <<: *store-agent-llm
       PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
       # The document names `store_id` and `store_domain` itself; the domain is repeated here
       # because `solicitation.serving` reads the env var when the context states none, and a
@@ -221,6 +258,7 @@ services:
       # not need the mount rewritten. The env var below is what picks this store out of it.
       - ../../deploy/demo/store-contexts:/srv/store-contexts:ro
     environment:
+      <<: *store-agent-llm
       PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
       # The document names `store_id` and `store_domain` itself; the domain is repeated here
       # because `solicitation.serving` reads the env var when the context states none, and a

@@ -77,6 +77,7 @@ single-use discount is discovering it too late.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import time
@@ -133,6 +134,8 @@ __all__ = [
     "renderable_validation_detail",
     "router",
 ]
+
+_log = logging.getLogger(__name__)
 
 
 # =====================================================================================
@@ -742,6 +745,233 @@ def _record_checkout_bridge(machine: AuctionStateMachine, result: Any) -> None:
         )
 
 
+# =====================================================================================
+# The learning fold — the only production producer of a bandit outcome in this service
+# =====================================================================================
+def _shown_stores(
+    request: Request,
+    *,
+    auction_id: str,
+    bids: Sequence[Mapping[str, Any]],
+) -> list[str] | None:
+    """Every store this auction actually showed, de-duplicated, in slot order.
+
+    **THE SHORTLIST IS SHOWN; THE BID BOOK IS NOT.** This function used to read the bid book
+    alone, and that is a different set. The book is filled by
+    :func:`~..auction.routes.collected_bid_records` with every candidate the ranking found
+    ELIGIBLE, while what the buyer was actually put in front of is the shortlist —
+    :data:`~..ranking.shortlist.MAX_SLOTS` slots, one per store, and everything past the cut
+    is benched by :func:`~..ranking.shortlist.bench` and never rendered. Measured over the
+    real ``POST /auctions`` then ``POST /auctions/{id}/accept`` with six eligible stores: four
+    slots, six records in the book, and the two benched stores each took a loss for an offer
+    no shopper ever saw. That is not a rounding error in the learning signal, it is a ratchet:
+    a benched store accrues beta forever and never alpha, its posterior falls, R12's
+    exploration slice reads that same posterior and benches it again.
+
+    So the shortlist is the source of truth, read through the accessor this codebase already
+    reads it through — :func:`~..ranking.serving.shortlist_store`, the same object
+    ``GET /auctions/{auction_id}/shortlist`` is served from — rather than through a second
+    reader invented here.
+
+    **Which field names the store, and why that one.** The slot itself is joined back to the
+    BID RECORD on ``bid_ref`` (the minted ``bid_id``), and the store is read off the record's
+    own top-level ``store_id``. That field is in :data:`~..ranking.candidates.CANDIDATE_FIELDS`
+    and the exchange writes it from the roster entry rather than from the store's reply, so it
+    is the platform's attribution and the same vocabulary the WIN is filed under — the win and
+    the losses of one accept cannot end up naming a store two different ways. The join is the
+    one :func:`~..ranking.serving.record_shown` already does for the ``shown`` ledger events,
+    and for the same stated reason.
+
+    Two other spellings were available and both are declined. A ``bid_id`` is minted as
+    ``f"{auction_id}:{store_id}"``, so a name could be *parsed* back out of one: declined,
+    because the mint is one producer's private spelling, a store id may itself contain a
+    colon, and a name recovered by splitting a string would attribute a loss to whatever the
+    split produced. A slot's ``trust_summary`` does happen to carry a ``store_id`` key
+    (``ranking.shortlist.trust_summary`` writes it first): declined, because the contract
+    types ``trust_summary`` as a free-form ``dict[str, Any]`` and nothing pins that key, while
+    the bid record's ``store_id`` is a named field of a stated projection.
+
+    Returns:
+        The stores shown, or ``None`` when this auction has no readable shortlist at all —
+        evicted past :class:`~..ranking.serving.ShortlistStore`'s cap, past its TTL, or never
+        stored because the auction was assembled without ``POST /auctions``. ``None`` is not
+        "nobody was shown": the caller must fold NOTHING for it, win included.
+
+        An empty LIST is a different answer and is kept distinct rather than collapsed into
+        ``None`` — it means a shortlist WAS read and named no store the bid book can resolve.
+        :func:`_record_auction_outcomes` folds nothing for that one either, for the same
+        anti-ratchet reason, but the two are logged as the different failures they are: one
+        is a missing shortlist, the other is a shortlist that does not join to the book.
+
+    A slot whose ``bid_ref`` matches no record contributes nothing rather than a guess, which
+    costs one loss and never files a wrong one. Two slots naming one store count once.
+    """
+    from ..ranking.serving import shortlist_store  # noqa: PLC0415 - sibling feature
+
+    shortlist = shortlist_store(request.app).get(auction_id)
+    if not isinstance(shortlist, Mapping):
+        return None
+
+    # First wins on a duplicate id, the same tie-break `_best_bid_per_store` and
+    # `record_shown` take: the slot was built from the first row carrying that `bid_id`.
+    store_by_bid: dict[str, str] = {}
+    for bid in bids:
+        if not isinstance(bid, Mapping):
+            continue
+        # `bid_id` or `bid_ref`, because `accept.offer._bid_ref_of` reads a record's reference
+        # under exactly those two names and this join must resolve every record that door can.
+        ref = str(bid.get("bid_id") or bid.get("bid_ref") or "").strip()
+        raw = bid.get("store_id")
+        if not ref or raw is None or ref in store_by_bid:
+            continue
+        store = str(raw).strip()
+        if store:
+            store_by_bid[ref] = store
+
+    shown: list[str] = []
+    for slot in shortlist.get("slots", ()) or ():
+        if not isinstance(slot, Mapping):
+            continue
+        store = store_by_bid.get(str(slot.get("bid_ref") or "").strip(), "")
+        if store and store not in shown:
+            shown.append(store)
+    return shown
+
+
+def _record_auction_outcomes(
+    request: Request,
+    *,
+    auction_id: str,
+    cluster_id: str,
+    accepted_store: str | None,
+    bids: Sequence[Mapping[str, Any]],
+) -> None:
+    """Fold this accept into the bandit: one win for the winner, one loss for each rival.
+
+    **Why this route is the producer.** ``POST /internal/outcomes`` — the door
+    :mod:`..policy.routes` publishes — is served, tested and has no production caller anywhere
+    in this repository. Nothing else in this service knows all three things an outcome needs at
+    the moment they are all true, and this handler knows them at exactly this point: the
+    auction's ``cluster_id`` off the record it already loaded, the winning store off the
+    checkout port's own ``accepted`` event, and the stores that were shown off the SHORTLIST
+    this auction stored. Until this fold existed :class:`~..policy.routes.InMemoryBanditPosteriors`
+    was never written to in a real deployment, so every posterior sat on its seeded prior for
+    the life of the process and exposure never moved with results.
+
+    **Both directions, because one direction is not a signal.** A buyer choosing one of four
+    shortlisted offers is one conversion for the store chosen and one non-conversion for each
+    of the other three: they were shown, in the same auction, to the same shopper, and were not
+    taken. Recording only the win would raise every posterior that ever appeared and the
+    Thompson sampler would have nothing to discriminate on — an alpha that only ever rises is
+    not evidence about a store, it is a count of how often the store was on a shortlist.
+
+    **SHOWN, not merely eligible.** The losses go to the stores :func:`_shown_stores` reads off
+    this auction's stored SHORTLIST, never to the whole bid book: a store the ranking benched
+    past ``MAX_SLOTS`` was not passed over by anybody, and charging it a loss is the ratchet
+    that function's docstring measures.
+
+    **No readable shortlist, no outcome — and that includes the win.** A shortlist evicted,
+    expired or never stored means this process cannot say what was put in front of the buyer,
+    so it records NOTHING and names the auction in the log. Folding only the win there would be
+    the same monotonic ratchet pointed the other way: one store's alpha rising every accept
+    while no rival's beta ever moves is not a comparison, and the sampler cannot un-learn it.
+
+    **The winner is credited whether or not a slot names it.** The win is recorded from
+    ``accepted_store`` directly and never from the shown list, because the buyer accepted this
+    store — which is proof it was shown, whatever a stored shortlist has to say. The shown list
+    only ever decides who takes a LOSS, and the winner is skipped there so one accept can never
+    be both a win and a loss for the same store.
+
+    **No cluster, no outcome.** ``exposure`` is decided WITHIN a cluster, so an outcome that
+    names none cannot be routed to a posterior; pooling it into an invented shared bucket would
+    move clusters it never happened in. :func:`~..policy.routes._record_outcome` refuses exactly
+    this with a 400 and the ruling is followed rather than re-litigated here — except that an
+    accept is not refusable over it, so the outcome is dropped and the auction is named in the
+    log instead.
+
+    **No named winner, no outcome either.** :func:`_accepted_store` returns ``None`` when the
+    checkout port emitted no ``accepted`` event. Every shown store would then be a rival of
+    nobody, so recording the losses would penalise the store that actually won. The whole fold
+    is dropped and the auction is named, for the same reason :func:`_accepted_store` refuses to
+    invent a substitute: an unattributed outcome is bad, a misattributed one is worse.
+    """
+    from ..policy.routes import record_conversion  # noqa: PLC0415 - sibling feature
+
+    if not cluster_id:
+        _log.warning(
+            "exchange.accept: auction=%s recorded no bandit outcome — the auction names no "
+            "cluster, and exposure is decided within a cluster",
+            auction_id,
+        )
+        return
+    winner = str(accepted_store or "").strip()
+    if not winner:
+        _log.warning(
+            "exchange.accept: auction=%s cluster=%s recorded no bandit outcome — the checkout "
+            "named no accepted store, so the losses have no winner to be losses to",
+            auction_id,
+            cluster_id,
+        )
+        return
+
+    # READ BEFORE ANYTHING IS RECORDED, deliberately. `None` is "this process cannot say what
+    # the buyer was shown", and the honest fold for that is the empty one — a win with no
+    # losses beside it moves one posterior up against rivals that were never marked down.
+    shown = _shown_stores(request, auction_id=auction_id, bids=bids)
+    if shown is None:
+        _log.warning(
+            "exchange.accept: auction=%s cluster=%s recorded no bandit outcome — no shortlist "
+            "is readable for it (evicted, expired, or never stored), so the stores that were "
+            "shown and passed over cannot be named and the win is dropped with them",
+            auction_id,
+            cluster_id,
+        )
+        return
+    if not shown:
+        # A DIFFERENT failure from `None`, and it gets the same answer for the same reason. The
+        # shortlist was read and still names no store this process can resolve — no slots at
+        # all, or every slot's `bid_ref` matching no record in the book, which is what a bid
+        # book and a shortlist store re-wired to two different `bid_id` spellings look like.
+        # A lone win is the tempting fold here and it is the ratchet again: the winner's alpha
+        # would rise on every accept while no rival's beta ever moved. Loud and empty beats
+        # quiet and skewed.
+        _log.warning(
+            "exchange.accept: auction=%s cluster=%s recorded no bandit outcome — its shortlist "
+            "was read but resolves to no store against the %d bid record(s) held for it, so not "
+            "one store this auction showed can be named and the win is dropped with the losses",
+            auction_id,
+            cluster_id,
+            len(bids),
+        )
+        return
+
+    # The win comes from `accepted_store`, not from `shown`: the buyer accepted this store, so
+    # it was shown, and a slot list that omits it does not get to withhold its credit. `shown`
+    # being non-empty is what separates this from the guard above: at least one store the
+    # shopper saw is nameable, so the accept is describable as a comparison.
+    wins = int(record_conversion(request, store_id=winner, cluster_id=cluster_id, converted=True))
+    losses = 0
+    for store in shown:
+        if store == winner:
+            continue
+        losses += int(
+            record_conversion(request, store_id=store, cluster_id=cluster_id, converted=False)
+        )
+
+    # One line per accept, at INFO, because this loop was silently dead: the door existed, the
+    # sampler existed, and nothing joined them. "Alive" has to be readable in the log of a
+    # running deployment, not inferable from a test.
+    _log.info(
+        "exchange.accept: auction=%s cluster=%s folded %d win and %d loss outcomes into the "
+        "bandit posteriors (winner=%s)",
+        auction_id,
+        cluster_id,
+        wins,
+        losses,
+        winner,
+    )
+
+
 def _denied(reason: str) -> JSONResponse:
     """The 409 body the contract publishes: ``{accepted, denial_reason, denial_code}``.
 
@@ -830,9 +1060,16 @@ async def accept_bid(auction_id: str, body: AcceptBidRequest, request: Request) 
         )
 
     now = time.time()
+    # Held in a local rather than read back out of `auction` below, so the learning fold and
+    # the checkout resolve a `bid_ref` against the SAME list. The fold no longer treats this
+    # book as the shown set — the shortlist decides that, see `_shown_stores` — but it is
+    # still the `bid_id -> store_id` table the fold joins the shown slots through, and a
+    # re-read between the two calls could resolve one slot against a record the checkout
+    # never saw.
+    bids = _bids_for(request, auction_id)
     auction = {
         "auction_id": record.auction_id,
-        "bids": _bids_for(request, auction_id),
+        "bids": bids,
         # The stamp as PERSISTED, so a second accept on a reloaded record is refused by the
         # same guard that refuses a second accept on one object.
         "accepted_bid_ref": record.accepted_bid_ref,
@@ -862,6 +1099,11 @@ async def accept_bid(auction_id: str, body: AcceptBidRequest, request: Request) 
     if not result.accepted:
         return _denied(str(result.denial_reason or ""))
 
+    # Read ONCE and reused by the stamp and by the learning fold below, so the store the
+    # ledger names as the winner and the store the bandit credits are the same value by
+    # construction rather than by two agreeing reads of `result.events`.
+    accepted_store = _accepted_store(result)
+
     try:
         # The token and the offer travel with the stamp, because the `accepted` event this
         # writes is the only record of the promise the trust reconciler ever sees, and it
@@ -874,7 +1116,7 @@ async def accept_bid(auction_id: str, body: AcceptBidRequest, request: Request) 
             now=now,
             checkout_token=result.checkout_token,
             offer=_accepted_offer(result),
-            store_id=_accepted_store(result),
+            store_id=accepted_store,
         )
     except IllegalAuctionTransition as exc:
         # NOT the T-158 window any more: the acceptance claim inside `accept()` is what makes
@@ -899,6 +1141,37 @@ async def accept_bid(auction_id: str, body: AcceptBidRequest, request: Request) 
     # unchanged gap — a live code exists there and the ledger says nothing about it — and it
     # is the expiry race, not this ticket.
     _record_checkout_bridge(machine, result)
+
+    # The bandit's only production producer, and it is HERE for two reasons that are both
+    # about position rather than about learning.
+    #
+    # It is downstream of the stamp, so it cannot fire for an accept that did not happen: a
+    # 404, a 409 from the legality guard, a denial from `accept()` and a lost expiry race all
+    # return above this line. And it cannot fire TWICE for one auction — VERIFIED, not
+    # assumed: `machine.accept` moves the record to `accepted`, and `TRANSITIONS[ACCEPTED]` is
+    # `frozenset()` (`auction/state.py:159`), so the guard at the top of this handler refuses
+    # every later accept on the same auction before reaching any of this. Concurrently, the
+    # T-158 acceptance claim inside `accept()` lets exactly one caller past, so the loser is a
+    # denial and returns above too.
+    #
+    # And it is wrapped, because a learning write may never cost a buyer their permalink. Same
+    # posture `_record_checkout_bridge` and `LedgerRecorder.record` take on the two lines
+    # above: the accept is finished, the code is minted and live, and the one thing that must
+    # not happen now is a 500 that loses the URL the buyer paid attention for.
+    try:
+        _record_auction_outcomes(
+            request,
+            auction_id=auction_id,
+            cluster_id=str(getattr(record, "cluster_id", "") or "").strip(),
+            accepted_store=accepted_store,
+            bids=bids,
+        )
+    except Exception as exc:  # noqa: BLE001 - never fail an accept for a posterior write
+        _log.warning(
+            "exchange.accept: auction=%s folded no bandit outcome (%s); the acceptance stands",
+            auction_id,
+            describe_exception(exc),
+        )
 
     return AcceptedOfferResponse(
         permalink_url=str(result.permalink_url),

@@ -102,7 +102,8 @@ arrived, which reconciles to nothing rather than to somebody else's promise.
 
 Nothing on this router is authenticated
 ---------------------------------------
-There is not one ``Depends`` in ``apps/trust``. Two bounds follow, and both are load-bearing:
+There is not one ``Depends`` in ``apps/trust``. Three bounds follow, and all three are
+load-bearing:
 
 * :data:`MAX_RECONCILE_INPUT_EVENTS`. The join is a union-find that holds every checkout
   event at once, so its cost is proportional to the ledger and not to a page — the same
@@ -114,12 +115,20 @@ There is not one ``Depends`` in ``apps/trust``. Two bounds follow, and both are 
   screen one unauthenticated append would 500 this door forever and stop every later purchase
   in that ledger from grading. The refusal is kept — as ``unjoinable_webhooks`` in the served
   body — rather than converted into an outage or into a silent drop.
+* :data:`ANNOUNCE_BUDGET_SECONDS`, which is the one that was missing. The two above bound what
+  the fold HOLDS and what it will READ; neither bounds how long ``POST /reconcile`` spends
+  telling store agents and the exchange what it decided, and that is a synchronous per-event
+  cost against peers this service does not control. Measured before the budget existed: ten
+  orders, twenty fresh observations, two peers that accept a connection and never answer,
+  **20.4s on one unauthenticated request** — and the observation count is bounded only by the
+  first bullet, so ~33k observations and hours of hold were reachable the same way.
 """
 
 from __future__ import annotations
 
 import contextlib
 import logging
+import time
 import zlib
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -127,7 +136,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
-from ..events.errors import EventServiceError, StoreUnavailable
+from ..events.errors import EventServiceError, IdempotencyConflict, StoreUnavailable
 from ..events.routes import store_for
 from ..events.store import append
 from .engine import (
@@ -145,6 +154,7 @@ from .engine import (
 )
 
 __all__ = [
+    "ANNOUNCE_BUDGET_SECONDS",
     "DEFAULT_VERDICT_PAGE",
     "INPUT_KINDS",
     "MAX_RECONCILE_INPUT_EVENTS",
@@ -190,6 +200,35 @@ DEFAULT_VERDICT_PAGE = 200
 
 #: The most one ``GET /reconcile`` will serialise, even explicitly.
 MAX_VERDICT_PAGE = 2_000
+
+#: How long ``POST /reconcile`` will spend TELLING the world what it decided, in total.
+#:
+#: The third bound on this unauthenticated door, and the one that was missing.
+#: :data:`MAX_RECONCILE_INPUT_EVENTS` bounds what the fold HOLDS and
+#: :data:`DEFAULT_VERDICT_PAGE` bounds what it SERIALISES; neither bounds how long it holds a
+#: worker open pushing notifications, and that turned out to be the largest of the three.
+#:
+#: The arithmetic, measured rather than assumed. Each fresh observation goes through
+#: ``trust.feedback.announce_trust_event``, whose fanout makes TWO inline HTTP attempts — the
+#: store's own agent, then the exchange's bandit — each bounded by
+#: ``notify.DEFAULT_PUSH_TIMEOUT_SECONDS`` (0.5s). So one observation costs up to 1.0s against
+#: peers that accept a connection and then say nothing, and the count is bounded only by
+#: :data:`MAX_RECONCILE_INPUT_EVENTS`: 50_000 checkout events is ~16k orders and ~33k
+#: observations. Ten orders against two silent peers measured **20.4s on one request**, and
+#: nothing in the door stopped that scaling to hours. It takes no credential.
+#:
+#: Five seconds, because the number has to be argued from what the announce is FOR rather than
+#: picked. It is a courtesy on top of an answer the caller has already earned: the verdicts are
+#: in the append-only chain and the rows are in ``ledger.trust_observations`` before this phase
+#: starts, so spending the caller's request on it is only ever worth a slice. Against healthy
+#: peers a push is single-digit milliseconds, so five seconds covers on the order of a thousand
+#: observations and the budget is invisible — it binds exactly in the case it exists for, an
+#: outage, where it caps the hold at five seconds instead of at the length of the ledger.
+#:
+#: Checked BEFORE each announce, never during one, so the true worst-case hold is this plus one
+#: full fanout (~1.0s). Interrupting an attempt mid-flight would mean a store agent that has
+#: received a delta and a fold that believes it has not.
+ANNOUNCE_BUDGET_SECONDS = 5.0
 
 #: The platform roster, read for the store alias. Two columns and no filter: the map has to
 #: be complete to be able to REFUSE a domain two sellers claim, and a query that returned one
@@ -442,22 +481,291 @@ def _refuse(exc: EventServiceError) -> HTTPException:
     )
 
 
-def _append_all(
-    store: Any, events: Sequence[Mapping[str, Any]]
-) -> tuple[int, int, list[tuple[int, Mapping[str, Any]]]]:
-    """Append every event, idempotently. ``(inserted, already present, [(seq, event)])``."""
+@dataclass(frozen=True)
+class _Appended:
+    """What one batch of composed events did to the chain."""
+
+    #: Rows this run added.
+    inserted: int = 0
+    #: Rows that were already there, byte-identical or superseding.
+    already: int = 0
+    #: Rows an EARLIER version of this fold sealed under a different body. See
+    #: :func:`_append_all`: the stored verdict stands and this run's is discarded.
+    superseded: int = 0
+    #: Superseded rows whose STORED body could not be read back off the chain, so their
+    #: relational row could not be converged on this run. Counted rather than guessed.
+    unreadable: int = 0
+    #: ``(seq, event)`` for everything the chain now holds under this run's composition.
+    landed: tuple[tuple[int, Mapping[str, Any]], ...] = ()
+    #: The subset of ``landed`` that this run INSERTED, which is what may be announced.
+    fresh: tuple[tuple[int, Mapping[str, Any]], ...] = ()
+    #: The refusal that stopped the batch, if one did — held rather than raised, so the caller
+    #: can finish landing what this batch already sealed before it answers. ``None`` on a
+    #: complete batch. See :func:`_append_all`.
+    error: HTTPException | None = None
+
+
+def _stored_row(store: Any, event_id: str) -> tuple[int, Mapping[str, Any]] | None:
+    """``(seq, event)`` as the CHAIN holds it under ``event_id``, or ``None``.
+
+    Used by the supersession branch below, where the event this run composed is precisely the
+    one that must not be used: the chain's row is the one that stands, its ``seq`` is the value
+    ``ledger.trust_observations.event_seq`` is a foreign key onto, and the body a later fold
+    recomputed is the body the ledger refused. Reading it back is one indexed probe on
+    ``commerce_events_idempotency_key_key`` (see ``events.pg.PostgresEventStore.get``).
+
+    ``None`` for every way that read can fail to produce a usable row — no ``get`` on this
+    store, a read that raised, a row without a ``seq``. The caller counts those; it never
+    invents a number, because a guessed ``seq`` is a foreign key pointed at somebody else's
+    event.
+    """
+    reader = getattr(store, "get", None)
+    if not callable(reader):
+        return None
+    try:
+        stored = reader(event_id)
+        if not isinstance(stored, Mapping):
+            return None
+        return int(stored["seq"]), stored
+    except Exception:  # noqa: BLE001 - an unreadable row is counted, never guessed at
+        _log.warning("the chain's own copy of %s could not be read back", event_id, exc_info=True)
+        return None
+
+
+def _append_all(store: Any, events: Sequence[Mapping[str, Any]]) -> _Appended:
+    """Append every event, idempotently. **Collects its refusal rather than raising it.**
+
+    ``landed`` and ``fresh`` are separate lists rather than one list with a flag, because the
+    two are read for opposite reasons and the difference is load-bearing.
+    ``persist_observations`` wants EVERY landed event — the relational write is arbitrated on
+    ``event_seq`` and re-running it converges, so an event that was already in the chain but
+    whose row never made it is exactly the case that must be retried.
+    :func:`_announce_observations` wants only the ones that INSERTED, because a second
+    notification for one event charges a store twice the moment its agent starts counting
+    deltas.
+
+    **Why the refusal is returned and not raised.** This function is not atomic and cannot be:
+    it appends one event per transaction to a hash-chained, append-only ledger. Raising from
+    inside the loop kept everything it had already appended and abandoned the caller's
+    remaining work, so the events it HAD sealed were never announced and never persisted —
+    measured, a 503 injected on the second ``offer_integrity`` append of one order left
+    ``offer_integrity:…:price`` in the chain with no store agent told, and no later run can
+    repair that (the second run's append is a no-op, a no-op is not ``fresh``, and this service
+    serves no door that re-announces a stored event). So the batch stops at the first refusal —
+    the ledger is unavailable or refusing what this module composes, and the next event is
+    overwhelmingly likely to meet the same answer — and hands the caller both what it landed
+    and the exception to raise once it has finished with it. The caller's status and body are
+    unchanged; only the ordering is.
+    """
     inserted = 0
     already = 0
+    superseded = 0
+    unreadable = 0
     landed: list[tuple[int, Mapping[str, Any]]] = []
+    fresh: list[tuple[int, Mapping[str, Any]]] = []
+    error: HTTPException | None = None
     for event in events:
         try:
             outcome = append(store, event)
+        except IdempotencyConflict as exc:
+            # THE FOLD CHANGED, AND THE LEDGER IS APPEND-ONLY. `event_id` here is minted by
+            # this service from the order (`reconciled:{store}:{order}`), not supplied by a
+            # caller, so a conflict cannot be a producer contradicting itself: it can only mean
+            # that an EARLIER VERSION of this fold already sealed a verdict for this order and
+            # the body it composed then is not byte-identical to the one composed now. D16's
+            # refusal is right about a caller's event and wrong about this one -- what it is
+            # protecting against, "accepting this append would silently lose it", cannot
+            # happen, because the chain keeps the row it already has either way.
+            #
+            # Left to raise, this takes the WHOLE door down permanently: `_refuse` answers 500,
+            # nothing in the fold lands, `persist_observations` never runs, and every later
+            # purchase on that ledger is ungraded for as long as the old row exists -- which is
+            # for ever, on an append-only chain with an `ENABLE ALWAYS` trigger. Measured on
+            # this tree: one pre-existing `reconciled:...` row is enough. So it is counted as
+            # present, said out loud, and the fold continues with the rest.
+            #
+            # It is NOT swallowed. The stored verdict is the one that stands and this run's
+            # recomputation of it is discarded, which is a real difference an operator has to
+            # be able to see -- hence the WARNING naming the event and the `superseded` count
+            # on the response.
+            already += 1
+            superseded += 1
+            _log.warning(
+                "the chain already holds %s with a different body: an earlier version of this "
+                "fold sealed it, and an append-only ledger cannot restate it. The STORED "
+                "verdict stands and this run's recomputation of it is discarded (%s)",
+                str(event.get("event_id", "unknown")),
+                exc,
+            )
+            # AND THE RELATIONAL WRITE STILL HAS TO CONVERGE. This branch used to `continue`
+            # here, before `landed.append(...)`, so a superseded event never reached
+            # `persist_observations` at all -- and because carrying the auction's `cluster_id`
+            # changed the body of every `reconciled:*` and `offer_integrity:*` payload while
+            # their ids stayed deterministic, EVERY order reconciled before that deploy takes
+            # this branch. On any database with history that made the relational convergence
+            # permanently off, which is the exact case this function's own docstring calls
+            # "the one that must be retried".
+            #
+            # The STORED row, never the one this run composed: the chain's copy is the one that
+            # stands, and `ledger.trust_observations.event_seq` is a foreign key onto it.
+            # Deliberately NOT added to `fresh` -- the chain already held this observation, and
+            # announcing it charges the store a second time for one purchase.
+            stored = _stored_row(store, str(event.get("event_id", "")))
+            if stored is None:
+                unreadable += 1
+                _log.warning(
+                    "the chain's stored copy of %s could not be read back, so its "
+                    "ledger.trust_observations row cannot converge on this run; reported as "
+                    "superseded_unreadable rather than written against a guessed event_seq",
+                    str(event.get("event_id", "unknown")),
+                )
+            else:
+                landed.append(stored)
+            continue
         except EventServiceError as exc:
-            raise _refuse(exc) from exc
+            # Held, not raised: see the docstring. What this batch already sealed into the
+            # chain still has to be persisted and announced before the caller answers.
+            error = _refuse(exc)
+            break
         inserted += int(outcome.inserted)
         already += int(not outcome.inserted)
         landed.append((int(outcome.seq), event))
-    return inserted, already, landed
+        if outcome.inserted:
+            fresh.append((int(outcome.seq), event))
+    return _Appended(
+        inserted=inserted,
+        already=already,
+        superseded=superseded,
+        unreadable=unreadable,
+        landed=tuple(landed),
+        fresh=tuple(fresh),
+        error=error,
+    )
+
+
+def _announce_observations(
+    request: Request, store: Any, fresh: Sequence[tuple[int, Mapping[str, Any]]]
+) -> dict[str, Any]:
+    """Tell the affected store's agent — and the exchange — what this fold decided.
+
+    **The gap this closes.** ``POST /events`` has notified since R13 was wired, but nothing
+    reconciliation appends goes through that door: :func:`_append_all` calls
+    ``trust.events.store.append`` directly, so every ``offer_integrity`` observation this
+    module has ever minted was sealed into the chain and told to nobody. That is the whole
+    transaction half of trust — price honoured, discount honoured, delivery kept — and it is
+    the half a store's advocate most needs, because it is the half the store can actually do
+    something about. R4 makes ``order_paid`` the authority on a completed purchase; this is
+    the line from that authority to the two things that learn from it.
+
+    Only the events that INSERTED, and that is not a nicety: this door is idempotent and
+    designed to be re-run, so announcing on every fold would re-charge a store for one
+    purchase once per run. It is the same rule ``events.routes._announce`` follows, for the
+    same reason, and the reason the caller is handed a separate ``fresh`` list.
+
+    **Never raises, and never delays the answer beyond :data:`ANNOUNCE_BUDGET_SECONDS` plus
+    one attempt in flight.** The verdicts are already in the append-only chain by the time this
+    runs; a store agent that is down is an operational problem with a notification, and turning
+    it into a 5xx would tell the caller that a durable, chained, verifiable fold had been
+    refused. Retries of an ATTEMPTED push happen off this thread — see
+    ``trust.feedback.notify``.
+
+    The budget is the bound this used to be missing, and the sentence it replaces
+    ("never delays the answer beyond one bounded attempt per event") was wrong twice over: the
+    fanout makes TWO inline attempts per event, and "per event" is not a bound at all when the
+    number of events is bounded only by the length of the ledger. Measured: ten orders, twenty
+    fresh observations, two peers that accept and never answer, **20.4s on one unauthenticated
+    request**. See :data:`ANNOUNCE_BUDGET_SECONDS` for why five seconds.
+
+    **What the caller is told about the remainder, and what an operator can do about it.** The
+    events past the budget were sealed into the chain and NOT announced, and the report says so
+    as ``not_attempted`` (with ``budget_seconds``, so the number is readable against the policy
+    that produced it). They are not counted as pushed and not counted as failed pushes, because
+    they are neither: the invariants are ``attempted + not_attempted == len(fresh)`` and
+    ``pushed + not_pushed == attempted``. Those two keys appear only on a fold where the budget
+    actually bit — their presence IS the signal, and on the overwhelming majority of folds
+    (healthy peers, or nothing to push) the block is the three counts it has always been.
+
+    **There is no recovery for them inside this service, and this comment is the honest
+    version of that.** Re-running the fold does not re-announce: the second run's appends are
+    no-ops, a no-op is not ``fresh``, and no door in ``apps/trust`` re-announces an event that
+    is already stored. Nor do they reach ``trust.feedback.notify``'s retry queue or its
+    readable ``undelivered`` ring — both of those are fed by an attempt that FAILED, and these
+    were never attempted. So the operator's position is: the trust update is durable and
+    verifiable in the ledger (``GET /events``, ``GET /reconcile``), the store's agent and the
+    exchange's bandit will never hear about it, and the only real fix is a durable outbox —
+    the same table ``trust.feedback.notify`` says it cannot add on its own (a migration, a
+    ``trust_rw`` grant, and a claim policy so two processes cannot drain the same row). Until
+    that exists the honest answer to "how do I replay these" is: you cannot. What the count is
+    for is knowing it happened and how big it was, which is strictly better than the silence
+    that was there before, and is not a substitute for the queue.
+    """
+    report: dict[str, Any] = {"attempted": len(fresh), "pushed": 0, "not_pushed": 0}
+    if not fresh:
+        return report
+    try:
+        from ..events.routes import trust_event_sink  # noqa: PLC0415 - sibling feature
+        from ..feedback.notify import (  # noqa: PLC0415 - reaches the scorer; see events.routes
+            announce_trust_event,
+            store_history_reader,
+        )
+    except Exception:  # noqa: BLE001 - a build that cannot compute deltas still reconciles
+        _log.warning(
+            "this build cannot compute trust deltas, so %d reconciled observation(s) were "
+            "sealed into the chain and no store agent or exchange was told",
+            len(fresh),
+            exc_info=True,
+        )
+        report["not_pushed"] = len(fresh)
+        return report
+
+    sink = trust_event_sink(request)
+    if sink is None:
+        report["not_pushed"] = len(fresh)
+        return report
+
+    # Checked before each announce and never inside one: a fanout interrupted half way would
+    # leave a store agent holding a delta this fold believes it never sent.
+    deadline = time.monotonic() + ANNOUNCE_BUDGET_SECONDS
+    for index, (seq, event) in enumerate(fresh):
+        if time.monotonic() >= deadline:
+            remaining = len(fresh) - index
+            report["attempted"] = index
+            report["not_attempted"] = remaining
+            report["budget_seconds"] = ANNOUNCE_BUDGET_SECONDS
+            _log.warning(
+                "the %.1fs announce budget was spent after %d of %d reconciled observation(s); "
+                "the remaining %d are SEALED IN THE CHAIN AND WERE NOT ANNOUNCED. They did not "
+                "reach the retry queue either -- that is fed by failed attempts, and these were "
+                "not attempted -- and re-running this fold will not re-announce them, because a "
+                "second append is a no-op. Recovering them needs a durable outbox this service "
+                "does not have. The peers are the thing to fix: %s",
+                ANNOUNCE_BUDGET_SECONDS,
+                index,
+                len(fresh),
+                remaining,
+                sorted({str(row[1].get("store_id", "unknown")) for row in fresh[index:]}),
+            )
+            break
+        try:
+            outcome = announce_trust_event(
+                event,
+                history_reader=store_history_reader(store, before_seq=seq),
+                sink=sink,
+            )
+        except Exception:  # noqa: BLE001 - see the docstring
+            _log.warning(
+                "notifying the affected store about reconciled event %s failed; the event is "
+                "in the ledger",
+                str(event.get("event_id", "unknown")),
+                exc_info=True,
+            )
+            report["not_pushed"] += 1
+            continue
+        if outcome.get("pushed"):
+            report["pushed"] += 1
+        else:
+            report["not_pushed"] += 1
+    return report
 
 
 def persist_observations(connection: Any, landed: Sequence[tuple[int, Mapping[str, Any]]]) -> int:
@@ -602,6 +910,13 @@ def post_reconcile(request: Request) -> dict[str, Any]:
     schedule, after a delivery, or twice by mistake. The answer distinguishes what was
     *appended* from what was *already present*, so "nothing landed" and "nothing to land"
     are never the same number.
+
+    **The refusals are raised at the END, and that ordering is the fix rather than a style.**
+    :func:`_append_all` is not atomic across a batch, so a ledger error part-way through leaves
+    events already sealed into the chain. Raising where it happened meant those events were
+    never persisted and never announced, permanently — see that function's docstring. So the
+    error is carried back, the fold finishes converging and announcing what it DID land, and
+    only then does the caller get the same status and the same body it always got.
     """
     store = store_for(request)
     with _optional_connection(request) as connection:
@@ -612,30 +927,80 @@ def post_reconcile(request: Request) -> dict[str, Any]:
             raise _refuse(exc) from exc
         reconciled, observations = _fold(inputs)
 
-        verdicts_new, verdicts_old, _ = _append_all(store, reconciled)
+        verdicts = _append_all(store, reconciled)
+        if verdicts.error is not None:
+            # Nothing to salvage: a `reconciled` verdict carries no observation, so it is
+            # neither persisted nor announced, and the observations that descend from these
+            # verdicts have not been composed into the chain yet. Composing them now would
+            # seal observations naming a verdict the ledger just refused to take.
+            raise verdicts.error
         # The observations go in AFTER the verdicts, so `reconciled_event_id` on each one
         # always names a row that is already in the chain.
-        observations_new, observations_old, landed = _append_all(store, observations)
+        landings = _append_all(store, observations)
 
-        persisted = persist_observations(connection, landed) if connection is not None else 0
+        persisted = (
+            persist_observations(connection, landings.landed) if connection is not None else 0
+        )
+        # AFTER the relational write, for the same reason `events.routes.post_event` announces
+        # after its projection: an agent that reacts by reading `GET /snapshot` must not beat
+        # its own observation into the table it is about to read.
+        notified = _announce_observations(request, store, landings.fresh)
         report = {
             **_report(inputs, reconciled, observations),
-            "appended": {RECONCILED_KIND: verdicts_new, OBSERVATION_KIND: observations_new},
+            "appended": {
+                RECONCILED_KIND: verdicts.inserted,
+                OBSERVATION_KIND: landings.inserted,
+            },
             "already_present": {
-                RECONCILED_KIND: verdicts_old,
-                OBSERVATION_KIND: observations_old,
+                RECONCILED_KIND: verdicts.already,
+                OBSERVATION_KIND: landings.already,
+            },
+            # Rows an EARLIER version of this fold sealed under a body this one would not
+            # write. The stored verdict stands and this run's recomputation of it was
+            # discarded. Reported rather than only logged, because "already present" and
+            # "present, and not what this code would write today" are two different states of
+            # a ledger and only one of them means the chain agrees with the running fold.
+            "superseded": {
+                RECONCILED_KIND: verdicts.superseded,
+                OBSERVATION_KIND: landings.superseded,
+            },
+            # The subset of `superseded` whose STORED row could not be read back, so its
+            # `ledger.trust_observations` row could not converge on this run. Separate from
+            # `superseded` because the two mean opposite things about the relational table:
+            # a superseded event is one that DID reach `persist_observations`, and one of these
+            # is one that did not and was not guessed at. Non-zero here means re-run the fold.
+            "superseded_unreadable": {
+                RECONCILED_KIND: verdicts.unreadable,
+                OBSERVATION_KIND: landings.unreadable,
             },
             "observations_written": persisted,
             "observations_persisted": connection is not None,
             "reconciled_event_ids": [str(event["event_id"]) for event in reconciled],
+            # What the fold told the outside world. Reported for the same reason
+            # `observation_rows` is on `POST /events`: this push is best effort by design, so a
+            # caller must be able to tell "no observation to push" from "pushed to nobody".
+            "notifications": notified,
         }
     _log.info(
         "reconciled %d order(s) from %d checkout event(s): %d verdict(s) and %d observation(s) "
-        "appended, %d observation row(s) written",
+        "appended, %d superseded by an older fold (%d of them unreadable, so their rows did not "
+        "converge), %d observation row(s) written, %d of %d new observation(s) pushed to a store "
+        "agent, %d left sealed in the chain and unannounced by the %.1fs announce budget "
+        "(re-running the fold will not re-announce those)",
         report["reconciled"],
         len(inputs.events),
-        verdicts_new,
-        observations_new,
+        verdicts.inserted,
+        landings.inserted,
+        verdicts.superseded + landings.superseded,
+        verdicts.unreadable + landings.unreadable,
         persisted,
+        notified["pushed"],
+        notified["attempted"],
+        notified.get("not_attempted", 0),
+        ANNOUNCE_BUDGET_SECONDS,
     )
+    if landings.error is not None:
+        # Everything this batch DID seal is now persisted and announced; the caller gets the
+        # refusal it would always have got, with the same status and the same body.
+        raise landings.error
     return report

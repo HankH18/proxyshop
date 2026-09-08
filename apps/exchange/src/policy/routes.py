@@ -53,16 +53,25 @@ models. D26 asks for posteriors in Redis and this is not that; it is the seam Re
 bandit adjusts **exposure and exploration only** — it never touches rank, price or eligibility —
 so a lost posterior costs exploration accuracy, never money and never a wrong shortlist.
 
-**What still has no consumer, and this module does not pretend otherwise.**
-:func:`~.bandit.exposure` has no production call site: nothing on the served path reads the state
-this door writes. That is the *other* half of R16's loop and it belongs to whoever wires exposure
-into candidate selection; it is reported here rather than fixed here, because wiring exposure
-into the served auction would change what a buyer is shown, and this ticket is about a published
-door that answered 404.
+**The consumer landed, and this paragraph records what it replaced.** This module used to say
+":func:`~.bandit.exposure` has no production call site: nothing on the served path reads the
+state this door writes", and that was true when this door was written: the WRITE half existed
+and the READ half did not. It does now. :mod:`exchange.policy.exploration` is the call site —
+:func:`~exchange.policy.exploration.exposure_shares` reads :func:`~.bandit.exposure`, and
+:mod:`exchange.ranking.serving` runs it (imported at ``ranking/serving.py:58``, applied to the
+shortlist), so R12's exploration slice on a served auction really does consume the posteriors
+``POST /internal/outcomes`` writes. The bound on what that slice may cost a shopper — one slot
+of four, only among the already-eligible, only for a store the trust snapshot positively marks
+``low_data`` — is stated in :mod:`exchange.policy.exploration`, not here.
 
-**The route is unauthenticated, and its name does not change that.** ``/internal/`` is a naming
-convention; this service has no authentication of any kind (``git grep -nE
-"Depends|api_key|Authorization" apps/exchange/src`` is empty). So the book is bounded in both
+**This route is unauthenticated, and its name does not change that.** ``/internal/`` is a naming
+convention and nothing checks a credential before :func:`_record_outcome` runs. This paragraph
+used to justify that with "this service has no authentication of any kind (``git grep -nE
+"Depends|api_key|Authorization" apps/exchange/src`` is empty)", and the sweeping half of that is
+no longer true: ``reports/routes.py`` serves ``GET /reports/losses`` behind a bearer token
+compared with :func:`hmac.compare_digest`, resolving the subject store from the token. So the
+exchange does authenticate one route; this door is simply not it, and the bound below is what
+stands in place of a credential. So the book is bounded in both
 directions an anonymous caller can push on — :data:`DEFAULT_BANDIT_STORES` pairs of roster and
 :data:`DEFAULT_MAX_OUTCOME_BYTES` of body — and every refusal is a decision this module makes on
 purpose rather than an exception escaping it. Nothing here can answer 500: the handler is a total
@@ -75,6 +84,7 @@ that without recording is worse than one that 404s.
 from __future__ import annotations
 
 import json
+import logging
 import math
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -94,8 +104,11 @@ __all__ = [
     "RETAINED_IDENTIFIER_FIELDS",
     "configure_outcomes",
     "identifier_ceiling",
+    "record_conversion",
     "router",
 ]
+
+_log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["policy"])
 
@@ -309,6 +322,87 @@ def _bind_the_deployment(request: Request) -> None:
         ensure_configured(request.app)
     except DeploymentConfigurationError as exc:
         raise HTTPException(status_code=503, detail=redact_addresses(exc)) from exc
+
+
+# =====================================================================================
+# Folding one outcome — the ONE place that decides what "record an outcome" means
+# =====================================================================================
+#
+# This pair exists because ``POST /internal/outcomes`` stopped being the only producer. The
+# served accept (``accept/routes.py``) folds a win for the store the buyer chose and a loss
+# for every other store the same auction showed, and it must reach the SAME book, through the
+# SAME snapshot, under the same "no cluster, no outcome" ruling as this door. Two call sites
+# each doing their own `getattr(app.state, "bandit_posteriors")` is how those three rules drift
+# apart, so the decision is written once, here, and both callers go through it.
+#
+# It is split in two for the reason ``record_outcome`` wraps ``_record_outcome``: the door needs
+# to tell its two failures apart (a book that exposes no ``record`` is a named 503; a recorder
+# that raised is the wrapper's generic one), while the accept path must never be failed by
+# either. So ``_fold_conversion`` raises and ``record_conversion`` is its total wrapper.
+
+
+class _OutcomeNotRecorded(RuntimeError):
+    """The wired posterior book cannot take an outcome, carrying the detail to publish."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+def _fold_conversion(request: Request, *, store_id: str, cluster_id: str, converted: bool) -> None:
+    """Fold one ``(cluster, store)`` Bernoulli outcome into this app's posterior book.
+
+    Raises :class:`_OutcomeNotRecorded` when the wired book exposes no ``record``; anything the
+    book's own ``record`` raises is left to propagate, because the two are different facts and
+    the door publishes them differently.
+    """
+    book = _posteriors(request)
+    recorder = getattr(book, "record", None)
+    if not callable(recorder):
+        raise _OutcomeNotRecorded(
+            f"the wired posterior book of type {type(book).__name__!r} exposes no "
+            "record(store_id, cluster_id, converted) — this exchange cannot learn from "
+            "an outcome it has nowhere to put"
+        )
+    recorder(store_id, cluster_id, converted, trust_snapshot=_trust_snapshot(request))
+
+
+def record_conversion(request: Request, *, store_id: str, cluster_id: str, converted: bool) -> bool:
+    """Fold one outcome and say whether it landed. **Never raises.**
+
+    The entry point for a producer that is doing something else and cannot be failed by a
+    learning write — the served accept, whose buyer is owed a permalink whatever the posterior
+    book does. ``converted`` is the whole outcome: ``True`` is one win for ``store_id`` in
+    ``cluster_id``, ``False`` is one loss. A caller that records only wins would make every
+    posterior rise together and the sampler would never discriminate, so the losses are the
+    caller's responsibility and not an optional extra.
+
+    An empty ``cluster_id`` is refused rather than bucketed, exactly as :func:`_record_outcome`
+    refuses one: exposure is decided WITHIN a cluster, so an outcome naming none cannot be
+    routed to a posterior and pooling it would move clusters it never happened in.
+    """
+    store = str(store_id or "").strip()
+    cluster = str(cluster_id or "").strip()
+    if not store or not cluster:
+        _log.warning(
+            "exchange.policy: outcome not recorded — store_id=%r cluster_id=%r; "
+            "exposure is decided within a cluster and neither name may be empty",
+            store,
+            cluster,
+        )
+        return False
+    try:
+        _fold_conversion(request, store_id=store, cluster_id=cluster, converted=converted)
+    except Exception as exc:  # noqa: BLE001 - a learning write may never fail its producer
+        _log.warning(
+            "exchange.policy: outcome not recorded for store=%s cluster=%s converted=%s (%s)",
+            store,
+            cluster,
+            converted,
+            describe_exception(exc),
+        )
+        return False
+    return True
 
 
 # =====================================================================================
@@ -596,23 +690,20 @@ async def _record_outcome(request: Request) -> Response:
 
     delta = float(payload.delta)
     if math.isfinite(delta) and delta != 0.0:
-        book = _posteriors(request)
-        recorder = getattr(book, "record", None)
-        if not callable(recorder):
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    f"the wired posterior book of type {type(book).__name__!r} exposes no "
-                    "record(store_id, cluster_id, converted) — this exchange cannot learn from "
-                    "an outcome it has nowhere to put"
-                ),
+        # Through `_fold_conversion` rather than through the total `record_conversion`: this
+        # door has to keep telling its two failures apart. A book exposing no `record` is a
+        # named 503 ("nowhere to put it"); anything the recorder itself raises falls to
+        # `record_outcome`'s wrapper and becomes the generic one. Both are 503 and neither is
+        # 204, because 204 on this route is the word "Recorded."
+        try:
+            _fold_conversion(
+                request,
+                store_id=payload.store_id,
+                cluster_id=cluster_id,
+                converted=delta > 0.0,
             )
-        recorder(
-            payload.store_id,
-            cluster_id,
-            delta > 0.0,
-            trust_snapshot=_trust_snapshot(request),
-        )
+        except _OutcomeNotRecorded as exc:
+            raise HTTPException(status_code=503, detail=exc.detail) from exc
     # A zero (or unreadable) delta is a well-formed report carrying no result, and `update`'s own
     # rule is that an outcome with no result is not an outcome. It is accepted — the trust
     # service has nothing to retry — and folded into nothing.

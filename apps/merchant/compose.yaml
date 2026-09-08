@@ -4,15 +4,37 @@
 #
 # The merchant Shopify app and its svc API — C1's second of four separate deployables.
 #
-# Only the svc API is a container today. apps/merchant/app/ is a TypeScript scaffold with no
-# build script and no entrypoint of its own, so there is nothing there to containerise yet;
-# when it grows a build it becomes a second service in THIS fragment, named `merchant-web`.
+# ONE container, serving the API and the operator dashboard from one uvicorn — and the second
+# half of that only started being true when `dockerfile:` below moved.
+#
+# The paragraph this replaces said "apps/merchant/app/ is a TypeScript scaffold with no build
+# script and no entrypoint of its own, so there is nothing there to containerise yet; when it
+# grows a build it becomes a second service in THIS fragment, named `merchant-web`." It grew
+# the build; what it did NOT need was a second service. `apps/merchant/Dockerfile.web` builds
+# the dashboard bundle in a node stage, copies it into the same python image, and runs the
+# same `uvicorn merchant_svc.main:app` on the same port 8082 with a byte-identical CMD — so
+# pointing this build at it changes what the image CONTAINS and nothing about what compose
+# runs, which is why it is a one-line move rather than a new block.
+#
+# WHAT WAS BROKEN. `merchant_svc.dashboard.routes` mounts the dashboard at `/dashboard` and
+# resolves the bundle per request from `MERCHANT_UI_DIST`. That variable was set in no compose
+# fragment, no `.env.example`, no Dockerfile and no script, and `apps/merchant/app/dist` is
+# both gitignored and `.dockerignore`d so it could not be COPYd from a host either — so every
+# container deployment answered every `/dashboard/*` request with a 503 telling the reader to
+# run a build the image had no way to run. Losses, envelope edits, the onboarding interview and
+# activation approval — the whole supply side — were unreachable in compose, from a container
+# reporting healthy.
+#
+# NO `MERCHANT_UI_DIST` HERE, deliberately. `Dockerfile.web` sets it as an `ENV` to a path that
+# exists only inside the image, which is the only form of the setting that cannot be wrong;
+# stating it out here would put a container-internal path in a file edited outside the
+# container. `os.environ` still wins, so a deployment serving a different bundle overrides it.
 services:
   merchant-svc:
     build:
       # Relative to THIS file's directory, so the context is the repo root.
       context: ../..
-      dockerfile: apps/merchant/Dockerfile
+      dockerfile: apps/merchant/Dockerfile.web
     ports:
       - "${MERCHANT_SVC_PORT:-8082}:8082"      # D40: env-overridable
     environment:

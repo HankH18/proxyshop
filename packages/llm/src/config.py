@@ -15,10 +15,9 @@ role            environment variable    documented default
 The four defaults are exactly the values ``.env.example`` ships (sonnet-class for the two
 conversational roles, opus-class for the onboarding interview, haiku-class for extraction
 — DESIGN §Decisions), and a test asserts that equality, so the two files move together or
-not at all — see the note on :data:`DEFAULT_INTERVIEW_MODEL`, which is the one id here that
-is a generation behind. **They are not a fallback nobody hits**: a worktree has no ``.env``
-(it is gitignored and never generated), so unless a process exports the variables itself,
-these constants are what actually runs.
+not at all. **They are not a fallback nobody hits**: a worktree has no ``.env`` (it is
+gitignored and never generated), so unless a process exports the variables itself, these
+constants are what actually runs.
 
 Hard-coded ids live *only* in the module-level ``DEFAULT_*`` constants below, and that is
 enforced mechanically rather than by convention: the frozen acceptance suite AST-scans
@@ -58,21 +57,25 @@ KNOWN_ROLES: tuple[str, ...] = tuple(ROLE_ENV_VARS)
 # documented defaults — the ONLY place a model id may be written down (C4)
 # --------------------------------------------------------------------------------------
 
-DEFAULT_BUYER_MODEL = "claude-sonnet-4-5"
-DEFAULT_STORE_AGENT_MODEL = "claude-sonnet-4-5"
-#: **This one is STALE and cannot be fixed here alone.** ``claude-opus-4-1`` is a
-#: previous-generation id; the current opus-class id is ``claude-opus-4-5`` (sonnet-class is
-#: ``claude-sonnet-4-5`` and haiku-class is ``claude-haiku-4-5``, and both of those are
-#: current). It still resolves, so nothing breaks and nothing says anything — a stale model
-#: id shows up only on a bill and in a quality difference nobody attributes to it.
+#: THE THREE-FILE RULE, because it is the thing that bites whoever edits this next. A model
+#: id is written down in exactly three places and they are pinned to each other: these
+#: constants, ``.env.example``, and ``apps/buyer/compose.yaml``'s service defaults.
+#: ``test_the_documented_defaults_are_the_values_env_example_ships`` asserts the first two are
+#: equal, so editing one alone turns that gate red without changing what any deployment runs.
+#: All three move together, or none do.
 #:
-#: It is left as-is because moving it is a THREE-FILE change and this file is the only one of
-#: the three in reach: ``test_the_documented_defaults_are_the_values_env_example_ships``
-#: asserts this constant equals ``.env.example``'s ``INTERVIEW_MODEL``, and
-#: ``apps/buyer/compose.yaml:54`` states it a third time as a service default. Editing this
-#: line alone turns that gate red without changing what any deployment runs. All three move
-#: together, or none do.
-DEFAULT_INTERVIEW_MODEL = "claude-opus-4-1"
+#: These were a generation behind until the live provider was actually switched on
+#: (``LLM_PROVIDER=anthropic`` with a real key): ``claude-sonnet-4-5`` for the two
+#: conversational roles and ``claude-opus-4-1`` for the interview. A stale id still resolves,
+#: so nothing broke and nothing said anything — which is exactly why it sat: it shows up only
+#: on a bill and in a quality difference nobody attributes to it.
+DEFAULT_BUYER_MODEL = "claude-sonnet-5"
+DEFAULT_STORE_AGENT_MODEL = "claude-sonnet-5"
+DEFAULT_INTERVIEW_MODEL = "claude-opus-5"
+#: Haiku-class, and current. ``claude-haiku-4-5`` is the moving alias for the 4.5 haiku
+#: (``claude-haiku-4-5-20251001`` is the pinned snapshot behind it); extraction is the one
+#: role where the cheapest current model is the right one, so it does not follow the two
+#: above up a generation.
 DEFAULT_EXTRACT_MODEL = "claude-haiku-4-5"
 
 DEFAULT_MODEL_BY_ROLE: Mapping[str, str] = {

@@ -48,12 +48,49 @@ services:
       PROXYSHOP_PG_DSN_APP: "postgresql://app@postgres:5432/proxyshop_w${PROXYSHOP_WORKER:-1}"
       PROXYSHOP_ROLE_PASSWORD: "${PROXYSHOP_ROLE_PASSWORD:-}"
       # R13's address book: a JSON object {store_id: base_url} naming where each store's
-      # agent receives its own trust deltas. There is deliberately NO default and NO
-      # wildcard. Unset is a working stack that computes deltas and delivers none, which is
-      # the safe failure: the only alternative to an address is a guess, and a guessed
-      # address is how one store's trust movement reaches a competitor. A store absent from
-      # this map is simply not told.
-      TRUST_STORE_AGENT_ENDPOINTS: "${TRUST_STORE_AGENT_ENDPOINTS:-}"
+      # agent receives its own trust deltas. Still NO wildcard and still no fallback endpoint —
+      # the only alternative to an address is a guess, and a guessed address is how one store's
+      # trust movement reaches a competitor, so a store absent from this map is simply not told.
+      #
+      # WHAT CHANGED, and why the default is no longer empty. An empty default was not a neutral
+      # choice, it was the whole feature switched off in every configuration this repo ships:
+      # `TRUST_STORE_AGENT_ENDPOINTS` had five repo-wide occurrences and not one of them set a
+      # value, so the store agents' only learning input was dead everywhere — and nothing logged,
+      # counted or health-reported that it was. D55 makes a dedicated advocate the thing a shop
+      # BUYS by joining the network; an advocate that is never told what its store's score did is
+      # the product's central claim, unwired.
+      #
+      # The default below names the four `demo`-profile agents in packages/store-agent/compose.yaml
+      # by their store_id (which is their domain — see deploy/demo/store-contexts/*.json) and the
+      # in-network address compose gives them, `http://<service>:8086`. `docker compose --profile
+      # demo up` therefore delivers deltas with nothing exported.
+      #
+      # ⚠️ THE LEAN STACK, and what the boot line may and may not say about it. Without
+      # `--profile demo` those four containers do not exist, so a trust event about one of those
+      # stores is a delivery failure — counted, retried, and named in the undelivered ring that
+      # `GET /events/verify` now serves. That is the lesser evil: a stack that says "the
+      # gaiaherbs.com agent is not answering" is diagnosable and the silence it replaces was not.
+      #
+      # This value is ADDRESSING, never reachability, and `log_learning_loop_state` is worded to
+      # say exactly that — it reads the environment and opens no socket, so it reports "4 store
+      # agent(s) are ADDRESSED" and points at `GET /events/verify` for whether any of them
+      # answers. An earlier wording said "deltas will be pushed to 4 store agent(s)", which in
+      # this very stack was a confident falsehood printed at boot: worse than the silence it
+      # replaced, because it reads as a success.
+      #
+      # A deployment that runs no agents at all sets TRUST_STORE_AGENT_ENDPOINTS={} and gets the
+      # old behaviour with the boot WARNING saying so in as many words.
+      TRUST_STORE_AGENT_ENDPOINTS: >-
+        ${TRUST_STORE_AGENT_ENDPOINTS:-{"gaiaherbs.com":"http://store-agent-gaiaherbs:8086","toniiq.com":"http://store-agent-toniiq:8086","paradiseherbs.com":"http://store-agent-paradiseherbs:8086","oregonswildharvest.com":"http://store-agent-oregonswildharvest:8086"}}
+      # The other half of the loop: where a completed purchase's trust movement becomes a bandit
+      # outcome. `POST /internal/outcomes` on the exchange is served, published, and had NO
+      # production producer anywhere in the repository — its only callers were tests and the e2e
+      # harness — so `exchange.policy.bandit.update` never ran in a deployment and every posterior
+      # sat on its seeded prior for the life of the process. This variable is what addresses it.
+      #
+      # The exchange's own container port is 8083 (apps/exchange/compose.yaml); the base url is
+      # enough, `trust.feedback.notify.exchange_outcomes_url` appends the path.
+      TRUST_EXCHANGE_OUTCOMES_URL: "${TRUST_EXCHANGE_OUTCOMES_URL:-http://exchange:8083}"
       # NO REDIS_URL, and no `depends_on: redis` below. Both were here and both were
       # decoration: this service never opens a Redis connection. Measured —
       # `git grep -n REDIS_URL -- apps/trust/src` is empty, and the only redis name anywhere
