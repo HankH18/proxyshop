@@ -1492,3 +1492,217 @@ stores admitted, **every decidable claim `verified`, zero `contradicted_claim` e
 platform's crawl of the same product says two — **still `contradicted`, still one
 `contradicted_claim` at the published 0.15, still `policy_penalties: -0.15`.** Both withdrawn-(b)
 attacks are asserted closed in the same file, so the deletion cannot be silently undone.
+
+## D59 — `in_stock` and `availability` are one BINARY fact, and a stock reading EXPIRES **[owner ruling on scope, 2026-09-07]**
+
+**The defect.** `in_stock` is what every producer of a stock claim in this tree writes — the
+hosted agent's live feed (`store_agent.runtime.bidding.IN_STOCK_KEY`), the pitch decomposer's
+two flag rules, the live-page reader. `availability` is what the crawl writes, as a closed
+vocabulary token, onto the graph `Offer`. They are two names for one fact and **nothing joined
+them**: `claim_verification.verifier._lookup_attribute` matches on `str(key)` with no folding,
+and the crawl emits `store`/`product`/`sells`/`category`/`media`/`variant`/`offer` ops and no
+`attribute` op at all, so the `attributes` block is empty for all 3,093 products of the
+recorded corpus. Every stock claim therefore resolved nowhere: `unsupported` from the verifier,
+rewritten to `ambiguous` by `attest_candidate_claims` as the exchange's own gap
+(`UNDECIDABLE_KEY_REASON`), and `ambiguous` is in `UNDECIDED_STATUSES` — it moves no dimension
+mean, earns no `verified_claim_ratio` gain and carries no `contradicted_claim` penalty.
+
+Measured on the served `POST /auctions`, four stores on a crawl-shaped catalogue, every one of
+them claiming `in_stock: true`, and the platform's own crawl of the same four products saying
+one thing for the first and the opposite for the other three:
+
+```
+claim_verdicts: {store-honest: ambiguous, store-liar: ambiguous,
+                 store-restocked: ambiguous, store-prose: ambiguous}
+policy_events:  []
+ranked:         all four at rank_score 0.46499999999999997, byte-identical components
+```
+
+**The lie was exactly as expensive as the truth, to the decimal.** That is the D55 mechanism
+failing in the direction opposite to D58's: D58 was the adversarial check firing at an honest
+store, and this is it not firing at all — and D55 is explicit that the check is what *justifies*
+letting a sponsored shop speak in its own voice. A stock claim is the most operationally
+consequential thing a seller says (the buyer is sent to a checkout), and it was the one claim
+the platform could not check.
+
+**The owner's ruling on scope, and it narrows this a great deal:** *"it's not our job to
+perfectly track their inventory. We just need to know if the product is in stock or not."*
+
+---
+
+### The ruling
+
+**(a) The platform publishes a DERIVED binary reading, under its own name for it.**
+`claim_verification.verifier.stock_reading` reads the offer block's `availability` token
+through `IN_STOCK_BY_AVAILABILITY` and answers `{value: bool, observed_at: …}`;
+`_lookup_attribute` resolves `in_stock` to it and `catalog_keys` reports it, so the two cannot
+disagree about what is decidable — the rule that function was written beside.
+
+**This is deliberately not a synonym table, and the distinction is load-bearing rather than
+verbal.** `retrieval/catalogue.py` states the rule that forbids one — *"the platform states what
+it observed under the name it observed it under"* — and it is right: renaming a crawled
+attribute makes a verdict cite evidence under a name the crawl never used. So `availability`
+keeps its spelling, its verbatim token (`observed_value: "in_stock"`) and its own verdict, and
+stays UNTYPED because typing it would route it to a dimension nobody approved. What is added
+beside it is a second, derived fact, computed from a token whose meaning the platform itself
+defined in `ingest.adapters.mapping.coerce_availability`. The derivation is also LAST in
+`_lookup_attribute`'s order, after all three real blocks, so a snapshot that states an
+`in_stock` of its own — the demo document and the S1 fixture both do — is answered by what it
+states and never by a derivation.
+
+**A token with no binary reading yields no fact at all**, which is where the whole of the
+conservatism sits and each case is deliberate. `preorder` and `backorder` describe a purchase
+accepted now and filled later, so "is it in stock" is not a question they answer.
+`discontinued` says the line is no longer made, which the crawl's own vocabulary keeps SEPARATE
+from `out_of_stock` precisely because a discontinued line can still have units on the shelf.
+`unknown` is what `coerce_availability` assigns to a token it did not recognise, and reading the
+platform's own parser gap as "out of stock" would manufacture a contradiction out of nothing.
+Each resolves to `unsupported` — absence of evidence — and never to `contradicted`.
+
+**(b) A stock reading EXPIRES, and that is what makes (a) safe rather than reckless.** An
+earlier analysis warned that a bare alias would grade an honest seller `contradicted` whenever
+its stock moved since the crawl, and that warning is correct: the restocked seller and the liar
+send byte-identical bids and the platform's record says `out_of_stock` for both. The binary
+reading alone cannot tell them apart. What tells them apart is how old the reading is.
+
+`_is_stale` already existed and already named this exact case in its own docstring — *"a
+six-week-old snapshot's `roast_level` is still evidence… its `availability` is not: that is live
+state"* — and it could not fire on either count. The offer block is written as bare scalars, so
+`availability` was not a Mapping and was skipped at the first line; and the window it reads,
+`freshness_window_days`, is published only when an operator sets one, which
+`graph_catalog_from_env` never does. The mechanism existed and the data path bypassed it twice.
+Both are closed: the derived reading is returned in the `{value, observed_at}` attribute shape,
+which is what puts it inside `_is_stale`'s reach, and both spellings of the fact are held to
+`STOCK_EVIDENCE_WINDOW_DAYS` whether or not an operator configured anything.
+
+**Where that window comes from matters more than its value, because it is not a number this
+ruling invented.** `ingest.scheduler.cadence.DEFAULT_CADENCE` already publishes
+`FieldCadence(field="offer.availability", section=PRODUCTS, max_age_seconds=3_600)`: the
+platform has committed in writing that an availability reading older than an hour is due for
+re-reading. **Holding its own GRADING to the standard it set for its own CRAWLER is the entire
+rule**, and `services/ingest/tests/test_refresh.py::test_the_verifiers_stock_freshness_floor_matches_this_services_own_cadence`
+gates the two definitions against drift in both directions — loosen the cadence and the verifier
+starts grading readings the crawler has given up on; tighten it and every stock claim quietly
+becomes `unsupported` again, which is the hole this entry closes.
+
+An operator's own `freshness_window_days` still applies, and the **tighter of the two wins in
+both directions**. An operator who says "nothing older than an hour is evidence here" has bound
+the stock fact too; an operator who says fourteen days has not thereby declared a fortnight-old
+shelf current, because a policy written for roast levels must not reopen this.
+
+The measurement is against the snapshot's own `captured_at` rather than a wall clock, so
+`verify` stays the pure function its module docstring promises. What it asks is "was this
+reading already an hour behind the rest of what the platform knew about this product when it
+published the snapshot", not "how long ago was that" — deterministic, replayable, and no clock
+inside a verdict.
+
+**(c) The claim is typed `specifications`, which invents no dimension.** An untyped verdict is
+announced to nobody — `claim_verdict_payload` returns `None` and `trust.scoring.claim_dimension`
+raises — so a decidable claim that stayed untyped would be a verdict the trust engine never
+sees. `specifications` is already in the human-approved `claim_type -> dimension` table (D18)
+and routes to `catalog_claim_accuracy`, and it is **already** what `pitch._FlagRule` mints for a
+stock reading read out of prose. So `KEY_CLAIM_TYPES["in_stock"] = "specifications"` only makes
+the ASSERTED claim agree with the prose one, which the exchange's own rule already required: *"a
+claim read out of prose earns and costs exactly what an asserted one does"*. `availability`
+stays out of that table, unchanged.
+
+---
+
+### What was rejected
+
+* **The naive alias** — folding `in_stock` onto `availability` and handing the pair to
+  `compare`. Measured through the real comparator:
+
+  ```
+  claimed True        vs catalog "in_stock"      -> contradicted   ("the normalised values differ")
+  claimed True        vs catalog "out_of_stock"  -> contradicted
+  claimed "in_stock"  vs catalog True            -> verified
+  ```
+
+  The honest store is punished **on the happy path**, and the failure is asymmetric — the two
+  spellings were never comparable in the direction the crawl actually writes them, because
+  `isinstance(catalog, bool)` is what selects the boolean comparator and a crawled availability
+  is a string. Repairing that much still convicts every restocked seller, so the alias is
+  rejected on its own merits rather than merely improved upon: (b) is not decoration on (a), it
+  is the half that makes (a) admissible.
+* **A general synonym table in `_lookup_attribute`.** `list_price`→`price` is the obvious next
+  entry and it is a different decision with a different false-positive profile (a price moves on
+  a merchant's schedule, not a shopper's). One derived fact, published under the platform's own
+  name, with its own expiry, is a ruling; a synonym table is a standing invitation to add the
+  next pair without arguing for it.
+* **Quantity, `units_left`, and any reconciliation of counts.** This is the owner's scope line
+  and it is kept literally: `IN_STOCK_BY_AVAILABILITY`'s values are exactly `{True, False}`, and
+  a third outcome would be an inventory model wearing a boolean's name. `units_left` still
+  resolves only where it always did — the `attributes` block — and is untouched, which also
+  leaves D58's dishonest-store measurement (a live feed saying thirty against a crawl saying
+  two) grading exactly as it did.
+* **Making the crawl write `AttributeValue` nodes for stock.** It would work and it is the wrong
+  place: the graph `Offer` already holds `availability` with its own `observed_at` and its own
+  `Source` provenance, and a second copy of the same fact on a different node is two records
+  free to disagree about one shelf. `mapping.build_upserts` is unchanged.
+* **A third, "partially available" verdict.** R18's vocabulary is closed (four statuses) and
+  `unsupported` already means precisely "the catalog says nothing that decides this".
+* **Moving `RANKING_FEATURES_VERSION`.** This is the opposite call from D57 and the reason is
+  stated at the constant: D57 bumped it because `delivery_fits` ITSELF was redefined, whereas
+  nothing in `ranking/features.py` is redefined here. `verified_claim_ratio` and
+  `policy_penalties` compute exactly what they computed before, from the verdicts they are
+  handed; what changed is the EVIDENCE, and the evidence carries its own version.
+  `DEFAULT_VERIFIER_VERSION` moves `verification/1.0.0` -> `verification/2.0.0` instead — MAJOR,
+  because the change is not additive (a claim that cost nothing can now cost the published
+  `contradicted_claim` penalty), and because `verification_key` names that constant exactly so a
+  verdict minted under the old comparator is re-verified rather than inherited. No contract
+  changes: `Claim.key` is free text, no enum gains a member, and nothing on the wire moves.
+
+### Residuals, named rather than left to be found
+
+* **The offer block is ONE listing, and the stock reading is that listing's.**
+  `graph.query.catalogue_entry` picks the CHEAPEST fully provenanced offer so that the
+  snapshot's price and the roster's quote are the same observation. A product whose cheapest
+  variant has sold out while a dearer one has not therefore reads out of stock. This is the
+  honest residual and the alternative is worse: an offer block pairing one variant's price with
+  another variant's shelf is facts about two objects graded as one, which is D58's defect class
+  exactly. Closing it is the variant-binding ticket D58 already deferred — *"give the snapshot
+  the crawled variant ids per product"* — and this fact is now a second reason to do it.
+* **`declared_attributes` still reads only the `attributes` block**, so a buyer's hard
+  constraint naming `in_stock` is still eligible for relaxation even though the exchange can now
+  decide it. That is unchanged behaviour rather than new breakage — the same is true of `price`,
+  `currency` and `canonical_name` — and it fails in the fail-closed direction the relaxation
+  path was built for.
+* **A store that declines still mints no verdict**, so declining still suppresses a stock
+  contradiction at the price of the auction. D58 already recorded that every store can do this,
+  and D59 adds no cheaper route to it.
+
+### Landed alongside, and closing the same class
+
+`ranking/filters.claimed_attributes` -> `decided_attributes`. The auction's relaxation counted
+every attribute key any claim NAMED, whatever verdict it carried, and relaxation is decided ONCE
+for the whole auction — so a store making a TRUTHFUL claim on a key no catalogue declares got
+`ambiguous`, that `ambiguous` suppressed the relaxation, and **every store in the auction came
+back excluded, including the ones that claimed nothing.** Measured before the fix, one honest
+sentence from `store-a` and silence from `store-b`: `relaxed_constraints: []`,
+`shortlist_slots: []`, both stores excluded `hard_constraint_unsatisfied`. The rule is now the
+VERDICT: `verified` or `contradicted` proves the key was answerable, `ambiguous`/`unsupported`
+are this exchange reporting its own gap, and a forged or absent attestation is inert in both
+directions — the auction reaches the outcome it would have reached had that store said nothing,
+which is a stronger ESC-020 property than the old width had.
+
+### What was proven, in both directions, on one served request
+
+`apps/exchange/tests/test_stock_claim_served.py` drives `POST /auctions` against a crawl-shaped
+catalogue — empty `attributes`, offer block carrying the token and its `observed_at` — with four
+stores all claiming `in_stock: true`:
+
+```
+store-honest     in_stock      read 20 min before the snapshot -> verified      no penalty, slot kept
+store-restocked  out_of_stock  read 24 h  before the snapshot -> unsupported   no penalty, slot kept
+store-liar       out_of_stock  read 20 min before the snapshot -> contradicted  policy_penalties -0.15
+store-prose      out_of_stock  read 20 min, claimed in PROSE   -> contradicted  policy_penalties -0.15
+rank_score: 0.465 / 0.465 / 0.315 / 0.315      penalised == {store-liar, store-prose}
+```
+
+`store-liar` and `store-restocked` send byte-identical bids against byte-identical availability
+tokens and are graded oppositely on the age of the platform's reading alone, which is the whole
+of (b) stated as one measurement. `packages/verification/tests/test_stock_fact.py` grades the
+rule itself — every token's reading, both freshness directions, the tighter-window rule, the
+stated-attribute precedence, and that `availability` keeps its own verbatim verdict and stays
+untyped.
