@@ -14,7 +14,15 @@ import {
   MEASURED_SHIFT_AT_64_EVENTS,
   NO_TEACHING_SPREAD,
 } from './LearningPage'
-import { ACCEPT_PATH, CLARIFY_PATH, CONFIRM_PATH, FEEDBACK_PATH, PROMPT_PATH, type Fetcher } from './loop'
+import {
+  ACCEPT_PATH,
+  BID_WINDOW_SECONDS,
+  CLARIFY_PATH,
+  CONFIRM_PATH,
+  FEEDBACK_PATH,
+  PROMPT_PATH,
+  type Fetcher,
+} from './loop'
 import { SEEDED_PREFIX } from '../journey/seeded-feedback'
 
 afterEach(cleanup)
@@ -186,6 +194,16 @@ describe('the learning page', () => {
     // The trust term is published for both readings and is identical; the page must say it
     // held rather than leaving a reader to infer that trust did the work.
     expect(toniiq?.querySelector('li[data-delta="flat"]')?.textContent).toMatch(/trust/)
+  })
+
+  it('asks for a bid window the exchange will actually grant', () => {
+    // The page used to ask for 60 seconds. `exchange.auction.routes.MAX_BID_TIMEOUT_SECONDS`
+    // is 10.0 and clamps silently, so the request's stated intent and its effect differed with
+    // nothing saying so -- measured through the served route, which publishes what it granted:
+    // asked 60 -> granted 10.0. A ceiling is not a suggestion, and a page whose whole argument
+    // is "check what the service actually did" must not ship a number the service ignores.
+    expect(BID_WINDOW_SECONDS).toBeLessThanOrEqual(10)
+    expect(BID_WINDOW_SECONDS).toBeGreaterThan(0)
   })
 
   it('warns that one pair is not evidence, whenever something did move', async () => {

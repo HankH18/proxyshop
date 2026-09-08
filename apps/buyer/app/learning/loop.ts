@@ -104,18 +104,26 @@ export const FEEDBACK_PATH = '/buyer/feedback'
 /**
  * The bid window this page asks for, in seconds.
  *
- * NOT a taste. The exchange's own default is 3 seconds (`DEFAULT_BID_TIMEOUT_SECONDS`), and
- * the four store agents in the demo stack answer a solicitation by calling a language model,
- * which measured at roughly 3 seconds per auction on this machine. At the default window the
- * ranker's `now` lands after the offers' own expiry and every real bidder is dropped with
- * `expired_offer: the offer expired at ... which is not after the caller-supplied now` — a
- * shortlist of nothing but fallback listings, which is a demo of the timeout rather than of
- * the market. Measured: at 3s, three of four bidders excluded; at 60s, zero.
+ * THE EXCHANGE'S CEILING, and it used to be six times that. This asked for 60, which
+ * `exchange.auction.routes.MAX_BID_TIMEOUT_SECONDS` silently clamps to 10 — measured through
+ * the served route, which now publishes what it granted:
  *
- * It is also the accept window. An offer is valid until the auction's deadline, so a longer
- * window is what leaves time for the checkout to be minted after the shortlist is read.
+ *     asked= 60s  granted=10.0  hosted_bids=4  excluded=0
+ *     asked= 10s  granted=10.0  hosted_bids=4  excluded=0
+ *     asked=  3s  granted= 3.0  hosted_bids=4  excluded=0
+ *
+ * Asking for a number the server will never grant is a request whose stated intent and actual
+ * effect differ with nothing saying so, which is the shape this page exists to argue against.
+ *
+ * The reason recorded here was also out of date, and the third row above is what retired it.
+ * It said the agents' model latency dropped bidders at a short window — "Measured at 3s: three
+ * of four bidders excluded" — and that was true when the store agent composed its offer AFTER
+ * its model answered. It no longer does: the offer is composed deterministically and only the
+ * model-written pitch spends what is left of the exchange's deadline, so a 3-second window now
+ * drops nobody. What the ceiling still buys is head-room between the shortlist being read and
+ * the checkout being minted, which is the accept-window half of the paragraph this replaces.
  */
-export const BID_WINDOW_SECONDS = 60
+export const BID_WINDOW_SECONDS = 10
 
 /**
  * The second turn of the clarify dialogue.
