@@ -47,11 +47,27 @@ from typing import Any
 from contracts import TrustEventPayload
 from fastapi import APIRouter, HTTPException, Request
 
+from ..solicitation.refusal import EnrichedRefusalRoute
 from .runner import agent_runner
 
 __all__ = ["MISROUTED_STATUS", "UNCONFIGURED_STATUS", "ingest_trust_event", "router"]
 
-router = APIRouter(tags=["trust-intake"])
+#: `route_class`, for the same three reasons the sibling door carries it — and the reasons are
+#: measured on THIS door, not inherited.
+#:
+#: `EnrichedRefusalRoute` was written for `/v1/bid-requests` and is schema-agnostic: it reads the
+#: model off `APIRoute.body_field` and walks its own JSON schema, so it learns this door's shape
+#: rather than the other one's. The lane that built it measured all three of its defects here and
+#: was scoped out of fixing them:
+#:
+#: * `1e400` in a numeric field -> **500**, ValueError out of starlette's response encoder;
+#: * a 2000-deep body -> **500**, RecursionError inside FastAPI's own exception handler;
+#: * a 3 KB hostile body -> an 18.9 KB refusal that echoes the caller's values back.
+#:
+#: All three are the stock 422's `input` echo, which this route class drops. This door is
+#: unauthenticated and takes third-party JSON, exactly like its sibling, so leaving it stock
+#: meant the amplification and the two crash shapes stayed reachable by anyone.
+router = APIRouter(tags=["trust-intake"], route_class=EnrichedRefusalRoute)
 
 #: The event names a store this process does not advocate for.
 MISROUTED_STATUS = 409
