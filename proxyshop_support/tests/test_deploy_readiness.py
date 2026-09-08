@@ -668,6 +668,73 @@ def test_ready_reports_only_the_checks_it_actually_ran(live_http_port: int) -> N
 # --------------------------------------------------------------------------------------
 
 
+def test_the_store_window_tokens_are_documented_forwarded_and_shipped() -> None:
+    """The same hole as the merchant admin token, in a fourth feature, caught the same way.
+
+    ``PROXYSHOP_BUYER_STORE_WINDOW_TOKENS`` opens ``GET /buyer/store-window`` — the
+    store-visible, k-anonymised view of the buyer population that T-142 built. Measured before
+    this gate existed: the variable appeared in exactly THREE files repo-wide (the route that
+    reads it, the OpenAPI document, and the README), was forwarded by **0 of 17 services
+    across 10 compose fragments**, and was named in no runbook, script or Makefile target. The
+    served route answered ``503 store-window-not-configured`` in every deployment that has
+    ever run, from a container reporting ``(healthy)``.
+
+    Two links, not three, and the missing one is deliberate. Documented in ``.env.example`` so
+    ``cp .env.example .env`` produces a stack where the door works, and forwarded by the
+    fragment so the container can see it — but **no healthcheck clause**, because unlike the
+    merchant's administrative API this window is OPTIONAL. A deployment that blanks it is
+    making a legitimate choice and must stay healthy while serving nobody through it. Requiring
+    it would turn "we do not expose the buyer window" into a red container.
+
+    The third assertion is the one the merchant twin does not need: the compose default names
+    a FILE, and a default naming a file that is not there is the same dead feature wearing a
+    path. It must exist and it must parse as a ``{store_id: token}`` mapping.
+    """
+    import json as _json
+
+    env_example = ENV_EXAMPLE.read_text(encoding="utf-8")
+    assert re.search(
+        r"^PROXYSHOP_BUYER_STORE_WINDOW_TOKENS=.+$", env_example, flags=re.MULTILINE
+    ), (
+        f"{_rel(ENV_EXAMPLE)} does not assign PROXYSHOP_BUYER_STORE_WINDOW_TOKENS a value, so "
+        f"`cp .env.example .env` produces a buyer whose store window answers 503 "
+        f"store-window-not-configured to every store."
+    )
+
+    fragment = REPO_ROOT / "apps" / "buyer" / "compose.yaml"
+    buyer = _services(fragment).get("buyer-svc")
+    assert buyer is not None, f"{_rel(fragment)} no longer declares a `buyer-svc` service"
+    environment = buyer.get("environment") or {}
+    assert "PROXYSHOP_BUYER_STORE_WINDOW_TOKENS" in environment, (
+        f"{_rel(fragment)}'s buyer-svc does not forward "
+        f"PROXYSHOP_BUYER_STORE_WINDOW_TOKENS, so the container cannot see it however the "
+        f"operator sets it — which is how this route came to be unreachable in every "
+        f"deployment while its tests passed."
+    )
+
+    declared = str(environment["PROXYSHOP_BUYER_STORE_WINDOW_TOKENS"])
+    _, _, default = declared.partition(":-")
+    default = default.rstrip("}").strip()
+    assert default, (
+        f"{_rel(fragment)} forwards PROXYSHOP_BUYER_STORE_WINDOW_TOKENS with no default, so "
+        f"the shipped demo opens the window for nobody."
+    )
+    shipped = REPO_ROOT / "deploy" / "demo" / Path(default).name
+    assert shipped.is_file(), (
+        f"{_rel(fragment)} defaults the store-window tokens to {default!r}, and "
+        f"{_rel(shipped)} is not in the tree. A default naming a file that does not exist is "
+        f"the same dead feature wearing a path."
+    )
+    mapping = _json.loads(shipped.read_text(encoding="utf-8"))
+    assert isinstance(mapping, dict) and mapping, (
+        f"{_rel(shipped)} does not parse as a non-empty store_id -> token mapping."
+    )
+    assert all(isinstance(k, str) and isinstance(v, str) and k and v for k, v in mapping.items()), (
+        f"{_rel(shipped)} carries an entry that is not a string store id mapped to a string "
+        f"token; the route reads it as exactly that."
+    )
+
+
 def test_the_merchant_admin_token_is_documented_forwarded_and_required() -> None:
     """Catches the setting that existed only in the source, making the admin API dead.
 

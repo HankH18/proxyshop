@@ -103,6 +103,23 @@ services:
       BUYER_DEPLOYMENT_JSON: "${BUYER_DEPLOYMENT_JSON:-}"
       BUYER_ROSTER: "${BUYER_ROSTER:-/srv/deploy/buyer-roster.json}"
       BUYER_ROSTER_JSON: "${BUYER_ROSTER_JSON:-}"
+      # The store-scoped bearers for `GET /buyer/store-window`, and this line is the whole
+      # reason that route was reachable by nobody. It shipped closed-by-default — correctly,
+      # a door onto the buyer population must not open itself — and then NOTHING OPENED IT:
+      # the variable appeared in exactly three files repo-wide (the route that reads it, the
+      # OpenAPI document, and the README), was forwarded by 0 of 17 services across 10
+      # compose files, and named in no runbook, script or Makefile target. Served in a clean
+      # environment it answered `503 store-window-not-configured` everywhere it ran.
+      #
+      # Same shape as MERCHANT_ADMIN_TOKEN, and the same remedy: a dev token in a tracked
+      # deploy file, so the demo exercises the door the tests exercise. The `deploy/demo`
+      # mount below already covers the path; no new mount.
+      #
+      # Blanking it is a legitimate deployment: unlike the merchant admin API, this window is
+      # optional, so a stack that serves nobody through it must still be HEALTHY. That is why
+      # no `--require-env` clause joins the healthcheck.
+      PROXYSHOP_BUYER_STORE_WINDOW_TOKENS: "${PROXYSHOP_BUYER_STORE_WINDOW_TOKENS:-/srv/deploy/buyer-store-window-tokens.json}"
+      PROXYSHOP_BUYER_STORE_WINDOW_K: "${PROXYSHOP_BUYER_STORE_WINDOW_K:-}"
       # NO BUYER_UI_DIST, deliberately. `composition.mount_ui` is its only reader and this
       # container never calls it: the CMD is `uvicorn buyer_svc.main:app`, and `main.py`
       # mounts `<feature>/routes.py` routers and nothing else. Only `apps/buyer/devstack/

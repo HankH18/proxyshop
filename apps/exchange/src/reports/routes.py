@@ -148,9 +148,28 @@ def _store_for(bearer: str, tokens: Mapping[str, str]) -> str | None:
     """
     if not bearer:
         return None
+    # BYTES, not `str`. `hmac.compare_digest` accepts `str` only when BOTH sides are
+    # ASCII-only and raises `TypeError` otherwise — and the presented bearer arrives from the
+    # network, so "the bearer is ASCII" is an assumption about the caller, not a property of
+    # this code. `_store_for('tok-x', {...})` against a bearer holding one `0xe9` byte raises
+    # out of the comparison itself, which an unauthenticated caller turns into a 500 with a
+    # traceback. A bad credential must be a 401.
+    #
+    # Measured as LATENT rather than live, and the reason is its own finding: this route is
+    # unconfigured in every deployment — `report_tokens_file` is named by no compose file — so
+    # it answers 503 before reaching this line. One defect class (a feature switched off
+    # everywhere) was hiding a live instance of another. It becomes reachable the moment
+    # anyone configures report tokens, which is why it is fixed now rather than when it bites.
+    #
+    # `surrogatepass` is what makes the encode itself unable to raise: a lone surrogate is the
+    # one thing a plain utf-8 encode refuses, and a lone surrogate is exactly what a hostile
+    # header can carry. Same shape as `buyer_svc.window.routes._credential_bytes` and
+    # `merchant_svc.install.signatures.signature_bytes`.
+    presented = bearer.encode("utf-8", "surrogatepass")
     found: str | None = None
     for store_id, token in tokens.items():
-        if hmac.compare_digest(str(token), bearer):
+        candidate = token if isinstance(token, str) else str(token)
+        if hmac.compare_digest(candidate.encode("utf-8", "surrogatepass"), presented):
             found = store_id
     return found
 
