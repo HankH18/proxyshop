@@ -45,6 +45,7 @@ import {
   SESSION_PATH,
 } from '../chat/session'
 import { CLARIFY_PATH, CONFIRM_PATH, type Intent } from '../intent/intent'
+import { REMEMBERED_AUCTION_KEY } from '../metrics/telemetry'
 import { ACCEPT_PATH } from '../shortlist/shortlist'
 import { Journey } from './Journey'
 import { SEEDED_PREFIX, SEEDED_PROMPT } from './seeded-feedback'
@@ -506,10 +507,22 @@ function demoService(
 }
 
 /**
- * Beat one and the clarifying question, which a visitor may do WITHOUT signing in: nothing
- * in this stretch leaves the buyer's own service, and no store is asked anything.
+ * Beat one and the clarifying question.
+ *
+ * THE FIRST LINE IS THE CHANGE, and it is a real one rather than a wait bolted on to keep a
+ * test quiet. This helper's docstring used to say the walk was something "a visitor may do
+ * WITHOUT signing in: nothing in this stretch leaves the buyer's own service". The first half
+ * of that has stopped being true — the journey is now behind a blocking sign-in gate, so
+ * there is no composer in the document until the redemption in `beforeEach`'s URL has landed
+ * a session. The second half is untouched and still the reason the gate is where it is:
+ * `POST /buyer/intent/clarify` still reaches no exchange and no store.
+ *
+ * So the walk now begins where a buyer's really begins, by waiting to be signed in. Without
+ * it every caller raced the redemption's `await` and asked for a textarea that the page had
+ * not rendered yet.
  */
 async function walkToIntent(): Promise<void> {
+  await screen.findByTestId('signed-in')
   fireEvent.change(screen.getByLabelText('What are you shopping for?'), {
     target: { value: 'I want a warm merino wool beanie for winter, under $100' },
   })
@@ -813,6 +826,11 @@ describe('the four beats', () => {
     const { fetcher, calls } = demoService()
     const { container } = render(<Journey fetcher={fetcher} />)
 
+    // Beat 0, which used not to exist: the journey is behind a blocking sign-in gate, so the
+    // composer is not in the document until the redemption in `beforeEach`'s URL has landed a
+    // session. Waiting for it is what a buyer arriving from their mailbox really does.
+    await screen.findByTestId('signed-in')
+
     // Beat 1: the whole transcript goes across, every time.
     fireEvent.change(screen.getByLabelText('What are you shopping for?'), {
       target: { value: 'I want a warm merino wool beanie for winter, under $100' },
@@ -1089,15 +1107,36 @@ describe('the four beats', () => {
     expect(product).toContain('product_ref')
     expect(product).toContain('catalogue')
 
-    // And the questions came from D20's offline double, which is measurable rather than
-    // asserted: `build_llm("buyer")` with LLM_PROVIDER unset returns
-    // `<DeterministicLLM role='buyer' calls=0>` with `model='double:buyer'`.
+    // The model bullet no longer claims the questions came from the offline double, and the
+    // retirement of that claim is the assertion.
+    //
+    // It used to pin five strings — `build_llm("buyer")`, `LLM_PROVIDER`, `DeterministicLLM`,
+    // `double:buyer` and `no live model` — because the bullet stated FLATLY, as the page's
+    // own voice, that no live model had written anything.
+    //
+    // WHY THAT WAS RETIRED, stated carefully because the reason is not "the default
+    // changed". It has not: `.env.example` still ships `LLM_PROVIDER=double`, and `docs/`
+    // and `.gitlab-ci.yml` still say it is deliberately left unset. What was wrong is that
+    // the sentence was UNCONDITIONAL about something the page cannot read. `LLM_PROVIDER` is
+    // deployment configuration; `POST /buyer/intent/clarify` answers with `questions`,
+    // `intent`, `unresolved` and `confirmed`, and no field on that route or any other route
+    // this origin serves discloses which client answered. So on any deployment that does set
+    // a provider — which the default does not forbid, and which this project has been told is
+    // in use — the page asserted a falsehood it had no way to check, and on the default
+    // deployment it was right by luck rather than by measurement.
+    //
+    // The claim was therefore retired rather than softened, and the assertions on its
+    // wording went with the wording. What is pinned instead is the honest replacement: the
+    // page says it cannot tell, and names the served field that would let it. The two
+    // `not.toContain`s below are the guard that the unconditional claim does not creep back.
     const model = screen.getByTestId('gap-model').textContent ?? ''
+    expect(model).toContain('cannot tell you')
     expect(model).toContain('build_llm("buyer")')
     expect(model).toContain('LLM_PROVIDER')
-    expect(model).toContain('DeterministicLLM')
-    expect(model).toContain('double:buyer')
-    expect(model).toContain('no live model')
+    // The retired claim must not creep back: an unconditional "no live model" is exactly the
+    // sentence this deployment falsifies.
+    expect(model).not.toContain('no live model')
+    expect(model).not.toContain('double:buyer')
 
     // Signed in from the emailed link, so the sign-in form has been replaced rather than
     // hidden: the page asks for no address it has no use for.
@@ -1722,27 +1761,58 @@ describe('the four beats', () => {
  * client and its identity backstop).
  *
  * The gate this page chose, stated once here because the tests below only show it working:
- * **browsing is open and confirming is not.** Everything up to and including the clarifying
- * loop happens between the buyer and the buyer's own service — no store hears any of it — so
- * a first-time visitor gets the page rather than a login wall. The confirm control, which is
- * the one gesture that reaches the exchange and therefore the stores, is ABSENT until there
- * is a session. Absent rather than disabled, for `IntentConfirm`'s own reason and one more:
- * that button fires at most once per mount, so a click this page refused would have spent
- * the buyer's single confirmation.
+ * **sign in first, then the journey.** A visitor with no session gets the sign-in form and no
+ * part of the journey — no composer, no transcript, no confirm control.
+ *
+ * WHAT THIS PARAGRAPH USED TO CLAIM, kept so the reversal is legible rather than silent. It
+ * read "**browsing is open and confirming is not**", and argued that a first-time visitor
+ * should get the page rather than a login wall because the clarifying loop reaches no store,
+ * with the confirm control ABSENT until a session existed. The DATA half of that argument was
+ * right and is unchanged — `POST /buyer/intent/clarify` still reaches no exchange and no
+ * store — but the shape it produced was a visitor who held a whole conversation and then
+ * discovered they could not use it, having to leave for their mailbox and lose it. The gate
+ * moved to the front for that reason, and the tests below moved with it.
+ *
+ * What did NOT weaken: the confirm control is still never mounted for a session-less page,
+ * and it is still absent rather than disabled. That property is now STRUCTURAL — the whole
+ * journey is inside the gate, so `IntentConfirm` cannot be reached signed out at all —
+ * which is why the old `confirm-gated` element is gone rather than merely unasserted. The
+ * tests below pin the stronger claim: signed out, none of the journey is in the document.
  */
 describe('R5 — signing in, and the pseudonym that comes with it', () => {
-  it('signed out, offers a link and puts no confirm control in the document', async () => {
+  it('signed out, shows the sign-in form and no part of the journey', async () => {
     signedOut()
     const { fetcher, calls } = demoService()
     render(<Journey fetcher={fetcher} />)
 
-    // Browsing is open: the clarify loop runs with no session at all.
-    await walkToIntent()
-    await screen.findByTestId('confirm-gated')
-    expect(screen.getByTestId('transcript').textContent).toContain('about $100')
-
-    // …and the one gesture that would reach a store is not on the page.
+    // THE GATE. Not one beat of the journey is in the document: no composer to type into, no
+    // transcript, no confirm control. This replaces the old assertion that the clarify loop
+    // ran signed out and only the confirm button was withheld — a claim the page has stopped
+    // making — and it is the stronger of the two, because it pins the absence of the whole
+    // journey rather than of one control inside it.
+    await screen.findByLabelText('Email address')
+    expect(screen.queryByLabelText('What are you shopping for?')).toBeNull()
+    expect(screen.queryByTestId('transcript')).toBeNull()
     expect(screen.queryByRole('button', { name: /confirm and ask stores/i })).toBeNull()
+    expect(screen.queryByLabelText('Shortlist')).toBeNull()
+
+    // The reason for the gate is ON the gate. A wall that cannot say why it is there is a
+    // worse wall than the one this replaced, so the sentence that used to live inside step 2
+    // is asserted here rather than allowed to go missing with the element that carried it.
+    const why = screen.getByTestId('why-sign-in').textContent ?? ''
+    expect(why).toContain('leaves it')
+    expect(why).toContain('solicits real stores')
+    expect(why).toMatch(/vault rather than from\s+this page/)
+
+    // And the privacy statement a signed-out visitor most reasonably wants BEFORE handing
+    // over an address. It used to sit beside the composer in step 1, which a signed-out
+    // visitor can no longer see; moving it here is what kept it renderable in some state
+    // rather than none.
+    const privacy = screen.getByTestId('pseudonym-signed-out').textContent ?? ''
+    expect(privacy).toContain('No store has been told anything about you')
+    expect(privacy).toContain('you are not signed in')
+
+    // Nothing has been asked of anybody.
     expect(calls.some((call) => call.path === CONFIRM_PATH)).toBe(false)
 
     const email = screen.getByLabelText('Email address')
@@ -1753,9 +1823,33 @@ describe('R5 — signing in, and the pseudonym that comes with it', () => {
     expect(bodyOf(calls.find((call) => call.path === MAGIC_LINK_PATH)?.init)).toEqual({
       email: BUYER_EMAIL,
     })
-    // 202 carries an expiry and never a token, so there is no session to be had from it.
+    // 202 carries an expiry and never a token, so there is no session to be had from it —
+    // and no vault pseudonym anywhere in the document, which is what the retired
+    // `pseudonym` assertion was really guarding. That line lived inside step 1 and step 1 is
+    // now behind the gate, so the check is made over the whole page instead of over one
+    // element, which is a wider net rather than a looser one.
     expect(screen.queryByTestId('signed-in')).toBeNull()
-    expect(screen.getByTestId('pseudonym').textContent).not.toMatch(/psn-/)
+    expect(document.body.textContent ?? '').not.toMatch(/psn-/)
+  })
+
+  it('lands a buyer arriving from the mailbox in the chat, not back on the form', async () => {
+    // THE GATE'S OTHER HALF, and the failure mode a blocking gate most easily introduces: a
+    // wall the emailed link cannot get you past. It cannot happen here, and this pins why —
+    // redemption sets the session on the SAME mount that read the token. `Journey` reads
+    // `?token=` on mount, strips it with `history.replaceState` (which rewrites the entry in
+    // place and does NOT reload), redeems over `fetch`, and sets state. So the arrival that
+    // `beforeEach` sets up ends inside the journey rather than in front of it.
+    const { fetcher } = demoService()
+    render(<Journey fetcher={fetcher} />)
+
+    // The composer is the thing the gate withholds, so the composer is the proof.
+    expect(await screen.findByLabelText('What are you shopping for?')).toBeInTheDocument()
+    expect(screen.getByTestId('signed-in')).toBeInTheDocument()
+    // And the form the visitor came through is gone rather than merely scrolled past.
+    expect(screen.queryByLabelText('Email address')).toBeNull()
+    expect(screen.queryByTestId('why-sign-in')).toBeNull()
+    // The single-use credential is out of the address bar before anything else happens.
+    expect(window.location.search).toBe('')
   })
 
   it('redeems the token out of the emailed link and wears the pseudonym the vault minted', async () => {
@@ -1849,6 +1943,11 @@ describe('R5 — signing in, and the pseudonym that comes with it', () => {
     fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
     await screen.findByLabelText('Shortlist')
 
+    // The confirm really did leave an auction id behind for the demo's metrics page. Checked
+    // BEFORE signing out so that the assertion after it cannot pass by the id never having
+    // been written — an empty-before, empty-after check would prove nothing.
+    expect(window.sessionStorage.getItem(REMEMBERED_AUCTION_KEY)).toBe(AUCTION_ID)
+
     fireEvent.click(screen.getByRole('button', { name: /sign out/i }))
     await screen.findByLabelText('Email address')
 
@@ -1860,7 +1959,18 @@ describe('R5 — signing in, and the pseudonym that comes with it', () => {
     // The shortlist belonged to a pseudonym the vault has now retired, so it does not stay
     // on the screen with an Accept button under it.
     expect(screen.queryByLabelText('Shortlist')).toBeNull()
-    expect(screen.getByTestId('pseudonym').textContent).not.toContain(VAULT_PSEUDONYM)
+    // The retired handle is gone from the WHOLE page, not merely from the one line that used
+    // to carry it. `pseudonym` lives inside step 1 and step 1 is behind the gate now, so
+    // asserting on that element would be asserting on something signing out has removed —
+    // this checks the document instead, which is what the original line was protecting
+    // against and catches strictly more.
+    expect(document.body.textContent ?? '').not.toContain(VAULT_PSEUDONYM)
+
+    // …and the auction id the demo's metrics page was told to remember goes with it. The
+    // gloss beside the sign-out button promises signing out "clears the auction below with
+    // it", and clearing only React state would have left `#/metrics` able to reopen the
+    // retired pseudonym's full recorded trace from a route that takes no session header.
+    expect(window.sessionStorage.getItem(REMEMBERED_AUCTION_KEY)).toBeNull()
   })
 
   it('never asks the exchange for anything while signed out, however hard the page is pushed', async () => {
@@ -1868,16 +1978,34 @@ describe('R5 — signing in, and the pseudonym that comes with it', () => {
     const { fetcher, calls } = demoService()
     render(<Journey fetcher={fetcher} />)
 
-    await walkToIntent()
-    await screen.findByTestId('confirm-gated')
+    const email = await screen.findByLabelText('Email address')
 
-    // Every button the signed-out page offers, pressed. None of them is an auction.
-    for (const button of screen.getAllByRole('button')) {
-      fireEvent.click(button)
+    // The signed-out page is DRIVEN, not merely inspected, and that distinction is the whole
+    // value of this test. The old shape walked the clarify loop and then clicked everything;
+    // the walk is gone because the gate means there is no loop to walk signed out. What
+    // replaced it has to do real work, or the test passes over an empty `calls` array and can
+    // no longer fail for the reason it exists: the page's one button is `disabled` until an
+    // address is typed, so clicking the page as-found presses nothing at all.
+    //
+    // So: type an address and submit it. That is a genuine round trip — it puts
+    // MAGIC_LINK_PATH into `calls`, proving the fetcher is live and reachable — and only then
+    // is "no exchange path followed" a claim about the page rather than about an empty list.
+    fireEvent.change(email, { target: { value: BUYER_EMAIL } })
+    fireEvent.submit(email.closest('form')!)
+    await screen.findByTestId('link-sent')
+
+    // Now every control the signed-out page offers, pressed, including the ones the request
+    // above just enabled or revealed.
+    for (const control of screen.getAllByRole('button')) {
+      fireEvent.click(control)
     }
-    await waitFor(() => expect(screen.getByTestId('confirm-gated')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByLabelText('Email address')).toBeInTheDocument())
+    expect(screen.queryByLabelText('What are you shopping for?')).toBeNull()
+    expect(screen.queryByRole('button', { name: /confirm and ask stores/i })).toBeNull()
 
     const reached = calls.map((call) => call.path)
+    // The fetcher really was exercised, so the three refusals below mean something.
+    expect(reached).toContain(MAGIC_LINK_PATH)
     expect(reached).not.toContain(CONFIRM_PATH)
     expect(reached).not.toContain(ACCEPT_PATH)
     expect(reached).not.toContain(RENDER_PATH)

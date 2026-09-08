@@ -95,28 +95,46 @@
  *    worse than the sentence saying why it is not there. That sentence names no single
  *    cause — the exchange's own 404 lists four and picks none, and the buyer service passes
  *    on a bare `null` with no reason attached.
- * 6. **Browsing is open; confirming is not.** The deliberate half of R5's sign-in, stated
- *    here because the code below only shows it working.
+ * 6. **Sign in first, then the journey.** A blocking gate: a visitor with no session sees the
+ *    sign-in form and no part of the journey.
  *
- *    Steps 1 and 2 run with no session at all. Everything in them is between the buyer and
- *    the buyer's OWN service — `POST /buyer/intent/clarify` reaches no exchange and no store
- *    — so there is nothing to protect a visitor from by making them hand over an address
- *    first, and a login wall in front of a page whose whole purpose is to show what this
- *    market does would be asking for an email to see a demo.
+ *    WHAT THIS SECTION USED TO SAY, kept visible rather than deleted, because the reversal is
+ *    the interesting part and a reader will find the old shape in the tests' history. It read
+ *    "Browsing is open; confirming is not", and argued that steps 1 and 2 should run with no
+ *    session because nothing in them leaves this origin, so "a login wall in front of a page
+ *    whose whole purpose is to show what this market does would be asking for an email to see
+ *    a demo". The gate therefore sat on the confirm control alone, which was withheld from
+ *    the document until a session existed.
  *
- *    The gate sits at the confirm, because that is the first gesture that leaves this origin:
- *    `POST /buyer/intent/confirm` opens an auction, the exchange solicits real stores, and
- *    each of them is handed a pseudonym and a bucket set. R5 says that pseudonym rotates and
- *    is the service's, so a page that let the auction open without a session would be back to
- *    naming the buyer itself. The control is therefore ABSENT rather than disabled until
- *    there is a session — `IntentConfirm`'s button fires once per mount, so a click this page
- *    refused would have spent the buyer's one confirmation.
+ *    That argument was sound about the DATA and wrong about the EXPERIENCE, which is the half
+ *    it never measured. A visitor typed what they wanted, answered the clarifying questions,
+ *    and only at the end discovered there was nothing they could do with any of it — the
+ *    conversation they had just had was unusable until they went to their mailbox, and
+ *    opening the mailed link reloads this page and throws that conversation away. The wall
+ *    was not removed by putting it late; it was moved to the most expensive possible moment.
  *
- *    The cost is named on the page rather than hidden: opening the mailed link loads this
- *    page again, so a conversation started before signing in does not survive it. Nothing
- *    here persists the transcript to work around that — `sessionStorage` does not cross the
- *    new tab a mail client opens, and `localStorage` would write what a buyer is shopping for
- *    onto their disk to save them retyping one sentence.
+ *    So the gate is now where a person expects a gate: in front. Signing in is the first
+ *    thing asked and the only thing offered, the reasoning for why it is required is stated
+ *    on the form itself rather than five steps later, and the conversation a buyer has after
+ *    signing in is one they can actually finish.
+ *
+ *    WHAT DID NOT CHANGE, and must not be read as having changed. The reason a session is
+ *    required is exactly what it was: `POST /buyer/intent/confirm` is the gesture that leaves
+ *    this origin, the exchange solicits real stores, and each is handed a pseudonym that R5
+ *    says is the service's to mint and rotate. That sentence has moved onto the sign-in form
+ *    (see `SignIn.tsx`) rather than being dropped — it is the honest answer to "why do I have
+ *    to sign in to look around", and a gate that could not answer that question would be
+ *    worse than the one it replaced.
+ *
+ *    THE COST, named rather than hidden, and it is larger than it was. This page persists no
+ *    session — see the note on `session` below, which is unchanged: the id is a bearer
+ *    credential and does not go to `localStorage` or `sessionStorage`. Redeeming a link does
+ *    NOT reload the page (`history.replaceState` rewrites the entry in place), so arriving
+ *    from the mailbox lands in the chat exactly as it should. But any LATER reload — F5, a
+ *    restored tab, a crash — now ends the session with the whole journey behind it rather
+ *    than just the confirm button, and the link is single-use and already stripped from the
+ *    address bar. Recovering means requesting a new link. That is a real regression against
+ *    the old shape and it is written here rather than discovered.
  */
 import {
   useCallback,
@@ -137,10 +155,10 @@ import {
   type BuyerSession,
 } from '../chat/session'
 import { FeedbackPromptView } from '../feedback/FeedbackPromptView'
+import { REMEMBERED_AUCTION_KEY, forget, remember } from '../metrics/telemetry'
 import { submitFeedback, type FeedbackReceipt } from '../feedback/feedback'
 import { IntentConfirm } from '../intent/IntentConfirm'
 import {
-  MAX_CLARIFYING_QUESTIONS,
   clarifyTurns,
   type AuctionCreated,
   type ClarifyOutcome,
@@ -334,6 +352,14 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
       setStage(undefined)
       setAccepted(undefined)
       setAcceptedSlot(undefined)
+      // …and the id the demo's metrics page was told to remember, for the same reason and
+      // not a weaker one. Clearing only the React state would take the auction off THIS
+      // screen while leaving `#/metrics` able to reopen the retired pseudonym's full
+      // recorded trace — every solicited store, every answer, every exclusion reason — from
+      // a route that takes no session header. The gloss below promises signing out "clears
+      // the auction below with it"; this is the half of that promise the screen cannot keep
+      // on its own.
+      forget(REMEMBERED_AUCTION_KEY)
     })
   }, [run, session, wire])
 
@@ -406,6 +432,12 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
                 profile: { pseudonym: profile.pseudonym, buckets: profile.buckets },
               })
         setStage({ created, record, slots })
+        // Leave the auction id where the demo's metrics page can offer it, so a driver who
+        // switches to `#/metrics` does not have to copy an identifier by hand. An auction id
+        // and NOTHING else: `GET /buyer/auctions/{id}` needs no authentication, so this is
+        // not a credential, and the session id above stays in memory exactly as its own
+        // comment requires. `remember` swallows a storage that refuses.
+        remember(REMEMBERED_AUCTION_KEY, created.auction_id)
       })
     },
     [profile, run, wire],
@@ -458,22 +490,23 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
   )
 
   const answers = turns.slice(1)
-  // Whether `IntentConfirm` would put its confirm button in the document. It is restated
-  // here rather than asked of the component because this page must not MOUNT that button
-  // while signed out: it fires `onConfirm` at most once per mount, so a click this page
-  // refused would spend the buyer's single confirmation and leave a dead button behind.
-  // Both halves mirror `IntentConfirm`'s own conditions, in its order.
-  const confirmable =
-    outcome !== undefined &&
-    outcome.questions.length <= MAX_CLARIFYING_QUESTIONS &&
-    outcome.questions.length <= answers.length
   // One condition for "signed in", used by the sign-in panel, the pseudonym line and the
   // gate alike. The two pieces of state are set together and cleared together, so a
   // half-signed-in page is not reachable — and deriving the gate from the SAME thing
   // `confirm` needs is what makes the refusal inside `confirm` genuinely unreachable rather
   // than merely unlikely.
+  //
+  // WHAT THIS REPLACED. There used to be a second derived flag here, `gateOnSignIn`, and a
+  // matching `confirmable` that restated `IntentConfirm`'s own mounting conditions so that
+  // the confirm BUTTON could be withheld from a signed-out page while everything around it
+  // still rendered. Both are gone, and not because the concern went away: the concern is now
+  // structural. The journey — every step of it, including the one that holds that button —
+  // is inside `signedIn` below, so `IntentConfirm` cannot be mounted by a signed-out page at
+  // all. A flag computing "would the button be gated" would now be constant `false` in every
+  // reachable state, and a test asserting on the gated branch would be asserting a branch the
+  // page can no longer enter. The single structural gate is the guard; there is no second one
+  // to fall out of step with it.
   const signedIn = session !== null && profile !== null
-  const gateOnSignIn = confirmable && !signedIn
   const permalink = accepted?.permalink_url
   const refusal =
     permalink === undefined
@@ -511,7 +544,41 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
       <section aria-label="Sign in" className="step" data-testid="signin">
         <h2>Sign in</h2>
         {session === null || profile === null ? (
-          <SignIn onRequestLink={askForLink} linkExpiresAt={linkExpiresAt} busy={busy} />
+          <>
+            {/*
+             * THE REASON, ON THE GATE. This paragraph is the one that used to sit inside step
+             * 2 as `confirm-gated`, and it moved here with the gate rather than being deleted
+             * with it. It is the honest answer to "why do I have to sign in to look around",
+             * and a wall that cannot answer that question is a worse wall than the one this
+             * replaced. The claim is unchanged and still true: confirming is the gesture that
+             * leaves this origin, and the handle the stores are told has to be minted by the
+             * service's vault rather than by this page.
+             */}
+            <p data-testid="why-sign-in">
+              <strong>Signing in is what lets the exchange ask the stores.</strong> Everything
+              you type here stays between you and this origin&rsquo;s own buyer service until
+              you confirm. Confirming is the step that leaves it: the exchange solicits real
+              stores, and each of them is told a pseudonym and a handful of coarse buckets.
+              That pseudonym has to come from the buyer service&rsquo;s vault rather than from
+              this page &mdash; a handle this browser minted would not rotate when the vault
+              rotates, which is the stable identifier R5 exists to deny the stores &mdash; so
+              the conversation starts once you are signed in.
+            </p>
+            {/*
+             * The signed-out privacy statement, moved here from step 1's pseudonym line when
+             * the gate went in. It used to render beside the composer for a visitor who had
+             * not signed in; there is no such visitor any more — step 1 is behind this gate —
+             * so without this it would render in no state at all. It is the claim a person
+             * most reasonably wants answered BEFORE handing over an address, which makes the
+             * gate a better home for it than the place it came from.
+             */}
+            <p className="gloss" data-testid="pseudonym-signed-out">
+              No store has been told anything about you, and there is no handle to tell them
+              with: you are not signed in. Nothing you type after signing in leaves this
+              origin&rsquo;s own buyer service until you confirm.
+            </p>
+            <SignIn onRequestLink={askForLink} linkExpiresAt={linkExpiresAt} busy={busy} />
+          </>
         ) : (
           <>
             <p data-testid="signed-in">
@@ -533,6 +600,27 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
         )}
       </section>
 
+      {/*
+       * THE GATE. Everything from step 1 to step 5 is the journey, and the journey needs a
+       * session — so a visitor without one sees the sign-in panel above and nothing of this.
+       *
+       * WHAT IS DELIBERATELY OUTSIDE IT, in both directions:
+       *
+       *   * ABOVE — the masthead, the failure banner and the sign-in panel. A person who
+       *     cannot sign in has to be able to SEE why: the refusal from a spent link, or a
+       *     deployment with no mail transport answering 503, is rendered by that banner, and
+       *     gating it would leave a blank wall as the only response to a broken sign-in.
+       *   * BELOW — "What is not wired yet". Those bullets are this page's standing account
+       *     of what it does not do, and none of them is about a signed-in buyer or reads any
+       *     session state. They are as true, and as worth reading, to somebody deciding
+       *     whether to sign in at all.
+       *
+       * Step 5 IS inside, though it is seeded and takes no session of its own: it is a
+       * post-purchase prompt, and showing a purchase-feedback form to a visitor who has not
+       * signed in would be the page telling a story about a journey they have not had.
+       */}
+      {!signedIn ? null : (
+        <>
       <section aria-label="Step 1 - say what you need" className="step">
         <h2>
           <span className="ordinal">1</span> Say what you need
@@ -568,21 +656,23 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
             ))}
           </ol>
         )}
+        {/*
+         * This used to branch on `profile === null`, with a signed-out arm reading "No store
+         * has been told anything about you, and there is no handle to tell them with: you are
+         * not signed in. What you type here goes to this origin's own buyer service and no
+         * further until you sign in and confirm."
+         *
+         * That arm is unreachable now — this section is inside the gate, so `profile` is
+         * never null here — and an unreachable branch that carries the page's only signed-out
+         * privacy statement is worse than dead code: the sentence would render in NO state at
+         * all. Its claim is still true and still worth making, so it moved to where a
+         * signed-out visitor can actually read it, on the sign-in gate above, rather than
+         * being deleted along with the branch that had stopped being reachable.
+         */}
         <p className="gloss" data-testid="pseudonym">
-          {profile === null ? (
-            <>
-              No store has been told anything about you, and there is no handle to tell them
-              with: you are not signed in. What you type here goes to this origin&rsquo;s own
-              buyer service and no further until you sign in and confirm.
-            </>
-          ) : (
-            <>
-              The stores are told you are <strong>{profile.pseudonym}</strong>, and nothing
-              else. That handle was minted by the buyer service&rsquo;s pseudonym vault when
-              you signed in &mdash; this browser cannot mint one &mdash; and signing out
-              retires it.
-            </>
-          )}
+          The stores are told you are <strong>{profile.pseudonym}</strong>, and nothing else.
+          That handle was minted by the buyer service&rsquo;s pseudonym vault when you signed
+          in &mdash; this browser cannot mint one &mdash; and signing out retires it.
         </p>
       </section>
 
@@ -591,32 +681,29 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
           <h2>
             <span className="ordinal">2</span> Check what we understood
           </h2>
-          {gateOnSignIn ? (
-            // The whole of the gate. Not a disabled confirm button — absent, for the reason
-            // `IntentConfirm` gives for never rendering one while a question is outstanding,
-            // plus the one in `confirmable` above. Nothing here restates the intent: that is
-            // `IntentConfirm`'s job and it does it as soon as there is a session to do it
-            // under.
-            <p role="status" data-testid="confirm-gated">
-              <strong>Sign in to ask the stores.</strong> Everything so far has stayed between
-              you and this origin&rsquo;s buyer service. The next step is the one that leaves
-              it: the exchange solicits real stores, and each of them is told a pseudonym and
-              a handful of coarse buckets. That pseudonym has to come from the service&rsquo;s
-              vault rather than from this page, so there is no button here until you have
-              signed in above.
-            </p>
-          ) : (
-            <IntentConfirm
-              key={`intent-${attempt}`}
-              questions={outcome.questions}
-              answers={answers}
-              intent={outcome.intent}
-              unresolved={outcome.unresolved}
-              onAnswer={say}
-              onConfirm={confirm}
-              busy={busy}
-            />
-          )}
+          {/*
+           * No sign-in branch here any more, and its absence is the point. This whole section
+           * is inside the `signedIn` gate below, so there is no reachable state in which this
+           * page renders step 2 to a visitor without a session — the confirm control cannot be
+           * mounted signed out, which is the property the old `confirm-gated` branch existed
+           * to provide and provided only for this one control.
+           *
+           * The sentence that branch carried — that the next step is the one leaving this
+           * origin, that the exchange solicits real stores, and that the pseudonym has to come
+           * from the service's vault rather than from this page — has NOT been deleted. It is
+           * the reason a person is asked to sign in at all, so it now sits on the sign-in form
+           * itself, where it is read before the decision rather than after the conversation.
+           */}
+          <IntentConfirm
+            key={`intent-${attempt}`}
+            questions={outcome.questions}
+            answers={answers}
+            intent={outcome.intent}
+            unresolved={outcome.unresolved}
+            onAnswer={say}
+            onConfirm={confirm}
+            busy={busy}
+          />
           <p className="gloss" data-testid="cluster-id">
             The exchange will match this to cluster {outcome.intent.cluster_id}, which is a hash
             of the use case, the budget band and the constraints above.
@@ -899,6 +986,8 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
           </>
         )}
       </section>
+        </>
+      )}
 
       <section aria-label="What is not wired yet" className="gaps">
         <h2>What is not wired yet</h2>
@@ -953,14 +1042,28 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
             later be mistaken for an earned one.
           </li>
           <li data-testid="gap-model">
-            <strong>The questions came from no live model</strong> — the buyer service
-            resolves its client with <code>build_llm(&quot;buyer&quot;)</code>, and with{' '}
-            <code>LLM_PROVIDER</code> unset that returns D20&rsquo;s offline double
-            (measured on this tree: <code>&lt;DeterministicLLM role=&apos;buyer&apos;&gt;</code>,{' '}
-            <code>model=&quot;double:buyer&quot;</code>). That is the service&rsquo;s designed
-            default, not a failure. It does mean the clarifying questions you were asked, and
-            the intent extracted from your answers, are the buyer service&rsquo;s own wording
-            and its own extraction — no live model wrote or read anything on this page.
+            <strong>Whether a live model wrote the questions: this page cannot tell you</strong>{' '}
+            — the buyer service resolves its client with{' '}
+            <code>build_llm(&quot;buyer&quot;)</code>, which returns a real provider when{' '}
+            <code>LLM_PROVIDER</code> names one and D20&rsquo;s offline double when it does
+            not. Both are designed behaviour and neither is a failure. What is missing is the
+            disclosure: <code>POST /buyer/intent/clarify</code> answers with{' '}
+            <code>questions</code>, <code>intent</code>, <code>unresolved</code> and{' '}
+            <code>confirmed</code>, and no field on it &mdash; nor on any other route this
+            origin serves &mdash; says which client answered. The service computes that fact
+            internally and writes it to its own log, and it reaches no response body, so a
+            page that told you either way would be guessing.
+            <br />
+            <span className="gloss">
+              What this bullet used to say, and why it changed: it asserted flatly that the
+              clarifying questions had been written by the offline double, because{' '}
+              <code>LLM_PROVIDER</code> was unset. That was measured and true of the tree it
+              was written on, and it is false on any deployment configured with a key &mdash;
+              a claim the page had no way to check and therefore should never have made
+              unconditionally. Making it conditional needs a served field: a{' '}
+              <code>model</code> or <code>source</code> on the clarify response, or a small
+              runtime route reporting what <code>resolve_provider()</code> answered.
+            </span>
           </li>
         </ul>
       </section>

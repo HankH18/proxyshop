@@ -1,0 +1,164 @@
+/*
+ * The metrics page's own rules — and only the ones the journey's stylesheet does not already
+ * publish.
+ *
+ * This page reuses `journey.css` wholesale: `.journey`, `.masthead`, `.lede`, `.step`,
+ * `.gaps`, `.mono`, `[data-tone]` and `details.trace` are all defined there and are all used
+ * verbatim here, which is what makes the two surfaces read as one product without a single
+ * value being spelled twice. Everything below is a component the journey has no selector for.
+ *
+ * Every colour is a `--ps-*` token from that same block. There is no hex literal in this
+ * file, and no token is redefined.
+ */
+
+/* The route each panel read, printed under its heading so no figure is anonymous. */
+.metrics-source {
+  margin: calc(-1 * var(--ps-2)) 0 var(--ps-4);
+  color: var(--ps-ink-3);
+  font-size: 12px;
+  letter-spacing: 0.01em;
+}
+
+/* The "do not host this publicly" note. Toned as a failure because that is what ignoring it
+   would be, and given a real border so it cannot be skimmed past. */
+.metrics-warning {
+  margin: var(--ps-3) 0 0;
+  padding: var(--ps-3) var(--ps-4);
+  border: 1px solid var(--ps-alarm-edge);
+  border-left-width: 3px;
+  border-radius: var(--ps-r-md);
+  background: var(--ps-alarm-wash);
+  color: var(--ps-alarm);
+  font-size: 14px;
+  max-width: 46rem;
+}
+
+.metrics-form {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--ps-2);
+  margin: var(--ps-4) 0;
+}
+.metrics-form label {
+  font-weight: 600;
+  font-size: 13px;
+}
+.metrics-form input {
+  flex: 1 1 22rem;
+  min-width: 0;
+  padding: var(--ps-2) var(--ps-3);
+  border: 1px solid var(--ps-rule);
+  border-radius: var(--ps-r-sm);
+  background: var(--ps-card);
+  color: var(--ps-ink);
+  font-family: var(--ps-mono);
+  font-size: 13px;
+}
+.metrics-form input:focus-visible {
+  outline: 2px solid var(--ps-accent);
+  outline-offset: 1px;
+}
+
+/*
+ * A panel with no value. This is the rule that keeps a blank from looking like a zero: it is
+ * never a number, it is always the reason, and the state word beside it is toned by
+ * `[data-tone]` from the journey's provenance palette.
+ */
+.metrics-blank {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--ps-2);
+  margin: var(--ps-3) 0;
+  padding: var(--ps-3);
+  border: 1px dashed var(--ps-rule);
+  border-radius: var(--ps-r-md);
+  background: var(--ps-sunk);
+}
+.metrics-blank__detail {
+  color: var(--ps-ink-2);
+  font-size: 13px;
+}
+
+/* A real, measured emptiness — distinct from `.metrics-blank`, which is an absence of
+   measurement. The two must not look alike, so one is dashed and sunk and this one is not. */
+.metrics-empty {
+  margin: var(--ps-3) 0;
+  color: var(--ps-ink-2);
+  font-size: 14px;
+}
+
+.metrics-rows {
+  display: grid;
+  grid-template-columns: minmax(7rem, max-content) 1fr;
+  gap: var(--ps-2) var(--ps-4);
+  margin: var(--ps-4) 0;
+}
+.metrics-rows dt {
+  color: var(--ps-ink-3);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.metrics-rows dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.metrics-entries {
+  margin: var(--ps-3) 0;
+  padding: 0;
+  list-style: none;
+}
+.metrics-entries li {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--ps-2);
+  padding: var(--ps-2) 0;
+  border-top: 1px solid var(--ps-rule-soft);
+}
+.metrics-entries li:first-child {
+  border-top: 0;
+}
+
+.metrics-unreachable {
+  margin: var(--ps-4) 0 0;
+  padding: 0;
+  list-style: none;
+}
+.metrics-unreachable > li {
+  padding: var(--ps-4) 0;
+  border-top: 1px solid var(--ps-rule);
+}
+.metrics-unreachable > li > p {
+  margin: 0 0 var(--ps-1);
+  max-width: 46rem;
+}
+.metrics-unreachable__head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--ps-2);
+}
+.metrics-unreachable__why {
+  color: var(--ps-ink-2);
+  font-size: 13px;
+}
+.metrics-unreachable__why strong {
+  color: var(--ps-ink);
+}
+
+/* The raw body fold. `details.trace` carries the treatment; this only bounds the pre so a
+   long payload scrolls inside the panel instead of stretching the page. */
+.metrics-trace pre,
+.metrics-unreachable pre {
+  max-height: 26rem;
+  overflow: auto;
+  padding: var(--ps-3);
+  border-radius: var(--ps-r-sm);
+  background: var(--ps-sunk);
+  font-size: 12px;
+}

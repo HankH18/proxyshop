@@ -1,0 +1,133 @@
+/*
+ * The demo nav bar's stylesheet. Mounted on BOTH portals, which is the whole design problem.
+ *
+ * THE TOKEN CHAIN, and why there is not one hex literal in this file.
+ *
+ * The two surfaces publish two different token vocabularies, deliberately — the shopper
+ * journey is light and spells its tokens `--ps-*` (`apps/buyer/app/journey/journey.css`), the
+ * merchant console is dark and spells its own `--ds-*`, `--accent`, `--panel`, `--line`
+ * (`apps/merchant/app/dashboard/dashboard.css`), and that file says in its own header that
+ * staying dark is a decision rather than an inheritance. A bar that hard-coded either
+ * palette would be wrong on one of the two surfaces, and a bar that introduced a third
+ * palette would be a second spelling of colours this design pass just finished unifying.
+ *
+ * So every value below is a `var()` chain: the buyer's token first, the merchant's as the
+ * fallback. On the journey `--ps-accent` resolves and the chain stops; on the console it is
+ * undefined, so `--accent` answers. Each surface tones the bar with the palette it already
+ * owns, and this file names no colour of its own.
+ *
+ * The last link in each chain is a CSS SYSTEM colour — `Canvas`, `CanvasText`, `GrayText`,
+ * `LinkText`. Those are roles the browser fills from the reader's own environment, not
+ * palette entries, so they add no fourth spelling; they exist only for the case where the
+ * bar is mounted before its host stylesheet has loaded, where the alternative is an
+ * invalid value and an unreadable bar.
+ *
+ * Spacing reuses the journey's `--ps-1..7` step where the console has no equivalent to fall
+ * back to — the console sizes in rem literals and publishes no spacing token — so those
+ * chains terminate in the pixel value the buyer token already holds. That is the same
+ * number, not a new one.
+ */
+
+#proxyshop-demo-nav {
+  --dnav-ink: var(--ps-ink, var(--ink, CanvasText));
+  --dnav-dim: var(--ps-ink-3, var(--ink-dim, GrayText));
+  --dnav-ground: var(--ps-card, var(--panel, Canvas));
+  --dnav-sunk: var(--ps-sunk, var(--panel-2, Canvas));
+  --dnav-edge: var(--ps-rule, var(--line, GrayText));
+  --dnav-accent: var(--ps-accent, var(--accent, LinkText));
+  --dnav-accent-wash: var(--ps-accent-wash, var(--panel-2, Canvas));
+  --dnav-sans: var(--ps-sans, var(--ds-sans, system-ui, sans-serif));
+  --dnav-mono: var(--ps-mono, var(--ds-mono, ui-monospace, monospace));
+
+  --dnav-gap: var(--ps-2, 8px);
+  --dnav-pad: var(--ps-3, 12px);
+  --dnav-radius: var(--ps-r-pill, 999px);
+
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--ps-4, 16px);
+
+  /* Normal flow rather than `position: fixed`. A fixed bar would need every page below it to
+     grow a matching top padding, which means this component reaching into two apps' layouts
+     to compensate for itself. In flow it simply sits above `#root`, and both shells
+     (`.journey`, `.shell`) keep the margins they were designed with. */
+  padding: var(--dnav-pad) var(--ps-5, 20px);
+  border-bottom: 1px solid var(--dnav-edge);
+  background: var(--dnav-ground);
+  color: var(--dnav-ink);
+  font-family: var(--dnav-sans);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+/* Says on its face what it is. The demo bar is scaffolding, and a reader who cannot tell it
+   apart from the product would reasonably assume the product ships a nav bar. */
+#proxyshop-demo-nav .demo-nav__badge {
+  flex: none;
+  padding: 2px var(--dnav-gap);
+  border: 1px solid var(--dnav-edge);
+  border-radius: var(--dnav-radius);
+  color: var(--dnav-dim);
+  font-family: var(--dnav-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: help;
+}
+
+#proxyshop-demo-nav .demo-nav__list {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--dnav-gap);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+#proxyshop-demo-nav .demo-nav__link {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--ps-1, 4px);
+  padding: var(--ps-1, 4px) var(--dnav-pad);
+  border: 1px solid transparent;
+  border-radius: var(--dnav-radius);
+  color: var(--dnav-ink);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+#proxyshop-demo-nav .demo-nav__link:hover {
+  border-color: var(--dnav-edge);
+  background: var(--dnav-sunk);
+  color: var(--dnav-ink);
+  text-decoration: none;
+}
+
+/* The current entry. Marked with `aria-current="page"` in the markup as well as tinted here,
+   because "where am I" is a claim that has to survive with the stylesheet switched off. */
+#proxyshop-demo-nav .demo-nav__link[data-current='true'] {
+  border-color: var(--dnav-accent);
+  background: var(--dnav-accent-wash);
+  color: var(--dnav-accent);
+}
+
+/* An entry that leaves this origin. Worth marking: the merchant console is a different
+   service on a different port, and it can be switched off while this page is up. */
+#proxyshop-demo-nav .demo-nav__external {
+  font-family: var(--dnav-mono);
+  font-size: 10px;
+  color: var(--dnav-dim);
+}
+
+#proxyshop-demo-nav .demo-nav__link:focus-visible {
+  outline: 2px solid var(--dnav-accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  #proxyshop-demo-nav .demo-nav__link {
+    transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+  }
+}

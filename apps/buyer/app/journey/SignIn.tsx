@@ -78,15 +78,32 @@ export function SignIn({ onRequestLink, linkExpiresAt, busy = false }: SignInPro
           finish signing in.
         </p>
       )}
+      {/*
+       * WHAT THIS PARAGRAPH USED TO SAY, and why it could not stay. It opened "You do not
+       * need to sign in to look around: say what you need and answer the clarifying questions
+       * first if you like", and went on to explain that signing in was asked for at the
+       * confirm and not before. Every clause of that was true of the page as it was built and
+       * every clause of it is false now: the journey is behind this form, so there is nothing
+       * to look around at first. Leaving it would have been a page instructing a visitor to
+       * do something it no longer lets them do.
+       *
+       * The two facts in it that DID survive the change are kept, because both are still
+       * load-bearing: the 503 a deployment with no mail transport answers with, which is the
+       * difference between a broken demo and a configured refusal; and the warning about a
+       * conversation not surviving, restated for where the risk actually is now.
+       */}
       <p className="gloss">
-        You do not need to sign in to look around: say what you need and answer the
-        clarifying questions first if you like. None of that leaves this origin. Signing in is
-        what lets the exchange ask the stores, and it is asked for at that point and not
-        before. Opening the link from your mailbox loads this page again, so a conversation
-        you started first will not still be here &mdash; signing in now saves retyping it. If
-        this deployment has no mail transport configured, the service answers{' '}
-        <code>503</code> and says so in the banner above rather than promising a mail nothing
-        will send.
+        Signing in comes first here: the conversation it opens is one the exchange can act on,
+        and it is minted against the handle the vault issues when you open your link. If this
+        deployment has no mail transport configured, the service answers <code>503</code> and
+        says so in the banner above rather than promising a mail nothing will send.
+      </p>
+      <p className="gloss">
+        Open the link in this same browser, and keep the tab once you are in. The session
+        lives in this page and is deliberately not written to your disk &mdash; the session id
+        is a bearer credential for this origin &mdash; and the link works exactly once, so
+        reloading after you have signed in ends the session and needs a fresh link rather than
+        restoring the old one.
       </p>
     </>
   )
