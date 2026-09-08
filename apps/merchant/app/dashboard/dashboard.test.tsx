@@ -354,6 +354,74 @@ describe('the merchant dashboard', () => {
     expect(calls.some((call) => call.method === 'POST' && call.url.endsWith('/kill'))).toBe(true)
   })
 
+  it('restarts a stopped store through the real route, without claiming it is live again', async () => {
+    /*
+      The console used to tell a merchant that stopping was permanent and that "nothing on this
+      console undoes it", and it was telling the truth about the service at the time. Both halves
+      are graded here: the restart is reachable and posts to the real `POST /stores/{id}/revive`,
+      and what comes back is `shadow` — so the page must still say the store is NOT bidding and
+      must hand the merchant to the approval that puts it back on the network.
+    */
+    signedIn()
+    let activation = 'killed'
+    const { impl, calls } = stubFetch({
+      [`GET /stores/${STORE}/dashboard`]: () => {
+        const stopped = activation === 'killed'
+        return json(
+          page({
+            envelope: {
+              ...page().envelope,
+              activation,
+              may_bid: false,
+              reason: `the store's current envelope is '${activation}'`,
+            },
+            onboarding: onboarding(
+              stopped ? { step: 'killed' } : { step: 'approval', approval: APPROVAL },
+            ),
+          }),
+        )
+      },
+      [`POST /stores/${STORE}/revive`]: () => {
+        activation = 'shadow'
+        return json({ store_id: STORE, activation: 'shadow' })
+      },
+    })
+    vi.stubGlobal('fetch', impl)
+    await mount(<Dashboard />)
+
+    expect(text()).toContain('is not bidding')
+    expect(text()).not.toContain('Stopping this store is permanent')
+    expect(text()).not.toContain('nothing on this console undoes it')
+    expect(text()).not.toContain('this console cannot restart it')
+
+    await type('#revive-confirm', STORE)
+    await click(button(/Restart this store/))
+
+    expect(calls.some((call) => call.method === 'POST' && call.url.endsWith('/revive'))).toBe(true)
+    expect(text()).toContain('is not bidding')
+    expect(text()).toContain('Approve v1 in writing')
+    // The card has flipped back to the kill control, and it must be DISARMED. Both buttons read
+    // one confirmation field, so a store id typed to arm the restart would otherwise leave the
+    // kill armed underneath it — one misclick from stopping the store just restarted.
+    expect(button(/Kill this store/).disabled).toBe(true)
+  })
+
+  it('offers no restart button until the store is actually stopped', async () => {
+    // The other direction of the same control: on a live store the arming field is the kill's,
+    // so a misclick cannot walk a running store through a restart it never needed.
+    signedIn()
+    const { impl } = stubFetch({
+      [`GET /stores/${STORE}/dashboard`]: () => json(page()),
+    })
+    vi.stubGlobal('fetch', impl)
+    await mount(<Dashboard />)
+
+    expect(text()).toContain('is bidding')
+    expect(host.querySelector('#revive-confirm')).toBeNull()
+    expect(() => button(/Restart this store/)).toThrow()
+    expect(button(/Kill this store/)).toBeTruthy()
+  })
+
   it('shows a decline with the agent’s own reason, not as a store that chose not to bid', async () => {
     signedIn()
     const { impl } = stubFetch({

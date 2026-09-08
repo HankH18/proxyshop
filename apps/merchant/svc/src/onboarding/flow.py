@@ -26,7 +26,12 @@ from typing import Any
 import contracts
 from merchant_svc.envelope.digest import approval_digest
 from merchant_svc.envelope.model import FIRST_VERSION, SHADOW, Envelope
-from merchant_svc.envelope.versions import activate_envelope, edit_envelope, kill_envelope
+from merchant_svc.envelope.versions import (
+    activate_envelope,
+    edit_envelope,
+    kill_envelope,
+    revive_envelope,
+)
 from merchant_svc.install.shop import InvalidShopDomain, normalize_shop_domain
 from merchant_svc.onboarding.interview import (
     Q_ACTIVATION,
@@ -55,6 +60,7 @@ __all__ = [
     "edit",
     "envelope_from_transcript",
     "kill",
+    "revive",
     "store_id_from_transcript",
 ]
 
@@ -159,6 +165,7 @@ def approval_artifact_template(envelope: Any, approver: str, approved_at: str) -
 activate = activate_envelope
 edit = edit_envelope
 kill = kill_envelope
+revive = revive_envelope
 
 
 # --------------------------------------------------------------------------------------

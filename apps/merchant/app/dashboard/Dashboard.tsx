@@ -23,6 +23,7 @@ import {
   DashboardRefused,
   killStore,
   readDashboard,
+  reviveStore,
   saveEnvelope,
   solicitBid,
   submitInterview,
@@ -226,9 +227,10 @@ export function Dashboard(): JSX.Element {
             activation={page.envelope.activation}
             mayBid={page.envelope.may_bid}
             reason={page.envelope.reason}
-            busy={busy === 'kill'}
+            busy={busy === 'kill' || busy === 'revive'}
             error={busy === '' && actionError ? actionError : ''}
             onKill={() => void act('kill', () => killStore(storeId, token))}
+            onRevive={() => void act('revive', () => reviveStore(storeId, token))}
           />
           <OnboardingCard
             panel={page.onboarding}

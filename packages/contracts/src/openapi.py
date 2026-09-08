@@ -71,6 +71,12 @@ PINNED_ROUTES: tuple[Route, ...] = (
     Route("merchant", "get", "/stores/{store_id}/envelope"),
     Route("merchant", "put", "/stores/{store_id}/envelope"),
     Route("merchant", "post", "/stores/{store_id}/kill"),
+    # The kill switch's other half, declared in the change that serves it. R9 asks for a kill
+    # switch and the owner ruled that a merchant must be able to restart their agent; the stop
+    # is one door and the un-stop is another, so that no approval path can ever lift a kill and
+    # no edit can resume a store as a side effect. It reaches `shadow` and cannot reach
+    # `active`, which is why it needs no approval artifact where `PUT .../envelope` does.
+    Route("merchant", "post", "/stores/{store_id}/revive"),
     Route("trust", "post", "/events"),
     Route("trust", "get", "/snapshot"),
     # T-312 UNPINNED two trust routes DESIGN §Interfaces still lists, and the reason is not

@@ -31,7 +31,7 @@ from typing import Any
 from .digest import approval_covers, approval_digest
 from .model import ACTIVE, FIRST_VERSION, SHADOW, ApprovalRejected, Envelope, EnvelopeError
 from .repository import EnvelopeRepository, InMemoryEnvelopeRepository, restorable
-from .versions import activate_envelope, edit_envelope, kill_envelope
+from .versions import activate_envelope, edit_envelope, kill_envelope, revive_envelope
 
 
 class UnknownStore(EnvelopeError, KeyError):
@@ -257,6 +257,25 @@ class EnvelopeVersions:
     def kill(self, store_id: str) -> Envelope:
         """Move the store's current envelope to ``killed`` and file that state."""
         return self.record(kill_envelope(self.current(store_id)))
+
+    def revive(self, store_id: str) -> Envelope:
+        """Lift the kill on the store's current envelope and file it back in ``shadow``.
+
+        The store is un-stopped and still not bidding: ``is_live`` answers ``False`` for a
+        revived version exactly as it does for an edited one, and only
+        :meth:`activate` against a written approval changes that. Reviving is therefore safe
+        to reach for — the worst it can do is put a stopped store back in the queue for its
+        owner's signature.
+
+        Filed like every other transition, at the SAME version and through :meth:`record`, so
+        the history reads ``shadow → active → killed → shadow`` and a merchant can see that the
+        stop happened and that it was lifted. Nothing is rewritten and nothing disappears.
+
+        Raises:
+            UnknownStore: nothing has been recorded for ``store_id``.
+            ReviveRefused: the store's current envelope is not killed.
+        """
+        return self.record(revive_envelope(self.current(store_id)))
 
 
 #: The service-wide history. Backed by an

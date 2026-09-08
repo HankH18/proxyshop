@@ -1,9 +1,15 @@
-"""``GET/PUT /stores/{store_id}/envelope`` and ``POST /stores/{store_id}/kill``.
+"""``GET/PUT /stores/{store_id}/envelope``, ``POST /stores/{store_id}/kill``, ``…/revive``.
 
 Discovered and mounted by the frozen ``merchant_svc.main.create_app`` because this file is
-``<feature>/routes.py`` and exports ``router``. The three paths and their shapes come from
+``<feature>/routes.py`` and exports ``router``. The four paths and their shapes come from
 ``packages/contracts/openapi/merchant.openapi.json``, which
 ``test_the_served_routes_match_the_pinned_contract`` grades this table against.
+
+**The two switch routes are asymmetric on purpose.** ``kill`` needs no artifact and no state
+check — stopping is always allowed. ``revive`` needs none either, because all it reaches is
+``shadow``; what it deliberately cannot do is reach ``active``, so a stopped store comes back
+un-stopped and still silent until the merchant approves its terms through the same gate every
+other live envelope came through. See :func:`revive_store_agent`.
 
 **These routes are administrative.** An envelope is sealed state (S7): it is the merchant's
 floor prices, their discount ceiling and their monthly give-away budget. Reading one
@@ -330,3 +336,57 @@ async def kill_store_agent(store_id: str, request: Request) -> Any:
         return _problem(409, "kill-refused", detail=str(exc))
     _log.warning("store %r envelope v%d killed", store_id, killed.version)
     return JSONResponse(content={"store_id": store_id, "activation": killed.activation})
+
+
+@router.post("/stores/{store_id}/revive")
+async def revive_store_agent(store_id: str, request: Request) -> Any:
+    """Lift the kill switch: bring a stopped store back to ``shadow``, still not bidding.
+
+    **The second half of R9's kill switch, and why it is a separate door.** The switch used to
+    be a one-way one: ``PUT`` on a killed store minted a version that was born killed and the
+    approval that would activate it was refused, so a merchant who stopped their agent could
+    never start it again. Reversing that could have been done by letting an approval lift the
+    killed state — and was not, on two measured grounds:
+
+    * :func:`~merchant_svc.envelope.versions.kill_envelope` keeps the approval that was on
+      file, so at the instant of the kill an artifact bound to those exact terms already
+      exists. Letting an approval clear ``killed`` would mean the paperwork signed *before*
+      the stop undoes the stop, and any client holding that artifact — a retry, a queued
+      request, a console tab left open — resumes the store by replaying it. That is the
+      "silently resumes" failure, arriving through the front door.
+    * it would put the reversal inside ``activate_envelope``'s killed branch, which is where
+      the kill switch's teeth are. They are still there and still refuse every approval; this
+      route is the only thing in the service that clears ``killed``, and it clears it to
+      ``shadow``.
+
+    So restarting is two deliberate acts by two different doors: **this one un-stops the
+    store, and the ordinary approval activates it.** Nothing here puts a store back on the
+    network — what comes back carries no approval, ``may_bid`` is still ``False``, and the
+    agent still answers ``store_killed``'s sibling refusal until the merchant signs the terms
+    again. Reviving a store that is not killed is refused rather than absorbed: on a live
+    envelope it would be a deactivation nobody could see in the kill-switch card.
+
+    It takes the same admin bearer as the kill, and no approval artifact of its own —
+    ``shadow`` is the state a PUT already reaches with no paperwork, so demanding an approval
+    to arrive at it would invent a second meaning for the one artifact this service checks.
+    """
+    refusal = _refuse_unless_admin(request)
+    if refusal is not None:
+        return refusal
+    try:
+        revived = ENVELOPES.revive(store_id)
+    except UnknownStore:
+        return _problem(404, "no-envelope", store_id=store_id)
+    except EnvelopeError as exc:
+        # `ReviveRefused` — the store is not killed. 409 rather than 400: the request is
+        # well formed and the state is what refuses it, which is the same shape as the kill
+        # switch's own refusal and reads the same way to a client.
+        return _problem(409, "revive-refused", detail=str(exc))
+    _log.warning(
+        "store %r envelope v%d revived to %s; it is NOT live until a written approval is "
+        "recorded for these terms",
+        store_id,
+        revived.version,
+        revived.activation,
+    )
+    return JSONResponse(content={"store_id": store_id, "activation": revived.activation})

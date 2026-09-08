@@ -33,6 +33,7 @@ from .model import (
     EnvelopeEditRefused,
     EnvelopeError,
     EnvelopeInvalid,
+    ReviveRefused,
     as_document,
 )
 from .repository import (
@@ -48,7 +49,7 @@ from .store import (
     UnknownStore,
     VersionWentBackwards,
 )
-from .versions import activate_envelope, edit_envelope, kill_envelope
+from .versions import activate_envelope, edit_envelope, kill_envelope, revive_envelope
 
 __all__ = [
     "ACTIVE",
@@ -73,6 +74,7 @@ __all__ = [
     "FrozenDict",
     "InMemoryEnvelopeRepository",
     "PostgresEnvelopeRepository",
+    "ReviveRefused",
     "StoreMismatch",
     "UnknownStore",
     "VersionWentBackwards",
@@ -85,6 +87,7 @@ __all__ = [
     "edit_envelope",
     "freeze",
     "kill_envelope",
+    "revive_envelope",
     "thaw",
 ]
 

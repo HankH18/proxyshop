@@ -930,7 +930,7 @@
       "post": {
         "operationId": "killStoreAgent",
         "summary": "Kill switch: move the envelope to `killed` immediately.",
-        "description": "Administrative. Needs no approval artifact — stopping is always allowed; only starting requires paperwork.",
+        "description": "Administrative. Needs no approval artifact and no confirmation of state — stopping is always allowed, and a control that can be refused for a paperwork reason is not a kill switch. Only STARTING requires paperwork, and starting is two acts rather than one: `POST /stores/{store_id}/revive` lifts the kill back to `shadow`, and a bound `X-Envelope-Approval` on `PUT /stores/{store_id}/envelope` is the only thing that makes the store live again. Nothing else lifts a kill — in particular, publishing a new version while killed does not: the new version is born `killed` too.",
         "security": [{ "adminBearer": [] }],
         "parameters": [
           { "name": "store_id", "in": "path", "required": true, "schema": { "type": "string" } }
@@ -995,6 +995,105 @@
                   }
                 },
                 "example": { "error": "kill-refused", "detail": "the envelope is already killed" }
+              }
+            }
+          },
+          "503": {
+            "description": "The deployment configures no admin token, so the envelope routes refuse every caller.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error", "missing"],
+                  "properties": {
+                    "error": { "type": "string", "enum": ["admin-api-not-configured"] },
+                    "missing": { "type": "array", "items": { "type": "string" } },
+                    "detail": { "type": "string" }
+                  }
+                },
+                "example": {
+                  "error": "admin-api-not-configured",
+                  "missing": ["MERCHANT_ADMIN_TOKEN"],
+                  "detail": "the envelope routes refuse every caller until a token is configured"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/stores/{store_id}/revive": {
+      "post": {
+        "operationId": "reviveStoreAgent",
+        "summary": "Lift the kill switch: return a stopped store to `shadow`.",
+        "description": "Administrative, and NOT a reactivation. R9's kill switch is reversible — a merchant who stopped their agent can start it again — but restarting is two deliberate acts through two doors, and this is the first: it clears `killed` on the store's CURRENT version, in place, at the same version number, and lands it in `shadow`. What comes back carries no approval and does not bid; `PUT /stores/{store_id}/envelope` with a bound `X-Envelope-Approval` is the only thing that puts a store back on the network, exactly as it is for a store that has never been live. Reviving takes no approval artifact of its own because `shadow` is a state a PUT already reaches with none — and it cannot reach `active`, so the reversal cannot be smuggled through as an activation. A store whose current envelope is not `killed` is refused with 409: this lifts a stop and is never a way to deactivate a live envelope, which is what the kill switch is for.",
+        "security": [{ "adminBearer": [] }],
+        "parameters": [
+          { "name": "store_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "The activation state after the revive. Always `shadow`: the store is un-stopped and still not bidding until its terms are approved again.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["store_id", "activation"],
+                  "properties": {
+                    "store_id": { "type": "string" },
+                    "activation": { "$ref": "https://proxyshop.dev/schemas/protocol.schema.json#/$defs/EnvelopeActivation" }
+                  }
+                },
+                "example": { "store_id": "store-1", "activation": "shadow" }
+              }
+            }
+          },
+          "401": {
+            "description": "No bearer token, or the wrong one.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": { "error": { "type": "string", "enum": ["unauthorized"] } }
+                },
+                "example": { "error": "unauthorized" }
+              }
+            }
+          },
+          "404": {
+            "description": "No envelope has ever been written for this store, so there is no kill to lift.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error", "store_id"],
+                  "properties": {
+                    "error": { "type": "string", "enum": ["no-envelope"] },
+                    "store_id": { "type": "string" }
+                  }
+                },
+                "example": { "error": "no-envelope", "store_id": "store-1" }
+              }
+            }
+          },
+          "409": {
+            "description": "The store's current envelope is not `killed`, so there is nothing to revive. Nothing was changed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["error"],
+                  "properties": {
+                    "error": { "type": "string", "enum": ["revive-refused"] },
+                    "detail": { "type": "string" }
+                  }
+                },
+                "example": {
+                  "error": "revive-refused",
+                  "detail": "store 'store-1' envelope v4 is 'active', not 'killed'; a revive lifts the kill switch and does nothing else — it is not a way to deactivate a live envelope, which is what the kill switch is for"
+                }
               }
             }
           },

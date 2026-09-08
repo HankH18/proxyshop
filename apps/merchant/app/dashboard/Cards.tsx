@@ -12,7 +12,11 @@
  * * :func:`KillSwitch` posts to the real `POST /stores/{id}/kill` and then invites the
  *   solicitation that shows the agent has stopped. An activation state nobody can observe is
  *   one nobody can trust, and this control was inert until an agent learned to answer
- *   `204 store_killed`.
+ *   `204 store_killed`. It also posts the real `POST /stores/{id}/revive`, which is the other
+ *   half of the same switch: the kill is reversible, and the card that stops a store is the
+ *   card that starts it. Reviving lands the envelope in `shadow` and never in `active`, so the
+ *   restart finishes in :func:`OnboardingCard`, under the same written approval every other
+ *   live envelope came through.
  */
 import { useState } from 'react'
 
@@ -228,6 +232,22 @@ export function OnboardingCard({
           it covers, so new terms need a new signature.
         </p>
       ) : null}
+
+      {/*
+        The killed step used to render nothing at all: no interview, no approval form, and no
+        sentence — a merchant who had stopped their store opened this card and found a blank. The
+        approval is still deliberately not offered here, because the service refuses to activate a
+        killed envelope however well the artifact is bound; what was missing was the step that
+        comes first. It is in the kill-switch card, so this says so rather than duplicating it.
+      */}
+      {panel.step === 'killed' ? (
+        <p className="muted">
+          This store is stopped, so there is nothing to approve here yet: a killed envelope refuses
+          activation whoever signs it. Restart it from the kill-switch card — it comes back in{' '}
+          <strong>shadow</strong> at the same version — and this card will then ask you to approve
+          those terms, which is what puts the store back on the network.
+        </p>
+      ) : null}
     </Card>
   )
 }
@@ -351,6 +371,7 @@ export function KillSwitch({
   mayBid,
   reason,
   onKill,
+  onRevive,
   busy,
   error,
 }: {
@@ -359,12 +380,24 @@ export function KillSwitch({
   mayBid: boolean
   reason: string
   onKill: () => void
+  onRevive: () => void
   busy: boolean
   error: string
 }): JSX.Element {
   const [confirmation, setConfirmation] = useState('')
   const armed = confirmation.trim() === storeId
   const stopped = activation === 'killed'
+  /*
+    Disarm on the way out, whichever button was pressed. Both controls read the same field, and
+    the card flips to the other one as soon as the page reloads — so a merchant who typed the
+    store id to arm the RESTART would have found the kill button already armed underneath it,
+    one misclick from stopping the store they had just started. Clearing here rather than in an
+    effect keeps it a property of the press rather than of a render.
+  */
+  const press = (act: () => void) => () => {
+    setConfirmation('')
+    act()
+  }
 
   return (
     <Card title="Kill switch" requirement="R9">
@@ -375,47 +408,71 @@ export function KillSwitch({
       </p>
       <p className="muted">{reason}</p>
       {/*
-        THE FINALITY, SAID BEFORE THE PRESS RATHER THAN DISCOVERED AFTER IT.
+        WHAT THE BUTTON DOES, SAID BEFORE THE PRESS RATHER THAN DISCOVERED AFTER IT.
 
-        Measured in `merchant_svc.envelope.versions`, not inferred from the copy:
-        `activate_envelope` refuses a killed envelope outright (versions.py:105) and tells the
-        caller to "publish a new version and approve that" — and `edit_envelope` mints that
-        next version with `activation = KILLED if current.activation == KILLED else SHADOW`
-        (versions.py:83). The new version is therefore born killed and its approval is refused
-        for the same reason as the first. The only shadow reset in the store is the branch for
-        a store with NO history at all (`store.py:237`), which a killed store is not. So every
-        route this page can reach leaves a stopped store stopped.
+        This notice used to read "Stopping this store is permanent", and it was true of the
+        service it described: `activate_envelope` refused a killed envelope, `edit_envelope`
+        carried `killed` forward onto every version an edit minted, and the refusal's own advice
+        ("publish a new version and approve that") named the one thing that could not work. The
+        owner ruled that a merchant must be able to restart their agent, so
+        `POST /stores/{id}/revive` now lifts the kill — and this copy is the first thing that had
+        to stop saying otherwise. A console that overstates a consequence is not being careful;
+        it is being wrong in the direction that keeps a merchant from using their own store.
 
-        The service is right to hold that line and this card is not the place to argue with it;
-        what this card owes the person about to press the button is that the door locks behind
-        them.
+        What is still true, and is what this card owes the person about to press the button:
+        stopping is instant and takes no approval, and coming back is neither. Restarting is two
+        deliberate acts — this card's restart returns the envelope to `shadow`, and only a
+        written approval in the onboarding card puts the store back on the network. Measured in
+        `merchant_svc.envelope.versions`: `revive_envelope` can only produce `shadow`, and
+        `edit_envelope` still carries `killed` forward, so saving new terms while stopped does
+        NOT restart anything.
       */}
       <div className="notice notice--final">
-        <p className="notice__heading">Stopping this store is permanent.</p>
+        <p className="notice__heading">Stopping is instant. Starting again is deliberate.</p>
         <p className="notice__detail">
-          Stopping needs no approval — only starting does, and starting is reachable from no
-          control on this page. A killed envelope refuses activation (<em>publish a new version
-          and approve that</em>), and the version an edit publishes is itself killed: the state
-          is carried forward rather than dropped to <code>shadow</code>. The approval that would
-          restart this store is refused for the same reason as the first one.
+          Stopping needs no approval and no confirmation from anyone else — that is the whole
+          point of the switch. The agent submits nothing from the next solicitation onward.
         </p>
         <p className="notice__detail">
-          This ends the store’s participation in the network, and nothing on this console undoes
-          it.
+          The stop is reversible, but starting again is not one click: this card returns the
+          envelope to{' '}
+          <strong>shadow</strong>, which is stopped-but-restartable, and the store bids again only
+          once you approve its terms in writing in the <a href="#onboarding">onboarding card</a>.
+          Saving new terms while stopped does <em>not</em> restart the store — the version an edit
+          publishes is killed too.
         </p>
       </div>
       {error ? <p className="error">{error}</p> : null}
       {stopped ? (
         /*
-          No arming field and no button once the store is stopped. A control that cannot change
-          anything is worse than the sentence saying why it is not there — and here it would be
-          worse still, because a second press would read as a control that could be un-pressed.
+          The restart, in the card that did the stopping. It is armed the same way the kill is —
+          the store id typed out — because this card has exactly one convention for a button that
+          changes whether the store participates, and a looser one in the other direction would
+          be a second convention in the same card.
         */
-        <p className="muted">
-          Already stopped, and this console cannot restart it. Solicit a bid above: the agent
-          answers <code>204 store_killed</code>, which is what makes the switch observable rather
-          than merely recorded.
-        </p>
+        <>
+          <p className="muted">
+            Stopped. Solicit a bid above and the agent answers <code>204 store_killed</code>, which
+            is what makes the switch observable rather than merely recorded.
+          </p>
+          <div className="stack">
+            <label htmlFor="revive-confirm">Type the store id to arm the restart</label>
+            <input
+              id="revive-confirm"
+              value={confirmation}
+              placeholder={storeId}
+              onChange={(event) => setConfirmation(event.target.value)}
+            />
+            <button type="button" disabled={!armed || busy} onClick={press(onRevive)}>
+              {busy ? 'Restarting…' : 'Restart this store’s agent — back to shadow'}
+            </button>
+            <p className="muted">
+              This lifts the kill and nothing more. The envelope returns to <strong>shadow</strong>{' '}
+              at the same version, carrying no approval, and the agent still submits nothing until
+              you sign for those terms again.
+            </p>
+          </div>
+        </>
       ) : (
         <>
           <p className="muted">
@@ -430,8 +487,13 @@ export function KillSwitch({
               placeholder={storeId}
               onChange={(event) => setConfirmation(event.target.value)}
             />
-            <button type="button" className="danger" disabled={!armed || busy} onClick={onKill}>
-              {busy ? 'Killing…' : 'Kill this store’s agent — permanently'}
+            <button
+              type="button"
+              className="danger"
+              disabled={!armed || busy}
+              onClick={press(onKill)}
+            >
+              {busy ? 'Killing…' : 'Kill this store’s agent'}
             </button>
           </div>
         </>

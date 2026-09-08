@@ -49,6 +49,11 @@ export const PINNED_ROUTES: readonly Route[] = [
   {domain: "merchant", method: "get", path: "/stores/{store_id}/envelope"},
   {domain: "merchant", method: "put", path: "/stores/{store_id}/envelope"},
   {domain: "merchant", method: "post", path: "/stores/{store_id}/kill"},
+  // The kill switch's other half, declared in the change that serves it: the stop is one door
+  // and the un-stop is another, so no approval path lifts a kill and no edit resumes a store as
+  // a side effect. It reaches `shadow` and cannot reach `active`. The Python twin carries the
+  // full reasoning.
+  {domain: "merchant", method: "post", path: "/stores/{store_id}/revive"},
   {domain: "trust", method: "post", path: "/events"},
   {domain: "trust", method: "get", path: "/snapshot"},
   // T-312 UNPINNED two trust routes DESIGN §Interfaces still lists. Each was published, served
@@ -111,6 +116,12 @@ export const PINNED_ROUTES: readonly Route[] = [
   {domain: "buyer", method: "get", path: "/buyer/auth/session"},
   {domain: "buyer", method: "delete", path: "/buyer/auth/session"},
   {domain: "buyer", method: "get", path: "/buyer/profile"},
+  // The store's read of the buyer window, not the shopper's: a store-scoped bearer, and a live
+  // buyer session is refused. It reached `openapi.py` and `buyer.openapi.json` with T-142 and
+  // not this mirror, so `are the only routes declared` had been red in TypeScript ever since —
+  // the two lists are compared against the same documents in both directions, and a route in
+  // one and not the other is exactly what that pair of tests exists to catch.
+  {domain: "buyer", method: "get", path: "/buyer/store-window"},
   {domain: "buyer", method: "post", path: "/buyer/feedback/prompt"},
   {domain: "buyer", method: "post", path: "/buyer/feedback"},
   {domain: "buyer", method: "post", path: "/buyer/intent/clarify"},

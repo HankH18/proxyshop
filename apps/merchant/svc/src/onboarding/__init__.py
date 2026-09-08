@@ -1,11 +1,18 @@
 """Merchant onboarding: a plain-language interview becomes an approved, versioned envelope.
 
-R6/R7/R9. The public surface is four functions and the vocabulary they refuse with::
+R6/R7/R9. The public surface is six functions and the vocabulary they refuse with::
 
     envelope = envelope_from_transcript(transcript)   # version 1, always shadow
     digest    = approval_digest(envelope)             # what the merchant signs
     live      = activate(envelope, approval)          # refuses without a bound artifact
     v2        = edit(envelope, {"max_discount_pct": 15})   # new version, prior untouched
+    stopped   = kill(live)                            # instant, takes no artifact
+    restarted = revive(stopped)                       # back to shadow; approve again to bid
+
+The last two are a pair and are deliberately asymmetric. Stopping is one call with no
+paperwork, because a control that can be refused is not a kill switch. Starting again is two
+deliberate acts — ``revive`` un-stops the store, ``activate`` puts it back on the network — so
+nothing a merchant does by accident, and no edit they save, resumes a store on its own.
 
 C3/S7 — ``.importlinter`` forbids ``apps/exchange`` from importing this package. The envelope
 never crosses into the exchange.
@@ -28,6 +35,7 @@ from merchant_svc.onboarding.flow import (
     edit,
     envelope_from_transcript,
     kill,
+    revive,
     store_id_from_transcript,
 )
 from merchant_svc.onboarding.interview import (
@@ -69,6 +77,7 @@ __all__ = [
     "interview_script",
     "kill",
     "read_transcript",
+    "revive",
     "shop_domain_for",
     "store_id_from_transcript",
 ]

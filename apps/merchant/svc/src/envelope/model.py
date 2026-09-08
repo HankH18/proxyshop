@@ -79,6 +79,17 @@ class EnvelopeEditRefused(EnvelopeError, ValueError):
     """The requested edit is not one an envelope edit may make."""
 
 
+class ReviveRefused(EnvelopeError, ValueError):
+    """A revive was asked for on an envelope that is not killed.
+
+    Revive is the ONE reversal of the kill switch and it reverses nothing else. Applied to a
+    ``shadow`` version it would be a no-op dressed as a transition; applied to an ``active``
+    one it would be a *deactivation* — a way to take a store off the network that the kill
+    switch card does not show and that files no ``killed`` state for anyone to read. Both are
+    refused by name rather than silently absorbed.
+    """
+
+
 class ApprovalRejected(EnvelopeError, ValueError):
     """The written approval artifact is missing, incomplete, or bound to something else."""
 

@@ -319,26 +319,36 @@ def test_the_postgres_repository_writes_one_row_per_version_to_sealed_envelopes(
 
 
 def test_the_lifecycle_transitions_all_reach_the_table_at_one_version() -> None:
-    """put, activate and kill each produce a write, and activate/kill share v1's row.
+    """put, activate, kill and revive each produce a write, all against v1's row.
 
     This is the test whose absence let the plain-INSERT bug ship green: the old suite only
-    ever drove ``put``, so the two transitions that collide on the primary key were never
-    exercised against the SQL at all.
+    ever drove ``put``, so the transitions that collide on the primary key were never
+    exercised against the SQL at all. ``revive`` is a fourth one — it restates v1 a second
+    time — so it lands in the same upsert and would have been the same 500 under an insert.
     """
     connection = _FakeConnection()
     versions = EnvelopeVersions(PostgresEnvelopeRepository(connection))
     stored = versions.put("s-lifecycle", _envelope("s-lifecycle"))
     versions.activate("s-lifecycle", _approval(stored))
     versions.kill("s-lifecycle")
+    versions.revive("s-lifecycle")
 
     writes = [
         (sql, params) for sql, params in connection.statements if sql.startswith("insert into")
     ]
-    assert [params[1] for _, params in writes] == [1, 1, 1], (
-        "activate and kill must not bump the version; the approval is bound to v1's terms"
+    assert [params[1] for _, params in writes] == [1, 1, 1, 1], (
+        "activate, kill and revive must not bump the version; the approval is bound to v1's terms"
     )
-    assert [params[2] for _, params in writes] == [SHADOW, ACTIVE, KILLED]
-    assert connection.commits == 3
+    assert [params[2] for _, params in writes] == [SHADOW, ACTIVE, KILLED, SHADOW]
+    # The approval columns follow the eight terms columns, in `ApprovalArtifact.FIELDS` order.
+    # The kill carries the artifact forward — it is the record of what the store was running —
+    # and the revive writes NULLs, because a restartable version that still shows a signature
+    # would be a row asserting that this store was approved live after somebody stopped it.
+    assert writes[2][1][8] is not None, "the killed row keeps the approval on file"
+    assert writes[3][1][8:] == (None, None, None, None, None), (
+        "a revived version must be filed unapproved"
+    )
+    assert connection.commits == 4
 
 
 def test_a_term_the_column_would_round_is_refused_rather_than_silently_changed() -> None:

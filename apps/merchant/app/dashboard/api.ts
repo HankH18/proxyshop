@@ -289,6 +289,28 @@ export async function killStore(
   return (await response.json()) as { store_id: string; activation: string }
 }
 
+/**
+ * Lift the kill switch. The store comes back in `shadow`, and it does NOT come back bidding.
+ *
+ * The second half of the restart is `approveEnvelope` below, and the two are separate calls
+ * because they are separate decisions: this one un-stops the store, and only a written approval
+ * bound to its terms puts it back on the network. There is deliberately no combined helper — a
+ * function that revived and activated in one breath would be a client-side path to `active` that
+ * the service refuses to have.
+ */
+export async function reviveStore(
+  storeId: string,
+  token: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ store_id: string; activation: string }> {
+  const response = await fetchImpl(`/stores/${encodeURIComponent(storeId)}/revive`, {
+    method: 'POST',
+    headers: authHeaders(token),
+  })
+  if (!response.ok) throw await refusalFrom(response)
+  return (await response.json()) as { store_id: string; activation: string }
+}
+
 export async function saveEnvelope(
   storeId: string,
   token: string,

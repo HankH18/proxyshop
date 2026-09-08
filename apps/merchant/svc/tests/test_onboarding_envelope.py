@@ -35,12 +35,13 @@ from merchant_svc.envelope import (
     EnvelopeEditRefused,
     EnvelopeInvalid,
     EnvelopeVersions,
+    ReviveRefused,
     StoreMismatch,
     UnknownStore,
     VersionWentBackwards,
     approval_digest,
 )
-from merchant_svc.onboarding import activate, edit, envelope_from_transcript, kill
+from merchant_svc.onboarding import activate, edit, envelope_from_transcript, kill, revive
 from merchant_svc.onboarding.interview import TranscriptRejected
 
 _APPROVED_AT = "2026-01-05T09:30:00+00:00"
@@ -344,6 +345,102 @@ def test_editing_a_killed_envelope_does_not_quietly_revive_it(
     assert revived.is_live is False
 
 
+# --------------------------------------------------------------------------------------
+# The kill switch reverses — through one verb, and only into shadow
+# --------------------------------------------------------------------------------------
+def test_reviving_a_killed_envelope_returns_it_to_shadow_carrying_no_approval(
+    onboarding_envelope: Envelope,
+) -> None:
+    """The defect, closed: a merchant who stops their agent can start it again.
+
+    The whole of the reversal is here, and so is its limit. ``revive`` produces ``shadow`` —
+    un-stopped, still not bidding — and drops the approval that was on file, so the version
+    that comes back is exactly as unauthorized to bid as a freshly edited one.
+    """
+    live = activate(onboarding_envelope, _approval(onboarding_envelope))
+    stopped = kill(live)
+    assert stopped.activation == KILLED
+    assert stopped.approval is not None, "the kill keeps the record of what was running"
+
+    restarted = revive(stopped)
+    assert restarted.activation == SHADOW
+    assert restarted.is_live is False, "a revived store is un-stopped, not live"
+    assert restarted.approval is None, (
+        "the pre-kill signature must not travel: nothing approved this store being live after "
+        "somebody stopped it"
+    )
+    assert stopped.activation == KILLED, "reviving must not disturb the version it revived"
+
+
+def test_a_revive_changes_the_lifecycle_and_nothing_else(
+    onboarding_envelope: Envelope,
+) -> None:
+    """Same version, same terms. A revive is not an edit and must not read as one."""
+    stopped = kill(activate(onboarding_envelope, _approval(onboarding_envelope)))
+    restarted = revive(stopped)
+    before = dict(stopped.to_dict(), activation=SHADOW, approval=None)
+    assert restarted.to_dict() == before
+    assert restarted.version == onboarding_envelope.version
+
+
+def test_a_revived_envelope_goes_live_only_against_a_fresh_bound_approval(
+    onboarding_envelope: Envelope,
+) -> None:
+    """The second half of the restart is the ordinary approval gate, not a second door."""
+    restarted = revive(kill(activate(onboarding_envelope, _approval(onboarding_envelope))))
+
+    with pytest.raises(ApprovalRejected, match="never activated on anybody's say-so"):
+        activate(restarted, None)
+    other = Envelope.from_obj(dict(restarted.to_dict(), max_discount_pct=99.0))
+    with pytest.raises(ApprovalRejected, match="only activates the exact terms"):
+        activate(restarted, _approval(other))
+
+    live_again = activate(restarted, _approval(restarted))
+    assert live_again.activation == ACTIVE
+    assert live_again.is_live is True
+
+
+@pytest.mark.parametrize("state", ["shadow", "active"])
+def test_reviving_an_envelope_that_is_not_killed_is_refused(
+    onboarding_envelope: Envelope, state: str
+) -> None:
+    """A revive lifts a stop. It is not a way to take a live store off the network quietly.
+
+    The dangerous case is ``active``: if this were permitted it would be a deactivation that
+    files no ``killed`` state, so the kill-switch card would show a store as running while it
+    bid nothing. The ``shadow`` case is refused for the plainer reason that there is nothing
+    to lift, and a transition that changes nothing should say so rather than look like it
+    worked.
+    """
+    subject = (
+        onboarding_envelope
+        if state == SHADOW
+        else activate(onboarding_envelope, _approval(onboarding_envelope))
+    )
+    assert subject.activation == state
+    with pytest.raises(ReviveRefused, match="a revive lifts the kill switch"):
+        revive(subject)
+
+
+def test_publishing_a_version_while_killed_still_does_not_restart_the_store(
+    onboarding_envelope: Envelope,
+) -> None:
+    """The guard that makes the reversal safe to have, asserted after it became reversible.
+
+    Restarting is a merchant saying *restart this store*, never a merchant saving terms. If an
+    edit reset the state, every PUT — the envelope editor, a re-submitted interview, an
+    integration syncing floors — would un-stop a store nobody meant to un-stop.
+    """
+    stopped = kill(activate(onboarding_envelope, _approval(onboarding_envelope)))
+    published = edit(stopped, {"budget_cap": 4321.0})
+    assert published.activation == KILLED
+    assert published.is_live is False
+    with pytest.raises(ApprovalRejected, match="has been killed"):
+        activate(published, _approval(published))
+    with pytest.raises(ApprovalRejected, match="has been killed"):
+        activate(edit(published, {"budget_cap": 8642.0}), _approval(onboarding_envelope))
+
+
 @pytest.mark.parametrize(
     "changes",
     [
@@ -457,6 +554,40 @@ def test_the_history_keeps_every_state_and_never_rewrites_one(
     assert onboarding_store.is_live(store_id) is False
 
 
+def test_the_history_records_the_stop_and_the_restart_as_states_of_one_version(
+    onboarding_envelope: Envelope, onboarding_store: EnvelopeVersions
+) -> None:
+    """shadow → active → killed → shadow → active, all at v1, nothing rewritten.
+
+    The restart is filed like every other transition, so a merchant reading the version table
+    can see that the store was stopped and that the stop was lifted. A revive that overwrote
+    the killed row would erase the one fact the kill switch exists to record.
+    """
+    store_id = onboarding_envelope.store_id
+    onboarding_store.record(onboarding_envelope)
+    onboarding_store.activate(store_id, _approval(onboarding_envelope))
+    onboarding_store.kill(store_id)
+
+    restarted = onboarding_store.revive(store_id)
+    assert restarted.activation == SHADOW
+    assert onboarding_store.is_live(store_id) is False, "a revived store is not yet bidding"
+
+    live_again = onboarding_store.activate(store_id, _approval(restarted))
+    assert live_again.activation == ACTIVE
+    assert onboarding_store.is_live(store_id) is True
+
+    history = onboarding_store.history(store_id)
+    assert [state.activation for state in history] == [SHADOW, ACTIVE, KILLED, SHADOW, ACTIVE]
+    assert [state.version for state in history] == [1, 1, 1, 1, 1]
+
+
+def test_reviving_a_store_with_no_envelope_is_an_unknown_store(
+    onboarding_store: EnvelopeVersions,
+) -> None:
+    with pytest.raises(UnknownStore):
+        onboarding_store.revive("never-onboarded")
+
+
 def test_a_version_that_goes_backwards_is_refused(
     onboarding_envelope: Envelope, onboarding_store: EnvelopeVersions
 ) -> None:
@@ -530,6 +661,7 @@ async def test_the_envelope_routes_refuse_an_anonymous_caller(
             f"/stores/{store_id}/envelope", json=onboarding_envelope.to_dict()
         ),
         await onboarding_client.post(f"/stores/{store_id}/kill"),
+        await onboarding_client.post(f"/stores/{store_id}/revive"),
     ):
         assert response.status_code == 401, response.text
     assert onboarding_store.current(store_id).activation == SHADOW
@@ -689,6 +821,178 @@ async def test_killing_a_store_with_no_envelope_is_a_404(
         headers={"authorization": f"Bearer {onboarding_admin_token}"},
     )
     assert response.status_code == 404
+
+
+async def test_the_whole_stop_and_restart_cycle_over_http(
+    onboarding_client: httpx.AsyncClient,
+    onboarding_admin_token: str,
+    onboarding_envelope: Envelope,
+    onboarding_store: EnvelopeVersions,
+) -> None:
+    """shadow → active → killed → **back to active**, every step through a served route.
+
+    This is the defect's own reproduction, run forwards. Before the revive route existed the
+    fourth step was unreachable: a killed store's next version was born killed and its approval
+    was refused, so the sequence ended at ``403 approval-required`` with the error message
+    naming the remedy that had just failed.
+    """
+    store_id = onboarding_envelope.store_id
+    headers = {"authorization": f"Bearer {onboarding_admin_token}"}
+
+    written = await onboarding_client.put(
+        f"/stores/{store_id}/envelope", json=onboarding_envelope.to_dict(), headers=headers
+    )
+    assert written.status_code == 200, written.text
+    assert written.json()["activation"] == SHADOW
+
+    def approve() -> dict[str, str]:
+        current = onboarding_store.current(store_id)
+        return {**headers, "X-Envelope-Approval": json.dumps(_approval(current))}
+
+    went_live = await onboarding_client.put(
+        f"/stores/{store_id}/envelope", json={"activation": ACTIVE}, headers=approve()
+    )
+    assert went_live.status_code == 200, went_live.text
+    assert went_live.json()["activation"] == ACTIVE
+
+    stopped = await onboarding_client.post(f"/stores/{store_id}/kill", headers=headers)
+    assert stopped.status_code == 200, stopped.text
+    assert stopped.json() == {"store_id": store_id, "activation": KILLED}
+    assert onboarding_store.is_live(store_id) is False
+
+    restarted = await onboarding_client.post(f"/stores/{store_id}/revive", headers=headers)
+    assert restarted.status_code == 200, restarted.text
+    assert restarted.json() == {"store_id": store_id, "activation": SHADOW}
+    assert onboarding_store.is_live(store_id) is False, (
+        "the revive alone must not put the store back on the network"
+    )
+
+    live_again = await onboarding_client.put(
+        f"/stores/{store_id}/envelope", json={"activation": ACTIVE}, headers=approve()
+    )
+    assert live_again.status_code == 200, live_again.text
+    assert live_again.json()["activation"] == ACTIVE
+    assert onboarding_store.is_live(store_id) is True
+
+    assert [state.activation for state in onboarding_store.history(store_id)] == [
+        SHADOW,
+        ACTIVE,
+        KILLED,
+        SHADOW,
+        ACTIVE,
+    ]
+
+
+async def test_a_killed_store_is_not_restarted_by_publishing_a_new_version(
+    onboarding_client: httpx.AsyncClient,
+    onboarding_admin_token: str,
+    onboarding_envelope: Envelope,
+    onboarding_store: EnvelopeVersions,
+) -> None:
+    """The guard, over HTTP: saving terms while stopped resumes nothing.
+
+    Both shapes of PUT are driven — new terms, and terms plus a request to activate them under
+    a correctly bound artifact — because the second is the one that would look authorized.
+    """
+    store_id = onboarding_envelope.store_id
+    headers = {"authorization": f"Bearer {onboarding_admin_token}"}
+    onboarding_store.record(activate(onboarding_envelope, _approval(onboarding_envelope)))
+    assert (await onboarding_client.post(f"/stores/{store_id}/kill", headers=headers)).json()[
+        "activation"
+    ] == KILLED
+
+    published = await onboarding_client.put(
+        f"/stores/{store_id}/envelope",
+        json=dict(onboarding_envelope.to_dict(), budget_cap=4321.0),
+        headers=headers,
+    )
+    assert published.status_code == 200, published.text
+    assert published.json()["activation"] == KILLED, "a version published while killed is killed"
+    assert published.json()["version"] == 2
+    assert onboarding_store.is_live(store_id) is False
+
+    refused = await onboarding_client.put(
+        f"/stores/{store_id}/envelope",
+        json=dict(onboarding_envelope.to_dict(), activation=ACTIVE, budget_cap=8642.0),
+        headers={
+            **headers,
+            # Bound to the exact version this PUT is about to file, so nothing but the kill
+            # itself is standing between this request and a live store.
+            "X-Envelope-Approval": json.dumps(
+                _approval(edit(onboarding_store.current(store_id), {"budget_cap": 8642.0}))
+            ),
+        },
+    )
+    assert refused.status_code == 403, refused.text
+    assert refused.json()["error"] == "approval-required"
+    assert refused.json()["activation"] == KILLED
+    assert onboarding_store.is_live(store_id) is False
+
+
+@pytest.mark.parametrize("state", ["shadow", "active"])
+async def test_reviving_a_store_that_is_not_killed_is_a_409(
+    onboarding_client: httpx.AsyncClient,
+    onboarding_admin_token: str,
+    onboarding_envelope: Envelope,
+    onboarding_store: EnvelopeVersions,
+    state: str,
+) -> None:
+    store_id = onboarding_envelope.store_id
+    onboarding_store.record(
+        onboarding_envelope
+        if state == SHADOW
+        else activate(onboarding_envelope, _approval(onboarding_envelope))
+    )
+    response = await onboarding_client.post(
+        f"/stores/{store_id}/revive",
+        headers={"authorization": f"Bearer {onboarding_admin_token}"},
+    )
+    assert response.status_code == 409, response.text
+    assert response.json()["error"] == "revive-refused"
+    assert onboarding_store.current(store_id).activation == state, "nothing was changed"
+
+
+async def test_reviving_a_store_with_no_envelope_is_a_404(
+    onboarding_client: httpx.AsyncClient, onboarding_admin_token: str
+) -> None:
+    response = await onboarding_client.post(
+        "/stores/never-onboarded/revive",
+        headers={"authorization": f"Bearer {onboarding_admin_token}"},
+    )
+    assert response.status_code == 404
+    assert response.json()["error"] == "no-envelope"
+
+
+async def test_stopping_a_store_needs_no_approval_artifact_and_no_state(
+    onboarding_client: httpx.AsyncClient,
+    onboarding_admin_token: str,
+    onboarding_envelope: Envelope,
+    onboarding_store: EnvelopeVersions,
+) -> None:
+    """The direction that must not acquire friction from any of this.
+
+    The kill takes no artifact, refuses no state, and answers the same however many times it is
+    pressed — including on a store that was just revived. A kill switch that could be refused
+    for a paperwork reason is not a kill switch, and the revive is precisely the shape of change
+    that tempts somebody to add a state check to its opposite number.
+    """
+    store_id = onboarding_envelope.store_id
+    headers = {"authorization": f"Bearer {onboarding_admin_token}"}
+    onboarding_store.record(activate(onboarding_envelope, _approval(onboarding_envelope)))
+
+    for _ in range(2):
+        stopped = await onboarding_client.post(f"/stores/{store_id}/kill", headers=headers)
+        assert stopped.status_code == 200, stopped.text
+        assert stopped.json()["activation"] == KILLED
+        assert "X-Envelope-Approval" not in stopped.request.headers
+
+    assert (
+        await onboarding_client.post(f"/stores/{store_id}/revive", headers=headers)
+    ).status_code == 200
+    stopped_again = await onboarding_client.post(f"/stores/{store_id}/kill", headers=headers)
+    assert stopped_again.status_code == 200, stopped_again.text
+    assert stopped_again.json()["activation"] == KILLED
+    assert onboarding_store.is_live(store_id) is False
 
 
 # --------------------------------------------------------------------------------------

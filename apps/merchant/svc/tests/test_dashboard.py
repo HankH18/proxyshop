@@ -33,6 +33,7 @@ from typing import Any
 
 import httpx
 import pytest
+from merchant_svc.envelope.digest import approval_digest
 from merchant_svc.envelope.store import EnvelopeVersions
 
 from ._fixtures_dashboard import (  # type: ignore[import-not-found]
@@ -366,6 +367,93 @@ async def test_the_kill_switch_makes_the_real_store_agent_stop_bidding(
     assert outcomes == ["declined", "bid"], (
         f"the bid journal must show both solicitations, newest first: {outcomes}"
     )
+
+
+async def test_a_restarted_store_bids_again_through_the_console_s_own_routes(
+    dash_client: httpx.AsyncClient,
+    dash_admin_token: str,
+    dash_store: EnvelopeVersions,
+    dash_journal: Any,
+    dash_upstreams: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The kill switch, all the way round: bidding → stopped → **bidding again**.
+
+    Every step is a route the console posts to, and the agent is the REAL
+    ``store_agent.main:app`` over this repo's own ``store-alpha`` fixture, re-created at each
+    phase with the activation the merchant service has just published — which is what makes
+    "the agent bids again" a statement about the merchant's envelope rather than about a stub
+    that was told to say yes. (A hosted agent caches its context per process; the sibling test
+    below is where that gap is graded.)
+
+    The middle of it is the property that must not be lost: after the revive the store is
+    ``shadow`` and its agent still declines. Being un-stopped is not being live.
+    """
+    _configure_upstreams(monkeypatch)
+    dash_store.put(STORE, _envelope())
+    headers = {"authorization": f"Bearer {dash_admin_token}"}
+
+    def approve() -> dict[str, str]:
+        current = dash_store.current(STORE)
+        return {
+            **headers,
+            "X-Envelope-Approval": json.dumps(
+                {
+                    "approver": "Dana Okonkwo, owner",
+                    "approved_at": "2026-01-05T09:30:00+00:00",
+                    "envelope_hash": approval_digest(current),
+                }
+            ),
+        }
+
+    async def solicit(activation: str) -> dict[str, Any]:
+        dash_upstreams(AGENT_URL, dash_store_agent_app(activation))
+        answered = await dash_client.post(f"/stores/{STORE}/bids/solicit", headers=headers, json={})
+        assert answered.status_code == 200, answered.text
+        return dict(answered.json())
+
+    live = await dash_client.put(
+        f"/stores/{STORE}/envelope", json={"activation": "active"}, headers=approve()
+    )
+    assert live.status_code == 200, live.text
+    assert (await solicit("active"))["outcome"] == "bid"
+
+    killed = await dash_client.post(f"/stores/{STORE}/kill", headers=headers)
+    assert killed.json()["activation"] == "killed"
+    stopped_row = await solicit("killed")
+    assert stopped_row["outcome"] == "declined"
+    assert stopped_row["decline_reason"] == "store_killed"
+
+    revived = await dash_client.post(f"/stores/{STORE}/revive", headers=headers)
+    assert revived.status_code == 200, revived.text
+    assert revived.json() == {"store_id": STORE, "activation": "shadow"}
+    body = (await dash_client.get(f"/stores/{STORE}/dashboard", headers=headers)).json()
+    assert body["envelope"]["may_bid"] is False, "a revived store is un-stopped, not live"
+    assert body["onboarding"]["step"] == "approval", (
+        "the console must be offered the approval artifact again; without it the merchant can "
+        "see the store is restartable and still not reach the form that restarts it"
+    )
+    assert body["onboarding"]["approval"]["envelope_hash"] == approval_digest(
+        dash_store.current(STORE)
+    )
+    assert (await solicit("shadow"))["outcome"] == "declined", "still not bidding"
+
+    relive = await dash_client.put(
+        f"/stores/{STORE}/envelope", json={"activation": "active"}, headers=approve()
+    )
+    assert relive.status_code == 200, relive.text
+    assert relive.json()["activation"] == "active"
+    assert (await solicit("active"))["outcome"] == "bid", "the store must bid again"
+
+    final = (await dash_client.get(f"/stores/{STORE}/dashboard", headers=headers)).json()
+    assert final["envelope"]["may_bid"] is True
+    assert [row["activation"] for row in final["envelope"]["versions"]] == [
+        "shadow",
+        "active",
+        "killed",
+        "shadow",
+        "active",
+    ]
 
 
 async def test_the_journal_flags_a_stopped_store_whose_agent_bid_anyway(

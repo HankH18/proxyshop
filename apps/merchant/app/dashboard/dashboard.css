@@ -401,8 +401,11 @@ ul.tight li { font-size: 0.82rem; }
 
 /* A one-way consequence, said before it is pressed rather than after.
    `.notice--final` is NOT a sixth panel state — the five above describe a panel that could
-   not be filled, and this describes a control that works and cannot be undone. It borrows the
-   `bad` tone and the killed pill's ground because that is what it is warning about. */
+   not be filled, and this describes a control that works and takes the store off the network
+   the moment it is pressed. It borrows the `bad` tone and the killed pill's ground because
+   that is what it is warning about. (It used to say "cannot be undone", which was true of the
+   kill switch until the kill became reversible; the class still marks the consequential
+   control, and the card's own copy now states what is and is not reversible.) */
 .notice--final { border-left-color: var(--bad); background: #241a1c; }
 .notice--final .notice__heading { color: var(--bad); }
 
