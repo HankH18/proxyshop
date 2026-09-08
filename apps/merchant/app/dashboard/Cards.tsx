@@ -88,7 +88,7 @@ export function OnboardingCard({
   const unanswered = asked.filter(({ index }) => (said[index] ?? '').trim() === '')
 
   return (
-    <Card title="Onboarding" requirement="R6 · R7">
+    <Card id="onboarding" title="Onboarding" requirement="R6 · R7">
       <PanelNotice panel={panel} />
       {/*
         `PanelNotice` renders nothing in the `ok` state, and this panel IS ok while one of its
@@ -261,13 +261,20 @@ export function EnvelopeCard({
         written approval artifact (<code>X-Envelope-Approval</code>), never by asking for it.
       </p>
       {panel.versions.length > 0 ? (
+        <div className="scroller">
         <table className="grid">
           <thead>
             <tr>
               <th>Version</th>
               <th>Activation</th>
+              {/*
+                Three columns, as the Screens document draws it. `approved_at` used to be a
+                fourth and, beside an approver address that is a single 43-character token, it
+                sat off the right edge of the card where nobody could read it. It is now the
+                second line of the approval cell — same two facts, both on the page, and they
+                belong together anyway: who signed and when they signed is one event.
+              */}
               <th>Approved by</th>
-              <th>Approved at</th>
             </tr>
           </thead>
           <tbody>
@@ -286,12 +293,20 @@ export function EnvelopeCard({
                 <td>
                   <span className={`pill pill--${row.activation}`}>{row.activation}</span>
                 </td>
-                <td>{row.approved_by ?? '—'}</td>
-                <td>{row.approved_at ? instant(row.approved_at) : '—'}</td>
+                <td className="approver">
+                  {row.approved_by ?? '—'}
+                  {row.approved_at ? (
+                    <>
+                      <br />
+                      <span className="muted">{instant(row.approved_at)}</span>
+                    </>
+                  ) : null}
+                </td>
               </tr>
             ))}
           </tbody>
         </table>
+        </div>
       ) : null}
       {current ? (
         <form
@@ -349,6 +364,7 @@ export function KillSwitch({
 }): JSX.Element {
   const [confirmation, setConfirmation] = useState('')
   const armed = confirmation.trim() === storeId
+  const stopped = activation === 'killed'
 
   return (
     <Card title="Kill switch" requirement="R9">
@@ -358,22 +374,68 @@ export function KillSwitch({
         <strong>{mayBid ? 'is bidding' : 'is not bidding'}</strong>.
       </p>
       <p className="muted">{reason}</p>
-      <p className="muted">
-        Stopping needs no approval — only starting does. After killing, solicit a bid below: the
-        agent answers <code>204 store_killed</code>, which is what makes the switch observable
-        rather than merely recorded.
-      </p>
-      <label htmlFor="kill-confirm">Type the store id to arm</label>
-      <input
-        id="kill-confirm"
-        value={confirmation}
-        placeholder={storeId}
-        onChange={(event) => setConfirmation(event.target.value)}
-      />
+      {/*
+        THE FINALITY, SAID BEFORE THE PRESS RATHER THAN DISCOVERED AFTER IT.
+
+        Measured in `merchant_svc.envelope.versions`, not inferred from the copy:
+        `activate_envelope` refuses a killed envelope outright (versions.py:105) and tells the
+        caller to "publish a new version and approve that" — and `edit_envelope` mints that
+        next version with `activation = KILLED if current.activation == KILLED else SHADOW`
+        (versions.py:83). The new version is therefore born killed and its approval is refused
+        for the same reason as the first. The only shadow reset in the store is the branch for
+        a store with NO history at all (`store.py:237`), which a killed store is not. So every
+        route this page can reach leaves a stopped store stopped.
+
+        The service is right to hold that line and this card is not the place to argue with it;
+        what this card owes the person about to press the button is that the door locks behind
+        them.
+      */}
+      <div className="notice notice--final">
+        <p className="notice__heading">Stopping this store is permanent.</p>
+        <p className="notice__detail">
+          Stopping needs no approval — only starting does, and starting is reachable from no
+          control on this page. A killed envelope refuses activation (<em>publish a new version
+          and approve that</em>), and the version an edit publishes is itself killed: the state
+          is carried forward rather than dropped to <code>shadow</code>. The approval that would
+          restart this store is refused for the same reason as the first one.
+        </p>
+        <p className="notice__detail">
+          This ends the store’s participation in the network, and nothing on this console undoes
+          it.
+        </p>
+      </div>
       {error ? <p className="error">{error}</p> : null}
-      <button type="button" className="danger" disabled={!armed || busy} onClick={onKill}>
-        {busy ? 'Killing…' : 'Kill this store’s agent'}
-      </button>
+      {stopped ? (
+        /*
+          No arming field and no button once the store is stopped. A control that cannot change
+          anything is worse than the sentence saying why it is not there — and here it would be
+          worse still, because a second press would read as a control that could be un-pressed.
+        */
+        <p className="muted">
+          Already stopped, and this console cannot restart it. Solicit a bid above: the agent
+          answers <code>204 store_killed</code>, which is what makes the switch observable rather
+          than merely recorded.
+        </p>
+      ) : (
+        <>
+          <p className="muted">
+            After killing, solicit a bid above: the agent answers <code>204 store_killed</code>,
+            which is what makes the switch observable rather than merely recorded.
+          </p>
+          <div className="stack">
+            <label htmlFor="kill-confirm">Type the store id to arm</label>
+            <input
+              id="kill-confirm"
+              value={confirmation}
+              placeholder={storeId}
+              onChange={(event) => setConfirmation(event.target.value)}
+            />
+            <button type="button" className="danger" disabled={!armed || busy} onClick={onKill}>
+              {busy ? 'Killing…' : 'Kill this store’s agent — permanently'}
+            </button>
+          </div>
+        </>
+      )}
     </Card>
   )
 }
@@ -384,7 +446,7 @@ export function KillSwitch({
 export function LossesCard({ panel }: { panel: LossesPanel }): JSX.Element {
   const rows = panel.by_cluster ?? []
   return (
-    <Card title="Where you lost" requirement="R9 · aggregated by intent cluster">
+    <Card title="Where you lost" requirement="R9 · by cluster">
       <PanelNotice panel={panel} />
       <p className="muted">
         Reason categories and the buyer criteria you did not meet. <strong>No rival is named
@@ -399,42 +461,65 @@ export function LossesCard({ panel }: { panel: LossesPanel }): JSX.Element {
         </p>
       ) : null}
       {rows.length > 0 ? (
-        <table className="grid">
-          <thead>
-            <tr>
-              <th>Intent cluster</th>
-              <th>Lost</th>
-              {REASONS.map((reason) => (
-                <th key={reason}>{reason}</th>
-              ))}
-              <th>Buyer criteria unmet</th>
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row) => (
-              <tr key={row.cluster_id}>
-                <td>{row.cluster_id}</td>
-                <td>{row.lost}</td>
-                {REASONS.map((reason) => (
-                  <td key={reason} className={row.reasons[reason] > 0 ? 'hot' : ''}>
-                    {row.reasons[reason]}
-                  </td>
+        <>
+          <div className="scroller">
+            <table className="grid">
+              <thead>
+                <tr>
+                  <th>Intent cluster</th>
+                  <th>Lost</th>
+                  {REASONS.map((reason) => (
+                    <th key={reason}>{reason}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row) => (
+                  <tr key={row.cluster_id}>
+                    <td>{row.cluster_id}</td>
+                    <td>{row.lost}</td>
+                    {REASONS.map((reason) => (
+                      <td key={reason} className={row.reasons[reason] > 0 ? 'hot' : ''}>
+                        {row.reasons[reason]}
+                      </td>
+                    ))}
+                  </tr>
                 ))}
-                <td>
-                  {row.unmet_criteria.length > 0 ? (
-                    <ul className="tight">
-                      {row.unmet_criteria.map((criterion) => (
-                        <li key={criterion}>{criterion}</li>
-                      ))}
-                    </ul>
-                  ) : (
-                    '—'
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+              </tbody>
+            </table>
+          </div>
+          {/*
+            The unmet criteria sit BELOW the table rather than in a seventh column, which is
+            where the Screens document puts them and, measured in the browser, the only place
+            they are readable: in a 23rem card a seventh column holding "free shipping over
+            $35" fell off the right edge and a merchant scrolling past read the loss report as
+            though no criterion had been missed.
+
+            Each list still names its own cluster. The design's mock shows one flat list under
+            a two-cluster table, and that ambiguity is the one thing not carried over: which
+            criteria belong to which cluster is the actionable half of this panel.
+          */}
+          <h3>Buyer criteria unmet</h3>
+          {rows.map((row) => (
+            <div key={row.cluster_id}>
+              <p className="muted">
+                <code>{row.cluster_id}</code>
+              </p>
+              {row.unmet_criteria.length > 0 ? (
+                <ul className="tight">
+                  {row.unmet_criteria.map((criterion) => (
+                    <li key={criterion}>{criterion}</li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="muted">
+                  The report names no unmet criterion for this cluster — the losses above were
+                  categorised without one.
+                </p>
+              )}
+            </div>
+          ))}
+        </>
       ) : null}
     </Card>
   )
@@ -455,7 +540,7 @@ export function TrustCard({
   // instance: an earlier draft read `dimensions` and rendered an empty table forever.
   const dimensions = Object.entries(snapshot?.dims ?? {})
   return (
-    <Card title="Trust" requirement="R12 · R13 · R9 (per dimension, with payloads)">
+    <Card title="Trust" requirement="R12 · R13 · R9">
       <PanelNotice panel={panel} />
       {snapshot ? (
         <>
@@ -471,6 +556,7 @@ export function TrustCard({
               {snapshot.blacklisted ? ' · blacklisted' : ''}
             </span>
           </p>
+          <div className="scroller">
           <table className="grid">
             <thead>
               <tr>
@@ -507,6 +593,7 @@ export function TrustCard({
               })}
             </tbody>
           </table>
+          </div>
         </>
       ) : panel.state === 'ok' ? (
         <p className="muted">{panel.detail}</p>
@@ -555,7 +642,7 @@ export function BidsCard({
   const entries = panel.entries ?? []
 
   return (
-    <Card title="Bid activity" requirement="R7 · R9 (every bid, with its reason)">
+    <Card title="Bid activity" requirement="R7 · R9">
       <PanelNotice panel={panel} />
       <p className="muted">
         These are solicitations <strong>you</strong> made from this page, against your own

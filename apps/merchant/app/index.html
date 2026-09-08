@@ -4,6 +4,20 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ProxyShop — merchant dashboard</title>
+    <!--
+      NO FONT <link> HERE, AND THAT IS THE POINT RATHER THAN AN OMISSION.
+
+      `dashboard/dashboard.css` declares Archivo, Instrument Sans and DM Mono in `@font-face`
+      blocks that point at `./fonts/*.woff2` in this repo, so vite hashes the files into
+      `dist/assets/` and the console fetches every face from the origin that served the page.
+      The block's own comment carries the reasoning; the short version is that the demo runs
+      offline, a `fonts.googleapis.com` stylesheet fails there by falling back SILENTLY, and
+      the shopper journey already self-hosts the identical eight files.
+
+      What was here before this file changed: nothing at all. The stylesheet named three
+      families and the repo loaded none of them, so the console rendered in the system UI font
+      with every gate green — the failure this head is now the record of.
+    -->
   </head>
   <body>
     <div id="root"></div>

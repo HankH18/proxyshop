@@ -117,7 +117,7 @@ export function Dashboard(): JSX.Element {
   if (!token || !storeId) {
     return (
       <main className="shell">
-        <Masthead storeId={storeId} generatedAt="" />
+        <Masthead storeId={storeId} page={null} />
         <section className="card">
           <h2>Sign in</h2>
           <p className="muted">
@@ -151,7 +151,7 @@ export function Dashboard(): JSX.Element {
 
   return (
     <main className="shell">
-      <Masthead storeId={storeId} generatedAt={page?.generated_at ?? ''} />
+      <Masthead storeId={storeId} page={page} />
       <div className="toolbar">
         <button type="button" onClick={() => void load()} disabled={loading}>
           {loading ? 'Reading…' : 'Reload'}
@@ -176,33 +176,30 @@ export function Dashboard(): JSX.Element {
         </div>
       ) : null}
 
+      {/*
+        Onboarding is LAST in the Screens document, which is right for the store that document
+        draws — one that has already joined — and wrong for one that has not: five panels that
+        can only say "nothing recorded yet" would stand between a new merchant and the single
+        card they can act on. So the order below is the designed one and this line is the
+        repair, shown only while the store still has an interview or an approval outstanding.
+      */}
+      {page && (page.onboarding.step === 'interview' || page.onboarding.step === 'approval') ? (
+        <p className="status-line muted">
+          This store is not live yet — <a href="#onboarding">finish onboarding</a> at the foot of
+          this page.
+        </p>
+      ) : null}
+
       {page ? (
         <div className="columns">
           {/*
-            First on the page, and that is the ordering R6 asks for rather than a layout
-            preference: a merchant with no envelope has nothing to kill, nothing to solicit and
-            no losses to read. Every other card below is about a store that has already joined.
+            The order the Screens document specifies: trust, then where the store lost, then
+            what its agent actually answered, then the terms it answers under, then the switch
+            that stops it, then the door it came in by. It reads outward from the fact a
+            merchant opens this page to check.
           */}
-          <OnboardingCard
-            panel={page.onboarding}
-            busy={busy === 'interview' || busy === 'approve'}
-            error={busy === '' && actionError ? actionError : ''}
-            onSubmitInterview={(turns, completedAt) =>
-              void act('interview', () => submitInterview(storeId, token, turns, completedAt))
-            }
-            onApprove={(artifact, header) =>
-              void act('approve', () => approveEnvelope(storeId, token, artifact, header))
-            }
-          />
-          <KillSwitch
-            storeId={storeId}
-            activation={page.envelope.activation}
-            mayBid={page.envelope.may_bid}
-            reason={page.envelope.reason}
-            busy={busy === 'kill'}
-            error={busy === '' && actionError ? actionError : ''}
-            onKill={() => void act('kill', () => killStore(storeId, token))}
-          />
+          <TrustCard panel={page.trust} events={page.trust_events} />
+          <LossesCard panel={page.losses} />
           <BidsCard
             panel={page.bids}
             busy={busy === 'solicit'}
@@ -216,8 +213,6 @@ export function Dashboard(): JSX.Element {
               )
             }
           />
-          <LossesCard panel={page.losses} />
-          <TrustCard panel={page.trust} events={page.trust_events} />
           <EnvelopeCard
             panel={page.envelope}
             busy={busy === 'envelope'}
@@ -226,21 +221,65 @@ export function Dashboard(): JSX.Element {
               void act('envelope', () => saveEnvelope(storeId, token, document))
             }
           />
+          <KillSwitch
+            storeId={storeId}
+            activation={page.envelope.activation}
+            mayBid={page.envelope.may_bid}
+            reason={page.envelope.reason}
+            busy={busy === 'kill'}
+            error={busy === '' && actionError ? actionError : ''}
+            onKill={() => void act('kill', () => killStore(storeId, token))}
+          />
+          <OnboardingCard
+            panel={page.onboarding}
+            busy={busy === 'interview' || busy === 'approve'}
+            error={busy === '' && actionError ? actionError : ''}
+            onSubmitInterview={(turns, completedAt) =>
+              void act('interview', () => submitInterview(storeId, token, turns, completedAt))
+            }
+            onApprove={(artifact, header) =>
+              void act('approve', () => approveEnvelope(storeId, token, artifact, header))
+            }
+          />
         </div>
       ) : null}
     </main>
   )
 }
 
-function Masthead({ storeId, generatedAt }: { storeId: string; generatedAt: string }): JSX.Element {
+/**
+ * The store header the Screens document puts above everything else.
+ *
+ * The stamp carries three facts rather than one — when the page was read, WHICH envelope
+ * version it was read against, and whether that version is live. The last two were on the page
+ * already but only inside two different cards, so a merchant scrolling the console could not
+ * see at a glance that the terms they were reading were the killed ones. Nothing here is
+ * derived: `version` and `activation` are the served payload's own fields.
+ */
+function Masthead({ storeId, page }: { storeId: string; page: DashboardPage | null }): JSX.Element {
+  const generatedAt = page?.generated_at ?? ''
+  // Gated on `current`, not on `activation`. The served payload reports `activation: "shadow"`
+  // for a store that has NO envelope at all, so stamping a shadow pill on the masthead there
+  // would announce a lifecycle state for a document that does not exist. No envelope, no
+  // envelope stamp; the kill-switch card is where a store with nothing on file is explained.
+  const envelope = page?.envelope.current
   return (
     <header className="masthead">
       <div>
-        <p className="masthead__eyebrow">ProxyShop · merchant</p>
+        <p className="masthead__eyebrow">Proxyshop for merchants</p>
         <h1>{storeId || 'no store selected'}</h1>
       </div>
       <p className="masthead__stamp">
-        {generatedAt ? `read at ${new Date(generatedAt).toLocaleString()}` : ''}
+        {generatedAt ? <span>read at {new Date(generatedAt).toLocaleString()}</span> : null}
+        {envelope === undefined ? null : (
+          <>
+            <span>· envelope v{envelope.version}</span>
+            <span>·</span>
+            <span className={`pill pill--${page?.envelope.activation ?? ''}`}>
+              {page?.envelope.activation}
+            </span>
+          </>
+        )}
       </p>
     </header>
   )

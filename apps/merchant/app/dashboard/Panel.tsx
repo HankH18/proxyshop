@@ -49,17 +49,27 @@ export function PanelNotice({ panel }: { panel: PanelBase }): JSX.Element | null
   )
 }
 
+/**
+ * The shared container every card renders into.
+ *
+ * `id` is optional and purely additive: the Screens document puts Onboarding LAST, which is
+ * right for a store that has already joined and wrong for one that has not, so the page links
+ * a merchant straight down to the card they can act on rather than reordering itself. A card
+ * with no `id` renders exactly as it did before.
+ */
 export function Card({
+  id,
   title,
   requirement,
   children,
 }: {
+  id?: string
   title: string
   requirement: string
   children: ReactNode
 }): JSX.Element {
   return (
-    <section className="card">
+    <section className="card" {...(id === undefined ? {} : { id })}>
       <header className="card__head">
         <h2>{title}</h2>
         <span className="card__req" title="the requirement this card serves">
