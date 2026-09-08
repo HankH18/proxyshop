@@ -10,11 +10,21 @@ import { cleanup, render, screen, fireEvent, waitFor } from '@testing-library/re
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { MetricsPage } from './MetricsPage'
-import { auctionPath, livecheckPath, type Fetcher } from './telemetry'
+import {
+  REMEMBERED_AUCTION_KEY,
+  auctionPath,
+  livecheckPath,
+  type Fetcher,
+} from './telemetry'
 
 // `@testing-library/react` registers its own cleanup only when the runner exposes
 // `afterEach` globally, and this workspace's vitest projects do not set `globals: true`.
 afterEach(cleanup)
+// `cleanup` unmounts the tree and touches no storage. `sessionStorage` is shared across every
+// test in this file, and the page READS it in its initial state, so a key left behind by one
+// test seeds the next one's auction field — a leak that would make these tests pass for the
+// wrong reason and, worse, could make an unrelated one fail mysteriously.
+afterEach(() => window.sessionStorage.clear())
 
 const HERE = { protocol: 'http:', hostname: 'localhost' }
 
@@ -145,6 +155,44 @@ describe('the recorded auction trace', () => {
     fireEvent.change(input, { target: { value: 'auc-2' } })
     fireEvent.submit(input.closest('form')!)
     await waitFor(() => expect(asked).toContain(auctionPath('auc-2')))
+  })
+})
+
+describe('the remembered auction id can be cleared from this page', () => {
+  // The dead end these pin: `Journey` writes this key on every confirm, and for a while the
+  // ONLY `forget` was behind its sign-out button — which renders only where
+  // `GET /buyer/auth/sign-in` answers `{"offered": true}`. Neither the compose stack nor the
+  // devstack offers it, so on every deployment a demo is driven on, a remembered id could be
+  // written and never cleared.
+  it('removes the key from sessionStorage, not just the text from the field', () => {
+    window.sessionStorage.setItem(REMEMBERED_AUCTION_KEY, 'auc-stale')
+    render(<MetricsPage fetcher={stack()} location={HERE} />)
+    // Read out of storage, because no `initialAuctionId` was injected — this is the real
+    // path a demo audience arrives on.
+    expect(screen.getByLabelText('Auction id')).toHaveValue('auc-stale')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Forget it' }))
+
+    expect(screen.getByLabelText('Auction id')).toHaveValue('')
+    // The half that clearing the field alone would not do: `remembered()` seeds the initial
+    // state of both `auctionId` and `submitted`, so a surviving key comes straight back on
+    // the next mount.
+    expect(window.sessionStorage.getItem(REMEMBERED_AUCTION_KEY)).toBeNull()
+  })
+
+  it('stops tracing the forgotten auction rather than leaving its trace on screen', async () => {
+    window.sessionStorage.setItem(REMEMBERED_AUCTION_KEY, 'auc-1')
+    render(<MetricsPage fetcher={stack()} location={HERE} />)
+    expect(await screen.findByText('The answer itself, as the service sent it')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Forget it' }))
+
+    await waitFor(() => expect(document.querySelector('.metrics-trace')).toBeNull())
+  })
+
+  it('offers nothing to forget when nothing is remembered', () => {
+    render(<MetricsPage fetcher={stack()} location={HERE} initialAuctionId="" />)
+    expect(screen.getByRole('button', { name: 'Forget it' })).toBeDisabled()
   })
 })
 

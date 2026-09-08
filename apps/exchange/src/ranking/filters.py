@@ -6,7 +6,7 @@ a candidate that the filters cannot positively clear is excluded *before* the pu
 formula runs, so no `rank_score` exists for it at all. A number that existed but was ignored
 would be a number some later reader could sort by; there is no such number here.
 
-The five filters, and why each one denies rather than discounts:
+The six filters, and why each one denies rather than discounts:
 
 * **Blacklist (R12).** A blacklisted store may not participate at any price. A store whose
   status cannot be read — no row in the snapshot, or a flag that is not a boolean — is
@@ -22,6 +22,13 @@ The five filters, and why each one denies rather than discounts:
   by nothing else. Ambiguous, unsupported and contradicted evidence are all *absent*
   evidence as far as this filter is concerned — they are dropped before the constraint is
   decided, so an unproven claim can never carry a candidate through.
+
+* **Organic relevance (D55).** A row the PLATFORM manufactured — a ``fallback``, where the
+  store never bid and the exchange stood its list price up in its place — must be about what
+  the shopper asked, judged by :func:`organic_relevance_reason` against the platform's own
+  crawled identity of the product. It is the one filter here that is about the QUESTION rather
+  than about the store, and the only one that never touches a row a store actually bid: see
+  that function for the three conditions that must all hold before it refuses anything.
 
 * **The buyer's budget.** A ``price_usd`` bound (``lte``/``gte``) is decided against the
   OFFER'S OWN PRICE by :func:`budget_reasons`, and is the one filter here that is not about
@@ -66,6 +73,7 @@ from ingest.graph.model import slug
 from ..checkout.codes import UnusableOffer, expiry_epoch
 from ..checkout.domain import is_on_domain
 from ..retrieval.criteria import HardCriterion, MalformedIntent
+from ..retrieval.relevance import TopicalRelevance, identity_surface
 from .attestation import ATTESTATION_FIELD, attested_status
 from .reasons import (
     REASON_BLACKLIST_UNREADABLE,
@@ -75,6 +83,7 @@ from .reasons import (
     REASON_HARD_CONSTRAINT,
     REASON_MALFORMED,
     REASON_OFF_DOMAIN,
+    REASON_OFF_TOPIC_ORGANIC,
     REASON_OVER_BUDGET,
     REASON_PRICE_UNREADABLE,
     REASON_UNDECIDABLE_INTENT,
@@ -775,6 +784,64 @@ def unanswerable_reason(criterion: HardCriterion) -> str:
 # ---------------------------------------------------------------------------------
 # The gate itself
 # ---------------------------------------------------------------------------------
+def organic_relevance_reason(
+    candidate: Any,
+    *,
+    query_text: str,
+    identity: Any,
+    relevance: TopicalRelevance,
+) -> str | None:
+    """Why this ORGANIC row is not about what the shopper asked, or ``None``.
+
+    The sixth filter, and the only one that is about the shopper's question rather than about
+    the store. It answers a defect a green ranking could not see: a vector index returns its
+    top ``k`` whatever is in it, so a catalogue with nothing on the subject produces a full
+    shortlist rather than an empty one. Measured through ``POST /auctions`` before this
+    existed — ``"a walnut coffee table for the lounge"``, four slots, four liver supplements.
+
+    THREE conditions, all of which must hold before anything is refused. Each is the
+    silent-on-honest-traffic direction of this gate, and each is here rather than left to fall
+    out of the arithmetic:
+
+    1. **The candidate is a FALLBACK.** ``entry.fallback`` is ``collect_bids``' own verdict for
+       a store that did not bid: the exchange stood a list-price offer up in its place, chose
+       the product off the roster row and wrote the pitch itself. A row a store BID is
+       untouched — see :data:`~exchange.ranking.reasons.REASON_OFF_TOPIC_ORGANIC` for why the
+       asymmetry is D55's and not a softening. Measured on the demo roster: the three queries
+       whose stores bid (``"milk thistle"``, ``"milk thistle silymarin liver support extract
+       under $50"``, ``"liver support supplement"``) keep all four sponsored slots under this
+       filter, because it never looks at them.
+    2. **The exchange holds a crawled identity for this store's product.** ``identity`` is
+       :func:`~exchange.ranking.verification.catalog_identity`'s answer, absent for a store this
+       exchange's catalogue never named. Absent means unchecked, and an unchecked product is
+       kept: an exchange whose catalogue is unwired would otherwise refuse every organic row in
+       every auction, which is a misconfiguration reported as "this catalogue serves nothing".
+    3. **The relevance rule could decide.** See
+       :meth:`~exchange.retrieval.relevance.TopicalRelevance.judge` — a query with no content
+       words, or an identity that folds to none, answers ``about=True, decidable=False`` and
+       nothing is refused on it.
+
+    Args:
+        candidate: the projected candidate, carrying ``fallback``.
+        query_text: the shopper's own words, off the intent.
+        identity: the PLATFORM's crawled identity for this store's rostered product, or
+            ``None``. Never the store's message, pitch or claims.
+        relevance: the rule to decide with.
+
+    Returns:
+        A ``REASON_OFF_TOPIC_ORGANIC``-prefixed reason, or ``None`` when this row stands.
+    """
+    if not bool(read(candidate, "fallback", False)):
+        return None
+    surface = identity_surface(identity)
+    if not surface:
+        return None
+    verdict = relevance.judge(query_text, surface)
+    if verdict.about:
+        return None
+    return f"{REASON_OFF_TOPIC_ORGANIC}: {verdict.detail}"
+
+
 def exclusion_reasons(
     candidate: Any,
     *,
@@ -847,6 +914,7 @@ __all__ = [
     "hard_constraint_reasons",
     "is_budget_bound",
     "offer_price",
+    "organic_relevance_reason",
     "read",
     "read_criteria",
     "trust_row",

@@ -11,12 +11,13 @@
  * `0`. A card that quietly dropped its price line would leave a shopper comparing a store
  * that quoted nothing against one that quoted, with nothing on screen saying so.
  *
- * Six things here are load-bearing:
+ * Seven things here are load-bearing:
  *
  * 1. **Every slot's provenance labels are rendered, always.** Not on hover, not behind a
  *    "details" toggle. R2's point is that a buyer can see which claims a store stands
  *    behind before choosing, and provenance a buyer has to go looking for is provenance
- *    they did not have when they chose.
+ *    they did not have when they chose. The record fold added in rule 7 does not weaken this
+ *    and could not: nothing that was on the card moved into it.
  * 2. **The labels are the strings the exchange sent.** This component does not map, filter,
  *    translate or re-derive them — `labelTone` only picks a `data-tone` for styling, and a
  *    label it does not recognise is still printed (D30).
@@ -40,23 +41,48 @@
  *    on Accept is the gesture that asks for two checkouts for one auction; the ref below is
  *    the client's half of the ledger the service keeps. And a shortlist with one eligible
  *    store renders one slot — there is no padding-out with a store that failed a filter.
+ * 7. **A card opens into the record behind it, and the record keeps the same two voices.**
+ *    `SlotRecordPanel` below. What a shopper decides on stays on the card; what opens is the
+ *    material a card has no room for and which, until now, reached the browser and was
+ *    rendered by nobody — the crawl's snapshot id and stamp, the whole trust snapshot rather
+ *    than the two numeric fields the browser's narrowing leaves, the published rank score
+ *    with what each term of the formula contributed, and every promise's own provenance,
+ *    authority rank and evidence reference. It is split into a PLATFORM block and a SHOP
+ *    block for the same reason `PitchPanel` is, and the split matters more here: this is the
+ *    surface a shopper opens in order to decide whether to believe something.
  *
- * This component performs no I/O. It renders what it is given and calls back; `shortlist.ts`
- * owns the wire.
+ * WHAT CHANGED ABOUT THIS COMPONENT'S I/O, because the sentence that used to close this
+ * header — "This component performs no I/O" — is no longer true and its retirement is a
+ * decision rather than a drift. Rule 7's platform block is drawn entirely from the slot this
+ * component is handed; the claims, the ranking and the discount's authorising rule are not on
+ * that slot and cannot be put there from here. They are dropped twice on the way in —
+ * `buyer_svc.accept.labels.slot_commitments` projects a published `Claim` down to
+ * `{key, value, unit, label}`, and `journey/wire.ts::readCommitments` keeps exactly those four
+ * — and `Journey` holds the auction record they survive on without passing it down. So the
+ * fold re-reads `GET /buyer/auctions/{id}`, on the click that opens it and once per mount.
+ * The alternative was a component that computed a rank breakdown of its own, which would be
+ * this page publishing a formula under the exchange's name. `shortlist.ts` still owns the
+ * wire: the request, its reader and its refusal all live there.
  */
-import { Fragment, useCallback, useRef, useState } from 'react'
+import { Fragment, useCallback, useRef, useState, type ReactNode } from 'react'
 
 import {
+  NO_AGENT_FALLBACK_FAMILY,
   VOICE_PLATFORM,
   VOICE_STORE,
+  fallbackReasonFamily,
   labelTone,
+  loadRecordedAuction,
   slotLabels,
   voiceOrder,
   type AcceptOutcome,
+  type Fetcher,
+  type RecordedAuction,
   type Shortlist,
   type ShortlistPrice,
   type ShortlistProduct,
   type ShortlistSlot,
+  type SlotClaim,
   type SlotCommitment,
   type SlotDiscount,
   type SlotPitch,
@@ -73,6 +99,27 @@ export interface ShortlistViewProps {
   readonly error?: string
   /** Shown while a request is in flight. */
   readonly busy?: boolean
+  /**
+   * How the record fold reads `GET /buyer/auctions/{id}`. Defaults to the browser's own
+   * `fetch`, which is what makes the fold work on the served page without `Journey` passing
+   * anything: a knob whose only setter is a test is a feature that is switched off in every
+   * deployment, and this one defaults to the working path.
+   *
+   * Injected at all so a test can drive the fold against a body it controls and assert that
+   * nothing was requested until a reader opened one.
+   */
+  readonly recordFetcher?: Fetcher
+}
+
+/**
+ * The browser's own `fetch`, or `undefined` where there is no browser.
+ *
+ * Wrapped rather than passed by reference because a bare `fetch` detaches from its global and
+ * throws `Illegal invocation` in a browser the moment it is called through a variable.
+ */
+function browserFetcher(): Fetcher | undefined {
+  if (typeof fetch !== 'function') return undefined
+  return (input, init) => fetch(input, init)
 }
 
 function trustLine(slot: ShortlistSlot): string {
@@ -157,10 +204,10 @@ function productLine(product: ShortlistProduct | null | undefined): string {
  * is the unremarkable case, and a line on every card saying "this shop quoted this" would
  * teach a reader to skim the one place the sentence matters. The other two both get words:
  *
- * * `true` — the shop did not answer this auction usably, so the exchange stood in for it at
- *   the list price on its own roster row. The number is real and nobody at that shop quoted
- *   it. The reason is the exchange's own token, printed as the token it is rather than
- *   translated, because this screen is not the layer that owns that vocabulary.
+ * * `true` — the exchange stood in for the shop at the list price on its own roster row. The
+ *   number is real and nobody at that shop quoted it. The reason is the exchange's own token,
+ *   printed as the token it is rather than translated, because this screen is not the layer
+ *   that owns that vocabulary.
  * * `null`/absent — the exchange did not state whose price this is. That is a producer older
  *   than the field, and the page says so instead of guessing. Rendering it as `false` would
  *   turn silence into a quote, which is the entire reason the flag exists.
@@ -170,7 +217,22 @@ function productLine(product: ShortlistProduct | null | undefined): string {
  * price is exactly that, and it is not rare. With no price, "the exchange did not say whose
  * price this is" is a sentence about nothing, printed directly beneath a line that already
  * said there is no price — so the unknown state stays quiet and the stand-in state says the
- * thing that is still true and still useful, which is that the shop never answered at all.
+ * thing that is still true and still useful.
+ *
+ * WHY `true` IS TWO SENTENCES AND NOT ONE, which is the correction this function most needed.
+ * It used to branch on the flag and the price alone, so every stand-in read "**The shop did
+ * not answer this auction**" — byte-identical for a shop whose agent was solicited and stayed
+ * silent and for a shop that has no agent at all. The second of those is an ORGANIC result: a
+ * shop Proxyshop found by crawling, on the roster from its catalogue alone, which was never
+ * spoken to and declined nothing. Telling a shopper it did not answer is the platform putting
+ * a refusal in a shop's mouth, and D55's whole asymmetry is that the platform may state only
+ * what it can check. The exchange has told the two apart all along —
+ * {@link NO_AGENT_FALLBACK_FAMILY} is the family it writes for the second, measured live on
+ * this stack as `tier_0_no_agent:no_bid_endpoint` — and only this line was collapsing them.
+ *
+ * ONE distinction and not nine. Past "was there anybody to ask?", the exchange's token is
+ * printed unchanged; the nine-family gloss lives in `journey/WhyEmpty.tsx` and is not forked
+ * here (see {@link NO_AGENT_FALLBACK_FAMILY}).
  */
 function priceProvenanceLine(
   fallback: boolean | null | undefined,
@@ -184,9 +246,16 @@ function priceProvenanceLine(
       named === ''
         ? 'The exchange did not say why it stood in.'
         : `The exchange gives its reason as ${named}.`
-    const what = priced
-      ? 'This price is Proxyshop’s, not this shop’s. The shop did not answer this auction, so the exchange stood in for it at the list price on its own roster row — nobody at this shop quoted the number above.'
-      : 'This shop did not answer this auction. The exchange stood in for it rather than dropping it, and its roster row carried no list price to show you either, so there is no number here that anyone quoted.'
+    // "Nobody asked" is not a weaker version of "nobody answered" — it is about a different
+    // party. Only the second sentence is about the shop at all.
+    const neverAsked = fallbackReasonFamily(named) === NO_AGENT_FALLBACK_FAMILY
+    const what = neverAsked
+      ? priced
+        ? 'This price is Proxyshop’s, not this shop’s. This shop has no bidding agent on the exchange, so nobody asked it for a price and it turned nothing down — Proxyshop found it by crawling and is showing it to you at the list price on its own roster row for the shop.'
+        : 'This shop has no bidding agent on the exchange, so nobody asked it for a price and it turned nothing down. Proxyshop found it by crawling and is showing it to you rather than leaving it out, and its roster row carried no list price either, so there is no number here that anyone quoted.'
+      : priced
+        ? 'This price is Proxyshop’s, not this shop’s. The shop did not answer this auction, so the exchange stood in for it at the list price on its own roster row — nobody at this shop quoted the number above.'
+        : 'This shop did not answer this auction. The exchange stood in for it rather than dropping it, and its roster row carried no list price to show you either, so there is no number here that anyone quoted.'
     return `${what} ${because}`
   }
   if (!priced) return null
@@ -428,15 +497,494 @@ function PitchPanel({ slot, pitch }: { slot: ShortlistSlot; pitch: SlotPitch }) 
   )
 }
 
+/**
+ * One machine row. `dt`/`dd` because it is a record, and `.facts` because that is the grid
+ * this design system already dresses key/value rows with.
+ */
+function RecordRow({ term, children }: { term: string; children: ReactNode }) {
+  return (
+    <>
+      <dt>{term}</dt>
+      <dd>{children}</dd>
+    </>
+  )
+}
+
+/**
+ * A recorded value, spelled the way it arrived.
+ *
+ * `JSON.stringify` per value rather than `String`, and for the reason `journey/wire.ts`'s
+ * `describeTrust` gives for the same choice: a boolean `true` and the string `"true"` must not
+ * read identically on a page whose subject is what was actually recorded. A list comes out as a
+ * list rather than as its members glued together by `Array.prototype.toString`.
+ */
+function recordValue(value: unknown): string {
+  if (value === undefined) return 'not stated'
+  try {
+    // A LIST IS SPELLED OUT ELEMENT BY ELEMENT, and that is a layout fix rather than a
+    // preference. `JSON.stringify` writes an array with no spaces in it, so the six trust
+    // dimensions arrive as one 120-character token with no break opportunity anywhere — and a
+    // token that cannot break widens the grid column that holds it. MEASURED on the served
+    // page at 1512px: the dimensions row ran off the right edge of the card. Each element
+    // keeps its own JSON spelling, so a string still reads as a string beside a number.
+    if (Array.isArray(value)) {
+      return `[${value.map((item) => JSON.stringify(item) ?? 'null').join(', ')}]`
+    }
+    return JSON.stringify(value) ?? 'not stated'
+  } catch {
+    // A circular object cannot arrive over JSON, so this is unreachable through the wire and
+    // is here because a caller may build a slot by hand.
+    return 'not stated'
+  }
+}
+
+/** How strong the network rates this kind of evidence, in the published semantics (D30). */
+function authorityRankText(rank: number | null): string {
+  return rank === null
+    ? 'the claim named no authority rank, so how strongly this network rates the evidence is not stated'
+    : `${rank} — 1 is the strongest evidence this network records, and larger numbers are weaker`
+}
+
+/**
+ * WHAT PROXYSHOP OBSERVED — the platform's own half of the record (D55).
+ *
+ * Every row here is reachable from no bid at all. The crawl's identity and its snapshot id,
+ * the trust snapshot, the published rank score and its components, and whose price this is,
+ * are the PLATFORM's facts about a candidate: `contracts.protocol.ShortlistSlot` says so field
+ * by field, and `exchange.ranking.candidates` writes them from the registry and the crawl
+ * rather than from anything a store sent. So they are attributed to Proxyshop and they are
+ * kept in their own block, away from the shop's own words below.
+ *
+ * The ranking is the RECORDED half of this auction and is labelled as such: the exchange
+ * publishes `rank_score` and `components` once, in its `POST /auctions` answer, and this is
+ * that answer read back — a different clock from the live shortlist the card was drawn from.
+ */
+function PlatformRecord({
+  slot,
+  auction,
+}: {
+  slot: ShortlistSlot
+  auction: RecordedAuction | undefined
+}) {
+  const identity = slot.product?.identity
+  const record = auction?.slots[slot.bid_ref]
+  // The unnarrowed snapshot where the browser kept one, and the numeric-only view otherwise.
+  // See `ShortlistSlot.trust_fields`: the narrowing drops most of what the exchange sent.
+  const trust: Readonly<Record<string, unknown>> =
+    slot.trust_fields !== undefined && Object.keys(slot.trust_fields).length > 0
+      ? slot.trust_fields
+      : (slot.trust_summary ?? {})
+  const ranking = record?.ranking ?? null
+  return (
+    <div className="voice" data-voice="platform" data-testid={`record-platform-${slot.bid_ref}`}>
+      <p className="voice-attribution">
+        <strong>What Proxyshop observed.</strong> These are the platform&rsquo;s own records
+        of this shop and this product &mdash; its crawl, its trust engine and its own auction
+        &mdash; and no shop wrote a word of any of them. The one line a shop had a hand in is
+        the catalogue reference: that is the exchange&rsquo;s reading of which product this bid
+        was for, and it is published beside the roster row the shop was solicited on. Every
+        other line here is reachable from no bid at all, so a shop cannot move one of them by
+        what it says.
+      </p>
+
+      <dl className="facts">
+        {identity ? (
+          <>
+            <RecordRow term="Name Proxyshop crawled">{identity.title}</RecordRow>
+            <RecordRow term="Brand">
+              {identity.brand ?? 'the crawl recorded none, and none is inferred from the title'}
+            </RecordRow>
+            <RecordRow term="Snapshot it was read from">
+              <code className="mono">{identity.source}</code>
+            </RecordRow>
+            <RecordRow term="When Proxyshop saw it">
+              {identity.observed_at ?? 'the snapshot named no time it was observed'}
+            </RecordRow>
+          </>
+        ) : (
+          <RecordRow term="Name Proxyshop crawled">
+            Proxyshop holds no crawled snapshot for this product, so it has no name of its own
+            to show and does not borrow the shop&rsquo;s.
+          </RecordRow>
+        )}
+        <RecordRow term="Catalogue reference">
+          {slot.product ? (
+            <>
+              <code className="mono">{slot.product.product_ref}</code>
+              {slot.product.variant_ref ? (
+                <>
+                  {' '}
+                  (variant <code className="mono">{slot.product.variant_ref}</code>)
+                </>
+              ) : (
+                ' — the bid named no variant'
+              )}
+            </>
+          ) : (
+            'the exchange named no product for this slot'
+          )}
+        </RecordRow>
+        <RecordRow term="Registered domain">
+          {storeDomainLine(slot.store_domain)}
+        </RecordRow>
+        {/* THREE absences, and they are three different statements. "The record was not
+            read" is about this page's own request; "the record names no such candidate" is
+            about the auction; "the record named no store" is about the row. A single
+            fall-through sentence would have this page assert one of them whenever any was
+            true — and after a failed read it would have asserted the one thing it could not
+            know. */}
+        <RecordRow term="Store the exchange attributed this bid to">
+          {auction === undefined
+            ? 'Proxyshop’s record of this auction was not read, so this page cannot say'
+            : record === undefined
+              ? 'the record names no candidate with this bid reference'
+              : record.store_id === ''
+                ? 'the record named no store for this candidate'
+                : <code className="mono">{record.store_id}</code>}
+        </RecordRow>
+        <RecordRow term="Where the labels above came from">
+          {slot.labels_source === 'exchange'
+            ? 'the exchange sent them and this page printed them'
+            : slot.labels_source === 'derived'
+              ? 'the exchange sent none, so the buyer service worked them out from this slot’s own claims'
+              : slot.labels_source === 'absent'
+                ? 'neither the exchange nor this slot’s claims named any, so it reads unverified'
+                : 'the service did not say'}
+        </RecordRow>
+        {Object.entries(trust).map(([key, value]) => (
+          <RecordRow key={`trust-${key}`} term={`Trust · ${key}`}>
+            <span className="mono">{recordValue(value)}</span>
+          </RecordRow>
+        ))}
+      </dl>
+
+      <p className="gloss" data-testid={`record-ranking-${slot.bid_ref}`}>
+        <strong>Why it ranked where it did.</strong>{' '}
+        {auction === undefined
+          ? 'Proxyshop’s record of this auction was not read, so the exchange’s published ranking components are not on this page. Nothing has been computed in their place.'
+          : ranking === null
+            ? 'The record carries no ranking for this candidate, so this page has no components to show and will not compute any of its own.'
+            : `The exchange scored this candidate ${
+                ranking.rank_score === null
+                  ? 'with no readable score'
+                  : `at ${ranking.rank_score}`
+              } when the auction was opened, and published what each term of its formula contributed. Those numbers are the exchange’s, recorded at that moment; they are not re-computed for this page.`}
+      </p>
+      {ranking !== null && ranking.components.length > 0 ? (
+        <dl className="facts">
+          {ranking.components.map(([term, contribution]) => (
+            <RecordRow key={term} term={term}>
+              <span className="mono">{contribution}</span>
+            </RecordRow>
+          ))}
+        </dl>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * ONE PROMISE AND THE EVIDENCE BEHIND IT.
+ *
+ * The promise and its value are the SHOP's, in the shop's own field names. The evidence rows
+ * beneath are PROXYSHOP's record of how that promise was obtained, and the two are labelled as
+ * two things inside one row rather than run together, because a shopper who reads "envelope
+ * rule, authority rank 1" as something the shop said has been handed the platform's weight
+ * under the seller's name.
+ *
+ * `label` is NOT derived here. D30 puts the source&rarr;label map in `packages/contracts` so the
+ * exchange and the buyer app cannot answer differently, and this component prints the label the
+ * buyer service already attached to this promise on the card. `provenance.source` beside it is
+ * the exchange's own token, rendered and never mapped &mdash; which is exactly what lets a
+ * reader see the derivation instead of taking the badge on faith.
+ */
+function ClaimRecord({
+  claim,
+  label,
+  bidRef,
+}: {
+  claim: SlotClaim
+  label: string | undefined
+  bidRef: string
+}) {
+  const provenance = claim.provenance
+  return (
+    <div data-testid={`record-claim-${bidRef}`}>
+      <p>
+        <strong>{claim.key.replace(/_/g, ' ')}</strong> &mdash;{' '}
+        <span className="mono">{recordValue(claim.value)}</span>
+        {claim.unit ? ` ${claim.unit}` : ''}{' '}
+        {label === undefined ? null : (
+          <span data-tone={labelTone(label)} data-testid={`record-claim-label-${bidRef}`}>
+            {label}
+          </span>
+        )}
+      </p>
+      <dl className="facts">
+        <RecordRow term="Kind of claim">
+          {claim.claim_type ?? 'the exchange did not type this one'}
+        </RecordRow>
+        {provenance === null ? (
+          <RecordRow term="Evidence">
+            This promise arrived with no provenance at all, so there is nothing Proxyshop can
+            show for it. That is why it reads unverified rather than being hidden.
+          </RecordRow>
+        ) : (
+          <>
+            <RecordRow term="Evidence">
+              <span className="mono">{provenance.source}</span>
+            </RecordRow>
+            <RecordRow term="How strongly it is rated">
+              {authorityRankText(provenance.authority_rank)}
+            </RecordRow>
+            <RecordRow term="When it was observed">
+              {provenance.observed_at ?? 'the claim named no observation time'}
+            </RecordRow>
+            <RecordRow term="Evidence reference">
+              {provenance.ref === null ? (
+                'the claim pointed at nothing'
+              ) : (
+                <code className="mono">{provenance.ref}</code>
+              )}
+            </RecordRow>
+          </>
+        )}
+      </dl>
+    </div>
+  )
+}
+
+/**
+ * WHAT THIS SHOP SAYS ABOUT ITSELF, and what Proxyshop can show for each of it (D55).
+ *
+ * The sponsored half of the record. The shop's prose is not repeated here &mdash; `PitchPanel`
+ * above owns it and owns its attribution &mdash; because this block is about the shop's
+ * CHECKABLE assertions: the promises it made beside its price, each with the evidence the
+ * platform holds for it.
+ *
+ * What is deliberately NOT here, said out loud so a reader does not assume the badge is more
+ * than it is: the exchange decides a `verified` / `contradicted` / `unsupported` / `ambiguous`
+ * verdict per claim against its own catalogue snapshot, under a MAC no bidder can compute, and
+ * publishes only the AGGREGATE of those verdicts &mdash; the `verified_claim_ratio` term in the
+ * ranking above. `contracts.protocol.Claim` is `additionalProperties: false` and declares no
+ * verdict field, so the per-claim decisions reach no buyer-facing surface at all. The gloss
+ * below says so rather than letting the provenance label be read as one.
+ */
+function StoreRecord({
+  slot,
+  auction,
+}: {
+  slot: ShortlistSlot
+  auction: RecordedAuction | undefined
+}) {
+  const record = auction?.slots[slot.bid_ref]
+  const claims = record?.claims ?? null
+  const labelled = slot.commitments ?? []
+  const discount = slot.price?.discount ?? null
+  const discountProvenance = record?.discount_provenance ?? null
+  return (
+    <div className="voice" data-voice="store" data-testid={`record-store-${slot.bid_ref}`}>
+      <p className="voice-attribution">
+        <strong>What this shop says about itself.</strong> Each promise below is the
+        shop&rsquo;s, in the shop&rsquo;s own words for it. Proxyshop did not write any of them
+        and does not vouch for them &mdash; what it adds is the evidence line under each one,
+        which says where the promise came from and how strongly this network rates that kind of
+        evidence.
+      </p>
+
+      {auction === undefined ? (
+        // NOT "the exchange published none". The request that would have told us either way
+        // did not complete, and the difference matters most here: a shopper reading "this shop
+        // promised nothing" when the truth is "this page did not manage to look" has been told
+        // something about the shop that nobody established.
+        <p className="gloss" data-testid={`record-no-claims-${slot.bid_ref}`}>
+          Proxyshop&rsquo;s record of this auction was not read, so the evidence behind each
+          promise is not on this page. The promises themselves, and the label for each, are on
+          the card above and came with it.
+        </p>
+      ) : auction.liveness === 'forgotten' ? (
+        <p className="gloss" data-testid={`record-no-claims-${slot.bid_ref}`}>
+          The exchange no longer holds this auction&rsquo;s shortlist, so the promises cannot be
+          re-read with their evidence attached. That is a fact about the exchange and its
+          fifteen-minute window rather than about this shop, and the recorded ranking above
+          survives it because the exchange published that once when the auction opened.
+        </p>
+      ) : record === undefined ? (
+        <p className="gloss" data-testid={`record-no-claims-${slot.bid_ref}`}>
+          The record names no candidate with this bid reference, so there is nothing in it to
+          show the evidence for. What is on the card above still came from the exchange.
+        </p>
+      ) : claims === null ? (
+        <p className="gloss" data-testid={`record-no-claims-${slot.bid_ref}`}>
+          The exchange published no commitments for this slot. That is the ordinary answer for a
+          shop the exchange stood in for: a stand-in offer is rebuilt from the roster row with an
+          empty claims list, so there is nothing here the shop promised and nothing to evidence.
+        </p>
+      ) : claims.length === 0 ? (
+        <p className="gloss" data-testid={`record-no-claims-${slot.bid_ref}`}>
+          The exchange published commitments for this slot and this page could not read any of
+          them. That is not the same as the shop promising nothing, and it is not being shown as
+          if it were.
+        </p>
+      ) : (
+        claims.map((claim) => (
+          <ClaimRecord
+            key={claim.key}
+            claim={claim}
+            bidRef={slot.bid_ref}
+            label={labelled.find((commitment) => commitment.key === claim.key)?.label}
+          />
+        ))
+      )}
+
+      {discount === null ? null : (
+        <div data-testid={`record-discount-${slot.bid_ref}`}>
+          <p>
+            <strong>{discountLine(discount)}</strong>
+          </p>
+          <dl className="facts">
+            {discountProvenance === null ? (
+              <RecordRow term="What authorised it">
+                The exchange published no provenance for this discount, so the rule behind the
+                depth is not on this page. It is a depth the shop states, not one Proxyshop can
+                show a rule for.
+              </RecordRow>
+            ) : (
+              <>
+                <RecordRow term="What authorised it">
+                  <span className="mono">{discountProvenance.source}</span>
+                </RecordRow>
+                <RecordRow term="How strongly it is rated">
+                  {authorityRankText(discountProvenance.authority_rank)}
+                </RecordRow>
+                <RecordRow term="The rule">
+                  {discountProvenance.ref === null ? (
+                    'the discount pointed at no rule'
+                  ) : (
+                    <code className="mono">{discountProvenance.ref}</code>
+                  )}
+                </RecordRow>
+              </>
+            )}
+          </dl>
+        </div>
+      )}
+
+      <p className="gloss" data-testid={`record-verdict-gloss-${slot.bid_ref}`}>
+        A badge above says what KIND of evidence a promise has, not that Proxyshop went and
+        confirmed it. The exchange does decide a verdict on each of a shop&rsquo;s claims
+        against its own crawl, and it publishes only the total of those verdicts &mdash; the
+        <span className="mono"> verified_claim_ratio </span> term in the ranking above. The
+        claim-by-claim decisions are not published to this page, and this page will not invent
+        them.
+      </p>
+    </div>
+  )
+}
+
+/**
+ * THE RECORD BEHIND ONE CARD — the fold this screen did not have.
+ *
+ * Additive, and that word is load-bearing. Nothing that was on the card has moved in here:
+ * rule 1 of this file is that a buyer's provenance is never behind a toggle, and provenance a
+ * shopper has to go looking for is provenance they did not have when they chose. What is here
+ * is what was reaching the browser and being rendered by nobody &mdash; the crawl's snapshot id
+ * and stamp, the whole trust snapshot rather than its two numeric fields, the published rank
+ * score with what each term of the formula contributed, every promise's provenance and
+ * authority rank, and the rule that authorised a discount.
+ *
+ * `details.trace` because the design system already names this exact shape: *the RECORD folds
+ * away; the LABELS never do*. A `<summary>` is keyboard-operable by construction, and the fold
+ * is controlled from React state rather than left to the element so that opening it is the
+ * thing that starts the read.
+ *
+ * TWO SOURCES, kept apart on the page. The platform block is drawn from the slot the card was
+ * already given; the claims, the ranking and the discount rule come from
+ * `GET /buyer/auctions/{id}`, which is why a panel can render in full while the record is still
+ * arriving, or fail to fetch and still be worth reading.
+ */
+function SlotRecordPanel({
+  slot,
+  auction,
+  reading,
+  failure,
+}: {
+  slot: ShortlistSlot
+  auction: RecordedAuction | undefined
+  reading: boolean
+  failure: string | undefined
+}) {
+  return (
+    <>
+      {reading ? (
+        <p className="gloss" role="status" data-testid={`record-reading-${slot.bid_ref}`}>
+          Reading Proxyshop&rsquo;s record of this auction&hellip;
+        </p>
+      ) : null}
+      {failure === undefined ? null : (
+        <p className="gloss" role="alert" data-testid={`record-failed-${slot.bid_ref}`}>
+          Proxyshop&rsquo;s record of this auction could not be read, so the promises&rsquo; own
+          evidence and the ranking components are missing from this panel. Everything else below
+          came with the card. The service said: {failure}
+        </p>
+      )}
+      <PlatformRecord slot={slot} auction={auction} />
+      <StoreRecord slot={slot} auction={auction} />
+    </>
+  )
+}
+
 export function ShortlistView({
   shortlist,
   onAccept,
   accepted,
   error,
   busy = false,
+  recordFetcher,
 }: ShortlistViewProps) {
   const acceptedOnce = useRef(false)
   const [sent, setSent] = useState('')
+  // WHICH RECORDS ARE OPEN. A list rather than one id: two cards' records side by side is the
+  // comparison a shopper is actually making, and closing one to read another would take that
+  // away for no reason a reader would recognise.
+  const [openRecords, setOpenRecords] = useState<readonly string[]>([])
+  const [record, setRecord] = useState<RecordedAuction | undefined>(undefined)
+  const [recordFailure, setRecordFailure] = useState<string | undefined>(undefined)
+  const [readingRecord, setReadingRecord] = useState(false)
+  // ONE read per mount, whatever a reader opens. `useRef` and not state, for the reason
+  // `acceptedOnce` is one: React batches nothing across an await, so two folds opened before
+  // the first response lands would otherwise be two requests for the same record.
+  const recordAsked = useRef(false)
+
+  const readRecord = useCallback(async () => {
+    if (recordAsked.current) return
+    recordAsked.current = true
+    const fetcher = recordFetcher ?? browserFetcher()
+    if (fetcher === undefined) {
+      setRecordFailure('there is no browser here to read the record with')
+      return
+    }
+    setReadingRecord(true)
+    try {
+      setRecord(await loadRecordedAuction(shortlist.auction_id, fetcher))
+    } catch (failure) {
+      // The service's own words, kept. A fold that said only "could not be read" would leave a
+      // reader unable to tell an expired auction from a service that is down.
+      setRecordFailure(failure instanceof Error ? failure.message : String(failure))
+    } finally {
+      setReadingRecord(false)
+    }
+  }, [recordFetcher, shortlist.auction_id])
+
+  const toggleRecord = useCallback(
+    (bidRef: string) => {
+      setOpenRecords((open) =>
+        open.includes(bidRef) ? open.filter((each) => each !== bidRef) : [...open, bidRef],
+      )
+      void readRecord()
+    },
+    [readRecord],
+  )
 
   const submitAccept = useCallback(
     async (slot: ShortlistSlot) => {
@@ -474,6 +1022,7 @@ export function ShortlistView({
             Boolean(slot.price),
           )
           const identity = slot.product?.identity
+          const recordIsOpen = openRecords.includes(slot.bid_ref)
           return (
           <li key={slot.bid_ref} data-testid={`slot-${slot.bid_ref}`}>
             <h3>{slot.slot}</h3>
@@ -595,6 +1144,34 @@ export function ShortlistView({
                 </li>
               ))}
             </ul>
+
+            {/* THE RECORD BEHIND THIS CARD — see `SlotRecordPanel`. Last, and folded, because
+                everything a shopper decides on is above it and unfolded: the design system's
+                own rule for this treatment is that the record folds away and the labels never
+                do. `preventDefault` keeps React's state the single source of truth for whether
+                it is open, so the same click that opens the fold is the one that starts the
+                read; a `<summary>` answers the keyboard for free. */}
+            <details className="trace" open={recordIsOpen} data-testid={`record-${slot.bid_ref}`}>
+              <summary
+                data-testid={`record-toggle-${slot.bid_ref}`}
+                onClick={(event) => {
+                  event.preventDefault()
+                  toggleRecord(slot.bid_ref)
+                }}
+              >
+                {recordIsOpen
+                  ? 'Hide the record behind this one'
+                  : 'See the record behind this one'}
+              </summary>
+              {recordIsOpen ? (
+                <SlotRecordPanel
+                  slot={slot}
+                  auction={record}
+                  reading={readingRecord}
+                  failure={recordFailure}
+                />
+              ) : null}
+            </details>
 
             <button
               type="button"

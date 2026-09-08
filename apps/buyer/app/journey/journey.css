@@ -603,6 +603,72 @@ li[data-tone="unknown"], span[data-tone="unknown"] { color: var(--ps-unknown); b
   font-size: 13px;
 }
 
+/* ---- the follow-up box ----------------------------------------------------
+ *
+ * `AskPanel`, under the shortlist. It reuses `.voice` wholesale rather than inventing a
+ * second two-voice treatment: the amber quoted block means "a shop is talking" on a
+ * shortlist card, and it has to mean the same thing forty pixels lower down. A follow-up
+ * answer is the easiest place in the product to blur the organic/sponsored line, so the
+ * colouring that separates them is the one thing here that is NOT allowed to be different.
+ *
+ * The only rule with real work in it is `.ask-not-held`. It is styled as a warning and sits
+ * above the answer, because "we do not hold this" has to survive being read quickly by
+ * somebody about to spend money. Nothing here folds it away.
+ */
+
+.ask {
+  margin: var(--ps-5) 0 0;
+  padding-top: var(--ps-4);
+  border-top: 1px solid var(--ps-rule-soft);
+}
+.ask > h3 { margin: 0 0 var(--ps-2); }
+.ask form { margin-top: var(--ps-4); }
+.ask textarea { resize: vertical; }
+
+.ask-turns {
+  margin: var(--ps-4) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ps-5);
+}
+.ask-turns > li {
+  padding: 0 0 var(--ps-4);
+  border-bottom: 1px solid var(--ps-rule-soft);
+}
+.ask-turns > li:last-child { border-bottom: 0; padding-bottom: 0; }
+
+/* The shopper's own words, set apart from the platform's answer so nobody has to work out
+   which half of the exchange they are reading. */
+.ask-question {
+  margin: 0 0 var(--ps-3);
+  padding: 10px 14px;
+  border-radius: var(--ps-r-md);
+  background: var(--ps-sunk);
+  border-left: 3px solid var(--ps-rule);
+  font-size: 15px;
+  color: var(--ps-ink-2);
+  overflow-wrap: anywhere;
+}
+
+.ask-not-held {
+  margin: 0 0 var(--ps-3);
+  padding: 11px 15px 11px 32px;
+  border-radius: var(--ps-r-md);
+  background: var(--ps-unverified-wash);
+  border: 1px solid #f0c4c0;
+  border-left: 4px solid var(--ps-unverified);
+  font-size: 14px;
+  color: #6d1616;
+}
+.ask-not-held li + li { margin-top: 6px; }
+.ask-not-held strong { color: var(--ps-unverified); }
+
+.ask-shop-voices { margin-top: var(--ps-3); display: flex; flex-direction: column; gap: var(--ps-2); }
+
+.ask details.trace { margin-top: var(--ps-3); }
+
 /* ---- errors and refusals -------------------------------------------------- */
 
 [role="alert"] { color: var(--ps-alarm); }

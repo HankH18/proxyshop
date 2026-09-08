@@ -281,11 +281,28 @@ this market is tuned for. The clarifier asks up to three questions and stops, th
 opens a real auction on the exchange, the store agents price from their own approved
 envelopes, and the shortlist comes back with each slot's reason on it.
 
-**Sign-in is required before the exchange is asked anything**, and the page says so where it
-stops: *"the next step is the one that leaves it: the exchange solicits real stores... That
-pseudonym has to come from the service's vault rather than from this page."* Sign-in is a
-single-use link, and a demo stack has nowhere to mail it. So choose the local transport, which
-writes the link to the service's own log instead:
+**On this stack there is no sign-in and no gate — type and go.** The SPA asks
+`GET /buyer/auth/sign-in` on load and draws a login form only where the deployment can really
+deliver mail; `.env.example` leaves `PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT` empty and names no
+MTA, so the route answers `{"offered": false}` and no form renders. Check it rather than
+believing this paragraph:
+
+```bash
+curl -s localhost:8081/buyer/auth/sign-in
+```
+
+Every beat runs without a session — clarify, confirm, shortlist and accept all answer with no
+`X-Buyer-Session` header. What it costs is worth saying out loud, because it shows up in the
+shortlist: with no session there is no vault-minted pseudonym, so the exchange names the
+shopper `anon-<auction id>` (`exchange.composition.solicitation_profile`) for that one auction
+and hands the stores empty buckets, which a store's learning grid reads as "no segment".
+
+**To demo the login itself**, the deployment has to be able to MAIL:
+`buyer_svc.auth.delivery.magic_link_is_mailed` answers `True` only for `smtp` with an MTA
+named, or an MTA named with the transport left unset. `console` does **not** bring the form
+back — it puts no link in a mailbox, so it answers `False` exactly like the unconfigured case.
+What `console` is for is reading the link out of the service's own log, for a login driven by
+`curl` rather than by the page:
 
 ```bash
 export PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT=console

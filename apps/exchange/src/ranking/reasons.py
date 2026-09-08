@@ -55,6 +55,23 @@ REASON_OVER_BUDGET = "offer_price_outside_budget"
 #: a price filter by being uncomparable.
 REASON_PRICE_UNREADABLE = "offer_price_unreadable"
 
+#: The PLATFORM manufactured this row and its own crawl says the product is not about what the
+#: shopper asked (:mod:`exchange.retrieval.relevance`).
+#:
+#: It fires on ORGANIC rows only — a candidate ``collect_bids`` marked ``fallback``, where the
+#: store never bid and the exchange stood a list-price offer up in its place. Measured on the
+#: served route before it existed: ``"a walnut coffee table for the lounge"`` was answered with
+#: four slots of liver supplements, every one of them a fallback, every one of them a product
+#: the platform picked and wrote the pitch for.
+#:
+#: **Never on a sponsored row**, and the asymmetry is D55's rather than a softening. A store
+#: that BID was solicited because the platform assigned this intent to a cluster that store
+#: pursues, chose which of its own products to put forward, and made its case in its own voice
+#: against a message the platform adversarially checks — it is accountable for the row and its
+#: trust record moves on it. A fallback row has no such author: the platform picked the product
+#: and wrote the pitch, so the platform's own crawl is the only thing that can vouch for it.
+REASON_OFF_TOPIC_ORGANIC = "organic_result_off_topic"
+
 #: NOT an exclusion reason, and deliberately outside :data:`EXCLUSION_REASON_PREFIXES`: it
 #: names a constraint this auction SET ASIDE rather than a candidate it refused. It is
 #: published on the ranking result (``relaxed_constraints``) and never on a row's
@@ -73,6 +90,7 @@ EXCLUSION_REASON_PREFIXES: tuple[str, ...] = (
     REASON_MALFORMED,
     REASON_OVER_BUDGET,
     REASON_PRICE_UNREADABLE,
+    REASON_OFF_TOPIC_ORGANIC,
 )
 
 __all__ = [
@@ -84,6 +102,7 @@ __all__ = [
     "REASON_HARD_CONSTRAINT",
     "REASON_MALFORMED",
     "REASON_OFF_DOMAIN",
+    "REASON_OFF_TOPIC_ORGANIC",
     "REASON_OVER_BUDGET",
     "REASON_PRICE_UNREADABLE",
     "REASON_UNDECIDABLE_INTENT",

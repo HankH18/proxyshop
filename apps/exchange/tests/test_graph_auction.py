@@ -896,9 +896,19 @@ def test_a_graph_sourced_auction_carries_per_candidate_intent_match(neo4j_sessio
     Two shops selling two DIFFERENT products against one query: the fit that reaches the
     formula is the retrieval's per-product measurement, so the two components differ and
     neither is the published neutral.
+
+    THE SECOND SHOP SELLS THE ROAD SHOE, NOT THE ESPRESSO MACHINE, and the swap is this
+    assertion's own subject rather than a convenience. It used to roster ``shop-beans`` /
+    ``prod-espresso``, and an espresso machine returned against ``"trail running shoe"`` is
+    precisely the confidently-irrelevant row ``exchange.retrieval.relevance`` now refuses — the
+    retrieval never rosters that shop, so there is one candidate and no pair to compare. What
+    this node is FOR is that two candidates get two different measured fits, and two running
+    shoes make that claim on two rows the catalogue genuinely serves. The espresso shop's
+    refusal is asserted on its own, next door, in
+    ``test_an_off_topic_product_is_not_rostered_and_the_roster_says_why``.
     """
     _seed_graph(neo4j_session)
-    stores = {"shop-fell": "prod-trail-shoe", "shop-beans": "prod-espresso"}
+    stores = {"shop-fell": "prod-trail-shoe", "shop-summit": "prod-road-shoe"}
     app = _graph_app(neo4j_session, stores=stores)
 
     body = _post(
@@ -915,6 +925,60 @@ def test_a_graph_sourced_auction_carries_per_candidate_intent_match(neo4j_sessio
     measured = {round(row["intent_match"], 9) for row in components.values()}
     assert len(measured) == len(components), f"the graph produced one constant: {components}"
     assert round(W_M * INTENT_MATCH_WHEN_ABSENT, 9) not in measured, components
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_an_off_topic_product_is_not_rostered_and_the_roster_says_why(neo4j_session) -> None:
+    """THE ORGANIC HALF'S HONESTY, over the real index. A query this catalogue cannot serve.
+
+    ``shop-beans`` sells an espresso machine and nothing else, and the whole seeded catalogue is
+    two running shoes and that machine. Asked for an espresso machine the graph answers with
+    it; asked for a walnut coffee table the graph's vector index still returns its top ``k``,
+    because that is what a top-``k`` index does — and before ``exchange.retrieval.relevance``
+    the exchange rostered those rows, priced them and shortlisted them. Measured on the real
+    corpus, the same shape produced four slots of liver supplements for a furniture query.
+
+    What is asserted is both halves of one seam. The catalogue's own subject still comes back;
+    the other market's does not, and the ``roster_source.reason`` a buyer's agent reads says
+    which of the three emptinesses this is — searched and off-topic, rather than "we could not
+    search" or "nothing is wired".
+    """
+    _seed_graph(neo4j_session)
+    stores = {"shop-fell": "prod-trail-shoe", "shop-beans": "prod-espresso"}
+    app = _graph_app(neo4j_session, stores=stores)
+
+    served = _post(
+        app,
+        intent={
+            "intent_id": "intent-graph-espresso",
+            "cluster_id": "cluster-1",
+            "query": "espresso machine",
+            "hard_constraints": [],
+        },
+    ).json()
+    assert "shop-beans" in set(served["solicited"]), served["roster_source"]
+
+    empty = _post(
+        app,
+        intent={
+            "intent_id": "intent-graph-walnut",
+            "cluster_id": "cluster-1",
+            "query": "a walnut coffee table for the lounge",
+            "hard_constraints": [],
+        },
+    ).json()
+    assert empty["solicited"] == [], empty["solicited"]
+    assert empty["entries"] == [] and empty["ranked"] == [], empty
+    assert empty["shortlist"]["slots"] == [], empty["shortlist"]
+    reason = empty["roster_source"]["reason"]
+    assert reason is not None, empty["roster_source"]
+    assert "is about what was asked" in reason, reason
+    assert "content-word-agreement" in reason, reason
+    # And it is DISTINGUISHABLE from the two other ways of finding nobody, which is the whole
+    # reason the sentence is composed rather than constant.
+    assert reason != NoShopRoster.REASON
+    assert "returned no product at all" not in reason, reason
 
 
 @pytest.mark.docker

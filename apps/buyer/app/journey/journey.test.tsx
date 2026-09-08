@@ -45,6 +45,7 @@ import {
   SESSION_PATH,
   SIGN_IN_PATH,
 } from '../chat/session'
+import { ASK_PATH } from '../chat/ask'
 import { CLARIFY_PATH, CONFIRM_PATH, type Intent } from '../intent/intent'
 import { REMEMBERED_AUCTION_KEY } from '../metrics/telemetry'
 import { ACCEPT_PATH } from '../shortlist/shortlist'
@@ -2814,3 +2815,120 @@ function bodyHasNoSessionHeader(init: RequestInit | undefined): boolean {
   const asRecord = headers as Record<string, unknown>
   return asRecord[SESSION_HEADER] === undefined
 }
+
+/**
+ * The follow-up box under the shortlist — mounted, wired, and only where it can work.
+ *
+ * The journey used to end at the shortlist. These tests are about the three things that make
+ * the box safe on THIS page rather than about the panel itself (`chat/AskPanel.test.tsx`
+ * covers the layout, and `chat/ask.test.ts` covers the boundary):
+ *
+ * 1. it is mounted where there are live options and NOWHERE ELSE, because a question box on
+ *    a page whose auction the exchange has forgotten could only ever fail;
+ * 2. what it sends is the auction id this page was given and the shopper's words — never the
+ *    slots on screen, which is the property that stops a browser making the platform assert
+ *    something (D55); and
+ * 3. a refused question leaves the shortlist standing.
+ */
+describe('asking a follow-up about the shortlist', () => {
+  const ANSWER_BODY = {
+    auction_id: AUCTION_ID,
+    question: 'which of these is actually third-party tested?',
+    answer:
+      'I don’t know about “third-party tested”: no shop on this shortlist has published a ' +
+      'claim for it and the platform’s crawl did not record one.',
+    answer_source: 'assembled',
+    grounds: [],
+    not_held: [
+      {
+        subject: 'third-party tested',
+        detail:
+          'no shop on this shortlist has published a claim for it and the platform’s crawl ' +
+          'did not record one',
+      },
+    ],
+    shop_messages: [],
+    ranking_recorded: true,
+  }
+
+  /** `demoService`, plus an answer for `POST /buyer/chat/ask`. */
+  function withAnswers(
+    answer: (init: RequestInit | undefined) => Response,
+    options: Parameters<typeof demoService>[0] = {},
+  ) {
+    const inner = demoService(options)
+    const asked: RequestInit[] = []
+    const fetcher: Fetcher = async (path, init) => {
+      if (path !== ASK_PATH) return inner.fetcher(path, init)
+      if (init !== undefined) asked.push(init)
+      return answer(init)
+    }
+    return { fetcher, asked }
+  }
+
+  async function walkToShortlist(): Promise<void> {
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByTestId('ask-panel')
+  }
+
+  it('sends the auction id and the question, and never the slots on screen', async () => {
+    const { fetcher, asked } = withAnswers(() => json(ANSWER_BODY))
+    render(<Journey fetcher={fetcher} />)
+    await walkToShortlist()
+
+    fireEvent.change(screen.getByTestId('ask-input'), {
+      target: { value: 'which of these is actually third-party tested?' },
+    })
+    fireEvent.click(screen.getByTestId('ask-send'))
+    await screen.findByTestId('ask-answer-0')
+
+    expect(asked).toHaveLength(1)
+    const sent = JSON.parse(String(asked[0]?.body)) as Record<string, unknown>
+    // Two keys. The page holds the whole rendered shortlist and sends none of it: the
+    // service fetches its own material from the exchange, so nothing this browser is
+    // holding can become something the platform asserts to the person reading it.
+    expect(Object.keys(sent).sort()).toEqual(['auction_id', 'question'])
+    expect(sent.auction_id).toBe(AUCTION_ID)
+    expect(screen.getByTestId('ask-not-held-0').textContent).toContain('third-party tested')
+  })
+
+  it('is not mounted on an auction the exchange has forgotten', async () => {
+    // There is no shortlist to answer from, `POST /buyer/chat/ask` would 404 on it, and a
+    // question box that could only fail is worse than no question box.
+    const { fetcher } = withAnswers(() => json(ANSWER_BODY), { forgotten: true })
+    render(<Journey fetcher={fetcher} />)
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+
+    await screen.findByTestId('shortlist-forgotten')
+    expect(screen.queryByTestId('ask-panel')).toBeNull()
+  })
+
+  it('is not mounted when the market came back empty', async () => {
+    const { fetcher } = withAnswers(() => json(ANSWER_BODY), { slots: [] })
+    render(<Journey fetcher={fetcher} />)
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+
+    await screen.findByLabelText('Why the shortlist is empty')
+    expect(screen.queryByTestId('ask-panel')).toBeNull()
+  })
+
+  it('leaves the shortlist standing when a question is refused', async () => {
+    const { fetcher } = withAnswers(() =>
+      json({ detail: 'the exchange holds no shortlist for this auction.' }, 404),
+    )
+    render(<Journey fetcher={fetcher} />)
+    await walkToShortlist()
+
+    fireEvent.change(screen.getByTestId('ask-input'), { target: { value: 'how much?' } })
+    fireEvent.click(screen.getByTestId('ask-send'))
+
+    expect((await screen.findByTestId('ask-failure-0')).textContent).toContain('no shortlist')
+    // The journey's own failure banner is untouched, and the options are still on screen: a
+    // refused question must not blank the page a shopper is in the middle of reading.
+    expect(screen.queryByTestId('journey-error')).toBeNull()
+    expect(screen.getByTestId('auction-id')).toBeInTheDocument()
+  })
+})

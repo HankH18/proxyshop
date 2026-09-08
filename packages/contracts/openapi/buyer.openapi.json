@@ -783,6 +783,218 @@
         }
       }
     },
+    "/buyer/chat/ask": {
+      "post": {
+        "tags": [
+          "buyer-chat"
+        ],
+        "summary": "Answer a shopper's follow-up about one auction's shortlist, from what the platform itself holds (D55, R2).",
+        "description": "Answer a follow-up about the shortlist this auction produced. Creates nothing.",
+        "operationId": "askAboutShortlist",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "auction_id": {
+                    "type": "string",
+                    "maxLength": 128,
+                    "minLength": 1,
+                    "title": "Auction Id"
+                  },
+                  "question": {
+                    "type": "string",
+                    "maxLength": 400,
+                    "minLength": 1,
+                    "title": "Question"
+                  }
+                },
+                "type": "object",
+                "required": [
+                  "auction_id",
+                  "question"
+                ],
+                "title": "AskBody",
+                "description": "One follow-up about one auction's shortlist.\n\nTwo fields, and the absence of a third is the design. There is no ``shortlist``, no\n``slots`` and no ``facts``: the material is fetched from the exchange by\n:func:`ask_route`, so nothing a page posts can become something the platform asserts."
+              },
+              "example": {
+                "auction_id": "auction-3028270a-bd47-4dbf-9859-41d56c476e7b",
+                "question": "which of these is actually third-party tested?"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The platform's answer, what it stands on, what it does not hold, and — separately, in each shop's own words — the message any sponsored shop wrote for this shopper. The two voices never share a field.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "auction_id": {
+                      "type": "string",
+                      "title": "Auction Id"
+                    },
+                    "question": {
+                      "type": "string",
+                      "title": "Question"
+                    },
+                    "answer": {
+                      "type": "string",
+                      "title": "Answer"
+                    },
+                    "answer_source": {
+                      "type": "string",
+                      "title": "Answer Source"
+                    },
+                    "grounds": {
+                      "items": {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      "type": "array",
+                      "title": "Grounds"
+                    },
+                    "not_held": {
+                      "items": {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      "type": "array",
+                      "title": "Not Held"
+                    },
+                    "shop_messages": {
+                      "items": {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      "type": "array",
+                      "title": "Shop Messages"
+                    },
+                    "ranking_recorded": {
+                      "type": "boolean",
+                      "title": "Ranking Recorded"
+                    }
+                  },
+                  "type": "object",
+                  "required": [
+                    "auction_id",
+                    "question",
+                    "answer",
+                    "answer_source",
+                    "grounds",
+                    "not_held",
+                    "shop_messages",
+                    "ranking_recorded"
+                  ],
+                  "title": "AskResponse",
+                  "description": "The answer, and everything it stands on.\n\n``grounds`` is the receipt: one entry per evidence item the answer was built from or\nscreened against, each naming its ``voice`` (``platform`` or ``shop_claim``) and where\nthe platform got it. ``shop_messages`` is the OTHER voice — the shop's own prose, whole\nand unedited, carried separately so a page can print it under the shop's name and so\nthat no field of this response mixes the two."
+                },
+                "example": {
+                  "auction_id": "auction-3028270a-bd47-4dbf-9859-41d56c476e7b",
+                  "question": "what is the return policy?",
+                  "answer": "Milk Thistle Gummies at gaiaherbs.com — free returns: 30 return window — gaiaherbs.com published this as owner statement, authority rank 1.",
+                  "answer_source": "assembled",
+                  "grounds": [
+                    {
+                      "slot": "fit",
+                      "bid_ref": "auction-3028270a-bd47-4dbf-9859-41d56c476e7b:gaiaherbs.com",
+                      "store_domain": "gaiaherbs.com",
+                      "voice": "shop_claim",
+                      "topic": "commitment",
+                      "key": "free returns",
+                      "value": "30 return window",
+                      "attribution": "gaiaherbs.com published this as owner statement, authority rank 1",
+                      "observed_at": "2026-01-01T00:00:00Z"
+                    }
+                  ],
+                  "not_held": [],
+                  "shop_messages": [
+                    {
+                      "slot": "fit",
+                      "bid_ref": "auction-3028270a-bd47-4dbf-9859-41d56c476e7b:gaiaherbs.com",
+                      "store_domain": "gaiaherbs.com",
+                      "message": "Milk thistle liver support is in stock now, with just 12 units left, and comes with a 30-day return window if it's not the right fit."
+                    }
+                  ],
+                  "ranking_recorded": true
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "detail": {
+                      "items": {
+                        "properties": {
+                          "loc": {
+                            "items": {
+                              "anyOf": [
+                                {
+                                  "type": "string"
+                                },
+                                {
+                                  "type": "integer"
+                                }
+                              ]
+                            },
+                            "type": "array",
+                            "title": "Location"
+                          },
+                          "msg": {
+                            "type": "string",
+                            "title": "Message"
+                          },
+                          "type": {
+                            "type": "string",
+                            "title": "Error Type"
+                          },
+                          "input": {
+                            "title": "Input"
+                          },
+                          "ctx": {
+                            "type": "object",
+                            "title": "Context"
+                          }
+                        },
+                        "type": "object",
+                        "required": [
+                          "loc",
+                          "msg",
+                          "type"
+                        ],
+                        "title": "ValidationError"
+                      },
+                      "type": "array",
+                      "title": "Detail"
+                    }
+                  },
+                  "type": "object",
+                  "title": "HTTPValidationError"
+                },
+                "example": {
+                  "detail": [
+                    {
+                      "loc": [
+                        "body",
+                        "question"
+                      ],
+                      "msg": "Field required",
+                      "type": "missing"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/buyer/feedback": {
       "post": {
         "operationId": "submitFeedback",

@@ -99,7 +99,7 @@ from proxyshop_support.neo4j_auth import graph_credentials
 
 from .criteria import MalformedIntent, UndecidableCriterion, build_query
 from .fit import FitAssessment
-from .service import CandidateRetrieval
+from .service import CandidateRetrieval, RetrievalResult
 from .sources import GraphCandidateSource
 
 __all__ = [
@@ -386,10 +386,15 @@ class GraphShopRoster:
                 result = retrieval.retrieve(intent, limit=self.product_limit)
                 fit = {a.product_id: a.fit_score for a in result.assessments}
                 if not fit:
+                    # WHICH kind of nothing, because the three are different answers to the
+                    # shopper and this string is the only place the difference survives. An
+                    # off-topic emptiness is "this catalogue is not about what you asked" — the
+                    # honest answer to a furniture query against a supplements corpus, and the
+                    # one the exchange used to replace with four confident supplements. A
+                    # hard-constraint emptiness is "we have this kind of thing, none of it meets
+                    # your must-have", which is a different sentence and a different repair.
                     return empty(
-                        "no product in this exchange's catalogue graph both matches this "
-                        "intent and satisfies its hard constraints, so there is no shop to "
-                        "solicit",
+                        _nothing_retrieved_reason(result),
                         considered=result.considered,
                     )
                 shops = candidate_shops(
@@ -443,6 +448,36 @@ class GraphShopRoster:
             elapsed_ms=elapsed_ms,
             fit=tuple(result.assessments),
         )
+
+
+def _nothing_retrieved_reason(result: RetrievalResult) -> str:
+    """Why this retrieval named no product, in the shopper's terms rather than the pipeline's.
+
+    Three emptinesses reach the same ``if not fit``, and reporting them with one sentence was
+    the reason a shopper could not tell "we searched and this catalogue is about something else"
+    from "we could not search". They are ordered by what the shopper can act on: an OFF-TOPIC
+    catalogue is the answer to their question, so it is named first even when a hard constraint
+    also excluded somebody — the constraint is not why they are being shown nothing.
+    """
+    if result.off_topic:
+        names = ", ".join(row.canonical_name for row in result.off_topic[:3])
+        return (
+            f"nothing in this exchange's catalogue is about what was asked. "
+            f"{result.considered} product(s) were retrieved and {len(result.off_topic)} of them "
+            f"were judged off-topic by {result.relevance} (nearest: {names}), so there is no "
+            f"shop to solicit. This is an answer about the catalogue, not a failure to search "
+            f"it — the products this exchange holds are about something else"
+        )
+    if result.excluded:
+        return (
+            f"no product in this exchange's catalogue graph satisfies this intent's hard "
+            f"constraints: {result.considered} were retrieved and every one of them was "
+            f"excluded, so there is no shop to solicit"
+        )
+    return (
+        "this exchange's catalogue graph returned no product at all for this intent — the "
+        "index matched nothing to judge — so there is no shop to solicit"
+    )
 
 
 def _solicited(shops: Sequence[ShopCandidate], *, fit: Mapping[str, float]) -> list[SolicitedShop]:

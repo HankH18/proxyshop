@@ -512,12 +512,32 @@ That is R14 working as specified rather than the demo running out; `make deps-do
 
 There is also a browser demo that needs no datastore at all —
 `PROXYSHOP_WORKER=1 npm run demo --workspace @proxyshop/buyer` — which builds the SPA and boots
-five ASGI apps in one process. Sign in before typing anything into the shopping box: there is
-no password, the launcher prints a single-use magic link into the terminal, and redeeming it
-reloads the page, so a conversation started first is gone when you come back. That console
-transport is a **local-development transport** — anyone who can read the process's stdout can
-sign in as whoever asked for a link — and it has to be named out loud, because a deployment
-that merely forgets to configure mail refuses every login with `503`.
+five ASGI apps in one process. **There is nothing to do before typing into the shopping box:
+this stack offers no sign-in and no gate.** The page asks `GET /buyer/auth/sign-in` on load and
+renders the form only where the deployment can actually deliver mail. The launcher's
+`configure_magic_link_delivery` (`apps/buyer/devstack/run.py`) sets
+`PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT=console`, and the compose stack leaves it empty, so both
+answer `{"offered": false}` and neither draws a form. Check it rather than
+believing this paragraph: `curl -s localhost:8081/buyer/auth/sign-in`.
+
+What that costs, so the shortlist does not surprise you: with no session there is no
+vault-minted pseudonym, so the exchange names the shopper `anon-<auction id>`
+(`exchange.composition.solicitation_profile`) for that one auction and the stores are handed
+empty buckets — which a store's learning grid reads as "no segment" rather than as a fact about
+anybody. Every beat still runs: clarify, confirm, shortlist and accept all answer without a
+session header.
+
+To demo the login instead, the deployment has to be able to MAIL. The decision is
+`magic_link_is_mailed` in `buyer_svc.auth.delivery`, and it answers `True` only for
+`PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT=smtp` with an MTA named, or an MTA named with the
+transport left unset. `console` is **not** a way to get
+the form back — it puts no link in any mailbox, so it answers `False` like the unconfigured
+case; what it does is print the single-use link to the service's own stdout, for a login driven
+by `curl` rather than by the page. It is a **local-development transport**: anyone who can read
+the process's stdout can sign in as whoever asked for a link. And an unconfigured deployment
+refuses rather than pretending — measured on the compose stack, `POST /buyer/auth/magic-link`
+answers `503 {"detail":"no login link was sent: this deployment has no magic-link mail
+transport configured"}`.
 
 ---
 
@@ -526,8 +546,8 @@ that merely forgets to configure mail refuses every login with `503`.
 ## The services
 
 Every service is a FastAPI app imported as `<namespace>.main:create_app` unless noted; the port
-is what its Dockerfile CMD binds. **The six product services serve 57 routes between them, and
-every one of the 57 is driven by at least one test** — measured by
+is what its Dockerfile CMD binds. **The six product services serve 58 routes between them, and
+every one of the 58 is driven by at least one test** — measured by
 `./.venv/bin/python -m proxyshop_support.route_census`, which also checks each service against
 its published OpenAPI contract and currently reports no drift in either direction. Run it rather
 than believing that sentence; it is the fastest way to find a route somebody built and nobody
@@ -535,7 +555,7 @@ reached.
 
 | Path | Port | Routes | What it owns |
 |---|---|---|---|
-| `apps/buyer` | 8081 | 16 | The Vite/React SPA (`@proxyshop/buyer`), the FastAPI buyer service, and `devstack/run.py`. Clarify, confirm, read an auction, render and accept a shortlist, magic-link auth and session, profile, feedback and its prompt, a live-check pair, and the store-visible window. |
+| `apps/buyer` | 8081 | 17 | The Vite/React SPA (`@proxyshop/buyer`), the FastAPI buyer service, and `devstack/run.py`. Clarify, confirm, read an auction, render and accept a shortlist, magic-link auth and session, the sign-in offer the SPA asks before it draws a login form, profile, feedback and its prompt, a live-check pair, and the store-visible window. |
 | `apps/exchange` | 8083 | 7 | The auction, the ranker, the checkout port. `POST /auctions`, `GET /auctions/{id}`, `GET /auctions/{id}/shortlist`, `POST /auctions/{id}/accept`, the external Tier-2 bid door `POST /v1/auctions/{id}/bids`, `POST /internal/outcomes`, `GET /reports/losses`. |
 | `apps/merchant` | 8082 | 13 | Install and OAuth callback, the Shopify webhook door, the pixel collector, code minting, envelope read/write, the kill switch, and the merchant console at `/dashboard`. |
 | `apps/trust` | 8084 | 10 | The hash-chained append-only ledger, plus scoring, reconciliation and snapshots. Exactly the ten `trust.openapi.json` declares. |

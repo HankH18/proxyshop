@@ -1129,6 +1129,24 @@ def rank_auction(
         # shortlist was emptied by it with nothing said. `None` when the catalog is unwired or
         # declares nothing, and then nothing is ever relaxed (ESC-020's direction).
         network_attributes=readings.attributes,
+        # THE SAME PASS, spent on the organic half's honesty check. `readings.identities` is the
+        # platform's own crawled name for each store's rostered product, already fetched two
+        # lines above for the shortlist's product block, and `rank()` uses it to ask whether a
+        # row the PLATFORM manufactured is about what the shopper asked at all.
+        #
+        # It is the served route's answer to a defect a green ranking could not see. Measured
+        # through the buyer service before this argument existed, on the demo roster:
+        # `"a walnut coffee table for the lounge"` returned four slots — Milk Thistle Gummies,
+        # Dandelion Root, Milk Thistle, Glutathione 98% — every one of them `fallback: true`,
+        # because a roster is fixed and the shortlist never asked whether the products on it
+        # had anything to do with the question. Nothing was broken; nothing had been checked.
+        #
+        # Passed unconditionally, and the dict being EMPTY is the fail-open. An exchange with
+        # no catalogue resolves no identity for anybody, every store is unchecked, and every
+        # organic row stands exactly as it did — see `organic_relevance_reason`'s three
+        # conditions. What is NOT conditional is the caller: a served auction always says what
+        # it holds, so this filter cannot end up wired and switched off.
+        product_identities=readings.identities,
     )
     # `projected`, ADDITIVE, and it is the repair for T-349. `rank()` answers with its own
     # ROW projection under `"candidates"` — `bid_id`, `eligible`, `rank_score`, the trust

@@ -243,6 +243,8 @@ import {
   type ClarifyOutcome,
   type Intent,
 } from '../intent/intent'
+import { AskPanel } from '../chat/AskPanel'
+import { askAboutShortlist } from '../chat/ask'
 import { ShortlistView } from '../shortlist/ShortlistView'
 import {
   acceptSlot,
@@ -582,6 +584,28 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
       })
     },
     [run, stage, wire],
+  )
+
+  /**
+   * Ask one follow-up about the shortlist on screen, through the REAL wire.
+   *
+   * The auction id is taken from `stage.record`, which is this page's own copy of what the
+   * confirm route returned — never from anything a shopper typed. The SLOTS are deliberately
+   * not passed: `POST /buyer/chat/ask` takes an auction id and a question and fetches its own
+   * material from the exchange, so nothing this browser holds can become something the
+   * platform asserts to the person reading it (D55). See `chat/ask.ts`.
+   *
+   * Deliberately NOT routed through `run`, for the same reason `answerSeededPrompt` is not:
+   * `run` owns the journey's failure banner and busy flag, and a question that the service
+   * refuses must not blank the shortlist a shopper is in the middle of reading. The rejection
+   * travels to `AskPanel`, which prints it on the turn that caused it.
+   */
+  const askAboutTheseOptions = useCallback(
+    async (question: string) => {
+      if (stage === undefined) throw new Error('there is no auction on this page to ask about')
+      return askAboutShortlist(stage.record.auction_id, question, wire.fetcher)
+    },
+    [stage, wire],
   )
 
   /**
@@ -1052,6 +1076,25 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
                       <pre className="mono">{JSON.stringify(stage.record.raw, null, 2)}</pre>
                     </details>
                   </details>
+
+                  {/* The follow-up box, and it is mounted HERE — inside the branch where the
+                      exchange returned a live shortlist with slots on it — rather than at the
+                      bottom of the section. Every other arm of this branch is a page with
+                      nothing to ask about: an auction the exchange has forgotten holds no
+                      shortlist to answer from and `POST /buyer/chat/ask` would 404 on it, and
+                      a labelling failure means this page is not showing the options it would
+                      be answering about. A question box that could only fail is worse than no
+                      question box.
+
+                      It is given the auction id and a fetcher, and NOT the slots. That is the
+                      D55 property and it is structural: the service fetches its own material
+                      from the exchange, so nothing this page holds can become something the
+                      platform asserts. See `chat/ask.ts`. */}
+                  <AskPanel
+                    key={`ask-${stage.record.auction_id}-${attempt}`}
+                    optionCount={stage.slots.length}
+                    onAsk={askAboutTheseOptions}
+                  />
               </>
             )}
             </>

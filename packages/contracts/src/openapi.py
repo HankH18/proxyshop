@@ -196,6 +196,13 @@ PINNED_ROUTES: tuple[Route, ...] = (
     Route("buyer", "post", "/buyer/intent/confirm"),
     Route("buyer", "post", "/buyer/livecheck/run"),
     Route("buyer", "get", "/buyer/livecheck/{auction_id}"),
+    # The shopper's follow-up questions about a shortlist they are already looking at. It is
+    # declared for the reason the block above records — a route the service ANSWERS is written
+    # down — and it is the one buyer door whose whole subject is what the PLATFORM may say in
+    # its own voice, so it is the last one that should escape contract review. Reads only: it
+    # fetches the exchange's live shortlist for one auction and answers from it, and it names
+    # neither of the exchange's two writes.
+    Route("buyer", "post", "/buyer/chat/ask"),
     # R9's merchant-facing report door, and neither block above is the honest home for it.
     #
     # NOT the DESIGN §Interfaces block: DESIGN's exchange line pins five routes and this is not

@@ -1,4 +1,4 @@
-"""Candidate retrieval end to end: fetch → R19 filter → features → rerank (T-031).
+"""Candidate retrieval end to end: fetch → R19 filter → relevance → features → rerank (T-031).
 
 The pipeline, and why it is in this order:
 
@@ -9,11 +9,19 @@ The pipeline, and why it is in this order:
    pre-filter on.
 3. **Filter** — every hard constraint re-decided locally, against whatever came back. This is
    acceptance 1, and it is what makes the guarantee independent of the source.
-4. **Measure** the features, over the *eligible* set. Preference alignment is min-max
-   normalised across the candidates that survived the filter, so an ineligible outlier cannot
-   compress the scale everyone else is measured on.
-5. **Rerank** behind the port, refusing an answer the interface does not allow.
-6. **Order** by fit, tie-broken by ``product_id``, and truncate to the caller's limit.
+4. **Judge relevance** — is each candidate *about* what was asked
+   (:mod:`~exchange.retrieval.relevance`). A vector index always answers with its top ``k``,
+   so "top ``k`` of a good match" and "top ``k`` of nothing relevant" arrive here in the same
+   shape; this is the step that tells them apart. Measured on the served route before it
+   existed: ``"a walnut coffee table for the lounge"`` returned four supplements, confidently.
+   Off-topic candidates are reported on :attr:`RetrievalResult.off_topic` with the reason,
+   never silently dropped — an empty answer whose emptiness cannot be explained is the same
+   defect wearing a shorter list.
+5. **Measure** the features, over the *relevant* set. Preference alignment is min-max
+   normalised across the candidates that survived both filters, so neither an ineligible nor
+   an off-topic outlier can compress the scale everyone else is measured on.
+6. **Rerank** behind the port, refusing an answer the interface does not allow.
+7. **Order** by fit, tie-broken by ``product_id``, and truncate to the caller's limit.
    Truncation is last: a limit applied before the filter would return fewer satisfying
    candidates than were asked for whenever anything was excluded.
 
@@ -35,6 +43,7 @@ from ingest.graph.model import canonical_text
 
 from .criteria import NEUTRAL_ALIGNMENT, RetrievalQuery, SoftPreference, build_query
 from .fit import FitAssessment, FitFeatures
+from .relevance import TopicalRelevance, candidate_surface
 from .rerank import DeterministicReranker, Reranker, RerankItem, read_rerank
 from .sources import CandidateSource
 
@@ -70,11 +79,28 @@ class RetrievalResult:
     assessments: tuple[FitAssessment, ...]
     excluded: tuple[ExcludedCandidate, ...]
     considered: int
+    #: How many candidates reached the reranker: they satisfied every hard constraint **and**
+    #: were about the query. It is deliberately not "how many passed R19" — the number this
+    #: reports is the size of the set the features were measured over, which is the set that
+    #: was scored, and a count that included off-topic rows would not describe any set the
+    #: pipeline ever held. ``considered - eligible_count`` is therefore
+    #: ``len(excluded) + len(off_topic)``, and those two are published separately below.
     eligible_count: int
     elapsed_ms: float
     budget_ms: float
     source: str
     reranker: str
+    #: The candidates that satisfied every hard constraint and were still not ABOUT the query
+    #: (:mod:`~exchange.retrieval.relevance`), each with the verdict's own sentence. Separate
+    #: from :attr:`excluded` and not merged into it, because the two say different things to
+    #: the shopper reading an empty answer: ``excluded`` is "this product does not meet a
+    #: must-have you stated", ``off_topic`` is "this catalogue has nothing about what you
+    #: asked". Rolling them together would report a corpus with nothing to offer as a corpus
+    #: full of near misses.
+    off_topic: tuple[ExcludedCandidate, ...] = ()
+    #: The relevance rule that produced :attr:`off_topic`, by name, so an audit can say WHICH
+    #: rule refused rather than only that something did.
+    relevance: str = ""
 
     @property
     def product_ids(self) -> tuple[str, ...]:
@@ -91,15 +117,16 @@ class RetrievalResult:
 
         Raises:
             KeyError: that product is not in this result — it was never retrieved, or it was
-                excluded, or it fell outside the limit. Returning 0.0 would be
-                indistinguishable from "measured, and a terrible match".
+                excluded, or it was not about the query, or it fell outside the limit.
+                Returning 0.0 would be indistinguishable from "measured, and a terrible match".
         """
         for assessment in self.assessments:
             if assessment.product_id == product_id:
                 return assessment.fit_score
         raise KeyError(
             f"{product_id!r} is not in this result; retrieved={self.product_ids}, "
-            f"excluded={tuple(row.product_id for row in self.excluded)}"
+            f"excluded={tuple(row.product_id for row in self.excluded)}, "
+            f"off_topic={tuple(row.product_id for row in self.off_topic)}"
         )
 
 
@@ -117,6 +144,7 @@ class CandidateRetrieval:
         source: CandidateSource,
         *,
         reranker: Reranker | None = None,
+        relevance: TopicalRelevance | None = None,
         budget_ms: float = RETRIEVAL_LATENCY_BUDGET_MS,
         require_status: str | None = "active",
         clock: Callable[[], float] = time.perf_counter,
@@ -129,6 +157,15 @@ class CandidateRetrieval:
             reranker: the fit scorer behind the port. Defaults to
                 :class:`~exchange.retrieval.rerank.DeterministicReranker`, which is what A2
                 requires every offline verify to run.
+            relevance: the rule deciding whether a candidate is ABOUT the query
+                (:mod:`~exchange.retrieval.relevance`). Defaults to
+                :class:`~exchange.retrieval.relevance.TopicalRelevance`, and **there is no way
+                to switch it off** — the same reason ``require_status`` re-decides status here
+                rather than trusting the source. A knob that turns the honesty check off is a
+                knob a deployment ends up in the off position on, and the failure it causes
+                (confidently wrong results) is silent. To widen or narrow it, pass a rule with
+                different thresholds; to see what it refused, read
+                :attr:`RetrievalResult.off_topic`.
             budget_ms: the latency budget reported on each result.
             require_status: the product status a candidate must carry, re-decided **here**
                 rather than trusted to the source. ``None`` disables the check. T-012 states
@@ -144,6 +181,9 @@ class CandidateRetrieval:
         """
         self.source = source
         self.reranker: Reranker = reranker if reranker is not None else DeterministicReranker()
+        self.relevance: TopicalRelevance = (
+            relevance if relevance is not None else TopicalRelevance()
+        )
         self.budget_ms = float(budget_ms)
         self.require_status = require_status
         self.clock = clock
@@ -158,7 +198,10 @@ class CandidateRetrieval:
 
         Returns:
             A :class:`RetrievalResult` whose ``assessments`` satisfy **every** hard constraint
-            in the intent, ordered by fit score with ``product_id`` as the tie-break.
+            in the intent **and** are about what it asked, ordered by fit score with
+            ``product_id`` as the tie-break. A result with no assessments and a non-empty
+            ``off_topic`` is the honest empty answer: the catalogue was searched and holds
+            nothing on this subject.
 
         Raises:
             MalformedIntent: the intent cannot be turned into a query.
@@ -170,14 +213,27 @@ class CandidateRetrieval:
 
         eligible: list[Candidate] = []
         excluded: list[ExcludedCandidate] = []
+        off_topic: list[ExcludedCandidate] = []
         for candidate in fetched:
             reasons = self._exclusions(query, candidate)
             if reasons:
                 excluded.append(
                     ExcludedCandidate(candidate.product_id, candidate.canonical_name, reasons)
                 )
-            else:
-                eligible.append(candidate)
+                continue
+            # Relevance is judged only on what survived R19, and only after it. A candidate
+            # already refused for a hard constraint would otherwise be reported twice, under
+            # two reasons, and the shopper would be told the catalogue is off-topic when what
+            # actually happened is that their own must-have excluded it.
+            verdict = self.relevance.judge(query.query_text, candidate_surface(candidate))
+            if not verdict.about:
+                off_topic.append(
+                    ExcludedCandidate(
+                        candidate.product_id, candidate.canonical_name, (verdict.detail,)
+                    )
+                )
+                continue
+            eligible.append(candidate)
 
         items = _rerank_items(query, eligible)
         scores = read_rerank(self.reranker, query.query_text, items)
@@ -209,6 +265,8 @@ class CandidateRetrieval:
             budget_ms=self.budget_ms,
             source=str(getattr(self.source, "name", type(self.source).__name__)),
             reranker=reranker_name,
+            off_topic=tuple(off_topic),
+            relevance=str(getattr(self.relevance, "name", type(self.relevance).__name__)),
         )
 
     def _exclusions(self, query: RetrievalQuery, candidate: Candidate) -> tuple[str, ...]:

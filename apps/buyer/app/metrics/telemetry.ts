@@ -103,15 +103,24 @@ export function remember(key: string, value: string): void {
 /**
  * Forget one remembered value.
  *
- * Exists because signing out has to reach this storage too. An auction id is not a
- * credential, but the trace it opens is not nothing: `GET /buyer/auctions/{id}` takes no
- * session header, so anyone holding the tab can read every solicited store, every store's
- * answer and price, every exclusion reason and the exchange's ranking components for that
- * auction. `Journey`'s sign-out already clears the shortlist from the screen because "the
- * shortlist belonged to a pseudonym the vault has now retired", and its own gloss promises
- * signing out "clears the auction below with it". A remembered id that outlived sign-out
- * would make that sentence false and leave the retired pseudonym's auction one hash change
- * away.
+ * WHY IT MATTERS. An auction id is not a credential, but the trace it opens is not nothing:
+ * `GET /buyer/auctions/{id}` takes no session header, so anyone holding the tab can read
+ * every solicited store, every store's answer and price, every exclusion reason and the
+ * exchange's ranking components for that auction.
+ *
+ * WHO CALLS IT, and the condition that used to be missing from this paragraph. There are two
+ * callers and only one of them is reachable on the shipped demo:
+ *
+ *   * `Journey`'s sign-out, which clears the shortlist because "the shortlist belonged to a
+ *     pseudonym the vault has now retired" and whose gloss promises signing out "clears the
+ *     auction below with it". That button renders ONLY where `GET /buyer/auth/sign-in`
+ *     answers `{"offered": true}` — i.e. where the deployment names a real mail transport.
+ *     Neither the compose stack nor `apps/buyer/devstack/run.py` does: both answer
+ *     `{"offered": false}`, so on the demo this caller never runs.
+ *   * `MetricsPage`'s own "Forget it" control (`onForget`, in `MetricsPage.tsx`), which is
+ *     therefore the only way a demo audience can clear a remembered id. It exists because for
+ *     a while there was no way at all, and a stale auction id surviving a "start over" makes
+ *     the demo look broken.
  */
 export function forget(key: string): void {
   try {
@@ -274,7 +283,11 @@ export const UNREACHABLE_SOURCES: readonly UnreachableSource[] = [
     route: 'GET /snapshot',
     service: 'trust',
     port: '8084',
-    why: 'Same origin barrier. This is also the only route that LISTS stores.',
+    why:
+      'Same origin barrier. It is the only route that lists every store WITH its score — ' +
+      'not the only one that lists stores at all: `GET /schedule` below enumerates them ' +
+      'too, as refresh plans, and the merchant’s `GET /install/shops` lists the shops ' +
+      'it holds a token for behind an admin bearer.',
     remedy: 'the same /trust/ proxy block.',
     openable: true,
   },
@@ -293,12 +306,16 @@ export const UNREACHABLE_SOURCES: readonly UnreachableSource[] = [
     service: 'exchange',
     port: '8083',
     why:
-      'A different origin AND a per-store bearer token: the exchange derives the store from ' +
-      'the Authorization header, so there is no store_id parameter. A shopper page holds ' +
-      "no store's token and must not.",
+      'Switched off before the origin barrier is reached. No compose file names the ' +
+      "exchange's `report_tokens_file`, so it holds no token table and answers 503 to " +
+      'everybody — the route is unreachable here for a reason that has nothing to do with ' +
+      'this page. Behind that it is also a different origin AND a per-store bearer: the ' +
+      'exchange derives the store from the Authorization header, so there is no store_id ' +
+      "parameter, and a shopper page holds no store's token and must not.",
     remedy:
-      'this one belongs on the merchant console, which already reads it server-side, ' +
-      'rather than on a page served to shoppers.',
+      'name `report_tokens_file` in the exchange deployment document to make it serve ' +
+      'anyone at all; it then belongs on the merchant console, which already reads it ' +
+      'server-side, rather than on a page served to shoppers.',
     openable: false,
   },
   {

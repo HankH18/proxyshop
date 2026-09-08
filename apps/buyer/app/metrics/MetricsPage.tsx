@@ -25,6 +25,7 @@ import {
   type SessionReading,
   auctionPath,
   directUrl,
+  forget,
   livecheckPath,
   readAuctionTrace,
   readLiveCheck,
@@ -45,9 +46,17 @@ const browserFetch: Fetcher = (input, init) => fetch(input, init)
 export interface MetricsPageProps {
   /** Injected in tests. Left alone, the page talks to the service on its own origin. */
   readonly fetcher?: Fetcher
-  /** Injected in tests. Left alone, read from the journey's remembered session. */
+  /**
+   * Injected in tests, and in tests ONLY.
+   *
+   * Left alone this page holds no session and cannot get one: `Journey` keeps its session id
+   * in component state "and NOWHERE else" — its words — because it is a bearer credential for
+   * this origin, so navigating to `#/metrics` does not carry it along. The session panel is
+   * therefore `unauthorized` on every real page load, and says so in those words. There is no
+   * "remembered session" anywhere in this app to read.
+   */
   readonly sessionId?: string
-  /** Injected in tests. Left alone, read from the journey's remembered auction. */
+  /** Injected in tests. Left alone, read from the journey's remembered auction id. */
   readonly initialAuctionId?: string
   /** Injected in tests so the cross-origin links are deterministic. */
   readonly location?: { protocol: string; hostname: string }
@@ -168,6 +177,26 @@ export function MetricsPage({
     setSubmitted(auctionId)
   }, [auctionId])
 
+  /**
+   * Clear the remembered auction id — from this screen AND from `sessionStorage`.
+   *
+   * THE DEAD END THIS CLOSES. `remember()` is written by `Journey` on every confirm, and for
+   * a while the only `forget()` was behind `Journey`'s sign-out button. That button renders
+   * only where `GET /buyer/auth/sign-in` answers `{"offered": true}`, and neither the compose
+   * stack nor the devstack launcher offers it — both answer `{"offered": false}` because
+   * neither names a mail transport. So on every deployment a demo is actually driven on, a
+   * remembered id could be written and never cleared: it survived a reload, survived a "start
+   * over", and reopened the previous run's full trace on the next visit to `#/metrics`.
+   *
+   * Clearing the field alone would not do it. `remembered()` is read in the initial state of
+   * both `auctionId` and `submitted`, so the next mount would put the id straight back.
+   */
+  const onForget = useCallback(() => {
+    forget(REMEMBERED_AUCTION_KEY)
+    setAuctionId('')
+    setSubmitted('')
+  }, [])
+
   return (
     <main className="journey" data-testid="metrics-page">
       <header className="masthead">
@@ -178,10 +207,13 @@ export function MetricsPage({
           such rather than shown as an empty chart.
         </p>
         <p className="metrics-warning" data-tone="unverified" role="note">
-          Do not expose this page on a public deployment. It reads the buyer session out of
-          this browser, prints an auction&rsquo;s full recorded trace including every
-          store&rsquo;s answer and the exchange&rsquo;s ranking components, and links to the
-          trust ledger and ingest scheduler, which are unauthenticated on their own ports.
+          Do not expose this page on a public deployment. It prints an auction&rsquo;s full
+          recorded trace including every store&rsquo;s answer and price, every exclusion
+          reason and the exchange&rsquo;s ranking components &mdash; from a route that takes
+          no session header &mdash; and it links to the trust ledger and the ingest
+          scheduler, which are unauthenticated on their own ports. What it does <em>not</em>{' '}
+          do is read a buyer session out of this browser: there is none here to read, and the
+          session panel below is refused rather than filled.
         </p>
       </header>
 
@@ -192,8 +224,13 @@ export function MetricsPage({
         <p>
           The richest real trace this origin can reach: who was solicited, what each store
           answered, which candidates were refused and for what stated reason, and the
-          published ranking with its components. There is no route on any service that LISTS
-          auctions, so an id has to come from a journey you have run.
+          published ranking with its components. No route on any service lists auctions, so
+          an id has to come from a journey you have run <em>against this stack</em>. The
+          trust ledger linked below does name auction ids inside its events, but they are not
+          a shortcut: this route answers 404 unless one of two sources still knows the
+          auction &mdash; this buyer service&rsquo;s own in-process record of opening it, or
+          a shortlist the exchange has not yet dropped. An id from the ledger that this
+          service never opened satisfies neither and 404s.
         </p>
         <form onSubmit={onSubmit} className="metrics-form">
           <label htmlFor="metrics-auction">Auction id</label>
@@ -206,6 +243,17 @@ export function MetricsPage({
             onChange={(event) => setAuctionId(event.target.value)}
           />
           <button type="submit">Trace it</button>
+          <button
+            type="button"
+            onClick={onForget}
+            disabled={auctionId === '' && submitted === ''}
+            title={
+              'Clears the id this browser remembered from your last confirm, so a fresh ' +
+              'demo does not open on the previous run’s trace.'
+            }
+          >
+            Forget it
+          </button>
         </form>
 
         {trace.state === 'ok' ? (

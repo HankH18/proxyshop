@@ -1,8 +1,15 @@
 /**
  * Client half of R2's shortlist labels and R3's checkout handoff (T-072).
  *
- * Mirrors `buyer_svc/accept/routes.py`. Three things here are load-bearing rather than
- * decorative, and each is the client-side half of a rule the service also enforces:
+ * Mirrors `buyer_svc/accept/routes.py`, and — since the record fold — reads one route it does
+ * not own: `GET /buyer/auctions/{id}`, the auction as `buyer_svc/auctions/routes.py` recorded
+ * it. That is the only place a shopper-facing surface can reach a promise's provenance and the
+ * exchange's published ranking components, because both are projected away twice on the way to
+ * a card; `loadRecordedAuction` and its readers are at the bottom of this file, and
+ * `ShortlistView`'s own header argues why the fold re-reads rather than re-deriving.
+ *
+ * Four things here are load-bearing rather than decorative, and each is the client-side half of
+ * a rule the service also enforces:
  *
  * 1. **This module has no provenance table in it.** D30 puts the source → label map in
  *    `packages/contracts` so the exchange (which produces `provenance_labels`) and the
@@ -21,6 +28,13 @@
  *    running in the process that will do the navigating. A `javascript:` "permalink" that
  *    passed two server-side checks and failed here would still be a bug — but it would be a
  *    bug that did not execute.
+ * 4. **The record readers refuse rather than repair.** Everything `readRecordedAuction` walks
+ *    is `unknown` at runtime, and its answer for a field it cannot read is the honest absence
+ *    the rest of this file uses — never a default that reads as a claim. An `authority_rank`
+ *    outside the contract's own `>= 1` bound is `null` rather than printed beside the sentence
+ *    "1 is the strongest"; a provenance block with no source is no evidence rather than three
+ *    blank rows under the word "Evidence"; and `null` commitments stay apart from `[]`, because
+ *    "the exchange published none" and "this shop promised nothing" are different sentences.
  */
 
 /** SPEC R2 fixes exactly two buyer-facing provenance label strings. */
@@ -100,8 +114,17 @@ export interface ShortlistProduct {
   readonly identity?: ShortlistProductIdentity | null
 }
 
-/** The discount a slot's price states. A *stated* depth, not an entitlement: no single-use
- * code exists until the buyer accepts (D22), which is why the screen says "states". */
+/**
+ * The discount a slot's price states. A *stated* depth, not an entitlement: no single-use
+ * code exists until the buyer accepts (D22), which is why the screen says "states".
+ *
+ * There is deliberately NO `provenance` here even though `contracts.protocol.Discount`
+ * declares one and the buyer service forwards the discount whole. `journey/wire.ts::readDiscount`
+ * rebuilds the object as `{type, value}`, so the rule that authorised the depth never reaches
+ * this component on a slot — declaring the field would be a type promising a value the browser
+ * does not populate. It is read off the auction record instead, as
+ * {@link SlotRecord.discount_provenance}.
+ */
 export interface SlotDiscount {
   readonly type: string
   readonly value: number
@@ -235,9 +258,38 @@ export interface ShortlistSlot {
   readonly trust_summary?: TrustSummary
   /** OPEN list of strings, produced by the exchange (D30). Rendered, never re-derived. */
   readonly provenance_labels: readonly string[]
+  /**
+   * HOW the labels above got there: `exchange` (the exchange sent them), `derived` (it sent
+   * none and the buyer service worked them out from the slot's claims) or `absent` (neither,
+   * so the slot reads `unverified`).
+   *
+   * `POST /buyer/shortlist/render` has published this on every slot since T-072
+   * (`buyer_svc.accept.labels.LabelledSlot.labels_source`) and the browser has carried it
+   * since — `journey/wire.ts::renderShortlist` writes `labels_source: asString(row.labels_source)`
+   * onto every slot it hands this component. It was simply never DECLARED here, so nothing
+   * could read it without a cast, and nothing did. Optional because a caller building a slot
+   * by hand has no obligation to state it, and because a producer older than the field is a
+   * real caller.
+   */
+  readonly labels_source?: string
   /** Present only on a slot the caller enriched; the protocol type carries no auction id. */
   readonly auction_id?: string
   readonly store_domain?: string
+  /**
+   * The WHOLE trust snapshot the exchange attached to this slot, values and all.
+   *
+   * `trust_summary` above is typed `Record<string, number>` and the browser narrows to it by
+   * dropping every non-numeric field, which on a live shortlist is most of them: measured on
+   * this stack, the exchange sends `{store_id, available, score, confidence, low_data,
+   * dimensions[]}` and only `score` and `confidence` survive that narrowing. `wire.ts` keeps
+   * the unnarrowed object beside it precisely so a screen can show what the narrowing lost —
+   * and until this declaration existed, no screen could reach it.
+   *
+   * Values are `unknown` because they genuinely are: a boolean, a number, a string and a list
+   * of dimension names all arrive here, and a reader that typed them would be inventing a
+   * shape the exchange never promised.
+   */
+  readonly trust_fields?: Readonly<Record<string, unknown>>
   /**
    * R2's other three, and all three are OPTIONAL and NULLABLE on purpose.
    *
@@ -388,6 +440,321 @@ export function slotLabels(slot: Pick<ShortlistSlot, 'provenance_labels'>): read
   const cleaned = supplied.filter(isNonEmptyString).map((label) => label.trim())
   const unique = [...new Set(cleaned)]
   return unique.length > 0 ? unique : [LABEL_UNVERIFIED]
+}
+
+/**
+ * The FAMILY half of an exchange `fallback_reason` — everything before the first colon.
+ *
+ * The exchange writes every reason either as a bare family word or as `family:detail`
+ * (`exchange.auction.collect.refusal_reason`), and the detail half is open-ended by
+ * construction: on a refusal it is the HTTP status a store's agent answered with, on a
+ * decline it is a reason header the store chose. So a screen that matched whole strings would
+ * recognise `store_refused:422` and then fail to recognise `store_refused:503`, which is the
+ * same store behaviour.
+ *
+ * A SECOND COPY of `journey/wire.ts::fallbackReasonFamily`, and deliberately so rather than an
+ * import: `wire.ts` imports this module, so the dependency between the two runs one way and
+ * importing it back would close a cycle. What is copied is one published splitting rule, not a
+ * vocabulary — {@link NO_AGENT_FALLBACK_FAMILY} below is the only family word this file names.
+ */
+export function fallbackReasonFamily(reason: string | null | undefined): string {
+  if (typeof reason !== 'string') return ''
+  return (reason.split(':', 1)[0] ?? '').trim()
+}
+
+/**
+ * The one `fallback_reason` family that means NOBODY WAS ASKED.
+ *
+ * `exchange.auction.collect.NO_AGENT_REASON` is `tier_0_no_agent:<detail>`, and it is the
+ * exchange's word for a shop that is on the roster from its crawled catalogue alone and has no
+ * bidding agent for anyone to solicit. Every other family in that vocabulary describes
+ * something that happened AFTER a solicitation went out — silence, a late reply, an unreadable
+ * answer, an explicit decline.
+ *
+ * That distinction is the whole reason this constant exists, and it is a D55 rule rather than a
+ * copywriting preference: a scraped shop is an ORGANIC result, and telling a shopper it "did
+ * not answer this auction" puts a refusal in the mouth of a shop that was never spoken to.
+ *
+ * ONE family word and not nine. The nine-family gloss lives in
+ * `journey/WhyEmpty.tsx::explainFallbackReason` and this file does not fork it — it cannot
+ * import it (see {@link fallbackReasonFamily}), and a second copy of a vocabulary that has
+ * already grown twice would go stale where a splitting rule cannot. What this screen needs is
+ * not nine sentences; it is the answer to one question — was there anybody to ask? — and past
+ * that it prints the exchange's own token unchanged.
+ */
+export const NO_AGENT_FALLBACK_FAMILY = 'tier_0_no_agent'
+
+/**
+ * WHERE THIS SLOT'S EVIDENCE CAME FROM, as the exchange published it (D30).
+ *
+ * The `Provenance` on a published `Claim`, read back off the auction record. `source` is the
+ * exchange's own closed vocabulary and is rendered as the token it is — this app does not own
+ * the source→label map (D30 puts it in `packages/contracts` so the exchange and the buyer
+ * cannot drift into two answers) and nothing here derives a label from it. The buyer-facing
+ * label a shopper reads still comes from the buyer service, on `SlotCommitment.label`.
+ *
+ * `authority_rank` has published semantics: **1 is the most authoritative and larger is
+ * weaker.** `null` when the claim stated none, or stated something this reader cannot read as
+ * one — the contract validates it `>= 1`, so a `0` is not a stronger rank than the strongest
+ * the network publishes, it is a value from a producer this page cannot identify.
+ */
+export interface ClaimProvenance {
+  readonly source: string
+  /** A pointer to the evidence — a snapshot URI, an envelope commitment path, a pitch span. */
+  readonly ref: string | null
+  readonly observed_at: string | null
+  /** 1 = strongest. `null` when the claim named no readable rank. */
+  readonly authority_rank: number | null
+}
+
+/**
+ * ONE PROMISE AS THE EXCHANGE PUBLISHED IT — the claim before the buyer service projected it.
+ *
+ * `SlotCommitment` is what a card renders: the promise, its value, and the one buyer-facing
+ * label. This is the same promise with the evidence still attached, and the difference is the
+ * whole reason the record panel exists — `buyer_svc.accept.labels.slot_commitments` projects a
+ * published `Claim` down to `{key, value, unit, label}`, and `journey/wire.ts::readCommitments`
+ * keeps exactly those four. So `claim_type` and the entire `provenance` block are dropped twice
+ * on the way to a shopper, and the only place they survive is the auction record itself.
+ */
+export interface SlotClaim {
+  readonly key: string
+  readonly value: unknown
+  readonly unit: string | null
+  /** D53's typed claim vocabulary (`return_policy`, `shipping_speed`, …), or `null`. */
+  readonly claim_type: string | null
+  readonly provenance: ClaimProvenance | null
+}
+
+/**
+ * WHAT THE PUBLISHED RANKING SCORED THIS CANDIDATE AT, and what each term contributed.
+ *
+ * The exchange publishes `rank_score` and its `components` once, in the body of its
+ * `POST /auctions` answer, and the buyer service records that body — so this is the RECORDED
+ * half of the auction, from the moment it was scored, and it is not re-computed for this
+ * request. A screen must say so: it is a different clock from the live shortlist beside it.
+ *
+ * `components` is kept as ordered pairs rather than an object because the ORDER is the
+ * exchange's and carries meaning a reader uses (the terms are published in formula order);
+ * round-tripping through an object literal would be one refactor away from being sorted.
+ */
+export interface SlotRanking {
+  /** `null` when the row carried no finite score — never a defaulted `0`. */
+  readonly rank_score: number | null
+  readonly components: readonly (readonly [string, number])[]
+}
+
+/** Everything the auction record holds about ONE candidate that its shortlist card does not. */
+export interface SlotRecord {
+  readonly bid_ref: string
+  /** The exchange's own attribution of this bid to a store. `''` when the row named none. */
+  readonly store_id: string
+  /**
+   * `null` means the exchange published no commitments for this slot — an R10 stand-in bid is
+   * rebuilt from the roster with an empty claims list and is exactly that case. `[]` would say
+   * the shop committed to nothing, which is a different sentence.
+   */
+  readonly claims: readonly SlotClaim[] | null
+  /** The rule that authorised this slot's discount, or `null`. See {@link ClaimProvenance}. */
+  readonly discount_provenance: ClaimProvenance | null
+  readonly ranking: SlotRanking | null
+}
+
+/**
+ * The buyer service's record of one auction, reduced to what a shortlist card cannot show.
+ *
+ * `liveness` is the same two-state answer `journey/wire.ts::ShortlistLiveness` publishes and it
+ * is not collapsed here either: `'forgotten'` is `shortlist: null`, which is a fact about the
+ * EXCHANGE (its 15-minute TTL took the auction away) and not about the market. The recorded
+ * diagnostics survive that — `ranked` is what the exchange said when the auction opened — so a
+ * record fetched after the TTL still carries every candidate's ranking and no claims at all.
+ */
+export interface RecordedAuction {
+  readonly auction_id: string
+  readonly liveness: 'live' | 'forgotten'
+  readonly recorded_at: string
+  /** Keyed by `bid_ref`, which is what a shortlist slot names itself with. */
+  readonly slots: Readonly<Record<string, SlotRecord>>
+}
+
+/**
+ * `GET {AUCTION_RECORD_PATH}{auction_id}` — the auction as the buyer service recorded it.
+ *
+ * A second spelling of `journey/wire.ts::AUCTION_PATH_PREFIX`, for the reason
+ * {@link fallbackReasonFamily} is a second copy: that module imports this one.
+ */
+export const AUCTION_RECORD_PATH = '/buyer/auctions/'
+
+/** Thrown when the auction record could not be read. Names the status, always. */
+export class RecordedAuctionUnreadable extends Error {
+  constructor(
+    readonly auctionId: string,
+    readonly reason: string,
+  ) {
+    super(`the record for auction ${auctionId} could not be read: ${reason}`)
+    this.name = 'RecordedAuctionUnreadable'
+  }
+}
+
+function readClaimProvenance(value: unknown): ClaimProvenance | null {
+  if (!isRecord(value)) return null
+  const source = isNonEmptyString(value.source) ? value.source.trim() : ''
+  // With no source there is no evidence to name, and an object of three empty fields under the
+  // word "evidence" reads as evidence a reader cannot check rather than as none at all.
+  if (source === '') return null
+  const rank = value.authority_rank
+  return {
+    source,
+    ref: isNonEmptyString(value.ref) ? value.ref.trim() : null,
+    observed_at: isNonEmptyString(value.observed_at) ? value.observed_at.trim() : null,
+    // `>= 1` is the contract's own bound and it is checked rather than trusted: a `0` rendered
+    // beside "1 is the strongest" would read as stronger than the strongest rank the network
+    // publishes, which is a claim about evidence that nobody made.
+    authority_rank:
+      typeof rank === 'number' && Number.isInteger(rank) && rank >= 1 ? rank : null,
+  }
+}
+
+function readSlotClaim(value: unknown): SlotClaim | undefined {
+  if (!isRecord(value)) return undefined
+  const key = isNonEmptyString(value.key) ? value.key.trim() : ''
+  // A row with no key has nothing in it a shopper could read. Dropped alone, never with its
+  // neighbours — the same rule `buyer_svc.accept.labels.slot_commitments` keeps, because
+  // dropping a whole list over one bad row hides promises that were fine.
+  if (key === '') return undefined
+  return {
+    key,
+    value: value.value,
+    unit: isNonEmptyString(value.unit) ? value.unit.trim() : null,
+    claim_type: isNonEmptyString(value.claim_type) ? value.claim_type.trim() : null,
+    provenance: readClaimProvenance(value.provenance),
+  }
+}
+
+function readSlotClaims(value: unknown): readonly SlotClaim[] | null {
+  // `null` and `[]` are kept apart the whole way: `null` is "the exchange published none",
+  // `[]` is "it published some and none of them were readable". Only the first is ordinary.
+  if (!Array.isArray(value)) return null
+  const claims: SlotClaim[] = []
+  for (const row of value) {
+    const claim = readSlotClaim(row)
+    if (claim !== undefined) claims.push(claim)
+  }
+  return claims
+}
+
+function readRanking(value: unknown): SlotRanking | null {
+  if (!isRecord(value)) return null
+  const score = value.rank_score
+  const components: (readonly [string, number])[] = []
+  if (isRecord(value.components)) {
+    for (const [key, term] of Object.entries(value.components)) {
+      // Numbers only, and that loses nothing: `exchange/auction/routes.py::_ranked_out` builds
+      // this map as `{str(k): float(v)}`, so a value that is not a finite number did not come
+      // from the exchange and is not shown under the exchange's name.
+      if (typeof term === 'number' && Number.isFinite(term)) components.push([key, term])
+    }
+  }
+  return {
+    rank_score: typeof score === 'number' && Number.isFinite(score) ? score : null,
+    components,
+  }
+}
+
+/**
+ * The auction record, reduced to `SlotRecord`s keyed by bid ref.
+ *
+ * The two halves are merged by `bid_ref` and neither is required to carry the other's rows: a
+ * candidate the ranking scored but the shortlist did not seat has a ranking and no claims, and
+ * a shortlist read after the exchange's TTL has claims for nothing. Merging on the key the
+ * shortlist card already names itself with is what keeps this join from being a guess.
+ */
+export function readRecordedAuction(auctionId: string, payload: unknown): RecordedAuction {
+  if (!isRecord(payload)) {
+    throw new RecordedAuctionUnreadable(auctionId, 'the service answered with something that is not an object')
+  }
+  const shortlist = payload.shortlist
+  // `Object.create(null)` and not `{}`, and this is a correctness rule rather than a style.
+  // A `bid_ref` is a string off the wire, so the reader must behave for every string — and on
+  // a plain object literal the strings that name `Object.prototype`'s own members do not
+  // behave: `slots['toString']` reads back a FUNCTION nobody put there, which `seated` would
+  // then spread into a `SlotRecord`, and an assignment to `slots['__proto__']` retargets the
+  // prototype instead of storing a row. A prototype-less map has no inherited keys for either
+  // to find. The exchange mints `{auction_id}:{store_id}`, so this is not reachable today; the
+  // point is that it does not depend on that staying true.
+  const slots: Record<string, SlotRecord> = Object.create(null) as Record<string, SlotRecord>
+
+  const seated = (bidRef: string): SlotRecord =>
+    slots[bidRef] ?? {
+      bid_ref: bidRef,
+      store_id: '',
+      claims: null,
+      discount_provenance: null,
+      ranking: null,
+    }
+
+  if (isRecord(shortlist) && Array.isArray(shortlist.slots)) {
+    for (const row of shortlist.slots) {
+      if (!isRecord(row) || !isNonEmptyString(row.bid_ref)) continue
+      const bidRef = row.bid_ref.trim()
+      const price = isRecord(row.price) ? row.price : undefined
+      const discount = price !== undefined && isRecord(price.discount) ? price.discount : undefined
+      slots[bidRef] = {
+        ...seated(bidRef),
+        claims: readSlotClaims(row.commitments),
+        discount_provenance:
+          discount === undefined ? null : readClaimProvenance(discount.provenance),
+      }
+    }
+  }
+
+  if (Array.isArray(payload.ranked)) {
+    for (const row of payload.ranked) {
+      if (!isRecord(row) || !isNonEmptyString(row.bid_ref)) continue
+      const bidRef = row.bid_ref.trim()
+      slots[bidRef] = {
+        ...seated(bidRef),
+        store_id: isNonEmptyString(row.store_id) ? row.store_id.trim() : '',
+        ranking: readRanking(row),
+      }
+    }
+  }
+
+  return {
+    auction_id: isNonEmptyString(payload.auction_id) ? payload.auction_id : auctionId,
+    // An explicit `null` is the exchange having forgotten this auction; anything else that is
+    // not a readable shortlist is a body this reader could not use, and both leave the claims
+    // half empty. They are told apart because only the first is a statement the service made.
+    liveness: shortlist === null ? 'forgotten' : 'live',
+    recorded_at: isNonEmptyString(payload.recorded_at) ? payload.recorded_at : '',
+    slots,
+  }
+}
+
+/**
+ * Fetch the auction record. The ONLY request this module makes that is not an accept.
+ *
+ * `GET`, and it creates nothing: it re-reads a record the buyer service already holds, on a
+ * route the shopper page has already called once through `journey/wire.ts::loadAuction`. It is
+ * fetched again here rather than passed down because `Journey` holds that record and hands
+ * `ShortlistView` only the labelled slots — and a component that invented the ranking numbers
+ * rather than reading them would be publishing a formula under the exchange's name.
+ */
+export async function loadRecordedAuction(
+  auctionId: string,
+  fetcher: Fetcher,
+): Promise<RecordedAuction> {
+  const named = auctionId.trim()
+  if (named === '') throw new RecordedAuctionUnreadable('', 'this shortlist names no auction')
+  const response = await fetcher(`${AUCTION_RECORD_PATH}${encodeURIComponent(named)}`)
+  if (!response.ok) throw new RecordedAuctionUnreadable(named, `the service answered HTTP ${response.status}`)
+  let payload: unknown
+  try {
+    payload = (await response.json()) as unknown
+  } catch {
+    throw new RecordedAuctionUnreadable(named, 'the service answered 200 with a body that is not JSON')
+  }
+  return readRecordedAuction(named, payload)
 }
 
 /**

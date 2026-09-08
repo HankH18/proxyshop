@@ -86,12 +86,37 @@ OUT = REPO_ROOT / "deploy" / "demo"
 #: envelope listing no cluster pursues nothing, and that is fail-closed by design.
 CLUSTER_ID = "cluster-liver-support"
 
-#: The shopper sentence this demo is tuned for, and the terms the cluster matches on.
+#: The shopper sentence this demo is tuned for.
 DEMO_QUERY = "milk thistle silymarin liver support extract"
+
+#: The terms the cluster matches on.
+#:
+#: WHY ``liver health`` IS HERE, since it reads as a duplicate of ``liver support`` and is not.
+#: ``exchange.retrieval.clusters`` scores a matched term at ``TERM_WEIGHT`` per word up to
+#: ``TERM_PHRASE_WORD_CAP`` (two), and ``MIN_ASSIGNMENT_SCORE`` is 2.0. A ONE-word term is
+#: therefore deliberately below the bar — the worked counter-example is a cluster called
+#: ``coffee`` and the query *"a walnut coffee table for the lounge"*, which must NOT authorise a
+#: coffee merchant to bid at a furniture shopper. This line does not weaken that: it adds a
+#: two-word phrase, matched as a whole word SEQUENCE, which cannot fall out of a sentence about
+#: something else.
+#:
+#: What it fixes is one measured query. *"something for liver health"* matched only ``liver``,
+#: scored 1.0, went unassigned, and every hosted agent answered ``204 cluster_not_pursued`` — so
+#: a shopper asking the demo's own subject in the demo's own words got no sponsored row at all.
+#: Measured through ``POST /buyer/intent/confirm`` before this term existed: 4 slots, 0
+#: sponsored, ``all_fallback: true``.
+#:
+#: It is a DATA fix for ONE query and it is not the general repair, which is worth saying
+#: because adding a phrase here is the tempting way to answer the next complaint too. What makes
+#: an unassigned query still useful is the organic half — ``exchange.retrieval.relevance`` —
+#: which decides whether the rows the PLATFORM manufactures are about what was asked. Vocabulary
+#: added one phrase at a time answers the queries somebody thought of; the organic half answers
+#: the rest, and answers "we have nothing on this" honestly when there is nothing.
 CLUSTER_TERMS = (
     "milk thistle",
     "silymarin",
     "liver support",
+    "liver health",
     "liver",
     "detox",
     "dandelion root",
@@ -579,7 +604,28 @@ def build() -> dict[str, Any]:
                 "terms": list(CLUSTER_TERMS),
             }
         ],
-        "catalog": {host: _snapshot(host, catalogs[host], ranked[host]) for host in HOSTED},
+        # EVERY SELLER, not just the four with an agent, and the widening is a measured repair
+        # rather than completeness for its own sake.
+        #
+        # This block used to be `for host in HOSTED`, on the reading that a snapshot is evidence
+        # against a store's CLAIMS and only a store that bids makes any. Under D55 that reading
+        # is half the market: `GraphShopRoster` may roster any of the ten, `buyer-roster.json`
+        # names two of the six agent-less ones outright, and for those the exchange held no
+        # snapshot at all. Two consequences, both measured through the served route:
+        #
+        #  * `catalogue_readings` resolved no identity, so the shortlist slot carried
+        #    `product.identity: null` — a row a shopper is shown and the platform cannot NAME.
+        #  * `ranking.filters.organic_relevance_reason` reads that same identity, and an absent
+        #    one means "unchecked", which is the correct fail-open and left exactly those two
+        #    stores unfilterable: `"a walnut coffee table for the lounge"` came back with four
+        #    slots before this and TWO after, and the two survivors were the two nameless ones.
+        #
+        # The cost is document size and it is bounded: `SNAPSHOT_PRODUCTS_PER_STORE` products
+        # per store, ten stores, ~575 KiB against `composition.MAX_DEPLOYMENT_BYTES` of 4 MiB.
+        # Nothing else about ranking moves — a store that never bid states no claim, so
+        # `verified_claim_ratio` is unchanged, and the attribute vocabulary these snapshots
+        # declare is the same six keys the hosted four already declared.
+        "catalog": {host: _snapshot(host, catalogs[host], ranked[host]) for host in hosts},
         "checkout_mode": "redirect",
         "trust_url": "http://trust:8084",
     }

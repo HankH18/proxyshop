@@ -14,8 +14,8 @@ nothing in this repository populates.
 
 The rest of this package is the second one:
 
-    intent  →  RetrievalQuery  →  CandidateSource  →  R19 hard filter  →  features  →
-    Reranker (port)  →  FitAssessment  →  ledger
+    intent  →  RetrievalQuery  →  CandidateSource  →  R19 hard filter  →  relevance  →
+    features  →  Reranker (port)  →  FitAssessment  →  ledger
 
 and its single output for the next ticket is ``FitAssessment.fit_score``, which enters the one
 published rank formula as ``intent_match``. Nothing else about the formula lives here: the
@@ -24,8 +24,16 @@ and applying it is T-032's. DESIGN says it plainly — "``intent_match`` comes f
 retrieval+rerank, but the combination is exactly the published formula" — and the two
 weighting layers never mix.
 
-The four rules this package exists to keep
+The five rules this package exists to keep
 ------------------------------------------
+0. **A result must be ABOUT what was asked** (:mod:`~exchange.retrieval.relevance`). A vector
+   index answers every query with its top ``k``, so a catalogue with nothing on the subject
+   returns exactly as many rows as one that serves it perfectly. Measured on the served route
+   before that module existed: ``"a walnut coffee table for the lounge"`` came back as four
+   supplements. Relevance is decided on whole-word agreement between the shopper's own words
+   and the PLATFORM's observed identity of the product — never a seller's prose (D55) — and a
+   candidate it refuses is reported on ``RetrievalResult.off_topic`` with the reason rather
+   than dropped.
 1. **Hard constraints are filters, and they are decided here** (R19). Pushing an
    ``AttributeFilter`` into Cypher narrows the fetch; it does not *decide* anything. Every
    hard constraint is re-evaluated locally against whatever the source returned, so the
@@ -108,6 +116,17 @@ from .fit import (
     intent_match_by_bid,
     record_fit_scores,
 )
+from .relevance import (
+    MIN_SHARED_SHARE,
+    MIN_SHARED_TERMS,
+    OFF_TOPIC_DETAIL,
+    STOPWORDS,
+    RelevanceVerdict,
+    TopicalRelevance,
+    candidate_surface,
+    content_terms,
+    identity_surface,
+)
 from .rerank import (
     DETERMINISTIC_RERANKER_SIMILARITY_SHARE,
     NEUTRAL_SIMILARITY,
@@ -155,14 +174,18 @@ __all__ = [
     "LOCAL_FILTER_OVERSAMPLE",
     "MAX_CANDIDATE_LIMIT",
     "MAX_CATALOGUE_CLUSTERS",
+    "MIN_SHARED_SHARE",
+    "MIN_SHARED_TERMS",
     "NEUTRAL_ALIGNMENT",
     "NEUTRAL_SIMILARITY",
+    "OFF_TOPIC_DETAIL",
     "PREFERENCE_DIRECTIONS",
     "RERANKER_INTERFACE_VERSION",
     "RETRIEVAL_LATENCY_BUDGET_MS",
     "SOURCE_ASSIGNED",
     "SOURCE_STATED",
     "SOURCE_UNASSIGNED",
+    "STOPWORDS",
     "TERM_PHRASE_WORD_CAP",
     "TERM_WEIGHT",
     "CandidateRetrieval",
@@ -188,11 +211,13 @@ __all__ = [
     "RerankItem",
     "Reranker",
     "RerankerContractError",
+    "RelevanceVerdict",
     "RetrievalQuery",
     "RetrievalResult",
     "ShopRoster",
     "ShopRosterSource",
     "SoftPreference",
+    "TopicalRelevance",
     "SolicitedShop",
     "StaticIntentClusterCatalogue",
     "UndecidableCriterion",
@@ -200,11 +225,14 @@ __all__ = [
     "assign_cluster",
     "attribute_rows",
     "build_query",
+    "candidate_surface",
+    "content_terms",
     "configure_clusters",
     "graph_catalog_from_env",
     "graph_roster_from_env",
     "graph_sessions_from_env",
     "intent_clusters_of",
+    "identity_surface",
     "intent_match_by_bid",
     "make_candidate",
     "read_rerank",

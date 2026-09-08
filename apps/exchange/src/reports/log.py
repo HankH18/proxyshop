@@ -62,6 +62,7 @@ from ..ranking.reasons import (
     REASON_HARD_CONSTRAINT,
     REASON_MALFORMED,
     REASON_OFF_DOMAIN,
+    REASON_OFF_TOPIC_ORGANIC,
     REASON_OVER_BUDGET,
     REASON_PRICE_UNREADABLE,
     REASON_UNDECIDABLE_INTENT,
@@ -93,6 +94,13 @@ _CATEGORIES: frozenset[str] = frozenset(LossReasons.model_fields)
 #: ``off_domain_checkout`` -> ``commitments``
 #:     same argument. The checkout host is the platform's registered record of where this store
 #:     transacts, and a bid pointing somewhere else is a commitment the store did not keep.
+#: ``organic_result_off_topic`` -> ``fit``
+#:     this one is genuinely a fit loss and the repair is the merchant's, which is why it is not
+#:     filed anywhere softer. The row was a FALLBACK: the store did not bid, so the exchange
+#:     stood its list price up on a product the platform's own crawl says has nothing to do with
+#:     the query. What a merchant can act on is exactly ``fit`` — pursue the cluster and bid a
+#:     product that answers it, or accept that the platform will not manufacture a pitch for a
+#:     product it cannot connect to the question.
 #:
 #: The mapping is asserted TOTAL against
 #: :data:`~exchange.ranking.reasons.EXCLUSION_REASON_PREFIXES` by the gate, because an unmapped
@@ -107,6 +115,7 @@ EXCLUSION_CATEGORIES: Mapping[str, str] = {
     REASON_HARD_CONSTRAINT: "fit",
     REASON_UNDECIDABLE_INTENT: "fit",
     REASON_MALFORMED: "fit",
+    REASON_OFF_TOPIC_ORGANIC: "fit",
     REASON_OVER_BUDGET: "price",
     REASON_PRICE_UNREADABLE: "price",
 }

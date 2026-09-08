@@ -627,7 +627,8 @@ $ curl :8084/events/head
 $ curl -X POST :8084/events -d '{"event_id":"1111...","kind":"auction_opened",...}'
 {"inserted":true,"event":{...,"event_hash":"6119e48ad1bff92b..."},...}             201
 $ curl -X POST :8081/buyer/auth/magic-link -d '{"email":"deploy-smoke@example.com"}'
-{"expires_at":"2026-09-05T05:57:24.359702Z"}                                       202
+{"detail":"no login link was sent: this deployment has no magic-link
+ mail transport configured"}                                                       503
 $ curl -H 'authorization: Bearer dev-merchant-admin-token' :8082/install/shops
 {"shops":[]}                                                                       200
 $ curl :8082/install/shops                       # no token
@@ -637,6 +638,15 @@ $ curl -X POST :8083/auctions -d '{"intent":{...},"profile":{"buckets":{}}}'
 $ curl :8085/er/config
 {"default_threshold":0.86, ...}                                                    200
 ```
+
+The buyer `503` belongs in this list rather than being tidied out of it: it is what a
+byte-identical `.env.example` **must** produce. That file leaves
+`PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT` empty and names no MTA — `..._SMTP_URL` and
+`..._SENDER` are both blank — so `buyer_svc.auth.delivery.magic_link_is_mailed` answers
+`False` and the door refuses instead of promising a mail nothing will send. The transcript
+recorded a `202` here until this line was corrected, which no clean `cp .env.example .env`
+can produce. The same fact reaches the SPA through `GET /buyer/auth/sign-in`
+(`{"offered": false}`), which is why the shipped demo renders no login form at all.
 
 The trust POST is the one that goes all the way through. Read back with `psql`:
 

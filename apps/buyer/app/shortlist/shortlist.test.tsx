@@ -16,17 +16,22 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ShortlistView } from './ShortlistView'
 import {
   ACCEPT_PATH,
+  RecordedAuctionUnreadable,
   LABEL_FROM_THEIR_WEBSITE,
   LABEL_STORE_CONFIRMED,
   LABEL_UNVERIFIED,
   MissingAuctionReferenceError,
+  NO_AGENT_FALLBACK_FAMILY,
   NoPermalinkError,
   UnsafePermalinkError,
   acceptSlot,
   assertFollowable,
+  fallbackReasonFamily,
   followPermalink,
   labelTone,
+  loadRecordedAuction,
   permalinkRefusal,
+  readRecordedAuction,
   slotLabels,
   type AcceptOutcome,
   type Fetcher,
@@ -901,5 +906,694 @@ describe('the two voices, and a shopper who can tell them apart', () => {
     const why = (screen.getByTestId('no-platform-voice-bid-e7-7').textContent ?? '').toLowerCase()
     expect(why).toContain('checked')
     expect(screen.queryByTestId('pitch-facts-bid-e7-7')).toBeNull()
+  })
+})
+
+/**
+ * THE RECORD BEHIND A CARD — what a shopper gets by clicking into a row.
+ *
+ * Every fixture below is LIVE BYTES. They were taken off the running stack on 2026-09-08 by
+ * driving the served routes in order — `POST /buyer/intent/clarify`, `POST /buyer/intent/confirm`,
+ * `GET /buyer/auctions/{id}` — against the demo corpus, so the shapes these tests assert on are
+ * the shapes the exchange actually publishes rather than shapes invented to make a renderer
+ * pass. Two auctions are represented:
+ *
+ *   * `RECORD_BODY` is `auction-027aa418-…`, a four-slot shortlist against the full demo
+ *     roster. The `gaiaherbs.com` slot below is that response's own bytes, including the
+ *     `commitments[0].provenance` block that `buyer_svc.accept.labels.slot_commitments` and
+ *     `journey/wire.ts::readCommitments` each drop on the way to a card.
+ *   * `NO_AGENT_SLOT` is `auction-75953d79-…`, opened with a roster of the two shops that have
+ *     no bidding agent. Both slots came back `fallback: true` with
+ *     `fallback_reason: "tier_0_no_agent:no_bid_endpoint"` — the case the card used to describe
+ *     as a shop that "did not answer this auction".
+ *
+ * The `seller_asserted` claim is the one addition, and it is a shape the corpus does not
+ * currently produce: the demo store agents commit through envelope hooks, so every live claim
+ * carries `owner_statement`. It is here because "a verified claim and an unverified one must
+ * not look alike" is the property this panel exists for, and a suite with only the evidenced
+ * shape would never once have rendered the other side of it.
+ */
+const LIVE_BID = 'auction-027aa418-3ab4-4b43-b88d-d27e5d68cdd7:gaiaherbs.com'
+
+const LIVE_TRUST = {
+  store_id: 'gaiaherbs.com',
+  available: true,
+  score: 0.7728621443663455,
+  confidence: 0.9421102773436725,
+  low_data: false,
+  dimensions: [
+    'catalog_claim_accuracy',
+    'discount_honored',
+    'feedback_match',
+    'not_returned',
+    'price_honored',
+    'shipped_on_time',
+  ],
+}
+
+/** The slot as it reaches this component: the browser's narrowing, applied. */
+const LIVE_SLOT: ShortlistSlot = {
+  slot: 'fit',
+  bid_ref: LIVE_BID,
+  auction_id: 'auction-027aa418-3ab4-4b43-b88d-d27e5d68cdd7',
+  fit_score: 0.5390724288732691,
+  // What `wire.ts::asNumberMap` leaves of the snapshot above — two of its six fields.
+  trust_summary: { score: 0.7728621443663455, confidence: 0.9421102773436725 },
+  // What `wire.ts::asUnknownMap` keeps beside it, and what nothing rendered until now.
+  trust_fields: LIVE_TRUST,
+  provenance_labels: ['from their website', 'store-confirmed', 'unverified'],
+  labels_source: 'exchange',
+  store_domain: 'gaiaherbs.com',
+  product: {
+    product_ref: 'prod_5b3100b381998843c2f732f147e632d0',
+    variant_ref: '42280407990408',
+    identity: {
+      title: 'Milk Thistle Gummies',
+      brand: 'Gaia Herbs',
+      source: 'snap-gaiaherbs.com',
+      observed_at: '2026-01-01T00:00:00Z',
+    },
+  },
+  price: {
+    unit_price: 25.49,
+    total_price: 25.49,
+    currency: 'USD',
+    discount: null,
+    expires_at: '2026-09-08T19:33:20.508000Z',
+  },
+  commitments: [
+    { key: 'free_returns', value: '30 return window', unit: null, label: LABEL_STORE_CONFIRMED },
+    { key: 'ships_in_days', value: 2, unit: 'days', label: LABEL_UNVERIFIED },
+  ],
+  fallback: false,
+  fallback_reason: null,
+}
+
+/** `GET /buyer/auctions/{id}`, reduced to the two arrays this fold reads. Live bytes. */
+const RECORD_BODY = {
+  auction_id: 'auction-027aa418-3ab4-4b43-b88d-d27e5d68cdd7',
+  recorded_at: '2026-09-08T19:23:20.601Z',
+  shortlist: {
+    auction_id: 'auction-027aa418-3ab4-4b43-b88d-d27e5d68cdd7',
+    slots: [
+      {
+        slot: 'fit',
+        bid_ref: LIVE_BID,
+        fit_score: 0.5390724288732691,
+        trust_summary: LIVE_TRUST,
+        provenance_labels: ['from their website', 'store-confirmed', 'unverified'],
+        product: LIVE_SLOT.product,
+        price: LIVE_SLOT.price,
+        commitments: [
+          {
+            claim_id: null,
+            key: 'free_returns',
+            claim_type: 'return_policy',
+            value: '30 return window',
+            unit: null,
+            source_span: null,
+            provenance: {
+              source: 'owner_statement',
+              ref: 'envelope:gaiaherbs.com:demo-1#free_returns',
+              observed_at: '2026-01-01T00:00:00Z',
+              authority_rank: 1,
+            },
+          },
+          {
+            claim_id: null,
+            key: 'ships_in_days',
+            claim_type: 'shipping_speed',
+            value: 2,
+            unit: 'days',
+            source_span: null,
+            provenance: {
+              source: 'seller_asserted',
+              ref: 'pitch:gaiaherbs.com:1#ships_in_days',
+              observed_at: '2026-09-08T19:23:18Z',
+              authority_rank: 5,
+            },
+          },
+        ],
+        message: 'Milk thistle for liver support comes with a 30-day return window.',
+        fallback: false,
+        fallback_reason: null,
+        store_domain: 'gaiaherbs.com',
+      },
+    ],
+  },
+  ranked: [
+    {
+      bid_ref: LIVE_BID,
+      store_id: 'gaiaherbs.com',
+      rank_score: 0.5390724288732691,
+      components: {
+        intent_match: 0.175,
+        verified_claim_ratio: 0.15950000000000003,
+        trust: 0.1545724288732691,
+        price_value: 0.0,
+        delivery_fit: 0.05,
+      },
+    },
+  ],
+}
+
+/**
+ * `RECORD_BODY` with the one slot's fields replaced.
+ *
+ * The result is typed `unknown` because it is wire JSON: the point of every reader in
+ * `shortlist.ts` is that a body is `unknown` at runtime however a test spells it, and a fixture
+ * that arrived already typed would exercise none of them.
+ */
+function recordBodyWith(slotPatch: Record<string, unknown>): unknown {
+  const body = JSON.parse(JSON.stringify(RECORD_BODY)) as {
+    shortlist: { slots: Record<string, unknown>[] }
+  }
+  body.shortlist.slots[0] = { ...body.shortlist.slots[0], ...slotPatch }
+  return body
+}
+
+/** A fetcher that answers the auction route and records every path it was asked for. */
+function recordingFetcher(body: unknown, status = 200): { fetcher: Fetcher; asked: string[] } {
+  const asked: string[] = []
+  const fetcher: Fetcher = async (input) => {
+    asked.push(input)
+    return jsonResponse(body, status)
+  }
+  return { fetcher, asked }
+}
+
+async function openTheRecord(bidRef: string): Promise<void> {
+  fireEvent.click(screen.getByTestId(`record-toggle-${bidRef}`))
+  await waitFor(() => expect(screen.getByTestId(`record-platform-${bidRef}`)).toBeInTheDocument())
+}
+
+describe('clicking into a row for the record behind it', () => {
+  it('asks for nothing until a reader opens one', () => {
+    const { asked, fetcher } = recordingFetcher(RECORD_BODY)
+    render(
+      <ShortlistView
+        shortlist={one(LIVE_SLOT)}
+        onAccept={vi.fn()}
+        recordFetcher={fetcher}
+      />,
+    )
+    // The fold is on the card and shut. Nothing has been requested, and nothing inside it has
+    // been rendered — a panel that mounted its own contents closed would be a fetch a shopper
+    // never asked for, on every card of every shortlist.
+    expect(screen.getByTestId(`record-toggle-${LIVE_BID}`)).toBeInTheDocument()
+    expect(screen.queryByTestId(`record-platform-${LIVE_BID}`)).toBeNull()
+    expect(asked).toEqual([])
+  })
+
+  it('reads the auction record once, however many cards are opened', async () => {
+    const { asked, fetcher } = recordingFetcher(RECORD_BODY)
+    const second: ShortlistSlot = { ...LIVE_SLOT, bid_ref: 'bid-second', slot: 'value' }
+    render(
+      <ShortlistView
+        shortlist={{ auction_id: RECORD_BODY.auction_id, slots: [LIVE_SLOT, second] }}
+        onAccept={vi.fn()}
+        recordFetcher={fetcher}
+      />,
+    )
+    await openTheRecord(LIVE_BID)
+    fireEvent.click(screen.getByTestId('record-toggle-bid-second'))
+    await waitFor(() => expect(screen.getByTestId('record-platform-bid-second')).toBeInTheDocument())
+    expect(asked).toEqual([`/buyer/auctions/${encodeURIComponent(RECORD_BODY.auction_id)}`])
+    // Both stay open: two records side by side is the comparison a shopper is making.
+    expect(screen.getByTestId(`record-platform-${LIVE_BID}`)).toBeInTheDocument()
+  })
+
+  it('closes again without asking for anything else', async () => {
+    const { asked, fetcher } = recordingFetcher(RECORD_BODY)
+    render(
+      <ShortlistView shortlist={one(LIVE_SLOT)} onAccept={vi.fn()} recordFetcher={fetcher} />,
+    )
+    await openTheRecord(LIVE_BID)
+    fireEvent.click(screen.getByTestId(`record-toggle-${LIVE_BID}`))
+    await waitFor(() => expect(screen.queryByTestId(`record-platform-${LIVE_BID}`)).toBeNull())
+    expect(asked).toHaveLength(1)
+  })
+
+  it('never offers a link, however much of the record is on the screen', async () => {
+    const { fetcher } = recordingFetcher(RECORD_BODY)
+    const { container } = render(
+      <ShortlistView
+        shortlist={one({ ...LIVE_SLOT, ...{ checkout_url: 'https://attacker.example/cart/1:1' } })}
+        onAccept={vi.fn()}
+        recordFetcher={fetcher}
+      />,
+    )
+    await openTheRecord(LIVE_BID)
+    // R3, restated over the new surface: the record carries refs and snapshot ids, and an
+    // `<a href>` built out of any of them is the violation the acceptance decoy hunts for.
+    expect(container.querySelectorAll('a')).toHaveLength(0)
+    expect(container.innerHTML).not.toContain('attacker.example')
+  })
+})
+
+describe('the platform half of the record', () => {
+  it('names the snapshot the product name was read from, and when it was seen', async () => {
+    const { fetcher } = recordingFetcher(RECORD_BODY)
+    render(<ShortlistView shortlist={one(LIVE_SLOT)} onAccept={vi.fn()} recordFetcher={fetcher} />)
+    await openTheRecord(LIVE_BID)
+    const platform = screen.getByTestId(`record-platform-${LIVE_BID}`).textContent ?? ''
+    expect(platform).toContain('Milk Thistle Gummies')
+    expect(platform).toContain('Gaia Herbs')
+    expect(platform).toContain('snap-gaiaherbs.com')
+    expect(platform).toContain('2026-01-01T00:00:00Z')
+    expect(platform).toContain('prod_5b3100b381998843c2f732f147e632d0')
+    expect(platform).toContain('42280407990408')
+  })
+
+  it('shows the trust fields the browser’s narrowing throws away', async () => {
+    const { fetcher } = recordingFetcher(RECORD_BODY)
+    render(<ShortlistView shortlist={one(LIVE_SLOT)} onAccept={vi.fn()} recordFetcher={fetcher} />)
+    await openTheRecord(LIVE_BID)
+    const platform = screen.getByTestId(`record-platform-${LIVE_BID}`).textContent ?? ''
+    // `TrustSummary` is `Record<string, number>`, so `wire.ts` keeps two of these six fields
+    // and drops the rest. The card's trust line therefore reads `score …, confidence …` and
+    // says nothing about whether there IS a snapshot or how thin it is.
+    expect(platform).toContain('low_data')
+    expect(platform).toContain('available')
+    expect(platform).toContain('catalog_claim_accuracy')
+    expect(platform).toContain('gaiaherbs.com')
+    // A boolean and the string "true" must not read identically in a record of what was
+    // actually recorded, so values keep their JSON spelling: `false`, and `"gaiaherbs.com"`
+    // with its quotes.
+    expect(platform).toContain('"gaiaherbs.com"')
+  })
+
+  it('spells a list out so it can wrap instead of running off the card', async () => {
+    const { fetcher } = recordingFetcher(RECORD_BODY)
+    render(<ShortlistView shortlist={one(LIVE_SLOT)} onAccept={vi.fn()} recordFetcher={fetcher} />)
+    await openTheRecord(LIVE_BID)
+    const platform = screen.getByTestId(`record-platform-${LIVE_BID}`).textContent ?? ''
+    // MEASURED on the served page before this: `JSON.stringify` writes an array with no
+    // spaces, so the six trust dimensions arrived as one 120-character token with no break
+    // opportunity in it and the row ran off the right edge of the card. The separator is what
+    // gives the line somewhere to fold.
+    expect(platform).toContain('"catalog_claim_accuracy", "discount_honored"')
+    expect(platform).not.toContain('"catalog_claim_accuracy","discount_honored"')
+  })
+
+  it('publishes the exchange’s five ranking components and what each contributed', async () => {
+    const { fetcher } = recordingFetcher(RECORD_BODY)
+    render(<ShortlistView shortlist={one(LIVE_SLOT)} onAccept={vi.fn()} recordFetcher={fetcher} />)
+    await openTheRecord(LIVE_BID)
+    const platform = screen.getByTestId(`record-platform-${LIVE_BID}`).textContent ?? ''
+    for (const term of [
+      'intent_match',
+      'verified_claim_ratio',
+      'trust',
+      'price_value',
+      'delivery_fit',
+    ]) {
+      expect(platform).toContain(term)
+    }
+    expect(platform).toContain('0.175')
+    expect(platform).toContain('0.5390724288732691')
+    // Recorded, not recomputed — and the panel says which, because it is a different clock
+    // from the live shortlist the card above it was drawn from.
+    expect(screen.getByTestId(`record-ranking-${LIVE_BID}`).textContent ?? '').toContain(
+      'not re-computed',
+    )
+  })
+
+  it('says whether the exchange supplied the labels or the service worked them out', async () => {
+    const { fetcher } = recordingFetcher(RECORD_BODY)
+    render(<ShortlistView shortlist={one(LIVE_SLOT)} onAccept={vi.fn()} recordFetcher={fetcher} />)
+    await openTheRecord(LIVE_BID)
+    expect(screen.getByTestId(`record-platform-${LIVE_BID}`).textContent ?? '').toContain(
+      'the exchange sent them',
+    )
+  })
+
+  it('keeps the shop’s own words out of the platform’s block', async () => {
+    const { fetcher } = recordingFetcher(RECORD_BODY)
+    render(<ShortlistView shortlist={one(LIVE_SLOT)} onAccept={vi.fn()} recordFetcher={fetcher} />)
+    await openTheRecord(LIVE_BID)
+    // D55. The record body carries `message` — the seller's bytes — and this block is the
+    // platform speaking. `PitchPanel` owns the shop's prose and owns its attribution; a
+    // sentence of it inside the platform's block is the seller's motive wearing the
+    // platform's credibility, which is the one thing this screen exists to prevent.
+    expect(screen.getByTestId(`record-platform-${LIVE_BID}`).textContent ?? '').not.toContain(
+      'Milk thistle for liver support comes with',
+    )
+  })
+})
+
+describe('the shop half of the record', () => {
+  it('shows each promise’s provenance, authority rank, stamp and evidence reference', async () => {
+    const { fetcher } = recordingFetcher(RECORD_BODY)
+    render(<ShortlistView shortlist={one(LIVE_SLOT)} onAccept={vi.fn()} recordFetcher={fetcher} />)
+    await openTheRecord(LIVE_BID)
+    const store = screen.getByTestId(`record-store-${LIVE_BID}`).textContent ?? ''
+    // None of these four reach a card: the service projects a `Claim` down to
+    // `{key, value, unit, label}` and the browser's reader keeps exactly those four.
+    expect(store).toContain('owner_statement')
+    expect(store).toContain('return_policy')
+    expect(store).toContain('envelope:gaiaherbs.com:demo-1#free_returns')
+    expect(store).toContain('2026-01-01T00:00:00Z')
+    expect(store).toContain('1 is the strongest evidence this network records')
+  })
+
+  it('does not let an evidenced promise and an unevidenced one read alike', async () => {
+    const { fetcher } = recordingFetcher(RECORD_BODY)
+    render(<ShortlistView shortlist={one(LIVE_SLOT)} onAccept={vi.fn()} recordFetcher={fetcher} />)
+    await openTheRecord(LIVE_BID)
+    const claims = screen.getAllByTestId(`record-claim-${LIVE_BID}`)
+    expect(claims).toHaveLength(2)
+    const evidenced = claims[0]!.textContent ?? ''
+    const asserted = claims[1]!.textContent ?? ''
+    // The store standing behind it through a hook, versus the store simply saying so. Same
+    // shape of row, four different values, and the badges carry different tones.
+    expect(evidenced).toContain('owner_statement')
+    expect(evidenced).toContain(LABEL_STORE_CONFIRMED)
+    expect(asserted).toContain('seller_asserted')
+    expect(asserted).toContain(LABEL_UNVERIFIED)
+    const tones = screen
+      .getAllByTestId(`record-claim-label-${LIVE_BID}`)
+      .map((badge) => badge.getAttribute('data-tone'))
+    expect(tones).toEqual(['confirmed', 'unverified'])
+  })
+
+  it('says what the badge is not — the per-claim verdicts are not published here', async () => {
+    const { fetcher } = recordingFetcher(RECORD_BODY)
+    render(<ShortlistView shortlist={one(LIVE_SLOT)} onAccept={vi.fn()} recordFetcher={fetcher} />)
+    await openTheRecord(LIVE_BID)
+    // `contracts.protocol.Claim` is `additionalProperties: false` and declares no verdict
+    // field, so the exchange's per-claim `verified`/`contradicted`/`unsupported`/`ambiguous`
+    // decisions reach no buyer-facing surface — only their total does, as the
+    // `verified_claim_ratio` term. A panel that let the provenance badge be read as the
+    // verdict would be overclaiming exactly where a shopper is deciding whom to believe.
+    const gloss = screen.getByTestId(`record-verdict-gloss-${LIVE_BID}`).textContent ?? ''
+    expect(gloss).toContain('verified_claim_ratio')
+    expect(gloss).toContain('will not invent')
+  })
+
+  it('shows the rule that authorised a discount', async () => {
+    const { fetcher } = recordingFetcher(
+      recordBodyWith({
+        price: {
+          unit_price: 25.49,
+          total_price: 25.49,
+          currency: 'USD',
+          expires_at: '2026-09-08T19:33:20.508000Z',
+          discount: {
+            type: 'percentage',
+            value: 15,
+            provenance: {
+              source: 'envelope_rule',
+              ref: 'envelope:gaiaherbs.com:demo-1#max_discount_pct',
+              observed_at: '2026-01-01T00:00:00Z',
+              authority_rank: 1,
+            },
+          },
+        },
+      }),
+    )
+    render(
+      <ShortlistView
+        shortlist={one({
+          ...LIVE_SLOT,
+          // What `wire.ts::readDiscount` leaves of it: the depth, and nothing that authorised it.
+          price: { ...LIVE_SLOT.price!, discount: { type: 'percentage', value: 15 } },
+        })}
+        onAccept={vi.fn()}
+        recordFetcher={fetcher}
+      />,
+    )
+    await openTheRecord(LIVE_BID)
+    const discount = screen.getByTestId(`record-discount-${LIVE_BID}`).textContent ?? ''
+    expect(discount).toContain('15% off')
+    expect(discount).toContain('envelope_rule')
+    expect(discount).toContain('envelope:gaiaherbs.com:demo-1#max_discount_pct')
+  })
+
+  it('says the exchange published no commitments rather than showing a store that promised nothing', async () => {
+    const { fetcher } = recordingFetcher(recordBodyWith({ commitments: null }))
+    render(
+      <ShortlistView
+        shortlist={one({ ...LIVE_SLOT, commitments: null })}
+        onAccept={vi.fn()}
+        recordFetcher={fetcher}
+      />,
+    )
+    await openTheRecord(LIVE_BID)
+    const said = screen.getByTestId(`record-no-claims-${LIVE_BID}`).textContent ?? ''
+    expect(said).toContain('published no commitments')
+    expect(screen.queryAllByTestId(`record-claim-${LIVE_BID}`)).toHaveLength(0)
+  })
+})
+
+describe('the record when the service cannot answer', () => {
+  it('still renders everything that came with the card, and says what failed', async () => {
+    const { fetcher } = recordingFetcher({ detail: 'no such auction' }, 404)
+    render(<ShortlistView shortlist={one(LIVE_SLOT)} onAccept={vi.fn()} recordFetcher={fetcher} />)
+    await openTheRecord(LIVE_BID)
+    expect(screen.getByTestId(`record-failed-${LIVE_BID}`).textContent ?? '').toContain('HTTP 404')
+    // The platform half is drawn from the slot, so a failed read costs the claims and the
+    // ranking and nothing else. A panel that blanked itself would lose the crawl's snapshot id
+    // over a request that has nothing to do with it.
+    const platform = screen.getByTestId(`record-platform-${LIVE_BID}`).textContent ?? ''
+    expect(platform).toContain('snap-gaiaherbs.com')
+    // "WAS NOT READ", never "the record carries no ranking for this candidate". The second is
+    // a statement about the auction and this page has no standing to make it — the request
+    // that would have settled it 404'd. An earlier version of this panel said exactly that,
+    // and this test asserted it, which is how a false sentence gets a green tick beside it.
+    const ranking = screen.getByTestId(`record-ranking-${LIVE_BID}`).textContent ?? ''
+    expect(ranking).toContain('was not read')
+    expect(ranking).toContain('Nothing has been computed in their place')
+    expect(ranking).not.toContain('no ranking for this candidate')
+    // Same rule on the shop's side: not "this shop promised nothing", which is a claim about
+    // the shop, but "this page did not manage to look".
+    const claims = screen.getByTestId(`record-no-claims-${LIVE_BID}`).textContent ?? ''
+    expect(claims).toContain('was not read')
+    expect(claims).not.toContain('published no commitments')
+    expect(platform).toContain('cannot say')
+  })
+
+  it('says the record names no such candidate rather than blaming the shop', async () => {
+    // A record that WAS read and holds nothing under this bid reference. Three absences and
+    // three sentences: the request failed, the record has no such row, the row promised
+    // nothing. Collapsing them is how a page ends up telling a shopper that a shop committed
+    // to nothing when the truth is that a join did not land.
+    const { fetcher } = recordingFetcher({ ...RECORD_BODY, shortlist: { slots: [] }, ranked: [] })
+    render(<ShortlistView shortlist={one(LIVE_SLOT)} onAccept={vi.fn()} recordFetcher={fetcher} />)
+    await openTheRecord(LIVE_BID)
+    expect(screen.getByTestId(`record-no-claims-${LIVE_BID}`).textContent ?? '').toContain(
+      'names no candidate with this bid reference',
+    )
+    expect(screen.getByTestId(`record-platform-${LIVE_BID}`).textContent ?? '').toContain(
+      'names no candidate with this bid reference',
+    )
+    // And the card's own material is untouched by the miss.
+    expect(screen.getByTestId(`record-platform-${LIVE_BID}`).textContent ?? '').toContain(
+      'snap-gaiaherbs.com',
+    )
+  })
+
+  it('keeps the recorded ranking when the exchange has forgotten the shortlist', async () => {
+    // `shortlist: null` is the exchange's 15-minute TTL, and it is a fact about the exchange
+    // rather than about the market. The RECORDED diagnostics survive it, so the components are
+    // still there and only the live claims are gone.
+    const { fetcher } = recordingFetcher({ ...RECORD_BODY, shortlist: null })
+    render(<ShortlistView shortlist={one(LIVE_SLOT)} onAccept={vi.fn()} recordFetcher={fetcher} />)
+    await openTheRecord(LIVE_BID)
+    expect(screen.getByTestId(`record-platform-${LIVE_BID}`).textContent ?? '').toContain(
+      'intent_match',
+    )
+    // And the promises say why they are missing, in a sentence about the EXCHANGE rather than
+    // about the shop: the fifteen-minute window closed, so they cannot be re-read. "The
+    // exchange published no commitments for this slot" would be a verdict on the shop drawn
+    // from a shortlist nobody can look at any more.
+    const claims = screen.getByTestId(`record-no-claims-${LIVE_BID}`).textContent ?? ''
+    expect(claims).toContain('no longer holds this auction’s shortlist')
+    expect(claims).not.toContain('published no commitments')
+  })
+})
+
+/**
+ * READING THE RECORD — the parsing rules, driven directly.
+ *
+ * A JSON body is `unknown` at runtime however the types are written, and every one of these is
+ * a shape that would put a false statement on the screen if it were let through.
+ */
+describe('reading the auction record', () => {
+  it('keeps the exchange’s own order for the ranking components', () => {
+    const read = readRecordedAuction(RECORD_BODY.auction_id, RECORD_BODY)
+    expect(read.slots[LIVE_BID]!.ranking!.components.map(([term]) => term)).toEqual([
+      'intent_match',
+      'verified_claim_ratio',
+      'trust',
+      'price_value',
+      'delivery_fit',
+    ])
+  })
+
+  it('refuses an authority rank the contract does not admit rather than printing it', () => {
+    // `Provenance.authority_rank` is validated `>= 1`, and "1 is the strongest" is on the
+    // screen beside it. A `0` printed there would read as stronger than the strongest rank
+    // this network publishes — a claim about evidence that nobody made.
+    const read = readRecordedAuction('a', {
+      shortlist: {
+        slots: [
+          {
+            bid_ref: 'b',
+            commitments: [
+              { key: 'k', value: 1, provenance: { source: 'scraped', ref: 'r', observed_at: 't', authority_rank: 0 } },
+            ],
+          },
+        ],
+      },
+    })
+    expect(read.slots.b!.claims![0]!.provenance!.authority_rank).toBeNull()
+    expect(read.slots.b!.claims![0]!.provenance!.source).toBe('scraped')
+  })
+
+  it('drops a claim with no key and keeps its neighbours', () => {
+    const read = readRecordedAuction('a', {
+      shortlist: {
+        slots: [{ bid_ref: 'b', commitments: [{ value: 1 }, { key: 'free_returns', value: true }] }],
+      },
+    })
+    expect(read.slots.b!.claims!.map((claim) => claim.key)).toEqual(['free_returns'])
+  })
+
+  it('keeps "the exchange sent none" apart from "none of them were readable"', () => {
+    const none = readRecordedAuction('a', { shortlist: { slots: [{ bid_ref: 'b', commitments: null }] } })
+    const unreadable = readRecordedAuction('a', {
+      shortlist: { slots: [{ bid_ref: 'b', commitments: [{ value: 1 }] }] },
+    })
+    expect(none.slots.b!.claims).toBeNull()
+    expect(unreadable.slots.b!.claims).toEqual([])
+  })
+
+  it('names an evidence block with no source as no evidence at all', () => {
+    const read = readRecordedAuction('a', {
+      shortlist: {
+        slots: [{ bid_ref: 'b', commitments: [{ key: 'k', provenance: { ref: 'r' } }] }],
+      },
+    })
+    expect(read.slots.b!.claims![0]!.provenance).toBeNull()
+  })
+
+  it('indexes a bid ref that names an Object.prototype member without inventing a row', () => {
+    // A `bid_ref` is a string off the wire and the index must behave for every string. On a
+    // plain `{}` these two do not: `slots['toString']` reads back a function nobody put there
+    // and would be spread into a `SlotRecord`, and writing `slots['__proto__']` retargets the
+    // prototype instead of storing a row. The exchange mints `{auction_id}:{store_id}`, so
+    // neither is reachable today — the point is that the reader does not depend on that.
+    const read = readRecordedAuction('a', {
+      shortlist: { slots: [{ bid_ref: '__proto__', commitments: [{ key: 'k', value: 1 }] }] },
+      ranked: [{ bid_ref: 'toString', store_id: 's', rank_score: 0.5, components: { trust: 0.5 } }],
+    })
+    // Read through `string`-typed keys, which is how a bid ref actually arrives — and which
+    // also stops TypeScript resolving `slots.toString` to `Object.prototype`'s member instead
+    // of the index signature, the static half of the same confusion.
+    const inherited: readonly string[] = ['__proto__', 'toString', 'valueOf', 'hasOwnProperty']
+    const [protoKey, toStringKey, valueOfKey, hasOwnKey] = inherited as [
+      string,
+      string,
+      string,
+      string,
+    ]
+    expect(read.slots[protoKey]!.claims!.map((claim) => claim.key)).toEqual(['k'])
+    expect(read.slots[toStringKey]!.ranking!.rank_score).toBe(0.5)
+    // And a ref nobody sent is still absent rather than an inherited member of the map.
+    expect(read.slots[valueOfKey]).toBeUndefined()
+    expect(read.slots[hasOwnKey]).toBeUndefined()
+  })
+
+  it('tells a forgotten shortlist apart from an unreadable one', () => {
+    expect(readRecordedAuction('a', { shortlist: null }).liveness).toBe('forgotten')
+    expect(readRecordedAuction('a', { shortlist: { slots: [] } }).liveness).toBe('live')
+  })
+
+  it('refuses a shortlist that names no auction rather than fetching one', async () => {
+    const { asked, fetcher } = recordingFetcher(RECORD_BODY)
+    await expect(loadRecordedAuction('   ', fetcher)).rejects.toBeInstanceOf(RecordedAuctionUnreadable)
+    expect(asked).toEqual([])
+  })
+})
+
+/**
+ * WHOSE SILENCE IT WAS — the fix for a card that put a refusal in an organic shop's mouth.
+ *
+ * `NO_AGENT_SLOT` is live: a roster of the two demo shops with no bidding agent produced two
+ * slots, both `fallback: true` with `fallback_reason: "tier_0_no_agent:no_bid_endpoint"`. The
+ * card rendered that byte-identically to a shop whose agent was asked and stayed silent.
+ */
+const NO_AGENT_SLOT: ShortlistSlot = {
+  slot: 'fit',
+  bid_ref: 'auction-75953d79-60d6-4aee-877a-a104776a43d4:nutricost.com',
+  auction_id: 'auction-75953d79-60d6-4aee-877a-a104776a43d4',
+  fit_score: 0.45247839305364085,
+  trust_summary: { score: 0.6373919652682042, confidence: 0.913116144629241 },
+  provenance_labels: [LABEL_UNVERIFIED],
+  store_domain: 'nutricost.com',
+  product: {
+    product_ref: 'prod_261dd5a5c47ecef42fe3755e93ddb20e',
+    variant_ref: null,
+    identity: null,
+  },
+  price: { unit_price: 15.97, total_price: 15.97, currency: 'USD', expires_at: null },
+  commitments: null,
+  fallback: true,
+  fallback_reason: 'tier_0_no_agent:no_bid_endpoint',
+}
+
+describe('a shop that was never asked', () => {
+  it('does not say an organic shop declined to answer', () => {
+    render(<ShortlistView shortlist={one(NO_AGENT_SLOT)} onAccept={vi.fn()} />)
+    const line = screen.getByTestId(`price-provenance-${NO_AGENT_SLOT.bid_ref}`).textContent ?? ''
+    // THE DEFECT. This shop has no agent for anyone to solicit; nobody spoke to it, so it
+    // declined nothing. Saying it "did not answer" is the platform describing a refusal that
+    // never happened — a claim about a shop that the platform cannot check, which is the one
+    // thing D55 does not allow it to make.
+    expect(line).not.toContain('did not answer')
+    expect(line).toContain('no bidding agent')
+    expect(line).toContain('nobody asked it for a price')
+    expect(line).toContain('turned nothing down')
+    // Still Proxyshop's price, and still the exchange's own token, unchanged.
+    expect(line).toContain('Proxyshop’s, not this shop’s')
+    expect(line).toContain('tier_0_no_agent:no_bid_endpoint')
+  })
+
+  it('still says a solicited shop stayed silent — the honest direction', () => {
+    // The other half of the same branch. A refusal that fires on every fallback is no more
+    // useful than one that fires on none: `no_response` really does mean a store's agent was
+    // asked and nothing came back, and that sentence must survive the fix.
+    render(
+      <ShortlistView
+        shortlist={one({ ...NO_AGENT_SLOT, fallback_reason: 'no_response' })}
+        onAccept={vi.fn()}
+      />,
+    )
+    const line = screen.getByTestId(`price-provenance-${NO_AGENT_SLOT.bid_ref}`).textContent ?? ''
+    expect(line).toContain('did not answer this auction')
+    expect(line).not.toContain('no bidding agent')
+  })
+
+  it('reads the family off the whole reason, however the exchange spelled the detail', () => {
+    // The detail half is open-ended by construction — a status code on a refusal, a
+    // store-chosen header on a decline — so the family is what a screen may match on.
+    expect(fallbackReasonFamily('tier_0_no_agent:no_bid_endpoint')).toBe(NO_AGENT_FALLBACK_FAMILY)
+    expect(fallbackReasonFamily('tier_0_no_agent')).toBe(NO_AGENT_FALLBACK_FAMILY)
+    expect(fallbackReasonFamily('store_refused:503')).toBe('store_refused')
+    expect(fallbackReasonFamily(null)).toBe('')
+  })
+
+  it('says a shop with no agent and no list price quoted nothing, without blaming it', () => {
+    render(
+      <ShortlistView
+        shortlist={one({ ...NO_AGENT_SLOT, price: null })}
+        onAccept={vi.fn()}
+      />,
+    )
+    const line = screen.getByTestId(`price-provenance-${NO_AGENT_SLOT.bid_ref}`).textContent ?? ''
+    expect(line).toContain('no bidding agent')
+    expect(line).not.toContain('did not answer')
+    expect(line).not.toContain('the number above')
   })
 })

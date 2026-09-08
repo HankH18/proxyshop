@@ -20,7 +20,9 @@ The order of operations, which is itself a requirement
 ------------------------------------------------------
 1. **Filter, then score.** R19 makes hard constraints eligibility filters and R12 makes the
    blacklist read fail closed. Both are decided in :mod:`.filters` before :mod:`.scoring` is
-   reached, so an excluded candidate has no score to leak.
+   reached, so an excluded candidate has no score to leak. The organic-relevance filter joins
+   them there and is decided in the same pass — a row the platform manufactured for a product
+   its own crawl says is not about the query is not a worse answer, it is not an answer.
 2. **One formula, blind.** :mod:`.scoring` applies the single published five-term
    combination with `packages/contracts`' weights. Network fee, store tier and a store's own
    discount ceiling are not features and are not reachable from the scorer, so changing them
@@ -60,9 +62,12 @@ counted in `verified_hard_fit_count`, so no store wins the D13 tie-break on a co
 nobody proved.
 
 `config` supplies `now` (so nothing here reads the wall clock) and optionally `auction_id`.
-`weights` and `eligibility` are keyword-only extras with inert defaults: the published
-surface is the four positionals, and an optional collaborator must never be something a
-caller has to know about to get a correct answer.
+`weights`, `eligibility`, `network_attributes`, `product_identities` and `relevance` are
+keyword-only extras with inert defaults: the published surface is the four positionals, and an
+optional collaborator must never be something a caller has to know about to get a correct
+answer. The two that carry a FACT the caller holds and this module cannot read —
+`network_attributes` and `product_identities` — both default to `None` meaning "the caller
+cannot say", and both then change nothing at all.
 """
 
 from __future__ import annotations
@@ -77,10 +82,12 @@ from contracts.ranking import (
     RankingWeights,
 )
 
+from ..retrieval.relevance import TopicalRelevance
 from . import shortlist as _shortlist
 from .filters import (
     exclusion_reasons,
     offer_price,
+    organic_relevance_reason,
     read,
     read_criteria,
     trust_row,
@@ -96,6 +103,7 @@ from .reasons import (
     REASON_HARD_CONSTRAINT,
     REASON_MALFORMED,
     REASON_OFF_DOMAIN,
+    REASON_OFF_TOPIC_ORGANIC,
     REASON_UNDECIDABLE_INTENT,
 )
 from .scoring import score
@@ -203,6 +211,8 @@ def rank(
     weights: RankingWeights | None = None,
     eligibility: Any = None,
     network_attributes: Sequence[Mapping[str, Any]] | None = None,
+    product_identities: Mapping[str, Any] | None = None,
+    relevance: TopicalRelevance | None = None,
 ) -> dict[str, Any]:
     """Rank one auction's candidates and build its shortlist.
 
@@ -225,6 +235,25 @@ def rank(
             relaxed, so every existing four-argument caller keeps the answer it had. Only a
             caller holding the catalog can say, which is why the served path
             (:func:`~exchange.ranking.serving.rank_auction`) is the one that passes it.
+        product_identities: ``{store_id: identity}`` — the PLATFORM's own crawled name for the
+            product each store was rostered on, as
+            :func:`~exchange.ranking.verification.catalogue_readings` builds it. It is what
+            lets :func:`~exchange.ranking.filters.organic_relevance_reason` ask whether an
+            ORGANIC row is about the query at all, which nothing here could otherwise decide:
+            the candidate carries the store's offer and the store's claims, and neither is the
+            platform's own record of what the product IS.
+
+            **The default is `None`, meaning "the caller cannot say"**, and then no organic row
+            is ever refused for relevance — the same shape, and the same direction, as
+            ``network_attributes``. A store with no entry in the map is likewise unchecked
+            rather than refused. So a four-argument caller, and an exchange whose catalogue is
+            unwired, keep exactly the answer they had.
+        relevance: the rule those identities are judged with. Defaults to
+            :class:`~exchange.retrieval.relevance.TopicalRelevance`. It is a parameter so a
+            deployment can widen or narrow the rule, never so it can be switched off — passing
+            ``None`` selects the default rather than disabling it, because the switch that
+            matters is ``product_identities``, and that one is the caller stating what it
+            actually holds rather than an operator's preference.
 
     Returns:
         `{"ranked": [...], "candidates": [...], "shortlist": {"auction_id", "slots"},
@@ -238,6 +267,12 @@ def rank(
     candidates = list(candidates or ())
     now = _now_from(config)
     criteria, intent_reason = read_criteria(intent)
+    relevance = TopicalRelevance() if relevance is None else relevance
+    identities = dict(product_identities or {})
+    # The shopper's own words. `Intent.query` is the only field here that is the buyer's prose
+    # rather than a structured term, and it is read once so the per-candidate loop cannot pick
+    # up a different spelling of it.
+    query_text = str(read(intent, "query", "") or "") if intent is not None else ""
 
     def rows_for(applied: Sequence[Any]) -> list[dict[str, Any]]:
         built: list[dict[str, Any]] = []
@@ -251,6 +286,18 @@ def rank(
                 eligibility=eligibility,
             )
             store_id = str(read(candidate, "store_id", "") or "")
+            # The organic half's own filter, and the only one that needs a fact `rank()` cannot
+            # read off the candidate — see `product_identities` above. `identities.get` on an
+            # absent store passes `None`, which the filter reads as "unchecked" and keeps.
+            if product_identities is not None and query_text:
+                off_topic = organic_relevance_reason(
+                    candidate,
+                    query_text=query_text,
+                    identity=identities.get(store_id),
+                    relevance=relevance,
+                )
+                if off_topic is not None:
+                    reasons.append(off_topic)
             row_of_store = trust_row(store_id, trust_snapshot) if store_id else None
             trust_score = None
             if row_of_store is not None:
@@ -372,6 +419,7 @@ __all__ = [
     "REASON_HARD_CONSTRAINT",
     "REASON_MALFORMED",
     "REASON_OFF_DOMAIN",
+    "REASON_OFF_TOPIC_ORGANIC",
     "REASON_UNDECIDABLE_INTENT",
     "TIE_BREAK_DIRECTIONS",
     "rank",
