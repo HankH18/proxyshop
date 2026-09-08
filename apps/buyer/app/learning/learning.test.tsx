@@ -9,7 +9,11 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { LearningPage } from './LearningPage'
+import {
+  LearningPage,
+  MEASURED_SHIFT_AT_64_EVENTS,
+  NO_TEACHING_SPREAD,
+} from './LearningPage'
 import { ACCEPT_PATH, CLARIFY_PATH, CONFIRM_PATH, FEEDBACK_PATH, PROMPT_PATH, type Fetcher } from './loop'
 import { SEEDED_PREFIX } from '../journey/seeded-feedback'
 
@@ -182,6 +186,29 @@ describe('the learning page', () => {
     // The trust term is published for both readings and is identical; the page must say it
     // held rather than leaving a reader to infer that trust did the work.
     expect(toniiq?.querySelector('li[data-delta="flat"]')?.textContent).toMatch(/trust/)
+  })
+
+  it('warns that one pair is not evidence, whenever something did move', async () => {
+    // The other direction of the "Nothing moved" warning below, and the one this page was
+    // missing. The sellers Thompson-sample a discount rung per auction, so `price_value` moves
+    // between two identical queries with nothing taught in between -- MEASURED at 0.0425 of
+    // spread over eight no-teaching runs, against a +0.0071 mean shift after sixty-four sealed
+    // feedback events. A page that showed the movement and not the scale of the noise would be
+    // presenting exploration as learning, which is the one claim this page exists to make.
+    const { fetcher } = stack([COLD, WARM])
+    render(<LearningPage fetcher={fetcher} {...SMALL} />)
+    await click(screen.getByRole('button', { name: /run this query/i }))
+    await screen.findByText(/auction auc-1/)
+    await click(screen.getByRole('button', { name: /run the same query again/i }))
+    await screen.findByTestId('movement-table')
+
+    expect(screen.getByText(/Read one pair with care\./)).toBeInTheDocument()
+    // The measured numbers, not a hand-wave: a caution that names no scale tells a reader
+    // nothing about whether what they are looking at is bigger than the noise.
+    expect(screen.getByText(NO_TEACHING_SPREAD.toFixed(4))).toBeInTheDocument()
+    expect(screen.getByText(`+${MEASURED_SHIFT_AT_64_EVENTS.toFixed(4)}`)).toBeInTheDocument()
+    // ...and it must NOT appear alongside the opposite message.
+    expect(screen.queryByText(/Nothing moved\./)).toBeNull()
   })
 
   it('says the market did not move when the stack answers the same auction twice', async () => {

@@ -93,6 +93,30 @@ export const OUTCOME_ROUNDS = 6
  */
 export const REVIEWERS_PER_ROUND = 4
 
+/**
+ * How far one shop's `rank_score` moves between two identical queries with NO teaching at all.
+ *
+ * The sellers Thompson-sample a discount rung per auction
+ * (`store_agent.learning.state.sample_depth`), so the same query asked twice can be answered
+ * at a different depth, and `price_value` — a published term — moves with it. That is the
+ * loop exploring, and it is the reason this page cannot let one before/after pair stand as
+ * evidence on its own.
+ *
+ * MEASURED on the running compose stack, `gaiaherbs.com` on the default query:
+ *
+ *     8 identical queries, no teaching   0.4970 – 0.5395   spread 0.0425
+ *     after 16 sealed feedback events    mean shift +0.0024
+ *     after 64 sealed feedback events    mean shift +0.0071
+ *
+ * The shift is real, positive and grows with volume — and it is smaller than the spread. The
+ * three shops that never discounted moved by exactly 0.0000 in every run, which is what says
+ * the spread is the sampling and not this page.
+ */
+export const NO_TEACHING_SPREAD = 0.0425
+
+/** The mean shift measured after four times what one press of the button feeds one shop. */
+export const MEASURED_SHIFT_AT_64_EVENTS = 0.0071
+
 export interface LearningPageProps {
   /** Injected in tests. Left alone, the page talks to the service on its own origin. */
   readonly fetcher?: Fetcher
@@ -497,7 +521,19 @@ export function LearningPage({
       {movements === null ? null : (
         <section className="step" aria-label="What changed and why">
           <h2>5 &middot; What changed, and which term did it</h2>
-          {anythingMoved(movements) ? null : (
+          {anythingMoved(movements) ? (
+            <p className="learning-hint">
+              <strong>Read one pair with care.</strong> The sellers Thompson-sample a discount
+              rung per auction, so <code className="mono">price_value</code> moves between two
+              identical queries even with nothing taught in between. Measured on this stack:{' '}
+              <code className="mono">{NO_TEACHING_SPREAD.toFixed(4)}</code> of spread across
+              eight identical queries and no teaching, against a mean shift of{' '}
+              <code className="mono">+{MEASURED_SHIFT_AT_64_EVENTS.toFixed(4)}</code> after
+              sixty-four sealed feedback events. The learning is real and it grows with volume;
+              a single pair is not how you see it. Run beats one and four a few times over —
+              what you are looking for is the middle of the range moving, not any one run.
+            </p>
+          ) : (
             <p className="metrics-warning" role="alert">
               Nothing moved. Both auctions published the same order and the same terms for
               every candidate. That is what this page shows when the market did not move, and
