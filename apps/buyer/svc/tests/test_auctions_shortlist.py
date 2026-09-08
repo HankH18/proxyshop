@@ -583,3 +583,93 @@ def test_the_recorded_diagnostics_survive_an_exchange_that_has_gone_away(buyer_c
     detail = view.json()["detail"]
     assert f"/auctions/{auction_id}/shortlist" in detail, detail
     assert exchange.url in detail, detail
+
+
+# =====================================================================================
+# The market verdict: the one field that separates "nobody bid" from "the market ran"
+#
+# When every solicited store falls back, the shortlist a shopper is served is a normal-looking
+# list of catalogue prices — same shape, same slot count, no error anywhere. The exchange
+# computes a one-line verdict for exactly that case and publishes it three ways from one
+# computation (the 201, the `auction_closed` ledger entry, one log line) so they cannot
+# disagree. It reached this service's record and stopped there: `AuctionView` forwarded five
+# ARRAYS and `market` is a mapping, so the signal built to make a silently-organic market
+# visible was invisible on the only route a shopper's page reads.
+#
+# Measured on the served buyer route, two queries against the demo stack:
+#
+#     'milk thistle'                     sponsored=4 list_price=2 all_fallback=false
+#     'a walnut coffee table ...'        sponsored=0 list_price=6 all_fallback=true
+#                                        fallback_reasons={no_response:2, store_declined:4}
+# =====================================================================================
+def test_the_market_verdict_the_exchange_published_reaches_the_shopper(buyer_client):
+    """Every store bids, so the verdict must say so — and must actually be present."""
+    auction_id = open_an_auction(buyer_client)
+
+    market = served_view(buyer_client, auction_id)["market"]
+
+    assert isinstance(market, dict), (
+        "the exchange publishes its market verdict once, on the answer this service records; "
+        "a shopper's page cannot tell an all-fallback market from a normal one without it"
+    )
+    assert market["all_fallback"] is False
+    assert market["sponsored"] == len(STORES)
+    assert market["list_price"] == 0
+    assert market["solicited"] == len(STORES)
+    # The window is a MEASUREMENT an operator may move, so it travels with the verdict rather
+    # than being something a reader has to go and look up in a compose file.
+    assert market["bid_window_seconds"] > 0
+
+
+def test_a_market_where_every_store_fell_back_says_so_on_the_buyers_own_route(
+    exchange, bidders, monkeypatch
+):
+    """The case the field exists for. Silent stores, a full shortlist, and a verdict.
+
+    The shortlist is deliberately asserted to be NON-EMPTY first: an all-fallback market does
+    not look like a failure from the outside, and if it did there would be no need for this
+    field at all.
+    """
+    from apps.buyer.svc.src.intent.routes import set_buyer_llm
+
+    reset_confirmations()
+    set_buyer_llm(None)
+    for name in ("BUYER_DEPLOYMENT", "BUYER_DEPLOYMENT_JSON", "BUYER_ROSTER"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("EXCHANGE_URL", exchange.url)
+    monkeypatch.setenv("BUYER_ROSTER_JSON", json.dumps(ROSTER))
+    bidders.silent = set(STORES)
+
+    app = importlib.import_module("buyer_svc.main").create_app()
+    try:
+        with TestClient(app) as client:
+            auction_id = open_an_auction(client)
+            body = served_view(client, auction_id)
+    finally:
+        bidders.silent = set()
+        reset_confirmations()
+
+    assert body["shortlist"]["slots"], (
+        "an all-fallback market still serves a full shortlist at catalogue prices — that is "
+        "why it is invisible without the verdict, and why this test asserts it first"
+    )
+    market = body["market"]
+    assert market["all_fallback"] is True, market
+    assert market["sponsored"] == 0, market
+    assert market["list_price"] == len(STORES), market
+    assert market["fallback_reasons"], "an all-fallback market that names no reason says nothing"
+
+
+def test_an_answer_that_carried_no_market_reports_none_rather_than_an_empty_one():
+    """An exchange too old to publish a verdict, and one reporting an empty market, differ.
+
+    Only one of those exists, and ``{}`` would report the one that does not.
+    """
+    from apps.buyer.svc.src.auctions.routes import RECORDED_MAPPING_KEY, _recorded_mapping
+
+    assert _recorded_mapping(None, RECORDED_MAPPING_KEY) is None
+    assert _recorded_mapping({"response": {}}, RECORDED_MAPPING_KEY) is None
+    assert _recorded_mapping({"response": {"market": []}}, RECORDED_MAPPING_KEY) is None
+    assert _recorded_mapping(
+        {"response": {"market": {"all_fallback": True}}}, RECORDED_MAPPING_KEY
+    ) == {"all_fallback": True}

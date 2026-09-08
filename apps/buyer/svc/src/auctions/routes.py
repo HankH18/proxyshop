@@ -66,6 +66,7 @@ solicitation — and the ``denied`` array beside it is where the reason is.
 from __future__ import annotations
 
 import sys
+from collections.abc import Mapping
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -93,6 +94,10 @@ router = APIRouter(prefix="/buyer/auctions", tags=["buyer-auctions"])
 #: from here would be a stale shortlist wearing a live one's field name.
 RECORDED_KEYS: tuple[str, ...] = ("entries", "excluded", "denied", "ranked", "solicited")
 
+#: The one recorded diagnostic that is a mapping rather than an array, forwarded through
+#: :func:`_recorded_mapping`. See :attr:`AuctionView.market`.
+RECORDED_MAPPING_KEY = "market"
+
 
 class AuctionView(BaseModel):
     """One auction, with its live half and its recorded half labelled as such."""
@@ -108,6 +113,23 @@ class AuctionView(BaseModel):
     denied: list[Any] = []
     ranked: list[Any] = []
     solicited: list[Any] = []
+    #: RECORDED, and a MAPPING rather than one of the five arrays above, which is why it is
+    #: named separately. The exchange's one-line verdict on the market it just ran --
+    #: ``{"solicited", "sponsored", "list_price", "timed_out", "not_asked", "denied",
+    #: "bid_window_seconds", "fallback_reasons", "all_fallback"}`` -- computed once so the
+    #: 201, the ``auction_closed`` ledger entry and the exchange's log cannot disagree.
+    #:
+    #: Forwarded because the interesting case is invisible without it. When every solicited
+    #: store falls back, the shortlist is a normal-looking list of catalogue prices: the same
+    #: shape, the same number of slots, no error anywhere. ``all_fallback`` is the only field
+    #: that distinguishes "this market ran and nobody bid" from "this market ran". The
+    #: exchange publishes it once, on the answer this service records, and it survived nowhere
+    #: else on this side -- the same argument the five arrays above are kept for.
+    #:
+    #: ``None`` when this service holds no record, or when the recorded answer carried no
+    #: ``market``. Never ``{}``: an exchange too old to publish one and an exchange reporting
+    #: an empty market are different facts, and only one of them exists.
+    market: dict[str, Any] | None = None
     #: When THIS SERVICE recorded the answer above; ``None`` when it holds no record. Not the
     #: exchange's clock, and kept outside the recorded body for exactly that reason.
     recorded_at: str | None = None
@@ -144,6 +166,23 @@ def _recorded_rows(recorded: Any, key: str) -> list[Any]:
         return []
     value = answer.get(key)
     return list(value) if isinstance(value, list) else []
+
+
+def _recorded_mapping(recorded: Any, key: str) -> dict[str, Any] | None:
+    """One diagnostic MAPPING off the recorded answer, or ``None`` when it carried none.
+
+    ``None`` and not ``{}``, unlike :func:`_recorded_rows`' ``[]``, and the difference is the
+    point: the five arrays are in every answer the exchange gives, so their absence says
+    nothing, while ``market`` is absent exactly when the exchange that answered predates it.
+    Flattening that to ``{}`` would report "a market with no stores in it".
+    """
+    if not isinstance(recorded, dict):
+        return None
+    answer = recorded.get("response")
+    if not isinstance(answer, dict):
+        return None
+    value = answer.get(key)
+    return dict(value) if isinstance(value, Mapping) else None
 
 
 @router.get("/{auction_id}", response_model=AuctionView)
@@ -188,6 +227,7 @@ async def read_auction(auction_id: str, request: Request) -> AuctionView:
         auction_id=auction_id,
         shortlist=dict(shortlist) if shortlist is not None else None,
         recorded_at=str(recorded["recorded_at"]) if recorded is not None else None,
+        market=_recorded_mapping(recorded, RECORDED_MAPPING_KEY),
         **{key: _recorded_rows(recorded, key) for key in RECORDED_KEYS},
     )
 

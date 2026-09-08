@@ -76,6 +76,18 @@
                       "title": "Solicited",
                       "default": []
                     },
+                    "market": {
+                      "anyOf": [
+                        {
+                          "additionalProperties": true,
+                          "type": "object"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ],
+                      "title": "Market"
+                    },
                     "recorded_at": {
                       "anyOf": [
                         {
