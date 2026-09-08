@@ -99,34 +99,23 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 #: Routes no test drives, each with the reason it is not covered yet.
 #:
-#: Measured on this branch, not guessed: one entry, out of 68 served routes across seven
-#: services. Every other route has at least one test file that builds a client and names it.
+#: **Empty, measured on this branch: 0 entries out of 68 served routes across seven services.**
+#: Every route has at least one test file that builds a client and names it.
+#:
+#: It held exactly one when this census was built — `POST /claims/verifications`, the
+#: claim-verification door: served, published in `trust.openapi.json`, and requested by
+#: nothing. The path appeared in three test files and every mention was prose. Nor did product
+#: code call it: `persist_claim_verification` had one caller in the tree, the handler itself.
+#: The verification pipeline was tested through `packages/verification` and through the ledger
+#: rows the route would write, never through the route, so nothing would have noticed if the
+#: handler stopped answering. `apps/trust/tests/test_claims_verifications_route.py` drives it
+#: now, and :func:`test_no_allowlisted_route_is_actually_driven` is what demanded this deletion.
 #:
 #: The rule for adding an entry: it must name the route AND say why the coverage is absent.
 #: "Not covered yet" alone is not a reason, it is a restatement of the fact that put the entry
 #: here. The rule for removing one: the moment a test drives the route,
 #: :func:`test_no_allowlisted_route_is_actually_driven` fails and demands the deletion.
-UNDRIVEN_ALLOWLIST: dict[tuple[str, str, str], str] = {
-    (
-        "trust",
-        "POST",
-        "/claims/verifications",
-    ): (
-        "The claim-verification door. It is served (trust's create_app globs "
-        "apps/trust/src/claims/routes.py, which exports a module-level router with "
-        "prefix=/claims) and it is published (packages/contracts/openapi/trust.openapi.json "
-        "declares POST /claims/verifications), but no test in the repo posts to it. The path "
-        "appears in exactly three test files, four mentions, and every one is prose: an ASCII "
-        "service diagram (twice) in apps/exchange/tests/test_repro_open_tickets.py, a note in "
-        "apps/trust/tests/test_repro_open_tickets.py, and a paragraph in e2e/test_s1_flow.py "
-        "describing a route that suite does not call. Nor does product code call it: "
-        "persist_claim_verification in apps/trust/src/verification/persistence.py has exactly "
-        "one caller in the tree, the handler itself. The verification "
-        "pipeline is tested through packages/verification and through the ledger rows the "
-        "route would write, never through the route itself, so nothing would notice if the "
-        "handler stopped answering. Covering it is separate scheduled work, not this lane's."
-    ),
-}
+UNDRIVEN_ALLOWLIST: dict[tuple[str, str, str], str] = {}
 
 #: The manual survey this census was cross-checked against, kept as a second opinion rather
 #: than as truth. Both agree, so a future disagreement means one of them moved.

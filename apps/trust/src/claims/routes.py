@@ -21,18 +21,26 @@ not emit. This route is the producer that had been missing. Six kinds still have
 (auction_closed, auction_opened, checkout_redirect, order_fulfilled, policy_event, shown);
 that is T-302's remainder and is gated in apps/trust/tests/test_repro_open_tickets.py.
 
-KNOWN CONTRACT DRIFT, recorded rather than hidden: ``/claims/verifications`` is served and
-is published nowhere. It is in neither ``trust.openapi.json`` nor
-``contracts.openapi.PINNED_ROUTES``, both of which live in ``packages/contracts`` and are
-outside the write scope of the lane that added this route. Nothing currently fails on it —
-the contract tests compare the DOCUMENTS to PINNED_ROUTES and neither to what boots — but it
-is the same served-but-unpublished class T-312 files against ingest.
+THE CONTRACT DRIFT THIS PARAGRAPH USED TO RECORD IS CLOSED, and it is worth keeping the shape
+of it. ``/claims/verifications`` was served and published nowhere — in neither
+``trust.openapi.json`` nor ``contracts.openapi.PINNED_ROUTES`` — and nothing failed on it,
+because the contract tests compared the DOCUMENTS to ``PINNED_ROUTES`` and neither to what
+boots. Both carry it now, and ``proxyshop_support.route_census`` compares every service's
+served routes against its published document in both directions, so the gap that let this sit
+here is closed as well as the entry.
+
+The route was also, until recently, the LAST route in the product that no test requested: it
+was served, it was published, and nothing drove it, so nothing would have noticed if this
+handler stopped answering. ``apps/trust/tests/test_claims_verifications_route.py`` drives it
+now. Both halves of that — published but undriven, and driven but unpublished — are the same
+class, and neither is visible from inside this module.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -91,11 +99,20 @@ def _check_values(
     return parsed or frozenset(fallback)
 
 
+@lru_cache(maxsize=1)
 def _vocabularies() -> tuple[frozenset[str], frozenset[str]]:
     """``(verification statuses, provenance sources)``, read from the authority that owns them.
 
     BOTH come from the migration's own CHECK constraints — the same file, read once. Reading
     rather than typing is the point: a second copy of a vocabulary is a second thing to drift.
+
+    **Cached, and "read once" now means once per process rather than once per validator.** It
+    was neither: the `status` validator calls this, and so does the `provenance_source` one
+    when that field is present, so a single request did two synchronous file reads and four
+    regex scans on the hot path of an unauthenticated door. A migration file cannot change
+    under a running process — it is baked into the image — so there is nothing here for a
+    cache to go stale against. The fallbacks below still apply on the first call, which is
+    where they were always decided.
 
     The statuses used to be imported from ``claim_verification``, and that was WRONG for a
     reason no unit test could see. ``services/sim/Dockerfile`` ships ``apps/trust/src/`` and
