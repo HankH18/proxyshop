@@ -14,7 +14,9 @@ role            environment variable    documented default
 
 The four defaults are exactly the values ``.env.example`` ships (sonnet-class for the two
 conversational roles, opus-class for the onboarding interview, haiku-class for extraction
-— DESIGN §Decisions). **They are not a fallback nobody hits**: a worktree has no ``.env``
+— DESIGN §Decisions), and a test asserts that equality, so the two files move together or
+not at all — see the note on :data:`DEFAULT_INTERVIEW_MODEL`, which is the one id here that
+is a generation behind. **They are not a fallback nobody hits**: a worktree has no ``.env``
 (it is gitignored and never generated), so unless a process exports the variables itself,
 these constants are what actually runs.
 
@@ -58,6 +60,18 @@ KNOWN_ROLES: tuple[str, ...] = tuple(ROLE_ENV_VARS)
 
 DEFAULT_BUYER_MODEL = "claude-sonnet-4-5"
 DEFAULT_STORE_AGENT_MODEL = "claude-sonnet-4-5"
+#: **This one is STALE and cannot be fixed here alone.** ``claude-opus-4-1`` is a
+#: previous-generation id; the current opus-class id is ``claude-opus-4-5`` (sonnet-class is
+#: ``claude-sonnet-4-5`` and haiku-class is ``claude-haiku-4-5``, and both of those are
+#: current). It still resolves, so nothing breaks and nothing says anything — a stale model
+#: id shows up only on a bill and in a quality difference nobody attributes to it.
+#:
+#: It is left as-is because moving it is a THREE-FILE change and this file is the only one of
+#: the three in reach: ``test_the_documented_defaults_are_the_values_env_example_ships``
+#: asserts this constant equals ``.env.example``'s ``INTERVIEW_MODEL``, and
+#: ``apps/buyer/compose.yaml:54`` states it a third time as a service default. Editing this
+#: line alone turns that gate red without changing what any deployment runs. All three move
+#: together, or none do.
 DEFAULT_INTERVIEW_MODEL = "claude-opus-4-1"
 DEFAULT_EXTRACT_MODEL = "claude-haiku-4-5"
 

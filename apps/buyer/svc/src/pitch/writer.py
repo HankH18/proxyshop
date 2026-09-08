@@ -105,12 +105,25 @@ def build_pitch_writer(env: Mapping[str, str] | None = None) -> Any:
     ``timeout=`` is passed only on the ``anthropic`` path, because ``llm.client.build_llm``
     refuses a keyword the selected provider would silently discard — the offline double has
     no socket to time out on, and passing it there is a ``TypeError`` rather than a no-op.
+
+    **It also says which voice this process has.** ``llm.boot.log_llm_runtime`` emits one
+    line — INFO when a real model writes the platform's case, WARNING when the deterministic
+    assembly does — naming the provider, the model id, whether the ``anthropic`` distribution
+    is installed in this image and whether a key is set (a bool; never the key). Without it a
+    buyer container serving nothing but ``assemble()`` is indistinguishable from one serving
+    written prose: both answer 200 and both report healthy. Suppressed after the first
+    identical line, because D20's default double is rebuilt per render (see
+    :func:`pitch_writer`) and this function therefore runs on the served path.
     """
     try:
-        from llm import PROVIDER_ANTHROPIC, build_llm, resolve_provider
+        from llm import PROVIDER_ANTHROPIC, build_llm, log_llm_runtime, resolve_provider
     except Exception:  # noqa: BLE001 - a service with no `packages/llm` still serves slots
         _warn_once("packages/llm is not importable; shortlist cases will be assembled")
         return None
+    try:
+        log_llm_runtime(LLM_ROLE, env=env)
+    except Exception:  # noqa: BLE001 - rule 2: a logging line never costs the shopper a slot
+        _log.warning("could not report the %r LLM runtime state", LLM_ROLE, exc_info=True)
     try:
         if resolve_provider(env) == PROVIDER_ANTHROPIC:
             return build_llm(LLM_ROLE, timeout=PITCH_TIMEOUT_SECONDS, env=env)

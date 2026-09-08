@@ -61,6 +61,47 @@ RUN pip install --no-cache-dir \
       "redis[hiredis]==8.1.0" \
       "jsonschema[format]==4.26.0"
 
+# ---------------------------------------------------------------------------------
+# This image's OWN layer, on top of the byte-identical prologue above.
+# ---------------------------------------------------------------------------------
+# A SEPARATE `RUN pip install`, not an edit to the block above, and that is the established
+# shape here rather than a preference: `apps/exchange/Dockerfile` and `services/ingest/
+# Dockerfile` both add their extra distributions in a second layer for the same reason. The
+# prologue's instruction string is the Docker cache key shared by all eight service images,
+# so adding one requirement there would re-download the whole dependency set eight times.
+# The prologue's sentence "numpy, lxml and anthropic are in no deployable's closure and are
+# deliberately absent" remains true OF THE PROLOGUE, which is the block it describes.
+#
+# WHY THIS IMAGE NEEDS IT. D55 gives the buyer-side agent its own objective: it pitches EVERY
+# candidate on the shortlist, scraped shops included, in the platform's own voice and only
+# from facts the exchange already holds. That case is written on `POST /buyer/shortlist/
+# render` by `pitch.writing.compose_case`, whose client comes from
+# `pitch.writer.pitch_writer()`, which selects `AnthropicLLM` on `LLM_PROVIDER=anthropic`.
+# Without the line below that selection did not fail — it SUCCEEDED, because
+# `llm.client.AnthropicLLM.__init__` performs no I/O and imports no SDK (D20). The
+# ModuleNotFoundError arrived one frame deeper, on the first `complete()`, inside
+# `import anthropic` at `packages/llm/src/client.py:168`, and `compose_case` catches
+# everything and answers with `assemble()` so a model outage can never cost a shopper a
+# slot. Net effect in every container-based deployment: both of D55's voices were the
+# deterministic slot-filled fallback, at 200 OK, with a configuration that said `anthropic`.
+# The SAME wheel closes the `buyer_svc.intent.routes` clarifier, whose `from llm import
+# build_llm` (T-300) has been importable since that ticket and whose live path had the
+# identical hole.
+#
+# The version MIRRORS the root pyproject.toml pin (`anthropic==1.2.0`) exactly as the
+# prologue's set does, and for the same reason: this file follows the root manifest and must
+# never lead it.
+#
+# It pulls anyio, docstring-parser, httpx2, jiter, sniffio and typing-extensions. Note
+# httpx2, which is a DIFFERENT distribution from the prologue's `httpx==0.28.1` (anthropic
+# 1.x moved to httpx2) — so this adds a second HTTP client rather than upgrading the one the
+# exchange and trust clients use, and neither pin constrains the other.
+#
+# The offline double stays the default (D20): with `LLM_PROVIDER` unset this wheel is
+# installed and never imported, because `import anthropic` still only runs inside
+# `AnthropicLLM._ensure_client()`. What changes is that the live path now exists.
+RUN pip install --no-cache-dir "anthropic==1.2.0"
+
 # The repo layout is reproduced VERBATIM rather than flattened into /app, because
 # `contracts.registry` resolves its JSON bundle as
 # `Path(__file__).resolve().parent.parent / "schemas"`. `.resolve()` follows the `.pkgroot`

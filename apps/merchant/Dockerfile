@@ -2,8 +2,16 @@
 #
 # The merchant svc API — the Shopify OAuth install flow, the web-pixel/webhook
 # registration and the HMAC-verified webhook door. httpx is its Admin GraphQL client.
-# apps/merchant/app/ is a TypeScript scaffold with no build of its own yet, so the
-# merchant deployable is this API.
+#
+# THIS IMAGE SERVES NO DASHBOARD, and that is now a choice rather than a fact about the repo.
+# `apps/merchant/app/` grew a real vite build (`package.json` -> `build:ui`), and
+# `dashboard/routes.py` mounts it at `/dashboard` from whatever directory `MERCHANT_UI_DIST`
+# names — so this image answers every `/dashboard/*` request with the 503 page that asks for a
+# build. The sibling `apps/merchant/Dockerfile.web` is this same service WITH the bundle built
+# in and `MERCHANT_UI_DIST` set, and it exists as a separate file because the bundle needs a
+# `COPY --from=` that `proxyshop_support/tests/test_artifact_copyset.py` deliberately refuses
+# to model in a file named `Dockerfile`. Its header carries the full argument. Deploy that one
+# wherever an operator is meant to reach the dashboard.
 #
 # Build context is the REPO ROOT (see the sibling compose.yaml), not this directory: the
 # flat src layout (D42) means a service image has to reach across member directories.

@@ -21,6 +21,16 @@ Importing this package touches no network and does not import the ``anthropic`` 
 
 from __future__ import annotations
 
+from llm.boot import (
+    SDK_DISTRIBUTION,
+    STATUS_LIVE,
+    STATUS_TEMPLATED,
+    LLMRuntime,
+    describe_llm_runtime,
+    forget_llm_runtime_reports,
+    log_llm_runtime,
+    sdk_installed,
+)
 from llm.client import (
     RESERVED_REQUEST_FIELDS,
     AnthropicLLM,
@@ -126,7 +136,10 @@ __all__ = [
     "ROLE_EXTRACT",
     "ROLE_INTERVIEW",
     "ROLE_STORE_AGENT",
+    "SDK_DISTRIBUTION",
     "SECTION_SEPARATOR",
+    "STATUS_LIVE",
+    "STATUS_TEMPLATED",
     "SUPPORTED_PROVIDERS",
     "TIMEOUT_ENV_VAR",
     "AnthropicLLM",
@@ -137,6 +150,7 @@ __all__ = [
     "LLMCall",
     "LLMClient",
     "LLMError",
+    "LLMRuntime",
     "MissingApiKeyError",
     "ModelOverrideError",
     "PromptAssemblyError",
@@ -153,11 +167,14 @@ __all__ = [
     "canonical_system_key",
     "compose_request",
     "default_model",
+    "describe_llm_runtime",
+    "forget_llm_runtime_reports",
     "load_all_recordings",
     "load_provenance",
     "load_recording",
     "load_system_contract",
     "load_recording_file",
+    "log_llm_runtime",
     "model_env_var",
     "normalize_recording_key",
     "prompt_text",
@@ -168,6 +185,7 @@ __all__ = [
     "resolve_provider",
     "resolve_timeout",
     "response_text",
+    "sdk_installed",
     "system_key_blocks",
     "system_key_text",
     "wire_key",

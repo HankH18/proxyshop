@@ -1,0 +1,165 @@
+# The proxyshop-merchant-web container — the merchant svc API *with its dashboard baked in*.
+#
+# WHAT IS BROKEN WITHOUT THIS FILE. `apps/merchant/svc/src/dashboard/routes.py:167` mounts the
+# operator dashboard at `/dashboard`, and `DashboardBundle.__call__` resolves the bundle per
+# request from `MERCHANT_UI_DIST` (`dashboard/config.py:167`). That variable is set in NO
+# compose fragment, NO .env.example, NO Dockerfile and NO script, and `apps/merchant/app/dist`
+# is both gitignored and excluded by `.dockerignore`, so it cannot be COPYd from a host either.
+# Every deployment therefore answers every `/dashboard/*` request with a 503 whose body is a
+# page telling the reader to run a build the image has no way to run. A merchant cannot see a
+# loss, edit an envelope, answer the onboarding interview or approve an activation — the whole
+# supply-side surface — in any container-based deployment, from a container reporting healthy.
+#
+# WHY IT IS A SEPARATE FILE FROM THE SIBLING `Dockerfile`, which is the question a reader will
+# ask first. The bundle can only be produced by a node build stage and brought over with
+# `COPY --from=`, and `proxyshop_support/tests/test_artifact_copyset.py` — the gate that proves
+# every image can import the modules it ships — asserts `spec.stage_copies == ()` for every
+# file named exactly `Dockerfile`, because its materialiser cannot model bytes that do not come
+# from the build context. That refusal is correct (it is what stopped T-298 being closed against
+# an artifact that could not exist) and teaching it the construct is not this lane's file to
+# edit, so the stage lands in a `Dockerfile.web`, which the gate's `rglob("Dockerfile")` does
+# not collect. `apps/buyer/Dockerfile.web` is outside it for the same reason.
+#
+# WHY IT SERVES THE API TOO, rather than being nginx + a proxy like `buyer-web`. The merchant
+# SPA fetches ROOT-LEVEL paths — `/stores/{id}/dashboard`, `/stores/{id}/envelope`,
+# `/stores/{id}/kill`, `/stores/{id}/bids/solicit` (`app/dashboard/api.ts:272-376`) — on bare
+# relative `fetch`, and `merchant_svc.main.create_app` installs no CORS. The buyer's SPA is
+# namespaced under `/buyer/`, so one nginx `location` block proxies it; the merchant's is not,
+# so the equivalent would be a hostname-shaped rule over `/stores|/install|/webhooks` that goes
+# stale the first time a router is added. Serving both from ONE uvicorn is what the dashboard
+# code was designed for and removes the question: `vite.config.ts:26` already sets
+# `base: '/dashboard/'` to match `DASHBOARD_MOUNT`, so the bundle's own asset URLs land on the
+# same mount, and every API call is same-origin by construction.
+#
+# WHAT COMPOSE MUST DO (owned by another lane, reported not changed): point `merchant-svc`'s
+# `build.dockerfile` at this file instead of `apps/merchant/Dockerfile`, or add a second
+# service from it. No new environment variable is needed — `MERCHANT_UI_DIST` is set BY THIS
+# IMAGE, below, because a path that only exists inside the image has no business being stated
+# outside it.
+#
+# Build context is the REPO ROOT (as for the sibling): the flat src layout (D42) means a
+# service image reaches across member directories, and this is an npm workspace whose lockfile
+# lives at the root.
+
+# ---------------------------------------------------------------------------------
+# Stage 1 — vite
+# ---------------------------------------------------------------------------------
+# 22-alpine, not `node:latest`: the root package.json pins `engines.node >= 22.12.0`, and an
+# unpinned base is a build that changes under you with no commit to point at.
+FROM node:22-alpine AS bundle
+
+WORKDIR /repo
+
+# The workspace manifests first, so the dependency layer is cached on everything except a
+# manifest change. `npm ci` needs the root lockfile plus EVERY workspace's package.json — the
+# lockfile describes the whole workspace tree and `npm ci` refuses a tree it cannot match. All
+# four are listed even though the merchant depends on none of them, for that reason alone.
+COPY package.json package-lock.json ./
+COPY packages/contracts/package.json packages/contracts/
+COPY apps/buyer/package.json apps/buyer/
+COPY apps/merchant/package.json apps/merchant/
+COPY pixel/package.json pixel/
+
+RUN npm ci
+
+# The root tsconfig the workspace members `extends` (`apps/merchant/tsconfig.json:2`). Without
+# it vite's transform fails with `Tsconfig not found /repo/tsconfig.base.json` — a build error
+# rather than a missing-file error, so it reads like a code fault rather than a copyset one.
+COPY tsconfig.base.json tsconfig.json ./
+
+# Then the sources that actually change. `.dockerignore` drops `**/node_modules` and `**/dist`,
+# so this brings the merchant's TypeScript and its `index.html` and nothing the build would
+# have to undo.
+COPY apps/merchant/ apps/merchant/
+
+# `--workspace` rather than a `cd`: the script resolves its own config relative to the
+# workspace root either way, and naming the workspace keeps the failure legible when the
+# member is missing.
+RUN npm run build:ui --workspace @proxyshop/merchant
+
+# A build that silently produces nothing is the failure this whole file exists to prevent, so
+# check rather than trust: an empty `dist` must fail HERE, where the message names the build,
+# instead of at runtime as the very 503 this image was written to retire — which is worse than
+# the original bug, because the page would then be lying about the reason.
+RUN test -f apps/merchant/app/dist/index.html || \
+    (echo "merchant bundle is missing index.html; vite produced nothing" && exit 1)
+
+# ---------------------------------------------------------------------------------
+# Stage 2 — the merchant service, plus the bundle
+# ---------------------------------------------------------------------------------
+# Everything from here to the bundle COPY is the sibling `apps/merchant/Dockerfile`'s runtime
+# half, and it is duplicated rather than shared because a Dockerfile has no include. The
+# sibling carries the full reasoning for each line — the byte-identical eight-image pip
+# prologue, why the repo layout is reproduced instead of flattened (`contracts.registry`
+# resolves its schema bundle through `.resolve()`), why `packages/contracts/generated/python/`
+# is copied separately (`src/generated` is a symlink), and why the exchange subset is exactly
+# `checkout/` plus four `auction/` modules and NOT `auction/routes.py` (T-298/T-299). Read it
+# there; changing this half means changing it there first.
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app:/app/.pkgroot
+
+WORKDIR /app
+
+RUN pip install --no-cache-dir \
+      "fastapi==0.141.1" \
+      "uvicorn[standard]==0.52.4" \
+      "pydantic==2.13.5" \
+      "email-validator==2.3.0" \
+      "httpx==0.28.1" \
+      "psycopg[binary,pool]==3.3.5" \
+      "redis[hiredis]==8.1.0" \
+      "jsonschema[format]==4.26.0"
+
+COPY packages/contracts/__init__.py /app/packages/contracts/__init__.py
+COPY packages/contracts/src/        /app/packages/contracts/src/
+COPY packages/contracts/schemas/    /app/packages/contracts/schemas/
+COPY packages/contracts/generated/python/ /app/packages/contracts/generated/python/
+COPY proxyshop_support/             /app/proxyshop_support/
+COPY apps/merchant/svc/src/      /app/apps/merchant/svc/src/
+COPY apps/exchange/src/__init__.py /app/apps/exchange/src/
+COPY apps/exchange/src/checkout/   /app/apps/exchange/src/checkout/
+COPY apps/exchange/src/auction/__init__.py \
+     apps/exchange/src/auction/collect.py \
+     apps/exchange/src/auction/fanout.py \
+     apps/exchange/src/auction/ledger.py \
+     apps/exchange/src/auction/state.py \
+     /app/apps/exchange/src/auction/
+
+RUN mkdir -p /app/.pkgroot \
+ && ln -s ../packages/contracts/src /app/.pkgroot/contracts \
+ && ln -s ../apps/merchant/svc/src /app/.pkgroot/merchant_svc \
+ && ln -s ../apps/exchange/src /app/.pkgroot/exchange
+
+# The bundle, and the only line in this stage the sibling does not have.
+#
+# `/app/ui` rather than `/app/apps/merchant/app/dist`: nothing resolves this path relative to a
+# source file — `ui_dist()` reads the variable and calls `Path(...).is_dir()` — so reproducing
+# the repo shape here would buy nothing and would put a build artefact inside the tree
+# `.pkgroot` links into.
+COPY --from=bundle /repo/apps/merchant/app/dist/ /app/ui/
+
+# Set IN THE IMAGE, deliberately, and this is the whole fix for the 503. `dashboard/config.py`
+# treats an unset variable and a non-directory identically (both are `None`, both are the
+# unbuilt page), so a value that names a directory this image actually contains is the only
+# form of the setting that cannot be wrong. Stating it in compose instead would put a path
+# that exists only inside the container into a file edited outside it — the same class of
+# mistake as the bind-mounted `apps/buyer/dist` that T-313 removed. A deployment that wants to
+# serve a different bundle still overrides it, because `os.environ` wins over `ENV`.
+ENV MERCHANT_UI_DIST=/app/ui
+
+# Non-root: nothing in this service writes to the filesystem, so there is no reason for the
+# process to be able to. The bundle is read-only to it, which is what it should be.
+RUN useradd --create-home --uid 10001 proxyshop
+USER proxyshop
+
+EXPOSE 8082
+
+# Byte-identical to the sibling's CMD on purpose: this is the same service, and
+# `proxyshop_support/tests/test_deploy_readiness.py` pins a compose `command:` to its image's
+# `CMD` for the services that declare one. A second spelling here would be a second answer to
+# "what does the merchant run".
+CMD ["uvicorn", "merchant_svc.main:app", "--host", "0.0.0.0", "--port", "8082", "--workers", "1"]

@@ -65,6 +65,7 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
+from llm.boot import log_llm_runtime
 from llm.client import build_llm
 from llm.config import (
     PROVIDER_ANTHROPIC,
@@ -149,8 +150,25 @@ class PitchClient:
         return str(getattr(self.inner, "model", "") or "unknown")
 
     def complete(self, prompt: Any, **kwargs: Any) -> str:
+        """Complete, then forget. A raise is re-raised — and, unlike before, is also SAID.
+
+        ``store_agent.runtime.pitch.compose_pitch`` catches everything this can throw and
+        answers with the deterministic fallback, which is right for the bid and was silent
+        for the operator: a container whose live client raised on every solicitation shipped
+        template prose for the life of the image with nothing in the log to point at. The
+        exception's TYPE is logged and its message is not, because a provider's error text is
+        the string in this path most likely to carry a credential on an auth failure.
+        """
         try:
             return str(self.inner.complete(prompt, **kwargs))
+        except Exception as error:
+            _log.warning(
+                "the pitch copywriter (%s) failed with %s; this bid carries the "
+                "deterministic fallback pitch",
+                self.model,
+                type(error).__name__,
+            )
+            raise
         finally:
             forget = getattr(self.inner, "reset", None)
             if callable(forget):
@@ -167,8 +185,23 @@ def pitch_client(env: Mapping[str, str] | None = None) -> PitchClient | None:
     :func:`store_agent.runtime.pitch.compose_pitch` answers it with the deterministic fallback
     pitch. Every way of failing to build a client resolves to it, loudly in the log and silently
     on the bid.
+
+    **This is also where the advocate says which voice it has.** ``llm.boot.log_llm_runtime``
+    emits one line — INFO when a real model writes the store's own case, WARNING when the
+    deterministic fallback does — naming the provider, the model id, whether the ``anthropic``
+    distribution is installed in this image and whether a key is set (a bool; never the key).
+    It belongs here rather than in ``store_agent.main`` because this function IS the decision:
+    `solicitation.advocate` calls it once per application and caches the result on
+    ``app.state``, so the line is emitted while the advocate is being built and is not
+    repeated per solicitation. D55 makes this pitch the thing an in-network shop is buying,
+    and until this line existed a container that had silently lost it looked identical to one
+    that had not.
     """
     environ: Mapping[str, str] = os.environ if env is None else env
+    try:
+        log_llm_runtime(ROLE_STORE_AGENT, env=environ)
+    except Exception:  # noqa: BLE001 - a logging line never costs the store its copywriter
+        _log.warning("could not report the store-agent LLM runtime state", exc_info=True)
     try:
         provider = resolve_provider(environ)
         if provider == PROVIDER_DOUBLE:
