@@ -330,7 +330,10 @@ const PRICED_SLOT: ShortlistSlot = {
     unit_price: 78,
     total_price: 156,
     currency: 'USD',
-    discount: { type: 'percent', value: 10 },
+    // `'percentage'`, which is what `store_agent.runtime.bidding.PERCENTAGE` actually emits.
+    // The fixture said `'percent'` — a spelling no producer in this tree produces — so the
+    // rendering branch it was meant to cover had never run under test either.
+    discount: { type: 'percentage', value: 10 },
     expires_at: '2026-09-06T12:00:00Z',
   },
   commitments: [
@@ -392,7 +395,10 @@ describe('what the shopper can read on a slot', () => {
   it('calls the discount a stated one, because no code exists until the buyer accepts', () => {
     render(<ShortlistView shortlist={one(PRICED_SLOT)} onAccept={vi.fn()} />)
     const discount = screen.getByTestId('discount-bid-e7-7').textContent ?? ''
-    expect(discount).toContain('10')
+    // The DEPTH as a shopper reads it, not merely the digits: asserting `toContain('10')`
+    // alone is satisfied by `percentage 10`, which is how this line rendered for every
+    // discount ever shown while this test stayed green.
+    expect(discount).toContain('10% off')
     expect(discount.toLowerCase()).toContain('states')
   })
 

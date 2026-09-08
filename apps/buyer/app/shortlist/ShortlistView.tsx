@@ -222,12 +222,28 @@ function priceLine(price: ShortlistPrice | null | undefined): string {
   return price.currency ? line : `${line} (the exchange named no currency for this)`
 }
 
+/**
+ * `Discount.type` spellings that mean "`value` is a percentage depth".
+ *
+ * MIRRORS `contracts.boundary.PERCENTAGE_DISCOUNT_TYPES` (and its TypeScript twin in
+ * `packages/contracts/src/ts/boundary.ts`) rather than importing it, because this app imports
+ * nothing from `packages/contracts` and starting here would be a new dependency for one word.
+ *
+ * Restated because a single spelling was wrong in the one direction that mattered. The only
+ * producer in the tree is `store_agent.runtime.bidding.PERCENTAGE`, whose value is
+ * `"percentage"` and whose comment calls it "the only form a tool hook can authorize" — while
+ * this function tested `=== 'percent'`. So the `% off` branch had never once run: every
+ * discount a shopper has ever been shown rendered as `percentage 15, as this store states it`.
+ * The test that covers this line passed throughout, because its fixture typed `'percent'` — a
+ * value no producer emits — and asserted only that the text contained the number.
+ */
+const PERCENTAGE_DISCOUNT_TYPES: ReadonlySet<string> = new Set(['percentage', 'percent', 'pct'])
+
 /** The discount the store STATES. Not a code, not an entitlement — see `SlotDiscount`. */
 function discountLine(discount: SlotDiscount): string {
-  const depth =
-    discount.type === 'percent'
-      ? `${discount.value}% off`
-      : `${discount.type} ${discount.value}`
+  const depth = PERCENTAGE_DISCOUNT_TYPES.has(discount.type)
+    ? `${discount.value}% off`
+    : `${discount.type} ${discount.value}`
   return `${depth}, as this store states it — no code exists until you accept.`
 }
 
@@ -601,7 +617,8 @@ export function ShortlistView({
       {accepted !== undefined ? (
         <p data-testid="checkout-destination">
           Your checkout is at {new URL(accepted.permalink_url).hostname}. We did not choose that
-          address — the store&apos;s exchange did.
+          address — the exchange minted this permalink when it accepted the offer, and it is
+          pinned to the store&apos;s own registered domain.
         </p>
       ) : null}
 
