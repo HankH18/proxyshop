@@ -757,12 +757,6 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
       <section aria-label="What is not wired yet" className="gaps">
         <h2>What is not wired yet</h2>
         <ul>
-          <li data-testid="gap-domain">
-            <strong>Store domain: not pinned</strong> — the exchange&rsquo;s shortlist slot
-            carries no <code>store_domain</code>, so the checkout host could only be checked
-            for scheme and host presence, not pinned to a named store. The host above is shown
-            to you for exactly that reason.
-          </li>
           <li data-testid="gap-fallback">
             <strong>Whose price it is: not on the slot</strong> &mdash; when a store does not
             answer, the exchange stands in for it at the list price its roster row carried,

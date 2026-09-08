@@ -1024,7 +1024,15 @@ describe('the four beats', () => {
     // are gone from it, because the gap closed rather than because the sentence softened.
     expect(screen.queryByTestId('gap-signin')).toBeNull()
     expect(screen.queryByTestId('gap-pseudonym')).toBeNull()
-    expect(screen.getByTestId('gap-domain').textContent).toContain('store_domain')
+
+    // `gap-domain` went the same way, and it is the newest of them. It read "the exchange's
+    // shortlist slot carries no `store_domain`, so the checkout host could only be checked for
+    // scheme and host presence" — true when it was written, and false now: `ShortlistSlot`
+    // publishes `store_domain`, `ranking/serving.py` joins the platform registry's answer onto
+    // the slot, and `permalinkRefusal` pins the permalink's host against it. Absent still means
+    // absent — an exchange with no registry publishes `null` and the pin does not fire — but
+    // that is a deployment saying it vouches for no host, not this page being unable to ask.
+    expect(screen.queryByTestId('gap-domain')).toBeNull()
 
     // The price gap is CLOSED — the slot carries `price` now — so `gap-price` is gone from
     // this list, the same way sign-in and the browser-minted pseudonym went: because the gap
@@ -1057,8 +1065,8 @@ describe('the four beats', () => {
     fireEvent.click(screen.getByRole('button', { name: /accept this one/i }))
     await screen.findByTestId('permalink-url')
 
-    await waitFor(() => expect(screen.getByTestId('gap-domain')).toBeInTheDocument())
-    expect(screen.getByTestId('gap-product-name')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('gap-product-name')).toBeInTheDocument())
+    expect(screen.queryByTestId('gap-domain')).toBeNull()
     expect(screen.getByTestId('gap-model')).toBeInTheDocument()
     expect(screen.queryByTestId('gap-price')).toBeNull()
     expect(screen.queryByTestId('gap-signin')).toBeNull()
