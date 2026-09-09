@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Put the ten demo sellers into the LIVE trust service, through its own published doors.
+"""Put the demo's sellers into the LIVE trust service, through its own published doors.
 
 Why this script exists
 ----------------------
@@ -47,13 +47,25 @@ digest, so a manufactured observation cannot be un-marked and an earned one cann
 without breaking ``GET /events/verify``. ``payload.simulated`` is a second, weaker courtesy
 for a human reading one event; the ``order_ref`` is the load-bearing one.
 
-Which dimensions get seeded, and the one that deliberately does not
--------------------------------------------------------------------
-Five of the six: ``price_honored``, ``discount_honored``, ``shipped_on_time``,
-``not_returned`` and ``catalog_claim_accuracy``. They carry each store's stated posture from
-:func:`build_demo_deployment.dimension_posteriors`, which reads the same ``TRUST_SCORES`` and
-``DISPATCH_POSTERIOR`` tables the removed ``trust_snapshot`` key was built from — so the
-demo's story about who is more reliable survives the switch to a live read.
+Two kinds of seller, and the difference is which dimensions exist at all
+------------------------------------------------------------------------
+:data:`~build_demo_deployment.DEMO_SELLERS` is two tables, and this script writes whatever
+:func:`build_demo_deployment.dimension_posteriors` returns for each — it has no rule of its
+own about which dimensions a store gets.
+
+**The ten TRANSACTING storefronts** (``TRUST_SCORES``) get five of the six:
+``price_honored``, ``discount_honored``, ``shipped_on_time``, ``not_returned`` and
+``catalog_claim_accuracy``. They carry each store's stated posture, read from the same
+``TRUST_SCORES`` and ``DISPATCH_POSTERIOR`` tables the removed ``trust_snapshot`` key was
+built from — so the demo's story about who is more reliable survives the switch to a live read.
+
+**The nine CRAWLED storefronts** (``CATALOGUE_ACCURACY``) get ONE: ``catalog_claim_accuracy``.
+They are organic results under D55 — shops the platform scraped, that bought nothing and
+promised nothing — so the four dispatch-and-payment dimensions have no evidence behind them
+and are seeded with none. They are served ``low_data: True`` as a result, which
+``trust.snapshot.builder`` defines as "treat as *unknown* rather than *average*" and is the
+honest reading of a shop nobody has ever ordered from. :func:`verify` therefore expects that
+flag for them and fails on it only for a transacting store.
 
 The NUMBERS are lower than the ones that key stated, and the reason is the correction of a
 real defect rather than a compromise. That key wrote an absolute posterior — ``alpha = mean *
@@ -98,13 +110,19 @@ rather than a demo.
 ``low_data``, which is not a detail
 ------------------------------------
 ``trust.snapshot.builder.clean_episodes`` derives a store's episode count as the minimum,
-over :data:`~trust.snapshot.builder.EPISODE_FLOOR_DIMENSIONS` (which is exactly the five
-seeded here, feedback excluded), of how many POSITIVE observations that dimension carries;
+over :data:`~trust.snapshot.builder.EPISODE_FLOOR_DIMENSIONS` (the five a transacting store is
+seeded on, feedback excluded), of how many POSITIVE observations that dimension carries;
 ``low_data`` is that count under ``NEW_STORE_PRIOR_N`` (5). So the positive observations are
 emitted as whole full-weight rows rather than one fat weighted row: seven ``fulfilled``
 events read as seven episodes, one event of weight 7.0 is impossible (the channel caps at
 1.0) and one of weight 1.0 would read as a single episode and flag every store low-data.
 :func:`observations_for` refuses rather than silently seeding a low-data store.
+
+For a CRAWLED seller the minimum is over four dimensions carrying nothing, so it is 0 and the
+flag is ``True`` however good its catalogue posture is. That is the intended answer and not a
+shortfall in the seed: the exchange should treat a shop it has only read as unknown. What it
+costs is the exploration slice — one shortlist slot of four, and only when such a store is on
+the bench — which is the exchange doing the thing that flag exists for.
 
 Idempotent
 ----------
@@ -143,7 +161,7 @@ import math
 import sys
 import urllib.error
 import urllib.request
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -153,8 +171,10 @@ if str(REPO_ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(REPO_ROOT / "scripts"))
 
 from build_demo_deployment import (  # noqa: E402 - after the sys.path line above
+    CATALOGUE_ACCURACY,
+    DEMO_SELLERS,
     HOSTED,
-    TRUST_SCORES,
+    TRUST_DIMENSIONS,
     dimension_posteriors,
 )
 
@@ -260,11 +280,15 @@ def observations_for(
     """The observations that move ``dimension`` from the prior to ``(alpha, beta)``.
 
     Raises:
-        SeedError: the target needs fewer than :data:`NEW_STORE_PRIOR_N` positive observations,
-            which would leave the store flagged ``low_data`` no matter what its score said. That
-            is a refusal rather than a clamp: a seeded store served ``low_data: True`` turns on
-            the exchange's exploration floor, and a demo that silently acquired a second
-            randomised mechanism would be very hard to read.
+        SeedError: the target needs fewer than :data:`NEW_STORE_PRIOR_N` positive observations.
+            For a store whose whole posture is seeded that means it would be flagged
+            ``low_data`` no matter what its score said, and the refusal is a refusal rather
+            than a clamp: a seeded store served ``low_data: True`` turns on the exchange's
+            exploration floor, and a demo that silently acquired a second randomised mechanism
+            would be very hard to read. For a CRAWL-ONLY store (:data:`CATALOGUE_ACCURACY`,
+            one dimension) ``low_data`` is the intended answer and this floor is instead what
+            stops a catalogue posture being stated on evidence too thin to mean anything; the
+            fix in both cases is the same, so the message is the same.
     """
     positive_mass = float(alpha) - PRIOR_ALPHA
     negative_mass = float(beta) - PRIOR_BETA
@@ -360,8 +384,13 @@ def seed_events(observed_at: str, stores: Sequence[str] | None = None) -> Iterat
 
     Order is fixed because the chain is ordered and a reseed of a partially-seeded stack must
     land the missing events where the first run would have put them.
+
+    A CRAWL-ONLY seller yields events for ONE dimension, because
+    :func:`~build_demo_deployment.dimension_posteriors` returns one entry for it. The five
+    transaction dimensions are not skipped here by a rule in this function; there is simply
+    nothing to write, which is the point — see :data:`~build_demo_deployment.CATALOGUE_ACCURACY`.
     """
-    for store_id in stores if stores is not None else sorted(TRUST_SCORES):
+    for store_id in stores if stores is not None else sorted(DEMO_SELLERS):
         posteriors = dimension_posteriors(store_id)
         for dimension in sorted(posteriors):
             if dimension == FEEDBACK_DIMENSION:
@@ -384,14 +413,20 @@ def seed_events(observed_at: str, stores: Sequence[str] | None = None) -> Iterat
 
 
 def expected_posture() -> dict[str, dict[str, float]]:
-    """``{store_id: {dim: posterior mean}}`` the seed implies, feedback at the bare prior."""
+    """``{store_id: {dim: posterior mean}}`` the seed implies.
+
+    A dimension this seed writes nothing for is at the bare prior, 0.5, and that covers both
+    ``feedback_match`` (every seller: nobody has left feedback) and the five transaction
+    dimensions of a crawl-only seller (nobody has transacted). Only the dimensions
+    :func:`~build_demo_deployment.dimension_posteriors` actually returns carry a stated mean.
+    """
+    neutral = PRIOR_ALPHA / (PRIOR_ALPHA + PRIOR_BETA)
     posture: dict[str, dict[str, float]] = {}
-    for store_id in sorted(TRUST_SCORES):
+    for store_id in sorted(DEMO_SELLERS):
         dims = dimension_posteriors(store_id)
-        means: dict[str, float] = {}
+        means: dict[str, float] = dict.fromkeys(TRUST_DIMENSIONS, neutral)
         for dimension, target in dims.items():
             if dimension == FEEDBACK_DIMENSION:
-                means[dimension] = PRIOR_ALPHA / (PRIOR_ALPHA + PRIOR_BETA)
                 continue
             alpha, beta = float(target["alpha"]), float(target["beta"])
             means[dimension] = alpha / (alpha + beta)
@@ -507,9 +542,10 @@ def write_sellers(dsn: str, stores: Sequence[str]) -> int:
     a human registered by hand is not overwritten.
 
     ``tier`` is ``hosted`` for the four storefronts that run a store agent in compose and
-    ``external`` for the six that do not, which is the distinction
+    ``external`` for every other seller, which is the distinction
     ``build_demo_deployment.HOSTED`` already draws and the only two values
-    ``sellers_tier_check`` admits.
+    ``sellers_tier_check`` admits. It is NOT the transacting/crawled split: that one is
+    expressed in evidence rather than in a column, which is the only place it can be checked.
     """
     import psycopg
 
@@ -569,35 +605,84 @@ def seeded_instant(trust_url: str, event_id: str) -> str | None:
     return str(stamped or event.get("ts") or "") or None
 
 
-def post_events(trust_url: str, events: Sequence[Mapping[str, Any]]) -> tuple[int, int]:
-    """Append every event. Returns ``(inserted, already present)``.
+def ranked_stores(trust_url: str) -> set[str]:
+    """Every store the live snapshot already carries a row for.
+
+    Read once, BEFORE anything is appended, because it is what :func:`post_events` decides a
+    conflict on and a decision that changed halfway through a run would be worse than either
+    answer. An unreadable snapshot returns the empty set, which makes every conflict fatal —
+    the conservative direction, and the one that matches "I could not check".
+    """
+    status, body = _http(trust_url.rstrip("/") + "/snapshot", timeout=60.0)
+    if status != 200 or not isinstance(body, Mapping):
+        return set()
+    return {str(store) for store, row in body.items() if isinstance(row, Mapping)}
+
+
+def post_events(
+    trust_url: str, events: Sequence[Mapping[str, Any]], *, already_ranked: Collection[str] = ()
+) -> tuple[int, int, dict[str, str]]:
+    """Append every event. Returns ``(inserted, already present, {store: conflicting id})``.
 
     A non-2xx is fatal and names the event: a half-seeded store is a store with a posture
     nobody chose, and it is much better to stop on the first one than to serve it.
 
-    A 409 gets its own message because it has its own cause and its own answer. :func:`seeded_
-    instant` removes the ordinary one (a re-run stamping a fresh clock reading). What is left is
-    a stack seeded by a DIFFERENT VERSION of this script — the event ids are stable across
-    versions but the bodies are not — and an append-only chain cannot be rewritten to match.
-    The message says that, and says the two things a person can actually do about it, rather
-    than reporting a conflict as though the ledger were at fault.
+    A 409 IS NOT ALWAYS FATAL, and which way it goes is the whole of this function
+    -----------------------------------------------------------------------------
+    A 409 means the chain already holds that ``event_id`` with DIFFERENT content
+    (``trust.events.store.IdempotencyConflict``, D16). :func:`seeded_instant` removes the
+    ordinary cause — a re-run stamping a fresh clock reading — so what is left is a stack seeded
+    by an OLDER VERSION of this script: the ids are stable across versions, the bodies are not.
+    An append-only ledger has no delete, so that store's posture cannot be rewritten to match.
+
+    This used to abort the run on the first one, and **that refusal fired on the healthy path
+    the moment the demo roster grew.** Measured on the running demo stack: its chain was seeded
+    before ``_payload`` stopped writing ``price_honored: false`` onto a ``discount_honored``
+    event, so ``sim-fb-seed-bulksupplements.com-discount_honored-09`` conflicts — and the run
+    died there, having appended eleven events, with **nine newly promoted storefronts left with
+    no ledger rows at all**. R12 excludes a store the trust snapshot holds no row for, so the
+    refusal's cost was that every one of those nine was invisible on every shortlist. The
+    conflicting store, meanwhile, was already in the snapshot with a posture that works.
+
+    So the rule is about consequence, not about tidiness:
+
+    * **the store is already in the live snapshot** — its old-version posture stands, this run
+      skips the rest of that store's events, records it, and carries on. Nothing is lost that
+      was not already lost, and every other store still gets seeded.
+    * **the store is NOT in the snapshot** — fatal, with the message this function has always
+      had. That store cannot be ranked at all, half a chain for it cannot be repaired, and
+      continuing would serve a posture nobody chose.
+
+    Skipping the REST of that store's events rather than only the conflicting one is deliberate:
+    its remaining events are the same older-version disagreement, and appending the subset that
+    happens to be byte-identical would leave a posture that is neither version.
+
+    ``already_ranked`` is the store ids ``GET /snapshot`` returned BEFORE this run started. Read
+    once by the caller rather than per conflict, so the decision cannot change halfway through.
     """
     url = trust_url.rstrip("/") + "/events"
+    ranked = {str(store) for store in already_ranked}
     inserted = repeated = 0
+    conflicted: dict[str, str] = {}
     for event in events:
+        store_id = str(event["store_id"])
+        if store_id in conflicted:
+            continue  # this store is on its older seed; see the docstring
         status, body = _http(url, event, timeout=60.0)
         if status == 201:
             inserted += 1
         elif status == 200:
             repeated += 1
+        elif status == 409 and store_id in ranked:
+            conflicted[store_id] = str(event["event_id"])
         elif status == 409:
             raise SeedError(
                 f"the chain already holds {event['event_id']!r} with DIFFERENT content, so this "
                 f"stack was seeded by a version of this script that built that event another "
                 f"way. An append-only ledger has no delete and D16 will not let an id be "
-                f"rewritten, so there is nothing to repair here: either keep the seed the stack "
-                f"already has (run --check; if it passes, the demo works) or wind the stack back "
-                f"with `make deps-down && make deps-up && make demo-up` and seed it afresh. "
+                f"rewritten, so there is nothing to repair here — and {store_id} is NOT in the "
+                f"live snapshot, so it cannot be left on the seed it has either. Wind the stack "
+                f"back with `make deps-down && make deps-up && make demo-up` and seed it afresh. "
                 f"{inserted} event(s) were appended before this one and nothing after it was."
             )
         else:
@@ -605,7 +690,7 @@ def post_events(trust_url: str, events: Sequence[Mapping[str, Any]]) -> tuple[in
                 f"POST /events answered {status} for {event['event_id']!r}: {body!r}. "
                 f"{inserted} event(s) were appended before this one and nothing after it was."
             )
-    return inserted, repeated
+    return inserted, repeated, conflicted
 
 
 def verify(trust_url: str) -> tuple[list[str], list[str]]:
@@ -659,7 +744,17 @@ def verify(trust_url: str) -> tuple[list[str], list[str]]:
             continue
         if row.get("blacklisted"):
             problems.append(f"{store_id} is blacklisted in the live snapshot")
-        if row.get("low_data"):
+        # `low_data` IS THE EXPECTED ANSWER FOR A CRAWL-ONLY SELLER, and asserting it the other
+        # way round would be asserting a fiction. Those nine have been crawled and never
+        # transacted with, so `clean_episodes` — the minimum positive-observation count across
+        # the five dimensions the network obtains on its own initiative — is 0 by construction.
+        # `trust.snapshot.builder` says the flag "marks a store the exchange should treat as
+        # *unknown* rather than *average*", which is exactly right about them. It does not
+        # exclude anybody; R12's exclusion is for a store with no row at all.
+        #
+        # It is NOT checked in the other direction either. A crawl-only seller that has stopped
+        # being low_data has been transacted with, which is the platform working.
+        if row.get("low_data") and store_id not in CATALOGUE_ACCURACY:
             problems.append(
                 f"{store_id} is served low_data: fewer than {NEW_STORE_PRIOR_N} clean episodes, "
                 f"which turns on the exchange's exploration floor"
@@ -702,7 +797,7 @@ def untouched_feedback(trust_url: str) -> int:
     if status != 200 or not isinstance(body, Mapping):
         return 0
     untouched = 0
-    for store_id in TRUST_SCORES:
+    for store_id in DEMO_SELLERS:
         row = body.get(store_id)
         dims = row.get("dims") if isinstance(row, Mapping) else None
         entry = dims.get(FEEDBACK_DIMENSION) if isinstance(dims, Mapping) else None
@@ -722,18 +817,22 @@ def report(trust_url: str) -> None:
     if status != 200 or not isinstance(body, Mapping):
         return
     print()
-    print(f"{'store':<28}{'score':>9}{'confidence':>12}{'feedback_match':>17}  low_data")
-    for store_id in sorted(TRUST_SCORES):
+    print(
+        f"{'store':<28}{'posture':<12}{'score':>9}{'confidence':>12}"
+        f"{'feedback_match':>17}  low_data"
+    )
+    for store_id in sorted(DEMO_SELLERS):
+        posture = "crawled" if store_id in CATALOGUE_ACCURACY else "transacting"
         row = body.get(store_id)
         if not isinstance(row, Mapping):
-            print(f"{store_id:<28}{'ABSENT':>9}")
+            print(f"{store_id:<28}{posture:<12}{'ABSENT':>9}")
             continue
         dims = row.get("dims") or {}
         feedback = dims.get(FEEDBACK_DIMENSION) or {}
         alpha, beta = float(feedback.get("alpha", 0.0)), float(feedback.get("beta", 0.0))
         mean = alpha / (alpha + beta) if alpha + beta else float("nan")
         print(
-            f"{store_id:<28}{float(row.get('score', 0.0)):>9.4f}"
+            f"{store_id:<28}{posture:<12}{float(row.get('score', 0.0)):>9.4f}"
             f"{float(row.get('confidence', 0.0)):>12.4f}{mean:>17.4f}"
             f"  {bool(row.get('low_data'))}"
         )
@@ -743,7 +842,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="seed_demo_trust",
         description=(
-            "Put the ten demo sellers into the live trust service so the exchange's ranking "
+            "Put the demo sellers into the live trust service so the exchange's ranking "
             "gate has something to read. EVERY observation it writes is SIMULATED and is "
             "marked as such inside the hash chain, permanently."
         ),
@@ -765,19 +864,38 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    stores = sorted(TRUST_SCORES)
+    stores = sorted(DEMO_SELLERS)
     try:
         if not args.check:
             # Order matters: an instant this script already sealed wins over the clock, or the
             # second run of a hashed, idempotency-keyed seed is a 409 rather than a no-op.
             # An explicit `--observed-at` still wins over both, because that is a person
             # deliberately restating it.
-            # Several probe ids, not one: `seeded_instant` falls back to the clock when the id
-            # it asks about is absent, and a single probe would do that for a run whose FIRST
-            # event happened to be the one a previous run died before writing -- which is
-            # exactly the partial-seed case this is for. Any hit is authoritative; they all
-            # carry the same stamp.
-            probes = [str(event["event_id"]) for event in list(seed_events("", stores))[:8]]
+            # ONE PROBE PER STORE, and this is the line that makes adding a seller safe.
+            #
+            # `seeded_instant` falls back to the clock when the id it asks about is absent, and
+            # a fresh clock reading on a chain that already holds this seed is a 409 on the
+            # first event it re-sends (`event_id` is the idempotency key and the same id with
+            # different content is refused, D16). An append-only chain has no repair for that.
+            #
+            # This list used to be the first EIGHT events of the run, which is the first two
+            # stores in `sorted(DEMO_SELLERS)` order. That is safe only while the roster never
+            # changes: promoting `branchfurniture.com` puts a store alphabetically FIRST, all
+            # eight probes then ask about events no previous run wrote, every one misses, the
+            # clock wins, and the very next `POST /events` for `bulksupplements.com` -- already
+            # in the chain, stamped with the old instant -- comes back 409 naming an id nobody
+            # can rewrite. Measured by seeding the ten and then re-seeding the nineteen.
+            #
+            # Probing the first event of EVERY store cannot fail that way: any store the chain
+            # already carries answers, and the answer is authoritative because every event of
+            # one run carries the same stamp. The generator short-circuits on the first hit, so
+            # the ordinary re-run costs one request, not nineteen. It also keeps the property
+            # the eight probes were there for -- a run that died partway leaves SOME store's
+            # first event on the chain, and this finds it wherever it is.
+            first_of_each: dict[str, str] = {}
+            for event in seed_events("", stores):
+                first_of_each.setdefault(str(event["store_id"]), str(event["event_id"]))
+            probes = list(first_of_each.values())
             sealed = next(
                 (found for found in (seeded_instant(args.trust_url, p) for p in probes) if found),
                 None,
@@ -795,8 +913,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(
                 f"POST {args.trust_url}/events  ({len(events)} observations, observed_at {observed_at})"
             )
-            inserted, repeated = post_events(args.trust_url, events)
+            inserted, repeated, conflicted = post_events(
+                args.trust_url, events, already_ranked=ranked_stores(args.trust_url)
+            )
             print(f"  {inserted} appended, {repeated} already in the chain")
+            if conflicted:
+                # Printed loudly and not fatal — `post_events` explains which way a 409 goes and
+                # why. These stores keep the posture an older version of this script sealed;
+                # `verify` below still has to find each of them rankable.
+                print(
+                    f"\n  {len(conflicted)} store(s) were seeded by an OLDER version of this "
+                    f"script and keep the posture already in the chain (an append-only ledger "
+                    f"cannot be rewritten). Everything else was seeded:"
+                )
+                for store_id, event_id in sorted(conflicted.items()):
+                    print(f"    - {store_id}: first conflict at {event_id}")
 
         problems, drift = verify(args.trust_url)
     except SeedError as exc:

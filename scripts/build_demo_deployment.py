@@ -22,12 +22,23 @@ The outputs are TRACKED IN THE TREE, so a clone runs the demo without running th
 It exists so the next reader can see where every number came from and regenerate after the
 corpus moves, not as a step in the runbook.
 
-WHERE THE DATA COMES FROM. ``fixtures/real-catalogs/`` -- ten real supplement storefronts,
-3,093 products, collected by ``scripts/collect_real_catalogs.py`` from public
-``products.json`` endpoints under robots.txt. Nothing here invents a store, a product or a
-price; the only invented numbers are the ones the platform has to state because no
-storefront publishes them -- the approved envelope's discount depth, the starting trust
-posture, and the intent-cluster vocabulary.
+WHERE THE DATA COMES FROM. ``fixtures/real-catalogs-demo/`` -- NINETEEN real storefronts
+across five stocked categories, 4,903 products, derived by ``scripts/build_demo_corpus.py``
+from ``fixtures/real-catalogs-broad/``, which ``scripts/collect_real_catalogs.py`` collected
+from public ``products.json`` endpoints under robots.txt. It is NOT
+``fixtures/real-catalogs/`` -- the ten supplement storefronts that corpus holds are why the
+demo answered *"a walnut coffee table for the lounge"* with liver capsules, and that corpus is
+still in the tree, still gated, and still the one ``ingest``'s own tests replay.
+
+Nothing here invents a store, a product or a price; the only invented numbers are the ones the
+platform has to state because no storefront publishes them -- the approved envelope's discount
+depth, the starting trust posture, and the intent-cluster vocabulary.
+
+TWO KINDS OF SELLER. :data:`TRUST_SCORES` states a posture for the ten storefronts this demo
+says the platform has TRANSACTED with; :data:`CATALOGUE_ACCURACY` states one number for the
+nine it has only CRAWLED. The shapes differ because the evidence does, and
+:func:`dimension_posteriors` returns one dimension for a crawled shop and five for a
+transacting one. See :data:`CATALOGUE_ACCURACY`.
 
 THE TRUST POSTURE IS NO LONGER A DOCUMENT KEY. :data:`TRUST_SCORES` and
 :func:`dimension_posteriors` still live here, because a person still has to state what the
@@ -53,8 +64,12 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import heapq
 import json
+import math
+import re
 import sys
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -70,10 +85,20 @@ from ingest.adapters.mapping import (  # noqa: E402 - after the sys.path bootstr
 # The six trust dimensions, imported rather than restated: D53 says EXACTLY six and the schema
 # refuses a seventh, so a second copy here would be a vocabulary that could drift out of the one
 # the trust service and the contracts share.
-from trust.scoring.dimensions import TRUST_DIMENSIONS  # noqa: E402 - after the bootstrap
+from trust.scoring.dimensions import (  # noqa: E402 - after the bootstrap
+    CATALOG_DIMENSION,
+    TRUST_DIMENSIONS,
+)
 
 #: The recorded corpus this demo is built from.
-CORPUS = REPO_ROOT / "fixtures" / "real-catalogs"
+#:
+#: ``fixtures/real-catalogs-demo/`` — nineteen storefronts across five stocked categories,
+#: derived from ``fixtures/real-catalogs-broad/`` by ``scripts/build_demo_corpus.py`` with the
+#: store files copied verbatim. It is NOT ``fixtures/real-catalogs/``, which is still in the
+#: tree, still gated by ``fixtures/tests/test_real_catalogs.py``, and still ten supplement
+#: storefronts — which is why the demo used to answer *"a walnut coffee table for the lounge"*
+#: with liver capsules: there was no coffee table in it to find.
+CORPUS = REPO_ROOT / "fixtures" / "real-catalogs-demo"
 
 #: Where the generated documents land. Tracked, mounted read-only into the containers.
 OUT = REPO_ROOT / "deploy" / "demo"
@@ -124,8 +149,8 @@ CLUSTER_TERMS = (
 )
 
 #: The four storefronts that get a hosted store agent in compose. They are the four the
-#: corpus README names as stocking the liver-support query; the other six stay in the
-#: seller registry and the graph, are found by retrieval, and are represented by R10's
+#: corpus README names as stocking the liver-support query; the other FIFTEEN storefronts stay
+#: in the seller registry and the graph, are found by retrieval, and are represented by R10's
 #: list-price fallback because no agent answers for them. A demo in which every rostered
 #: store bids would not show that half of the market at all.
 HOSTED = (
@@ -135,7 +160,8 @@ HOSTED = (
     "oregonswildharvest.com",
 )
 
-#: Two of the ten stock no liver-support inventory at all (the corpus README calls them
+#: Two of the ten supplement storefronts stock no liver-support inventory at all (the corpus
+#: README calls them
 #: negative controls). They are eligible and rostered like everyone else -- retrieval is
 #: what must leave them out, not the registry.
 NEGATIVE_CONTROLS = ("livemomentous.com", "nakednutrition.com")
@@ -166,6 +192,86 @@ TRUST_SCORES = {
     "nakednutrition.com": 0.70,
 }
 
+#: The nine ORGANIC storefronts this demo promoted, and what the platform's crawl of each is
+#: worth. One number, on one dimension, and the shape of this table is the argument.
+#:
+#: **A scraped shop has no transaction record, so it does not get one.** D55: an in-network
+#: shop is SPONSORED and buys the right to make its case in its own voice; a scraped shop is an
+#: ORGANIC result carrying a pitch the PLATFORM wrote. The ten in :data:`TRUST_SCORES` are
+#: stores this demo says the platform has transacted with, and their postures are stated across
+#: all six dimensions because a transaction record touches all six. Nobody has ever bought
+#: anything from these nine. Handing them ``shipped_on_time`` evidence would be manufacturing a
+#: dispatch history for a shop the platform has only ever read the catalogue of, and the whole
+#: point of the trust column is that it is evidence rather than decoration.
+#:
+#: So five of the six dimensions are seeded with NOTHING and sit at the neutral ``Beta(2, 2)``
+#: prior. ``catalog_claim_accuracy`` is the sixth, and it is the ONE the crawl can honestly
+#: speak to: ``trust.scoring.dimensions`` says in its own words that it "grades a *product
+#: fact*: whether what the pitch said about the goods matches the catalog", and for an organic
+#: row the pitch is the platform's, written from the catalogue it crawled and graded against
+#: the snapshot in ``exchange-deployment.json``. Five of the six grade an offer-integrity
+#: PROMISE — something the store said it would do — and these stores have promised nothing.
+#:
+#: **The consequence is that every one of these stores is served ``low_data: True``, and that
+#: is the correct reading rather than a cost.** ``trust.snapshot.builder`` opens by saying
+#: ``low_data`` "marks a store the exchange should treat as *unknown* rather than *average*",
+#: and a shop the platform has only crawled is exactly unknown. It does not exclude the store —
+#: R12's exclusion is for a store with NO row at all, which is why these rows have to exist —
+#: it turns on the exchange's exploration slice, one shortlist slot of four, which is the
+#: exchange behaving correctly about a store it has never watched deliver.
+#:
+#: The NUMBERS are the platform's reading of the catalogue it crawled, in the same spirit as
+#: :data:`TRUST_SCORES`: a person states them, because no storefront publishes them. They sit
+#: in a narrow band a little above neutral -- a crawl that parsed cleanly and priced cleanly is
+#: mild positive evidence, and nothing about a crawl supports 0.9. The two furniture stores
+#: whose catalogues are mostly components, swatches and service contracts read lowest, because
+#: those rows are the ones a platform-written pitch is most likely to get wrong.
+CATALOGUE_ACCURACY = {
+    "floydhome.com": 0.68,
+    "branchfurniture.com": 0.64,
+    "sabai.design": 0.62,
+    "deathwishcoffee.com": 0.70,
+    "vervecoffee.com": 0.69,
+    "nemoequipment.com": 0.72,
+    "hyperlitemountaingear.com": 0.70,
+    "fromourplace.com": 0.71,
+    "fellowproducts.com": 0.63,
+}
+
+#: Every seller this demo registers with the trust service, transacting ten first.
+#:
+#: ``scripts/seed_demo_trust.py`` seeds exactly this list and R12 excludes anyone not in it, so
+#: :func:`build` refuses a corpus carrying a host this list does not.
+DEMO_SELLERS: tuple[str, ...] = (*TRUST_SCORES, *CATALOGUE_ACCURACY)
+
+#: The shops ``deploy/demo/buyer-roster.json`` names — the STATED candidate set the buyer
+#: service sends on every confirmation, because it refuses to open an auction with none
+#: (``buyer_svc.composition.NoRosterBound``).
+#:
+#: The four hosted stores plus two agent-less supplement storefronts, which is what it has
+#: always been -- so a run still shows both halves of R10, a store that bids and a store
+#: represented at its catalogue list price because nobody answered for it -- **plus the nine
+#: promoted organic shops**, which is the change.
+#:
+#: WHY THE NINE HAD TO BE ADDED, measured rather than assumed. ``GraphShopRoster.solicit`` is
+#: consulted for the shop set ONLY when the request body states no roster (``auction/routes``
+#: says so at the top), and the buyer route always states one. ``retrieval.roster.
+#: repoint_organic_products`` can move a stated row onto the product the graph says answers the
+#: query, but it cannot add a shop that is not on the list. So a roster of six supplement shops
+#: answers *"a walnut coffee table for the lounge"* with six honestly-off-topic rows and an
+#: empty shortlist, no matter how many coffee tables are in the graph.
+#:
+#: The other four incumbent supplement stores stay OFF the roster, exactly as before: they are
+#: in the seller registry and in the graph, and the roster-less route (``scripts/demo_check.sh``
+#: and ``POST /auctions`` with no roster) finds them. A demo where the stated roster is the
+#: whole registry would not show that there are two ways in.
+ROSTER_HOSTS: tuple[str, ...] = (
+    *HOSTED,
+    "bulksupplements.com",
+    "nutricost.com",
+    *CATALOGUE_ACCURACY,
+)
+
 #: Each store's `shipped_on_time` posterior -- what its dispatch record says, as distinct from
 #: what it is worth overall. Deployment configuration like `TRUST_SCORES` above, and invented for
 #: the same reason: no storefront publishes its own fulfilment history.
@@ -179,9 +285,9 @@ TRUST_SCORES = {
 #: So the four hosted stores each carry a different story, and `toniiq.com` is the one to watch:
 #: 0.74 overall but 0.45 on dispatch, a store that promises fast and does not deliver. Its quote
 #: is divided by that posterior (`features.credible_delivery_estimate`), so a one-day promise is
-#: read as 2.2 days. `gaiaherbs.com` at 0.93 is quoted near face value. The six stores nobody
-#: bids for sit at parity with their overall score, because a store with no story does not need
-#: an invented one.
+#: read as 2.2 days. `gaiaherbs.com` at 0.93 is quoted near face value. The six OTHER
+#: transacting stores sit at parity with their overall score, because a store with no story does
+#: not need an invented one, and the nine crawled ones carry no dispatch record at all.
 DISPATCH_POSTERIOR = {
     "gaiaherbs.com": 0.93,
     "toniiq.com": 0.45,
@@ -244,34 +350,60 @@ MAX_DISCOUNT_PCT = {
     "oregonswildharvest.com": 18.0,
 }
 
-#: How many of a store's products reach the exchange's `catalog` snapshot. The document is
-#: capped at 4 MiB across every store (``composition.MAX_DEPLOYMENT_BYTES``) and one store's
-#: snapshot at 1000 products (``ranking.verification.MAX_CATALOG_PRODUCTS``); the agents' own
-#: catalogues are NOT trimmed either, because an agent that cannot find the product the graph
-#: rostered declines the auction.
+#: How many of a store's products reach the exchange's `catalog` snapshot.
 #:
-#: **1000 means "every product", and the trim it replaces was costing shoppers a NAME.** At 60
-#: this snapshot held the sixty most liver-relevant products per store, which is fine for
-#: grading the four bidding agents (their claims resolve against the one product the auction
-#: names, and that product is their lead) and wrong for everything the platform picks itself.
-#: `catalogue_readings` resolves a shortlist slot's `product.identity` out of this same
-#: document, so any organic row pointing outside the window came back with **`identity: null`**
-#: — a row a shopper is shown and the platform cannot name. Measured on the served route at 60:
-#: over 32 in-corpus queries through the exchange's own graph roster, 63 of 101 shortlist slots
-#: carried a null identity, and `ranking.filters.organic_relevance_reason` — which reads that
-#: same identity and treats an absent one as "unchecked" — refused nothing at all on that
-#: route, so 62% of graph-route rows were unfilterable. The same hole opened on the buyer route
-#: the moment `retrieval.roster.repoint_organic_products` began pointing a stated roster's rows
-#: at the product the crawl says answers the query, which is usually not in the top sixty.
+#: THIS IS THE WINDOW. `ranking.verification.catalog_identity` can name a shortlist slot only
+#: if its product is in here; `catalogue_readings` resolves a slot's `product.identity` out of
+#: this same document, so a row pointing outside comes back with **`identity: null`** — a row a
+#: shopper is shown and the platform cannot name — and `ranking.filters.
+#: organic_relevance_reason` reads that same identity and treats an absent one as "unchecked",
+#: so the row is unfilterable as well as nameless. WHICH products land inside it is
+#: `_store_catalog`'s question and the comment above it is where that is answered; this
+#: constant is only HOW MANY.
 #:
-#: The cost is document size, and it is measured rather than asserted: the ten storefronts hold
-#: 3,086 priced products (largest store 805, under the 1000-per-store cap), and
-#: `exchange-deployment.json` goes from 575,663 bytes to 2,950,154 — 70% of the 4 MiB ceiling,
-#: parsed once when the composition root runs on the first served request. Nothing about
-#: RANKING moves: `_narrowed_to` cuts the list to the one row an auction can resolve against
-#: before any claim is graded, the attribute vocabulary is the same six keys every row already
-#: declared, and a store that never bid states no claim.
-SNAPSHOT_PRODUCTS_PER_STORE = 1000
+#: **250, and the number is the ceiling's, not a preference.** The document is capped at 4 MiB
+#: across every store (`composition.MAX_DEPLOYMENT_BYTES`) and one store's snapshot at 1000
+#: products (`ranking.verification.MAX_CATALOG_PRODUCTS`). Measured on this roster, a snapshot
+#: product costs a flat 955 bytes, and the nineteen storefronts hold 4,830 priced products:
+#:
+#:     window   products   bytes       of 4 MiB
+#:        200      2,984   2,853,585      68.0%
+#:        250      3,241   3,097,455      73.8%   <- this one
+#:        300      3,487   3,330,562      79.4%
+#:        400      3,887   3,708,644      88.4%
+#:       1000      4,830   4,602,384     109.7%   <- every product: OVER the ceiling
+#:
+#: The predecessor of this constant was 1000 — "every product" for ten supplement storefronts
+#: holding 3,086 between them. At nineteen stores that is no longer true of any number, so the
+#: trim is real again and where it falls is decided by the ordering rather than by price.
+#:
+#: **The constant does not bound the document on its own and must not be read as if it did.**
+#: The bound is `sum over stores of min(products, 250) x 955`, so it moves with the STORE COUNT
+#: as much as with this number: nineteen stores all at the cap would be 4.53 MB, over the
+#: ceiling. :func:`build` therefore renders the document and refuses it against
+#: :data:`DEPLOYMENT_BYTES_BUDGET` rather than trusting this line, because a demo whose
+#: exchange refuses its own deployment document at composition time serves an empty shortlist
+#: and says nothing about why.
+#:
+#: The agents' own catalogues are NOT trimmed, because an agent that cannot find the product
+#: the graph rostered declines the auction with `no_matching_product` — which reads as "this
+#: store does not stock it" when the truth is "this file was trimmed".
+SNAPSHOT_PRODUCTS_PER_STORE = 250
+
+#: The share of ``composition.MAX_DEPLOYMENT_BYTES`` the generated exchange document may spend.
+#:
+#: The exchange refuses a document over 4 MiB outright (`composition` raises, and the container
+#: then serves every auction from its fail-closed defaults), so the interesting number is not
+#: the ceiling but the distance from it. 85% leaves about 630 KB — room for a re-collection to
+#: find more inventory, or for one more storefront on the roster, without anybody having to
+#: re-derive the arithmetic above. :func:`build` renders and measures rather than estimating.
+DEPLOYMENT_BYTES_BUDGET = 0.85
+
+#: ``exchange.composition.MAX_DEPLOYMENT_BYTES``, restated because this script runs against the
+#: corpus rather than against a running exchange and importing the app to read one integer
+#: would pull in its whole composition root. ``scripts/tests/test_build_demo_deployment.py``
+#: pins that these two agree.
+MAX_DEPLOYMENT_BYTES = 4 * 1024 * 1024
 
 #: A fixed observation stamp. The corpus is a point-in-time snapshot and every document
 #: built from it must be byte-identical on every machine, so nothing here reads a clock.
@@ -384,10 +516,233 @@ def _catalog_row(
     return product_ref, row
 
 
-def _store_catalog(host: str) -> tuple[dict[str, dict[str, Any]], list[str]]:
-    """``({product_ref: row}, [product_ref most relevant first])`` for one storefront."""
+# =====================================================================================
+# THE WINDOW — which of a store's products the exchange can NAME
+#
+# `_snapshot` ships `ranked[:SNAPSHOT_PRODUCTS_PER_STORE]`, and that slice is the set of
+# products `ranking.verification.catalog_identity` can resolve a shortlist slot against. A
+# roster row pointing outside it comes back with `product.identity: null` — a row a shopper is
+# shown and the platform cannot name — and `ranking.filters.organic_relevance_reason` reads
+# that same identity and treats an absent one as "unchecked", so the row is also unfilterable.
+#
+# WHAT WAS WRONG. The order was `(-_relevance(entry), price, product_ref)` and `_relevance`
+# counts CLUSTER_TERMS — liver-supplement vocabulary. For any store outside that one category
+# every product scores zero, the sort collapses onto its second key, and the window becomes
+# literally the N CHEAPEST products. That is not a near miss on a furniture store: the cheapest
+# rows in a furniture catalogue are its swatches, components, service contracts and gift cards.
+# Measured on THIS roster, the first five products of each promoted store's window under the
+# old order:
+#
+#   branchfurniture.com   five identical `XCover Protection Plan` rows, $12.99 each
+#   floydhome.com         `Serviceability - Sofa`, `- Lift Off Smaller Components`,
+#                         `- The Shelving System (Storage)`, `- The Floyd Leg`, `- HARDWARE`
+#   fellowproducts.com    `Replacement Carter Slide Mug Mouth Gasket` ($1.00), the piston
+#                         gasket, two grinder screws, a descaler
+#   sabai.design          a $0.25 carbon-removal donation, `Terra Leather`, three furniture legs
+#   nemoequipment.com     tent stakes, a pump sack and a trucker hat
+#
+# Not one of those twenty-five rows is a thing the store is rostered for.
+#
+# Meanwhile `retrieval.roster.repoint_organic_products` picks a product from `GraphShopRoster.
+# solicit` over the WHOLE ingested corpus and never consults the snapshot. So the graph ranks a
+# store's products by relevance to the query and the window ranked them by cheapness — two
+# orderings with nothing to do with each other, and every row where they disagreed was nameless.
+#
+# WHAT REPLACES IT, and why this signal rather than another. The window is now chosen by a
+# greedy pass over the STORE'S OWN title vocabulary that saturates each term as it is covered
+# (:func:`_window_order`). Three properties, and each is the answer to a way this could have
+# gone wrong:
+#
+#  * it is PER STORE. There is no category->vocabulary table anywhere in this file, and
+#    deliberately: a table is the cluster bug generalised — it answers the queries somebody
+#    thought of and files everything else at zero. The only vocabulary consulted for a store is
+#    the vocabulary that store's own catalogue publishes.
+#  * it CANNOT collapse onto price. Price is not a key at any level; ties break on
+#    `product_ref`, which is a hash of the store id and the storefront's own product key. A
+#    store whose products all scored zero would come out in `product_ref` order, which is
+#    arbitrary — and arbitrary is a far better failure than "every cheap accessory first".
+#  * it PREFERS BREADTH over repetition. `cotopaxi.com` publishes 1,431 priced rows under 711
+#    distinct titles; without saturation a window would fill with colourways of one hip pack.
+#
+# WHAT IT DOES NOT DO is decide relevance for the auction. The exchange runs its own retrieval
+# over the graph and is not bound by this ordering; this decides only which products the
+# exchange holds a snapshot row for.
+# =====================================================================================
+
+#: Words carrying no discriminating power in a product title. Deliberately short: this is a
+#: stoplist for English function words and the two units of measure that appear in most sizes,
+#: not a curation of what counts as a product. Every judgement about which products matter is
+#: made by the corpus, never by this tuple.
+_STOPWORDS = frozenset(
+    """
+    a an and are as at be by for from in into is it its of on or the this to with
+    oz ct pcs pack size color colour new
+    """.split()
+)
+
+#: A term must appear in at least this many of a store's products before it can be covered.
+#:
+#: A term carried by exactly one product describes THAT PRODUCT and says nothing about the
+#: store, so covering it buys the window nothing and rewards whichever row has the longest
+#: unusual title. Measured on this roster: admitting them costs 2.7 points of
+#: on-topic-in-window (86.7% to 84.0% at a window of 250) and moves no store's lead product.
+_MIN_STORE_DOCUMENT_FREQUENCY = 2
+
+
+def _title_terms(entry: Mapping[str, Any]) -> tuple[str, ...]:
+    """The vocabulary one product publishes: its title's words and adjacent word pairs.
+
+    THE TITLE, AND NOTHING ELSE, because the title is what the reader downstream reads.
+    ``exchange.retrieval.relevance.identity_surface`` — the function
+    ``ranking.filters.organic_relevance_reason`` judges a slot's identity with — reads title
+    and brand, and ``brand`` is one constant string per storefront here, so within a store it
+    carries no information at all.
+
+    Adjacent pairs are included because the phrases that decide this are two words long —
+    ``coffee table``, ``sleeping bag``, ``dutch oven``, ``milk thistle``. A window chosen on
+    single words alone treats "coffee" in a furniture store and "coffee" in a roastery as the
+    same evidence.
+
+    ``tags`` is excluded because ``fixtures/tests/test_real_catalogs.py`` has a gate called
+    ``test_tags_carry_operational_junk_and_literal_typos``: covering a store's ``YGroup_``
+    slugs would spend the window on vocabulary no shopper types.
+
+    ``product_type`` is excluded too, and that one was measured rather than reasoned. It is a
+    category LABEL repeated verbatim down a column, so its frequency is an artefact of the
+    merchant's taxonomy rather than of what the store sells — ``branchfurniture.com`` files 25
+    rows under ``Clyde Service Contract``, which made those three words the heaviest terms in
+    its catalogue and put **"XCover Protection Plan" at the head of its window and on its
+    roster row**. Dropping it moved that lead to a real product and was worth 0.7 points of
+    on-topic-in-window across this roster (86.1% to 86.8% at a window of 250).
+    """
+    words = [
+        word
+        for word in re.split(r"[^a-z0-9]+", str(entry.get("title") or "").lower())
+        if word and word not in _STOPWORDS and not word.isdigit()
+    ]
+    pairs = [f"{first} {second}" for first, second in zip(words, words[1:], strict=False)]
+    # `dict.fromkeys` rather than `set`: a stable order makes the greedy below reproducible
+    # without sorting every product's term list on every visit.
+    return tuple(dict.fromkeys([*words, *pairs]))
+
+
+def _term_weights(
+    store_terms: Mapping[str, Mapping[str, int]], host: str
+) -> dict[str, float]:
+    """How much covering each of ``host``'s terms is worth, given every other store.
+
+    ``log(1 + S / stores_carrying(t)) * log(1 + times this store uses t)`` — the two halves of
+    the question, and each one alone gets it wrong:
+
+    * **across stores.** ``log(1 + S / stores_carrying(t))`` over the ``S`` stores in the
+      corpus. A word only this storefront uses is worth about three times one every storefront
+      uses, which is what keeps the window off the words that are everywhere — ``set``,
+      ``kit``, ``bundle``, ``gift`` — without a hand-written list of them.
+    * **within the store.** ``log(1 + count)``, the ordinary sublinear damping. Without it a
+      term two products share weighs as much as one two hundred share, and the window fills
+      with the store's oddities instead of what it sells. Measured on this roster, dropping
+      this half costs 2.2 points of on-topic-in-window (86.7% to 84.5% at a window of 250).
+
+    Terms under :data:`_MIN_STORE_DOCUMENT_FREQUENCY` within the store are dropped entirely;
+    see that constant.
+    """
+    stores = len(store_terms)
+    carrying: dict[str, int] = {}
+    for counts in store_terms.values():
+        for term in counts:
+            carrying[term] = carrying.get(term, 0) + 1
+    return {
+        term: math.log(1.0 + stores / carrying[term]) * math.log(1.0 + count)
+        for term, count in store_terms[host].items()
+        if count >= _MIN_STORE_DOCUMENT_FREQUENCY
+    }
+
+
+def _window_order(
+    terms_by_ref: Mapping[str, tuple[str, ...]], weights: Mapping[str, float], window: int
+) -> list[str]:
+    """``window`` product refs that cover this store's vocabulary, most representative first.
+
+    A greedy maximisation of a saturating coverage objective: a product is worth the sum, over
+    the terms it carries, of ``weight(term) / sqrt(1 + times that term is already covered)``.
+    The first pick is the product carrying the most of what makes this store distinctive; every
+    pick after it is worth less the more its vocabulary has already been said.
+
+**Both halves are measured on this roster**, at a window of 250, as the fraction of on-topic
+    products falling inside it:
+
+        no saturation at all (a fixed per-product score)   86.1%
+        ``1 + k``, the obvious harmonic decay             84.3%
+        ``sqrt(1 + k)``, in the tree                      86.7%
+
+    ``1 + k`` is the interesting loser: it forgets a term almost immediately and spends the
+    window on the store's tail. ``sqrt`` halves a term's value every fourth time it is covered,
+    which keeps the window on what the store actually sells while still refusing to fill it
+    with one product.
+
+    **Saturation is worth only 0.6 points HERE, and that is a fact about this roster rather
+    than about the idea.** What it defends against is a catalogue of near-duplicates —
+    ``cotopaxi.com`` publishes 1,431 priced rows under 711 distinct titles — and this roster
+    deliberately does not carry one; ``scripts/build_demo_corpus.py`` says why cotopaxi was
+    left off. Keep the saturation: the store that needs it is one re-collection away, and
+    without it the objective is a fixed per-product score that cannot see a duplicate at all.
+
+    Ties break on ``product_ref`` and on nothing else. Price is absent from this function by
+    construction, which is the property the ordering it replaces did not have.
+
+    Implemented lazily (Robertson's accelerated greedy): the objective is monotone and
+    submodular, so a product's gain never rises, and a heap entry whose recomputed gain still
+    equals its stored key is the true maximum. Exact, not approximate — the same answer the
+    quadratic loop gives, measured on every store in this roster.
+    """
+    covered: dict[str, int] = {}
+
+    def gain(ref: str) -> float:
+        return sum(
+            weights[term] / math.sqrt(1.0 + covered.get(term, 0))
+            for term in terms_by_ref[ref]
+            if term in weights
+        )
+
+    heap = [(-gain(ref), ref) for ref in terms_by_ref]
+    heapq.heapify(heap)
+    order: list[str] = []
+    while heap and len(order) < window:
+        stale, ref = heapq.heappop(heap)
+        fresh = -gain(ref)
+        if fresh <= stale + 1e-12:  # still exact: this really is the best remaining product
+            order.append(ref)
+            for term in terms_by_ref[ref]:
+                if term in weights:
+                    covered[term] = covered.get(term, 0) + 1
+        else:
+            heapq.heappush(heap, (fresh, ref))
+    return order
+
+
+def _store_catalog(
+    host: str, store_terms: Mapping[str, Mapping[str, int]], window: int
+) -> tuple[dict[str, dict[str, Any]], list[str]]:
+    """``({product_ref: row}, [product_ref, the window first])`` for one storefront.
+
+    The returned order is ``[the cluster lead] + [the window, most representative first] +
+    [everything else]``.
+
+    **Why the lead is still chosen by :data:`CLUSTER_TERMS` when nothing else is.** It is not
+    part of the window question. ``ranked[0]`` is what ``deploy/demo/buyer-roster.json`` pins
+    each shop to and what ``_store_context`` puts an explicit envelope floor on — a STATED
+    roster, built before the shopper typed anything, around the one cluster this demo
+    addresses intents to. For the ten supplement storefronts that keeps the demo's lead
+    products exactly what they were. For the nine promoted ones every product scores zero, so
+    the lead is simply the window's own first pick — the store's most representative product,
+    not its cheapest, which is what the old tie-break made it.
+
+    Past the window the order is by descending base score and then ``product_ref``. Nothing
+    reads it; it is deterministic rather than arbitrary so a diff of two runs is empty.
+    """
     catalog: dict[str, dict[str, Any]] = {}
-    scored: list[tuple[int, float, str]] = []
+    terms_by_ref: dict[str, tuple[str, ...]] = {}
+    relevance: dict[str, int] = {}
     for entry in _read_products(host):
         priced = _priced_variant(entry)
         if priced is None:
@@ -398,9 +753,27 @@ def _store_catalog(host: str) -> tuple[dict[str, dict[str, Any]], list[str]]:
         except ValueError:
             continue  # an entry naming no id/handle: the loader skips it too
         catalog[product_ref] = row
-        scored.append((-_relevance(entry), price, product_ref))
-    scored.sort()
-    return catalog, [product_ref for _, _, product_ref in scored]
+        terms_by_ref[product_ref] = _title_terms(entry)
+        relevance[product_ref] = _relevance(entry)
+    if not catalog:
+        return catalog, []
+
+    weights = _term_weights(store_terms, host)
+    order = _window_order(terms_by_ref, weights, window)
+    placed = {ref: position for position, ref in enumerate(order)}
+    outside = len(order) + 1
+    # Most cluster-relevant; among equals, the one the window already ranks first; then the id.
+    # Price is not consulted at any level, which is the whole repair.
+    lead = min(catalog, key=lambda ref: (-relevance[ref], placed.get(ref, outside), ref))
+
+    base = {
+        ref: sum(weights[term] for term in terms if term in weights)
+        for ref, terms in terms_by_ref.items()
+    }
+    ranked = [lead, *(ref for ref in order if ref != lead)]
+    seen = set(ranked)
+    ranked += sorted((ref for ref in catalog if ref not in seen), key=lambda ref: (-base[ref], ref))
+    return catalog, ranked
 
 
 #: How long an offer these demo merchants make STANDS, in seconds, past the auction's deadline.
@@ -518,6 +891,14 @@ def _snapshot(host: str, catalog: dict[str, Any], ranked: list[str]) -> dict[str
     }
 
 
+def _beta(mean: float) -> dict[str, Any]:
+    """``mean`` as evidence laid on top of the prior, never as an absolute posterior."""
+    return {
+        "alpha": round(PRIOR_ALPHA + mean * DIMENSION_EVIDENCE, 6),
+        "beta": round(PRIOR_BETA + (1.0 - mean) * DIMENSION_EVIDENCE, 6),
+    }
+
+
 def dimension_posteriors(host: str) -> dict[str, dict[str, Any]]:
     """The six Betas for one store: :data:`DIMENSION_EVIDENCE` of evidence, over the prior.
 
@@ -544,9 +925,19 @@ def dimension_posteriors(host: str) -> dict[str, dict[str, Any]]:
 
     The `feedback_match` entry it returns is what that dimension WOULD carry if the demo pretended
     buyers had spoken. The seeder skips it on purpose and leaves the dimension at the neutral
-    prior -- nobody has ever left feedback for these ten storefronts, and it is the only
+    prior -- nobody has ever left feedback for any of these storefronts, and it is the only
     dimension `POST /buyer/feedback` can move.
+
+    A HOST IN :data:`CATALOGUE_ACCURACY` GETS ONE ENTRY, NOT SIX, and the missing five are the
+    statement. Those nine storefronts have been crawled and never transacted with, so the only
+    dimension the platform holds evidence on is `catalog_claim_accuracy`; a `shipped_on_time`
+    Beta for a shop nobody has ever ordered from would be a manufactured dispatch record. The
+    seeder writes what this returns and nothing else, so those five dimensions stay at the bare
+    prior and the store is served `low_data: True` -- unknown rather than average, which is the
+    truth about it. See :data:`CATALOGUE_ACCURACY`.
     """
+    if host in CATALOGUE_ACCURACY:
+        return {CATALOG_DIMENSION: _beta(CATALOGUE_ACCURACY[host])}
     score = TRUST_SCORES.get(host, 0.6)
     dispatch = DISPATCH_POSTERIOR.get(host, score)
     others = (6.0 * score - dispatch) / 5.0
@@ -557,15 +948,8 @@ def dimension_posteriors(host: str) -> dict[str, dict[str, Any]]:
             f"posterior closer to the score, or move the score."
         )
 
-    def beta(mean: float) -> dict[str, Any]:
-        """`mean` as evidence laid on top of the prior, never as an absolute posterior."""
-        return {
-            "alpha": round(PRIOR_ALPHA + mean * DIMENSION_EVIDENCE, 6),
-            "beta": round(PRIOR_BETA + (1.0 - mean) * DIMENSION_EVIDENCE, 6),
-        }
-
     return {
-        dimension: beta(dispatch if dimension == "shipped_on_time" else others)
+        dimension: _beta(dispatch if dimension == "shipped_on_time" else others)
         for dimension in TRUST_DIMENSIONS
     }
 
@@ -580,18 +964,59 @@ def agent_service(host: str) -> str:
     return "store-agent-" + host.split(".")[0].replace("_", "-")
 
 
+def corpus_hosts() -> list[str]:
+    """Every storefront the corpus carries, in the order its manifest lists them."""
+    manifest = json.loads((CORPUS / "collection.json").read_text(encoding="utf-8"))
+    return [
+        str(store["host"]) for store in manifest["stores"] if store.get("skipped") is None
+    ]
+
+
+def store_vocabularies(hosts: Sequence[str]) -> dict[str, dict[str, int]]:
+    """``{host: {term: how many of that store's products carry it}}`` over the whole corpus.
+
+    Computed once for every store rather than per store, because :func:`_term_weights` needs
+    the CROSS-STORE half — how many storefronts use a word — and that is not knowable from one
+    catalogue. It is the signal that tells ``sofa`` (three stores) from ``set`` (all nineteen).
+    """
+    vocabularies: dict[str, dict[str, int]] = {}
+    for host in hosts:
+        counts: dict[str, int] = {}
+        for entry in _read_products(host):
+            if _priced_variant(entry) is None:
+                continue
+            for term in _title_terms(entry):
+                counts[term] = counts.get(term, 0) + 1
+        vocabularies[host] = counts
+    return vocabularies
+
+
 def build() -> dict[str, Any]:
     """Every document, as ``{relative path: JSON object}``."""
-    manifest = json.loads((CORPUS / "collection.json").read_text(encoding="utf-8"))
-    hosts = [str(store["host"]) for store in manifest["stores"]]
+    hosts = corpus_hosts()
     missing = [host for host in HOSTED if host not in hosts]
     if missing:
         raise SystemExit(f"FATAL: the corpus does not carry the hosted stores {missing}")
+    unregistered = [host for host in hosts if host not in DEMO_SELLERS]
+    if unregistered:
+        # R12 is fail-closed: `ranking.filters.blacklist_reason` excludes a store the live
+        # trust snapshot holds no row for, and `scripts/seed_demo_trust.py` seeds exactly the
+        # stores TRUST_SCORES names. A seller in the corpus and not in that table is a seller
+        # the exchange refuses on every shortlist, silently, and the only symptom is a shorter
+        # shortlist. Refusing here is the only place that can say so before the demo does not.
+        raise SystemExit(
+            f"FATAL: {unregistered} are in the corpus but not in DEMO_SELLERS, so "
+            f"scripts/seed_demo_trust.py will not seed them and R12 will exclude them from "
+            f"every shortlist. Add a posture for each, or take them off the roster."
+        )
 
+    vocabularies = store_vocabularies(hosts)
     catalogs: dict[str, dict[str, Any]] = {}
     ranked: dict[str, list[str]] = {}
     for host in hosts:
-        catalogs[host], ranked[host] = _store_catalog(host)
+        catalogs[host], ranked[host] = _store_catalog(
+            host, vocabularies, SNAPSHOT_PRODUCTS_PER_STORE
+        )
         if not ranked[host]:
             raise SystemExit(f"FATAL: {host} recorded no priced product; nothing to auction")
 
@@ -615,7 +1040,7 @@ def build() -> dict[str, Any]:
     #
     # It is fail-closed: a store the live snapshot holds no row for is EXCLUDED from ranking
     # (`exchange.ranking.filters.blacklist_reason`, R12), so a stack whose trust service knows
-    # nobody shortlists nobody. `scripts/seed_demo_trust.py` is what puts the ten sellers there,
+    # nobody shortlists nobody. `scripts/seed_demo_trust.py` is what puts all nineteen there,
     # and `scripts/demo_check.sh` names it by name when the shortlist comes back empty.
     exchange_doc = {
         "sellers": sellers,
@@ -632,9 +1057,9 @@ def build() -> dict[str, Any]:
         #
         # This block used to be `for host in HOSTED`, on the reading that a snapshot is evidence
         # against a store's CLAIMS and only a store that bids makes any. Under D55 that reading
-        # is half the market: `GraphShopRoster` may roster any of the ten, `buyer-roster.json`
-        # names two of the six agent-less ones outright, and for those the exchange held no
-        # snapshot at all. Two consequences, both measured through the served route:
+        # is half the market: `GraphShopRoster` may roster any seller at all, `buyer-roster.json`
+        # names eleven agent-less ones outright, and for those the exchange held no snapshot at
+        # all. Two consequences, both measured through the served route:
         #
         #  * `catalogue_readings` resolved no identity, so the shortlist slot carried
         #    `product.identity: null` — a row a shopper is shown and the platform cannot NAME.
@@ -651,8 +1076,9 @@ def build() -> dict[str, Any]:
         # shortlist slots still carried `identity: null`. That half is closed by the constant
         # itself; see its docstring for the measurement and for what the size now is.
         #
-        # The cost is document size and it is bounded: `SNAPSHOT_PRODUCTS_PER_STORE` products
-        # per store, ten stores, 2,950,154 bytes against `composition.MAX_DEPLOYMENT_BYTES` of
+        # The cost is document size, and it is MEASURED below rather than bounded here:
+        # `SNAPSHOT_PRODUCTS_PER_STORE` products per store over nineteen stores is 3,241
+        # snapshot rows and 3,097,455 bytes against `composition.MAX_DEPLOYMENT_BYTES` of
         # 4 MiB. Nothing else about ranking moves — a store that never bid states no claim, so
         # `verified_claim_ratio` is unchanged, and the attribute vocabulary these snapshots
         # declare is the same six keys the hosted four already declared.
@@ -661,12 +1087,8 @@ def build() -> dict[str, Any]:
         "trust_url": "http://trust:8084",
     }
 
-    # The buyer's roster: the four hosted stores plus two real storefronts with no agent, so
-    # a run shows both halves of R10 -- a store that bids and a store that is represented at
-    # its catalogue list price because nobody answered for it.
-    roster_hosts = list(HOSTED) + ["bulksupplements.com", "nutricost.com"]
     roster = []
-    for host in roster_hosts:
+    for host in ROSTER_HOSTS:
         lead = ranked[host][0]
         entry = {
             "store_id": host,
@@ -692,6 +1114,23 @@ def build() -> dict[str, Any]:
     for host in HOSTED:
         documents[f"store-contexts/{host}.json"] = _store_context(
             host, catalogs[host], ranked[host]
+        )
+
+    # MEASURED, not estimated, and fatal rather than a warning. `exchange.composition` refuses
+    # a deployment document over `MAX_DEPLOYMENT_BYTES` outright; a container handed one it
+    # refuses keeps every fail-closed default and answers `ranked: []` on a stack where
+    # `docker compose ps` reports every row healthy, which is the exact failure the top of this
+    # module exists to have fixed once. Growing the roster or the window past the budget must
+    # fail HERE, where the person who did it is standing.
+    size = len(render(exchange_doc).encode("utf-8"))
+    budget = int(MAX_DEPLOYMENT_BYTES * DEPLOYMENT_BYTES_BUDGET)
+    if size > budget:
+        raise SystemExit(
+            f"FATAL: exchange-deployment.json is {size:,} bytes, over the "
+            f"{DEPLOYMENT_BYTES_BUDGET:.0%} budget of composition.MAX_DEPLOYMENT_BYTES "
+            f"({budget:,} of {MAX_DEPLOYMENT_BYTES:,}). Lower SNAPSHOT_PRODUCTS_PER_STORE "
+            f"(currently {SNAPSHOT_PRODUCTS_PER_STORE}, worth about 955 bytes per product per "
+            f"store) or take a storefront off the corpus roster."
         )
     return documents
 

@@ -172,11 +172,40 @@ def test_the_real_scorer_reproduces_the_posture_the_seed_targets(
 
 
 def test_the_seeded_order_is_the_stated_order(seeder: Any, generator: Any) -> None:
-    """The demo's claim is who is more reliable. Compressing the range must not permute it."""
+    """The demo's claim is who is more reliable. Compressing the range must not permute it.
+
+    Over the TRANSACTING stores, which are the ones `TRUST_SCORES` states an order for. The
+    crawled sellers are not in that table and are not in this comparison: they carry one
+    dimension each and their `score` is five-sixths prior, so ranking them against a store with
+    a transaction record would be comparing a posture to the absence of one.
+    """
     posture = seeder.expected_posture()
-    seeded = sorted(posture, key=lambda s: -sum(posture[s].values()))
+    seeded = sorted(generator.TRUST_SCORES, key=lambda s: -sum(posture[s].values()))
     stated = sorted(generator.TRUST_SCORES, key=lambda s: -generator.TRUST_SCORES[s])
     assert seeded == stated
+
+
+def test_a_crawled_seller_reads_as_unknown_rather_than_as_a_bad_transacting_one(
+    seeder: Any, generator: Any
+) -> None:
+    """The nine promoted shops must sit at the prior on everything a transaction decides.
+
+    This is the assertion that stops the crawl-only posture quietly becoming a full one. Give
+    `sabai.design` a `shipped_on_time` entry in `DISPATCH_POSTERIOR` and this goes red, which
+    is what should happen: nobody has ever ordered from it.
+    """
+    posture = seeder.expected_posture()
+    neutral = seeder.PRIOR_ALPHA / (seeder.PRIOR_ALPHA + seeder.PRIOR_BETA)
+    assert set(generator.CATALOGUE_ACCURACY) & set(generator.TRUST_SCORES) == set(), (
+        "a store cannot be both crawled-only and transacting"
+    )
+    for store_id in sorted(generator.CATALOGUE_ACCURACY):
+        means = posture[store_id]
+        stated = {dim for dim, mean in means.items() if abs(mean - neutral) > 1e-9}
+        assert stated == {"catalog_claim_accuracy"}, (
+            f"{store_id} is a scraped shop and states a posture on {sorted(stated)}; the crawl "
+            f"can only speak to catalog_claim_accuracy"
+        )
 
 
 # =====================================================================================
@@ -285,14 +314,38 @@ def test_every_demo_seller_is_seeded_on_every_floor_dimension(seeder: Any, gener
     for event in events:
         seeded.setdefault(str(event["store_id"]), set()).add(str(event["payload"]["dim"]))
 
-    assert set(seeded) == set(generator.TRUST_SCORES), (
-        f"the seed covers {sorted(seeded)} but the demo roster is {sorted(generator.TRUST_SCORES)}"
+    assert set(seeded) == set(generator.DEMO_SELLERS), (
+        f"the seed covers {sorted(seeded)} but the demo roster is "
+        f"{sorted(generator.DEMO_SELLERS)}"
     )
     for store_id, dims in sorted(seeded.items()):
+        if store_id in generator.CATALOGUE_ACCURACY:
+            assert dims == {generator.CATALOG_DIMENSION}, (
+                f"{store_id} is a crawled shop and is seeded on {sorted(dims)}; the crawl "
+                f"produces catalogue evidence and nothing else"
+            )
+            continue
         assert dims == set(EPISODE_FLOOR_DIMENSIONS), (
             f"{store_id} is seeded on {sorted(dims)}, not on the five dimensions "
             f"clean_episodes takes its floor over ({sorted(EPISODE_FLOOR_DIMENSIONS)})"
         )
+
+
+def test_every_host_in_the_demo_corpus_gets_a_trust_row(generator: Any) -> None:
+    """R12 is fail-closed, so a corpus host with no seeded row is invisible on every shortlist.
+
+    `blacklist_reason` excludes a store the live snapshot holds no row for, and `GET /snapshot`
+    only knows the sellers this seed wrote. A storefront added to
+    `fixtures/real-catalogs-demo/` and not to `DEMO_SELLERS` would load into the graph, be
+    rostered by retrieval, and then be dropped from every ranking with no message anywhere —
+    the symptom is a shorter shortlist. `build_demo_deployment.build` refuses that at build
+    time; this is the same check where a reader will look for it.
+    """
+    missing = [host for host in generator.corpus_hosts() if host not in generator.DEMO_SELLERS]
+    assert not missing, (
+        f"{missing} are in fixtures/real-catalogs-demo and carry no trust posture, so R12 "
+        f"excludes them from every shortlist"
+    )
 
 
 def test_the_scripts_copy_of_the_low_data_floor_agrees_with_the_trust_engine(seeder: Any) -> None:
@@ -414,7 +467,7 @@ def test_feedback_match_is_never_seeded(seeder: Any) -> None:
         assert event["payload"]["dim"] != "feedback_match", event
 
 
-def test_no_seeded_store_is_served_low_data(seeder: Any) -> None:
+def test_no_transacting_store_is_served_low_data(seeder: Any, generator: Any) -> None:
     """`low_data` switches on the exchange's exploration floor, a second randomised mechanism.
 
     Checked through `trust.snapshot.builder`'s own `clean_episodes` and its own floor-dimension
@@ -431,6 +484,17 @@ def test_no_seeded_store_is_served_low_data(seeder: Any) -> None:
 
     for store_id, observations in sorted(by_store.items()):
         episodes = clean_episodes({"store_id": store_id}, observations)
+        if store_id in generator.CATALOGUE_ACCURACY:
+            # DELIBERATELY low_data, and asserted in that direction. A crawled shop has no
+            # completed episode with anybody; `low_data` is `trust.snapshot.builder`'s own
+            # "unknown rather than average", which is the true thing to say about it. If this
+            # ever came out >= the floor, the seed would have manufactured a transaction
+            # record for a shop nobody has bought from.
+            assert episodes == 0, (
+                f"{store_id} is a crawled shop and derives {episodes} clean episodes; the seed "
+                f"writes catalogue evidence only, so this must be 0"
+            )
+            continue
         assert episodes >= NEW_STORE_PRIOR_N, (
             f"{store_id} derives {episodes} clean episodes from the seed and would be served "
             f"low_data (< {NEW_STORE_PRIOR_N})"
@@ -474,12 +538,17 @@ def test_one_press_of_the_button_outruns_the_gaps_between_the_stores_it_reaches(
     posture = seeder.expected_posture()
     scores = {store: sum(m.values()) / len(m) for store, m in posture.items()}
 
-    ranked = sorted(scores.values(), reverse=True)
-    widest = max(a - b for a, b in zip(ranked, ranked[1:], strict=False))
+    # Over the TRANSACTING ten. The crawled nine sit as a block below every one of them —
+    # `test_a_crawled_seller_ranks_below_every_transacting_one` pins that — and the step down
+    # to that block is wider than any press, which is correct rather than a defect: a press
+    # lands on `feedback_match`, and no amount of buyer feedback should promote a shop the
+    # platform has never watched deliver past one it has.
+    transacting = sorted((scores[store] for store in generator.TRUST_SCORES), reverse=True)
+    widest = max(a - b for a, b in zip(transacting, transacting[1:], strict=False))
     assert shift(24, 0) > widest, (
         f"even 24 straight positives move a store's published score by only {shift(24, 0):.4f}, "
-        f"and the widest gap between two adjacent demo stores is {widest:.4f}. Nothing a press "
-        f"can do would reorder them; the seed is too heavy or too spread out."
+        f"and the widest gap between two adjacent transacting stores is {widest:.4f}. Nothing a "
+        f"press can do would reorder them; the seed is too heavy or too spread out."
     )
 
     hosted = sorted((scores[store] for store in generator.HOSTED), reverse=True)
@@ -489,4 +558,68 @@ def test_one_press_of_the_button_outruns_the_gaps_between_the_stores_it_reaches(
         f"moves a store by {shift(20, 4):.4f}, and the widest gap between two adjacent HOSTED "
         f"stores — the four that bid, and so the only four a press reaches — is "
         f"{widest_hosted:.4f}. A press would not reorder the shortlist."
+    )
+
+
+def test_a_crawled_seller_ranks_below_every_transacting_one(seeder: Any, generator: Any) -> None:
+    """The two postures are meant to be visibly different, and this is where that is stated.
+
+    A crawled shop's `score` is five-sixths neutral prior and one-sixth catalogue evidence, so
+    it lands just above 0.5; a transacting store carries evidence on five of the six. If a
+    crawled shop ever outranked a transacting one on `score`, the demo would be saying the
+    platform trusts a shop it has only read more than one it has traded with.
+
+    It is NOT a claim about shortlists. `trust` is one weighted term of several and a crawled
+    shop can and should still win a shortlist slot on relevance, price or delivery — which is
+    exactly what happens on the furniture queries this roster was widened for.
+    """
+    posture = seeder.expected_posture()
+    scores = {store: sum(m.values()) / len(m) for store, m in posture.items()}
+    floor = min(scores[store] for store in generator.TRUST_SCORES)
+    for store_id in sorted(generator.CATALOGUE_ACCURACY):
+        assert scores[store_id] < floor, (
+            f"{store_id} is crawled-only and scores {scores[store_id]:.4f}, at or above the "
+            f"weakest transacting store ({floor:.4f})"
+        )
+
+
+def test_a_reseed_after_the_roster_grows_finds_the_instant_the_chain_already_holds(
+    seeder: Any, generator: Any
+) -> None:
+    """The 409 that an append-only ledger has no repair for. Measured, then fixed here.
+
+    `event_id` is the ledger's idempotency key and re-sending an id with DIFFERENT content is
+    refused (D16), so a re-run MUST reuse the `observed_at` the chain already carries.
+    `seed_demo_trust.main` finds it by asking `seeded_instant` about a handful of event ids;
+    the ids it asks about used to be the FIRST EIGHT events of the run, which is the first two
+    stores in `sorted(DEMO_SELLERS)` order.
+
+    Promoting `branchfurniture.com` puts a new store alphabetically first. Every one of those
+    eight probes then names an event no previous run wrote, all eight miss, the clock wins, and
+    the next event for a store that IS on the chain comes back 409 — the demo's trust seed
+    permanently unrunnable without tearing the stack down.
+
+    So the probe set must contain, for every store, an id a run that seeded THAT store would
+    have written. This asserts exactly that, against the ten-store roster the chain in the wild
+    was seeded from.
+    """
+    probes = {
+        str(event["event_id"])
+        for event in seeder.seed_events("", sorted(generator.DEMO_SELLERS))
+        if str(event["event_id"]).endswith("-00")
+    }
+    incumbent_first_events = {}
+    for event in seeder.seed_events("", sorted(generator.TRUST_SCORES)):
+        incumbent_first_events.setdefault(str(event["store_id"]), str(event["event_id"]))
+    unreachable = sorted(set(incumbent_first_events.values()) - probes)
+    assert not unreachable, (
+        f"a re-seed would not ask about {unreachable}, so a chain seeded before the roster grew "
+        f"would go undetected and the run would stamp a fresh instant and 409"
+    )
+
+    first_of_each: dict[str, str] = {}
+    for event in seeder.seed_events("", sorted(generator.DEMO_SELLERS)):
+        first_of_each.setdefault(str(event["store_id"]), str(event["event_id"]))
+    assert set(first_of_each) == set(generator.DEMO_SELLERS), (
+        "the probe set must cover every seller, not the first few in sort order"
     )

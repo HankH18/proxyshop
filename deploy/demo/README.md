@@ -1,6 +1,7 @@
 # The compose demo's deployment documents
 
-Four of these are GENERATED from `fixtures/real-catalogs/` by
+Four of these are GENERATED from `fixtures/real-catalogs-demo/` — the curated nineteen-store
+roster `scripts/build_demo_corpus.py` derives from `fixtures/real-catalogs-broad/` — by
 `./.venv/bin/python scripts/build_demo_deployment.py`, whose `--check` regenerates in memory and
 diffs. CI runs `--check`, so a hand edit to a generated file fails the build rather than
 surviving quietly. The generated column below says which.
@@ -27,29 +28,43 @@ hand-written column.
 With the key absent, the ranking gate binds `LiveTrustSnapshot` against this document's
 `trust_url` and reads `GET /snapshot` on the running trust service.
 
-## Which means the trust service has to know the ten sellers
+## Which means the trust service has to know all nineteen sellers
 
 **Run `make demo-trust` once, after `make demo-up`.**
 
 R12 fails closed: `exchange.ranking.filters.blacklist_reason` EXCLUDES a store the live snapshot
 holds no row for, because a store whose blacklist status cannot be established is not a store
-you may shortlist. On a stack whose trust service has never heard of these ten storefronts that
-is all of them, and the auction comes back `shortlist: []` — a symptom that points at ranking
-and names trust nowhere. `scripts/demo_check.sh` reads the snapshot itself and says which step
-is missing; `scripts/seed_demo_trust.py` is that step.
+you may shortlist. On a stack whose trust service has never heard of these storefronts that is
+all of them, and the auction comes back `shortlist: []` — a symptom that points at ranking and
+names trust nowhere. `scripts/demo_check.sh` reads the snapshot itself and says which step is
+missing; `scripts/seed_demo_trust.py` is that step.
 
 Two things it does, over the trust service's own doors:
 
-* inserts the ten sellers into `app.sellers`, which `trust.snapshot.routes` joins against and
-  which nothing in the product ever writes; and
-* appends each store's opening posture as sealed ledger events through `POST /events`, five
-  dimensions' worth, every one marked `sim-fb-` in `order_ref` — a top-level column inside the
-  event digest, so a manufactured observation cannot be un-marked without breaking
-  `GET /events/verify`.
+* inserts all nineteen sellers into `app.sellers`, which `trust.snapshot.routes` joins against
+  and which nothing in the product ever writes; and
+* appends each store's opening posture as sealed ledger events through `POST /events`, every one
+  marked `sim-fb-` in `order_ref` — a top-level column inside the event digest, so a
+  manufactured observation cannot be un-marked without breaking `GET /events/verify`.
 
-It leaves `feedback_match` empty on purpose. Nobody has ever left feedback for these
-storefronts, and it is the only dimension `POST /buyer/feedback` moves — so the demo's button
-has the whole dimension to itself.
+### The two postures, and why they are different shapes
+
+**Ten TRANSACTING storefronts** (`build_demo_deployment.TRUST_SCORES`) get five of the six
+dimensions. **Nine CRAWLED storefronts** (`CATALOGUE_ACCURACY` — the ones this demo promoted for
+breadth) get exactly one, `catalog_claim_accuracy`, because that is the only dimension a crawl
+can speak to. Under D55 they are ORGANIC results: the platform scraped them, nobody has bought
+anything from them, and giving them a dispatch record would be inventing one.
+
+They are therefore served `low_data: true`, which `trust.snapshot.builder` defines as "treat as
+*unknown* rather than *average*" — the honest reading of a shop the platform has only read. It
+does not exclude them; it turns on the exchange's exploration slice, one shortlist slot of four.
+Measured on the live snapshot after `make demo-trust`: the ten transacting stores score 0.5997
+to 0.7724 at confidence 0.88–0.94, the nine crawled ones 0.5150 to 0.5274 at confidence
+0.47–0.49, and every crawled store sits below every transacting one.
+
+It leaves `feedback_match` empty for all nineteen on purpose. Nobody has ever left feedback for
+these storefronts, and it is the only dimension `POST /buyer/feedback` moves — so the demo's
+button has the whole dimension to itself.
 
 Measured on the served buyer route (`/buyer/intent/clarify` → `/confirm` →
 `/buyer/auctions/{id}`), one press of the learning page's button, 6 rounds x 4 reviewers:
@@ -79,14 +94,26 @@ store agents learning, not trust; the trust number on each card is the noise-fre
 Re-running it is safe *for a stack seeded by the same version of this script*: `event_id` is the
 ledger's idempotency key and `seeded_instant` adopts the `observed_at` the chain already holds
 rather than stamping a fresh clock reading, so the second run rebuilds byte-identical events, the
-ledger answers 200 to each, and it prints `0 appended, 568 already in the chain`.
+ledger answers 200 to each, and it prints `0 appended, 667 already in the chain`.
 
-A stack seeded by an OLDER version is the case that stops, and it stops loudly rather than
-half-writing. The event ids are stable across versions of this script and the bodies are not, so
-`POST /events` answers 409 on the first event whose content changed. Measured on a stack in that
-state: the run named the event (`sim-fb-seed-bulksupplements.com-discount_honored-09`), reported
-`0 event(s) were appended before this one and nothing after it was`, and exited 2 — and `--check`
-against the same stack still passed, because the seed it already carries is a working one. That is
-the choice the message offers: keep the seed you have, or wind the stack back with
-`make deps-down && make deps-up && make demo-up` and seed it afresh. `--check` verifies without
-writing and is the right thing to run first either way.
+A stack seeded by an OLDER version of this script is the interesting case, and it is now
+survivable. The event ids are stable across versions and the bodies are not, so `POST /events`
+answers 409 on the first event whose content changed and an append-only ledger cannot be
+rewritten to match. What the run does about it depends on the CONSEQUENCE:
+
+* **the store is already in the live snapshot** — it keeps the posture the chain holds, the run
+  skips the rest of that store's events, names it, and carries on with every other store;
+* **the store is NOT in the snapshot** — fatal, exit 2, because that store cannot be ranked at
+  all and half a chain for it cannot be repaired.
+
+That split is a repair rather than a softening. The run used to abort on the FIRST conflict, and
+the moment the roster grew that refusal fired on the healthy path: measured on the running demo
+stack, whose chain predates the fix that stopped `_payload` writing `price_honored: false` onto a
+`discount_honored` event, the run died at
+`sim-fb-seed-bulksupplements.com-discount_honored-09` — having appended eleven events and left
+**nine newly promoted storefronts with no ledger rows at all**, which under R12 means invisible on
+every shortlist. Re-run after the fix, the same stack reported `88 appended, 219 already in the
+chain`, named the ten stores keeping their older posture, and ended
+`OK: all 19 demo sellers are in the live trust snapshot`.
+
+`--check` verifies without writing and is still the right thing to run first.

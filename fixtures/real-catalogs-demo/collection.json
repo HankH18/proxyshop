@@ -1,0 +1,1462 @@
+{
+  "corpus_version": "2.2.0-demo",
+  "collector_version_at_fetch": "2.1.0",
+  "collected_at": "2026-09-08T22:50:34.239557+00:00",
+  "collected_span": {
+    "earliest": "2026-09-08T22:42:58.145187+00:00",
+    "latest": "2026-09-08T22:50:34.591446+00:00",
+    "days": 0.005
+  },
+  "run": {
+    "complete": true,
+    "roster_size": 19,
+    "restricted_to": [
+      "gaiaherbs.com",
+      "bulksupplements.com",
+      "nutricost.com",
+      "oregonswildharvest.com",
+      "toniiq.com",
+      "doublewoodsupplements.com",
+      "purebulk.com",
+      "paradiseherbs.com",
+      "livemomentous.com",
+      "nakednutrition.com",
+      "floydhome.com",
+      "branchfurniture.com",
+      "sabai.design",
+      "deathwishcoffee.com",
+      "vervecoffee.com",
+      "nemoequipment.com",
+      "hyperlitemountaingear.com",
+      "fromourplace.com",
+      "fellowproducts.com"
+    ],
+    "pending": [],
+    "reused_from_earlier_runs": [
+      "gaiaherbs.com",
+      "bulksupplements.com",
+      "nutricost.com",
+      "oregonswildharvest.com",
+      "toniiq.com",
+      "doublewoodsupplements.com",
+      "purebulk.com",
+      "paradiseherbs.com",
+      "livemomentous.com",
+      "nakednutrition.com",
+      "floydhome.com",
+      "branchfurniture.com",
+      "sabai.design",
+      "deathwishcoffee.com",
+      "vervecoffee.com",
+      "nemoequipment.com",
+      "hyperlitemountaingear.com",
+      "fromourplace.com",
+      "fellowproducts.com"
+    ]
+  },
+  "collector": "scripts/collect_real_catalogs.py",
+  "user_agent": "ProxyShopBot/0.1 (catalog research; contact: hank.holcomb@challenger.gauntletai.com)",
+  "politeness": {
+    "robots_txt": "fetched and respected per host",
+    "min_seconds_between_requests_per_host": 2.0,
+    "max_requests_per_host": 45,
+    "max_pages_per_host": 40,
+    "page_size": 250,
+    "crawl_delay": "a declared Crawl-delay widens the interval and never narrows it",
+    "retries": "no retry loop within a run — a 403 or a 404 on /products.json ends that store's walk and is recorded as its outcome, and nothing is re-requested. ACROSS runs, --resume re-walks a store whose recorded outcome was retryable, which is: a 429, a 5xx, a transport error, an empty body, an unparseable page, an interrupted walk, a robots.txt that could not be read — including a 403 on robots.txt, which is a policy we were never shown rather than an answer about the catalogue — a budget spent before robots.txt was read, or an outcome this collector does not recognise. That is a later run started by a person, never a loop against a host that just answered.",
+    "scope": "public catalogue data only",
+    "concurrency": "none — one host at a time, one request at a time. Measured: 8 concurrent connections across 30 Cloudflare-fronted zones drew an IP-wide 429 at request 41, 5.9 seconds in; the same 80 zones serially cost 209 requests and zero blocks.",
+    "resume": "a store already walked to a non-retryable outcome under these same settings is not re-fetched; every skip is checked against the page digests on disk",
+    "request_accounting": "totals.requests_recorded is the sum of each store's `requests_charged`: one robots.txt fetch plus every catalogue page actually asked for. Every store carries the field, so its presence says nothing; `requests_charged_accumulated` is what says whether the number is real. True: the scratch record carried the count forward across every walk of that host. False: the scratch record predates that (collector 2.1.0 and earlier), so `build` synthesised the number from the walk that survived — a FLOOR for that host, because a re-walk replaced the record of the walk it replaced. totals.requests_recorded_is_floor is true when any store is in the second case. Recompute the total from the artifact: sum(s['requests_charged'] if 'requests_charged' in s else len([f for f in s['fetches'] if f['status'] != -1]) + bool(s['robots']) for s in collection['stores']) — the else branch is for manifests written before this field existed at all.",
+    "min_interval_floor_seconds": 2.0
+  },
+  "selection": {
+    "policy": "entire catalogue — every product on every page, nothing filtered",
+    "why": "A category-biased corpus builds a system that can only answer one question and silently removes the hardest part of retrieval: discriminating relevant inventory from a large body of irrelevant inventory. The irrelevant stock is not overhead, it is the test.",
+    "dropped": "exact duplicate product ids across pages only; counted per store"
+  },
+  "storage": {
+    "compressed": true,
+    "format": "gzip (mtime=0, level 9) over JSONL",
+    "note": "A storage decision only. No product is dropped and no field is trimmed, so what is stored is the whole catalogue."
+  },
+  "notes": [
+    "POINT-IN-TIME SNAPSHOT of other companies' public catalogues. Prices and inventory move; assert shape and relationships, never a dollar amount.",
+    "Product records are the exact bytes the storefront served, unnormalised.",
+    "Collected by hand. No test in this repository opens a socket (D3/C9)."
+  ],
+  "stores": [
+    {
+      "host": "gaiaherbs.com",
+      "role": "relevant",
+      "category": "supplements",
+      "note": "111 products in the committed corpus",
+      "roster_source": "incumbent-hosts.txt:27",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.gaiaherbs.com",
+      "robots": {
+        "url": "https://www.gaiaherbs.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:43:38.679020+00:00",
+        "sha256": "63be68c09c2111befd22af92922da4e53913417b9e9d99c82834ee0ce6a49aa6",
+        "bytes": 3634,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.gaiaherbs.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:43:40.680620+00:00",
+          "sha256": "51af09a765f5111c953b851ae8c4af66c7095af8b0ffa0e52f4000059a5e162c",
+          "bytes": 410123,
+          "elapsed_ms": 2281,
+          "note": ""
+        }
+      ],
+      "requests": 2,
+      "requests_charged": 2,
+      "requests_charged_accumulated": false,
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 111,
+      "products_recorded": 111,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/gaiaherbs.com.products.jsonl.gz",
+        "provenance": "stores/gaiaherbs.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "62331c8a61f22b5c9e11a64c9b61b82e4c27430bdc7821db6faf32dcfe6e3a70",
+        "provenance": "97854005f06fde233f9fa2c1495c227ff96d43014b8955e5f2341552a8f91657"
+      },
+      "bytes": {
+        "products": {
+          "raw": 410109,
+          "on_disk": 51695
+        },
+        "provenance": {
+          "raw": 43872,
+          "on_disk": 7829
+        }
+      }
+    },
+    {
+      "host": "bulksupplements.com",
+      "role": "relevant",
+      "category": "supplements",
+      "note": "805 — the largest store in it",
+      "roster_source": "incumbent-hosts.txt:28",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.bulksupplements.com",
+      "robots": {
+        "url": "https://www.bulksupplements.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:43:42.967218+00:00",
+        "sha256": "b3b75ef965f3922f40688be5558ea0f59dc84c4a6c01c58f108eb629b02ba391",
+        "bytes": 3660,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.bulksupplements.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:43:44.967240+00:00",
+          "sha256": "1da394a7331cbb412d1ea5ec19108f7e2163122b5a348f5e93ddcd96e3660fce",
+          "bytes": 2018279,
+          "elapsed_ms": 1208,
+          "note": ""
+        },
+        {
+          "url": "https://www.bulksupplements.com/products.json?limit=250&page=2",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:43:46.967602+00:00",
+          "sha256": "5161be7d010b77407141421ac9dab4d75499469a14ae7a7d858323bee5197bce",
+          "bytes": 2154987,
+          "elapsed_ms": 971,
+          "note": ""
+        },
+        {
+          "url": "https://www.bulksupplements.com/products.json?limit=250&page=3",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:43:48.971558+00:00",
+          "sha256": "18fd08e2aa456ba41785b53d3df0be71450bb19fe44ee092b0d33504cdd76c81",
+          "bytes": 2239545,
+          "elapsed_ms": 936,
+          "note": ""
+        },
+        {
+          "url": "https://www.bulksupplements.com/products.json?limit=250&page=4",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:43:50.974828+00:00",
+          "sha256": "2e670d764821359b78d7755eb62c5cb17899fe21f5c3297dba9e7e873c4c0a3f",
+          "bytes": 501267,
+          "elapsed_ms": 340,
+          "note": ""
+        }
+      ],
+      "requests": 5,
+      "requests_charged": 5,
+      "requests_charged_accumulated": false,
+      "pages_fetched": 4,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 805,
+      "products_recorded": 805,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/bulksupplements.com.products.jsonl.gz",
+        "provenance": "stores/bulksupplements.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "8881f7db88a41bd5870ce8308f126a8ae52ca21d2b2f8ba4109ce9ecb21e4dd1",
+        "provenance": "3a0a34d6c30caffcd8777103355d1dfaec6b90a7d746b30bbe941bab4e3fa57a"
+      },
+      "bytes": {
+        "products": {
+          "raw": 6914022,
+          "on_disk": 843277
+        },
+        "provenance": {
+          "raw": 326631,
+          "on_disk": 55668
+        }
+      }
+    },
+    {
+      "host": "nutricost.com",
+      "role": "relevant",
+      "category": "supplements",
+      "note": "755",
+      "roster_source": "incumbent-hosts.txt:29",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://nutricost.com",
+      "robots": {
+        "url": "https://nutricost.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:43:51.320280+00:00",
+        "sha256": "530dc2c86b7abe30c5dda8437c5370b26cebe416b73ffde861b2531d8ca7dcd3",
+        "bytes": 3620,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://nutricost.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:43:53.325292+00:00",
+          "sha256": "3112f135a5545dbb2f5d91e07a30f65214dd9d7861f10528b2f3a3bfc85da416",
+          "bytes": 1218702,
+          "elapsed_ms": 547,
+          "note": ""
+        },
+        {
+          "url": "https://nutricost.com/products.json?limit=250&page=2",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:43:55.328125+00:00",
+          "sha256": "325ca5d4b790ae666b067b01526debf6c54f1bcb5d2982261bdea9bd6cb7c7ff",
+          "bytes": 1010158,
+          "elapsed_ms": 532,
+          "note": ""
+        },
+        {
+          "url": "https://nutricost.com/products.json?limit=250&page=3",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:43:57.332819+00:00",
+          "sha256": "0a2c3f2ff5fa5b24c14b4f96fb7f2e8767acce206a99c274c680a19ca15159cf",
+          "bytes": 1052206,
+          "elapsed_ms": 777,
+          "note": ""
+        },
+        {
+          "url": "https://nutricost.com/products.json?limit=250&page=4",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:43:59.333824+00:00",
+          "sha256": "3a314831b54b3a2cecced66094d489b92183c7c0498d19a861785171e4f450cf",
+          "bytes": 35349,
+          "elapsed_ms": 134,
+          "note": ""
+        }
+      ],
+      "requests": 5,
+      "requests_charged": 5,
+      "requests_charged_accumulated": false,
+      "pages_fetched": 4,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 755,
+      "products_recorded": 755,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/nutricost.com.products.jsonl.gz",
+        "provenance": "stores/nutricost.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "aca0d0239c48427f8f63a23aee4ba2f705d7d35a9955829b31e04778a2a6b79a",
+        "provenance": "ab25c7406bc2a8fa6242a49daccf173571aadab73226f1acd9f4905397dc11a7"
+      },
+      "bytes": {
+        "products": {
+          "raw": 3316359,
+          "on_disk": 375089
+        },
+        "provenance": {
+          "raw": 308133,
+          "on_disk": 53740
+        }
+      }
+    },
+    {
+      "host": "oregonswildharvest.com",
+      "role": "relevant",
+      "category": "supplements",
+      "note": "189",
+      "roster_source": "incumbent-hosts.txt:30",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://oregonswildharvest.com",
+      "robots": {
+        "url": "https://oregonswildharvest.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:43:59.470790+00:00",
+        "sha256": "569fba514927869d4ae010da3993e38a9b1229e4fb99a6f472dc17eba85d225d",
+        "bytes": 3654,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://oregonswildharvest.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:01.471878+00:00",
+          "sha256": "56b397c183ca0d4c43164756d3c1985deb28fff4ae39c3b0c6829c31fd20b050",
+          "bytes": 729036,
+          "elapsed_ms": 248,
+          "note": ""
+        }
+      ],
+      "requests": 2,
+      "requests_charged": 2,
+      "requests_charged_accumulated": false,
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 189,
+      "products_recorded": 189,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/oregonswildharvest.com.products.jsonl.gz",
+        "provenance": "stores/oregonswildharvest.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "08c0672b44d177e5da550ae8d3b26f6b4433d7483bb8c00ba3cd2444c3197672",
+        "provenance": "4a22f224b05c0b40aeddbe329f71106c9af9f96b774d7a00b34a74bdd6fdec66"
+      },
+      "bytes": {
+        "products": {
+          "raw": 729022,
+          "on_disk": 77596
+        },
+        "provenance": {
+          "raw": 76347,
+          "on_disk": 12749
+        }
+      }
+    },
+    {
+      "host": "toniiq.com",
+      "role": "relevant",
+      "category": "supplements",
+      "note": "103; product_type empty on 100% of them",
+      "roster_source": "incumbent-hosts.txt:31",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.toniiq.com",
+      "robots": {
+        "url": "https://www.toniiq.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:01.726908+00:00",
+        "sha256": "8e8cffee119c3dadaaa558a029aac57811844e953e3b4aa44976a21b0ffe5a25",
+        "bytes": 3616,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.toniiq.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:03.731923+00:00",
+          "sha256": "7216762158b10b4648b23d46c903dc1768945654a0fefb603d690cf756c00bc5",
+          "bytes": 379408,
+          "elapsed_ms": 424,
+          "note": ""
+        }
+      ],
+      "requests": 2,
+      "requests_charged": 2,
+      "requests_charged_accumulated": false,
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 103,
+      "products_recorded": 103,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/toniiq.com.products.jsonl.gz",
+        "provenance": "stores/toniiq.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "fd110415b8f62b1dcc5851ccc7bfa74df6a314a6947cde614364f3454d763959",
+        "provenance": "665b1686aa6303ed4b564f6f0bcc2c017ced33389b7a71457a0cd991984c532b"
+      },
+      "bytes": {
+        "products": {
+          "raw": 379394,
+          "on_disk": 44501
+        },
+        "provenance": {
+          "raw": 39936,
+          "on_disk": 7382
+        }
+      }
+    },
+    {
+      "host": "doublewoodsupplements.com",
+      "role": "relevant",
+      "category": "supplements",
+      "note": "201",
+      "roster_source": "incumbent-hosts.txt:32",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://doublewoodsupplements.com",
+      "robots": {
+        "url": "https://doublewoodsupplements.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:04.161152+00:00",
+        "sha256": "194ee62ea0e371d70faecf681ddc70f517bce99963aa6374be589cfa58adc9f3",
+        "bytes": 3660,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://doublewoodsupplements.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:06.161428+00:00",
+          "sha256": "fc2635af3d6f5299d80f2e102cf0490514213a3717fbbdd54f41961fb76dbe94",
+          "bytes": 1040016,
+          "elapsed_ms": 758,
+          "note": ""
+        }
+      ],
+      "requests": 2,
+      "requests_charged": 2,
+      "requests_charged_accumulated": false,
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 201,
+      "products_recorded": 201,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/doublewoodsupplements.com.products.jsonl.gz",
+        "provenance": "stores/doublewoodsupplements.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "316f54bb4b6d17b33a51c05431e6d4bc92e131257ea79818dbbaff3b5fb8f3b8",
+        "provenance": "400cebf33f55b4a41c4465bf5d084848af18b29a1e952f95392631b4a0bf742b"
+      },
+      "bytes": {
+        "products": {
+          "raw": 1040002,
+          "on_disk": 146679
+        },
+        "provenance": {
+          "raw": 81261,
+          "on_disk": 14544
+        }
+      }
+    },
+    {
+      "host": "purebulk.com",
+      "role": "relevant",
+      "category": "supplements",
+      "note": "550; 4,649 chars of body_html on average",
+      "roster_source": "incumbent-hosts.txt:33",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://purebulk.com",
+      "robots": {
+        "url": "https://purebulk.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:06.928291+00:00",
+        "sha256": "aab07d5799505735637eb3ebd4b26fc9bbad6878dc5c1e5a4daed7d6c08d8938",
+        "bytes": 3614,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://purebulk.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:08.933308+00:00",
+          "sha256": "7824deb577b70b3400161c23f9b089ad34ac811482de3b2fd257493cceb5f010",
+          "bytes": 2050592,
+          "elapsed_ms": 1377,
+          "note": ""
+        },
+        {
+          "url": "https://purebulk.com/products.json?limit=250&page=2",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:10.938322+00:00",
+          "sha256": "17976fce5445f75493a785124753e947a306662b7985bc9e121235f66fa11dcf",
+          "bytes": 2386824,
+          "elapsed_ms": 1087,
+          "note": ""
+        },
+        {
+          "url": "https://purebulk.com/products.json?limit=250&page=3",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:12.940282+00:00",
+          "sha256": "b9aaa05242fda76d4dfc88275b30bbd72de52551b3b92718778b1e58526d3c2b",
+          "bytes": 524458,
+          "elapsed_ms": 280,
+          "note": ""
+        }
+      ],
+      "requests": 4,
+      "requests_charged": 4,
+      "requests_charged_accumulated": false,
+      "pages_fetched": 3,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 550,
+      "products_recorded": 550,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/purebulk.com.products.jsonl.gz",
+        "provenance": "stores/purebulk.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "5bc386079c097217a17480385ef3a2b08d9da7de0d31dc33c55082095c004ca7",
+        "provenance": "9dbd649bd55e11288e54925dc8a0d964a978c3f70de85a261e7a1b1189605242"
+      },
+      "bytes": {
+        "products": {
+          "raw": 4961832,
+          "on_disk": 740899
+        },
+        "provenance": {
+          "raw": 218397,
+          "on_disk": 37397
+        }
+      }
+    },
+    {
+      "host": "paradiseherbs.com",
+      "role": "relevant",
+      "category": "supplements",
+      "note": "90; zero tags on every product",
+      "roster_source": "incumbent-hosts.txt:34",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://paradiseherbs.com",
+      "robots": {
+        "url": "https://paradiseherbs.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:13.225751+00:00",
+        "sha256": "273293d0c0a673963074ed0c67a2955bf2397d88b62f9dacb96d6de94238b560",
+        "bytes": 3636,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://paradiseherbs.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:15.225962+00:00",
+          "sha256": "7951d72688013df2dfec0729c98c93167b2be4c06a23f8285d34c397f66bb1bb",
+          "bytes": 229627,
+          "elapsed_ms": 251,
+          "note": ""
+        }
+      ],
+      "requests": 2,
+      "requests_charged": 2,
+      "requests_charged_accumulated": false,
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 90,
+      "products_recorded": 90,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/paradiseherbs.com.products.jsonl.gz",
+        "provenance": "stores/paradiseherbs.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "89245db203844b3018b75f8920a8e174bc12b4a75588d471561e9a0905776788",
+        "provenance": "d9c278063a22fccc0809d32b26a49f6e4d7166fe0a0da41654a126de009a86bd"
+      },
+      "bytes": {
+        "products": {
+          "raw": 229613,
+          "on_disk": 32767
+        },
+        "provenance": {
+          "raw": 36076,
+          "on_disk": 6638
+        }
+      }
+    },
+    {
+      "host": "livemomentous.com",
+      "role": "negative_control",
+      "category": "supplements",
+      "note": "no liver-support inventory: answers milk thistle with whey",
+      "roster_source": "incumbent-hosts.txt:35",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.livemomentous.com",
+      "robots": {
+        "url": "https://www.livemomentous.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:15.481247+00:00",
+        "sha256": "d7e081ebbdb64e4af6808d15ea14e26d3ef01afe97367f14d1065bb1d334fc98",
+        "bytes": 3646,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.livemomentous.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:17.482260+00:00",
+          "sha256": "320d3210010b6c0146484afb54651bc23c85bfa077989251431c741a6f6664fb",
+          "bytes": 416034,
+          "elapsed_ms": 356,
+          "note": ""
+        }
+      ],
+      "requests": 2,
+      "requests_charged": 2,
+      "requests_charged_accumulated": false,
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 89,
+      "products_recorded": 89,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/livemomentous.com.products.jsonl.gz",
+        "provenance": "stores/livemomentous.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "60448444d07ee601de2ea4f95d3c6a05af65ad8d6d499f4d76d4d6c47f026d6b",
+        "provenance": "9eed31bc4ee39a4fa4ae88aad8f53958ba49be6248d8b2abc5d7ce7ba40dac1f"
+      },
+      "bytes": {
+        "products": {
+          "raw": 416020,
+          "on_disk": 66296
+        },
+        "provenance": {
+          "raw": 35785,
+          "on_disk": 6528
+        }
+      }
+    },
+    {
+      "host": "nakednutrition.com",
+      "role": "negative_control",
+      "category": "supplements",
+      "note": "no liver-support inventory: answers milk thistle with protein stacks",
+      "roster_source": "incumbent-hosts.txt:36",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://nakednutrition.com",
+      "robots": {
+        "url": "https://nakednutrition.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:17.843328+00:00",
+        "sha256": "8b25002a8cbe994e1edeaabc1197485ac7c65c320d34f1beaa267ba8eca9b06b",
+        "bytes": 7399,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://nakednutrition.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:19.843440+00:00",
+          "sha256": "6db23a1406e0d9c0ba7eb46579d0928dd935a2825786f3f731c05de24c8dbb9e",
+          "bytes": 714737,
+          "elapsed_ms": 52,
+          "note": ""
+        }
+      ],
+      "requests": 2,
+      "requests_charged": 2,
+      "requests_charged_accumulated": false,
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 199,
+      "products_recorded": 199,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/nakednutrition.com.products.jsonl.gz",
+        "provenance": "stores/nakednutrition.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "65ae5f35e2417a0de6d16084e6cf91a379ae5e9b7f8b9d21d9d4c2c6ddbc731e",
+        "provenance": "4eb8482d069f9f35d7e1a4a656890c925cb423c9ba4d8cad1ee8eadd32d88d8e"
+      },
+      "bytes": {
+        "products": {
+          "raw": 714723,
+          "on_disk": 100417
+        },
+        "provenance": {
+          "raw": 80880,
+          "on_disk": 13589
+        }
+      }
+    },
+    {
+      "host": "floydhome.com",
+      "role": "relevant",
+      "category": "furniture",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:85",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://floydhome.com",
+      "robots": {
+        "url": "https://floydhome.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:22.006373+00:00",
+        "sha256": "a65ac4fad13da5a6fac3faab9d97914f3f21baaa60c97621681f9e6ca278087f",
+        "bytes": 3620,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://floydhome.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:24.006489+00:00",
+          "sha256": "eb8a229c70c3e41145bed8b394b81d03e73bd1c8b68fcd79ed397ed9eedba690",
+          "bytes": 3716072,
+          "elapsed_ms": 2061,
+          "note": ""
+        }
+      ],
+      "requests": 2,
+      "requests_charged": 2,
+      "requests_charged_accumulated": false,
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 173,
+      "products_recorded": 173,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/floydhome.com.products.jsonl.gz",
+        "provenance": "stores/floydhome.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "56847143a9f5f9fe4d3bbcc6ac34b42ad034ebb2926f27411ef9a8c3cf05ad3c",
+        "provenance": "6c6ec16849c849b8a433a30bd3e49dab2ed5fbafde88c62fb4e8016ea4a2a6fa"
+      },
+      "bytes": {
+        "products": {
+          "raw": 3716058,
+          "on_disk": 332756
+        },
+        "provenance": {
+          "raw": 69253,
+          "on_disk": 12211
+        }
+      }
+    },
+    {
+      "host": "branchfurniture.com",
+      "role": "relevant",
+      "category": "furniture",
+      "note": "desks and chairs: office rather than lounge, on purpose",
+      "roster_source": "candidate-hosts.txt:89",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.branchfurniture.com",
+      "robots": {
+        "url": "https://www.branchfurniture.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:34.717685+00:00",
+        "sha256": "8c21333755650059f6f3f3a1be8a04b1037125617f9a2abcd3de281c8e222e54",
+        "bytes": 3679,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.branchfurniture.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:36.719299+00:00",
+          "sha256": "befef9c358419434e5d17b5183e5d7822eadf105a1111efaa49cbe6f3e457379",
+          "bytes": 5434683,
+          "elapsed_ms": 2148,
+          "note": ""
+        }
+      ],
+      "requests": 2,
+      "requests_charged": 2,
+      "requests_charged_accumulated": false,
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 220,
+      "products_recorded": 220,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/branchfurniture.com.products.jsonl.gz",
+        "provenance": "stores/branchfurniture.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "46c4dc4c097b2e52c2a780eb35663d8f774307a5f29848d93269ac0bb8d6f202",
+        "provenance": "a8aee83e315e269f3c408c086210508e1f414daf9472e6225cabe1c87db17938"
+      },
+      "bytes": {
+        "products": {
+          "raw": 5434669,
+          "on_disk": 463522
+        },
+        "provenance": {
+          "raw": 89321,
+          "on_disk": 14808
+        }
+      }
+    },
+    {
+      "host": "sabai.design",
+      "role": "relevant",
+      "category": "furniture",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:87",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://sabai.design",
+      "robots": {
+        "url": "https://sabai.design/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:26.372991+00:00",
+        "sha256": "a353067a30343e1e3d5f5b138e56a66589a7e7b748030583271ee8ce7dea981f",
+        "bytes": 3614,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://sabai.design/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:28.373102+00:00",
+          "sha256": "d2c9bff076fe62e350da4e1bf723e407e66ae8eaee730840ae498819e3096dea",
+          "bytes": 7341849,
+          "elapsed_ms": 2578,
+          "note": ""
+        },
+        {
+          "url": "https://sabai.design/products.json?limit=250&page=2",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:31.001111+00:00",
+          "sha256": "88f4573b3bb2efda8abe53b386ced47992abfbb43ab5ddef93fa7c1d47f036a8",
+          "bytes": 1927051,
+          "elapsed_ms": 829,
+          "note": ""
+        }
+      ],
+      "requests": 3,
+      "requests_charged": 3,
+      "requests_charged_accumulated": false,
+      "pages_fetched": 2,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 321,
+      "products_recorded": 321,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/sabai.design.products.jsonl.gz",
+        "provenance": "stores/sabai.design.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "9067daebcd6c5458bf7c0eb5f95bb49b8bb9fae1cb01a353be49a55113db1025",
+        "provenance": "76024ebf208b9e1a68569d3160489522064caeb87b31098c60499f8f50671b8d"
+      },
+      "bytes": {
+        "products": {
+          "raw": 9268872,
+          "on_disk": 682936
+        },
+        "provenance": {
+          "raw": 131102,
+          "on_disk": 21463
+        }
+      }
+    },
+    {
+      "host": "deathwishcoffee.com",
+      "role": "relevant",
+      "category": "coffee",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:93",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.deathwishcoffee.com",
+      "robots": {
+        "url": "https://www.deathwishcoffee.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:41.312567+00:00",
+        "sha256": "cb9518026264803874325deb47586dc2422dd0b1415c6802653f64eb6f1b6629",
+        "bytes": 3652,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.deathwishcoffee.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:43.312610+00:00",
+          "sha256": "d4688f4b5ca2ed44dd6c0ac0cfa8a19a9078c35da52de35ec5115579ca6e0fb8",
+          "bytes": 625217,
+          "elapsed_ms": 385,
+          "note": ""
+        }
+      ],
+      "requests": 2,
+      "requests_charged": 2,
+      "requests_charged_accumulated": false,
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 142,
+      "products_recorded": 142,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/deathwishcoffee.com.products.jsonl.gz",
+        "provenance": "stores/deathwishcoffee.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "1ead4b8ef0634cc359c8273faecedb51f5cf9602cb8cb7b63f51b3982e9c95b9",
+        "provenance": "db7769275e1852da6695cb3825669adb01408fb4e8057b8e900476fb218fed84"
+      },
+      "bytes": {
+        "products": {
+          "raw": 625203,
+          "on_disk": 78319
+        },
+        "provenance": {
+          "raw": 58002,
+          "on_disk": 10358
+        }
+      }
+    },
+    {
+      "host": "vervecoffee.com",
+      "role": "relevant",
+      "category": "coffee",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:94",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.vervecoffee.com",
+      "robots": {
+        "url": "https://www.vervecoffee.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:44:43.705516+00:00",
+        "sha256": "321f34a4fa0988583132274415075e678bc2ea43cc73c675e8b62de8aead1a8a",
+        "bytes": 3634,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.vervecoffee.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:44:45.705536+00:00",
+          "sha256": "4154d1785cf556f01f90843ff3ff708ad494c43183b12111a3400f53e2550ace",
+          "bytes": 1438848,
+          "elapsed_ms": 565,
+          "note": ""
+        }
+      ],
+      "requests": 2,
+      "requests_charged": 2,
+      "requests_charged_accumulated": false,
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 175,
+      "products_recorded": 175,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/vervecoffee.com.products.jsonl.gz",
+        "provenance": "stores/vervecoffee.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "1983615ee1a669ce635154d114eb3fee64da8e5884680c51154c70b495e9c4e5",
+        "provenance": "65114aba26f184c131e3c57826a9f94b1fbace032754bbfa3a29da6dcc52b53d"
+      },
+      "bytes": {
+        "products": {
+          "raw": 1438834,
+          "on_disk": 119166
+        },
+        "provenance": {
+          "raw": 69926,
+          "on_disk": 12366
+        }
+      }
+    },
+    {
+      "host": "nemoequipment.com",
+      "role": "relevant",
+      "category": "outdoor",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:105",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://www.nemoequipment.com",
+      "robots": {
+        "url": "https://www.nemoequipment.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:02.281725+00:00",
+        "sha256": "7ad2a156480ce39b7312e88347c330a6db8630ae7ebd5d2717e841305b27db5e",
+        "bytes": 3652,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://www.nemoequipment.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:04.282742+00:00",
+          "sha256": "a0ad2e42be1a26e78926314b3e20fafa4f01c12269740b2bc8b1c3932f75c645",
+          "bytes": 585626,
+          "elapsed_ms": 518,
+          "note": ""
+        }
+      ],
+      "requests": 2,
+      "requests_charged": 2,
+      "requests_charged_accumulated": false,
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 97,
+      "products_recorded": 97,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/nemoequipment.com.products.jsonl.gz",
+        "provenance": "stores/nemoequipment.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "49a9e16921072b4df80e398304fdd05fb43fb2e8514abe29ca1c008ef99eb63f",
+        "provenance": "3db17ae7f18cc3c634cb523df4eeede0fd884a52cca7d684dcd6f060bef652cd"
+      },
+      "bytes": {
+        "products": {
+          "raw": 585612,
+          "on_disk": 85626
+        },
+        "provenance": {
+          "raw": 40307,
+          "on_disk": 6926
+        }
+      }
+    },
+    {
+      "host": "hyperlitemountaingear.com",
+      "role": "relevant",
+      "category": "outdoor",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:106",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://hyperlitemountaingear.com",
+      "robots": {
+        "url": "https://hyperlitemountaingear.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:04.806630+00:00",
+        "sha256": "2b3ef6f764a2f340b11fb96c83d6578ec7b5b3fc81c1c12f2b7b2a7ad9ac524a",
+        "bytes": 3667,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://hyperlitemountaingear.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:06.815392+00:00",
+          "sha256": "0ee4d9322ad54af844f6bc3c03d2d7c49562d4e9612ab1d8292bb86cf3970213",
+          "bytes": 956862,
+          "elapsed_ms": 673,
+          "note": ""
+        }
+      ],
+      "requests": 2,
+      "requests_charged": 2,
+      "requests_charged_accumulated": false,
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 119,
+      "products_recorded": 119,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/hyperlitemountaingear.com.products.jsonl.gz",
+        "provenance": "stores/hyperlitemountaingear.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "0facaf0b4d6fc057604aaf5dca51db475046f6288845ded157ac2e8ab10de30f",
+        "provenance": "b297719294db13143edc1c79cae5459dcce0a4c3cab6cb430628940a32ebc1b0"
+      },
+      "bytes": {
+        "products": {
+          "raw": 956848,
+          "on_disk": 122156
+        },
+        "provenance": {
+          "raw": 47928,
+          "on_disk": 8603
+        }
+      }
+    },
+    {
+      "host": "fromourplace.com",
+      "role": "relevant",
+      "category": "home-kitchen",
+      "note": "",
+      "roster_source": "candidate-hosts.txt:119",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://fromourplace.com",
+      "robots": {
+        "url": "https://fromourplace.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:31.292697+00:00",
+        "sha256": "c8424ff99e6c8615d43c7774e32a3cc558e4115959ae2a183cf44414a6fca5f6",
+        "bytes": 13168,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://fromourplace.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:33.295418+00:00",
+          "sha256": "0a12414898c7c118ef89519abeaace86b982fa08660bf0abce362b9c52c5ebb6",
+          "bytes": 1084090,
+          "elapsed_ms": 528,
+          "note": ""
+        }
+      ],
+      "requests": 2,
+      "requests_charged": 2,
+      "requests_charged_accumulated": false,
+      "pages_fetched": 1,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 123,
+      "products_recorded": 123,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/fromourplace.com.products.jsonl.gz",
+        "provenance": "stores/fromourplace.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "a299c3712b4aced8db587d090f98d1cbb55ab1160017c3c795b0fb4b48c7e1ae",
+        "provenance": "e196fc88e921feb8b55a797d962f74d88172e16feb7f0392d9d61d9613885981"
+      },
+      "bytes": {
+        "products": {
+          "raw": 1084076,
+          "on_disk": 112284
+        },
+        "provenance": {
+          "raw": 48629,
+          "on_disk": 8495
+        }
+      }
+    },
+    {
+      "host": "fellowproducts.com",
+      "role": "relevant",
+      "category": "home-kitchen",
+      "note": "brews coffee; a deliberate overlap with the coffee category",
+      "roster_source": "candidate-hosts.txt:118",
+      "walk_outcome": "exhausted",
+      "effective_origin": "https://fellowproducts.com",
+      "robots": {
+        "url": "https://fellowproducts.com/robots.txt",
+        "status": 200,
+        "fetched_at": "2026-09-08T22:46:25.630916+00:00",
+        "sha256": "206a94ab98a11f789513d6f2f2b72f223bb60ac4d056f2dfad898a616734c97a",
+        "bytes": 5394,
+        "products_json_allowed": true,
+        "crawl_delay_seconds": 2.0,
+        "note": ""
+      },
+      "skipped": null,
+      "fetches": [
+        {
+          "url": "https://fellowproducts.com/products.json?limit=250&page=1",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:27.631704+00:00",
+          "sha256": "f6f24c41d8f0b8b8c95da2ca41cfb0999db24eac3f64618da792adcfdf54478d",
+          "bytes": 664843,
+          "elapsed_ms": 531,
+          "note": ""
+        },
+        {
+          "url": "https://fellowproducts.com/products.json?limit=250&page=2",
+          "status": 200,
+          "fetched_at": "2026-09-08T22:46:29.631913+00:00",
+          "sha256": "8a922101b27b25547788647b3a633eb3bf95a539e1fe0e53e00e485c9dab65e4",
+          "bytes": 907269,
+          "elapsed_ms": 1651,
+          "note": ""
+        }
+      ],
+      "requests": 3,
+      "requests_charged": 3,
+      "requests_charged_accumulated": false,
+      "pages_fetched": 2,
+      "page_cap": 40,
+      "truncated": false,
+      "truncation_reason": "",
+      "products_seen": 441,
+      "products_recorded": 441,
+      "duplicates_dropped": 0,
+      "files": {
+        "products": "stores/fellowproducts.com.products.jsonl.gz",
+        "provenance": "stores/fellowproducts.com.provenance.jsonl.gz"
+      },
+      "file_sha256": {
+        "products": "1d447b8546d9ce9f441510b254d86a01c898fdd84a56fa650a432812e28e67d6",
+        "provenance": "f83b3ff2c60017b0c24769ce2f5d718e88851b8a59efce330457db4cc21d5b5f"
+      },
+      "bytes": {
+        "products": {
+          "raw": 1572084,
+          "on_disk": 231583
+        },
+        "provenance": {
+          "raw": 176667,
+          "on_disk": 31532
+        }
+      }
+    }
+  ],
+  "totals": {
+    "stores_collected": 19,
+    "stores_skipped": 0,
+    "stores_truncated": 0,
+    "products": 4903,
+    "duplicates_dropped": 0,
+    "requests_recorded": 48,
+    "requests_recorded_is_floor": true,
+    "bytes_raw": 45771805,
+    "bytes_on_disk": 5050390,
+    "categories": 5,
+    "off_platform_controls": 0,
+    "off_platform_controls_that_answered": 0
+  },
+  "per_store_counts": {
+    "gaiaherbs.com": 111,
+    "bulksupplements.com": 805,
+    "nutricost.com": 755,
+    "oregonswildharvest.com": 189,
+    "toniiq.com": 103,
+    "doublewoodsupplements.com": 201,
+    "purebulk.com": 550,
+    "paradiseherbs.com": 90,
+    "livemomentous.com": 89,
+    "nakednutrition.com": 199,
+    "floydhome.com": 173,
+    "branchfurniture.com": 220,
+    "sabai.design": 321,
+    "deathwishcoffee.com": 142,
+    "vervecoffee.com": 175,
+    "nemoequipment.com": 97,
+    "hyperlitemountaingear.com": 119,
+    "fromourplace.com": 123,
+    "fellowproducts.com": 441
+  },
+  "categories": {
+    "coffee": {
+      "stores": [
+        "deathwishcoffee.com",
+        "vervecoffee.com"
+      ],
+      "stores_with_inventory": [
+        "deathwishcoffee.com",
+        "vervecoffee.com"
+      ],
+      "products": 317
+    },
+    "furniture": {
+      "stores": [
+        "floydhome.com",
+        "branchfurniture.com",
+        "sabai.design"
+      ],
+      "stores_with_inventory": [
+        "floydhome.com",
+        "branchfurniture.com",
+        "sabai.design"
+      ],
+      "products": 714
+    },
+    "home-kitchen": {
+      "stores": [
+        "fromourplace.com",
+        "fellowproducts.com"
+      ],
+      "stores_with_inventory": [
+        "fromourplace.com",
+        "fellowproducts.com"
+      ],
+      "products": 564
+    },
+    "outdoor": {
+      "stores": [
+        "nemoequipment.com",
+        "hyperlitemountaingear.com"
+      ],
+      "stores_with_inventory": [
+        "nemoequipment.com",
+        "hyperlitemountaingear.com"
+      ],
+      "products": 216
+    },
+    "supplements": {
+      "stores": [
+        "gaiaherbs.com",
+        "bulksupplements.com",
+        "nutricost.com",
+        "oregonswildharvest.com",
+        "toniiq.com",
+        "doublewoodsupplements.com",
+        "purebulk.com",
+        "paradiseherbs.com",
+        "livemomentous.com",
+        "nakednutrition.com"
+      ],
+      "stores_with_inventory": [
+        "gaiaherbs.com",
+        "bulksupplements.com",
+        "nutricost.com",
+        "oregonswildharvest.com",
+        "toniiq.com",
+        "doublewoodsupplements.com",
+        "purebulk.com",
+        "paradiseherbs.com",
+        "livemomentous.com",
+        "nakednutrition.com"
+      ],
+      "products": 3092
+    }
+  },
+  "derivation": {
+    "derived_by": "scripts/build_demo_corpus.py",
+    "derived_from": "fixtures/real-catalogs-broad",
+    "source_corpus_version": "2.2.0",
+    "source_collection_sha256": "ffcfe5e74a8f0156129b95e780ae02e2a9413fff38dcb28ba139dbc5c7b5714e",
+    "policy": "a curated roster cut from the broad corpus. Store files are copied VERBATIM and their digests checked against the source manifest; no product record is parsed, filtered, re-ordered or re-serialised. Nothing here was collected: re-run scripts/build_demo_corpus.py to reproduce this directory byte for byte.",
+    "roster": [
+      "gaiaherbs.com",
+      "bulksupplements.com",
+      "nutricost.com",
+      "oregonswildharvest.com",
+      "toniiq.com",
+      "doublewoodsupplements.com",
+      "purebulk.com",
+      "paradiseherbs.com",
+      "livemomentous.com",
+      "nakednutrition.com",
+      "floydhome.com",
+      "branchfurniture.com",
+      "sabai.design",
+      "deathwishcoffee.com",
+      "vervecoffee.com",
+      "nemoequipment.com",
+      "hyperlitemountaingear.com",
+      "fromourplace.com",
+      "fellowproducts.com"
+    ],
+    "incumbents": [
+      "gaiaherbs.com",
+      "bulksupplements.com",
+      "nutricost.com",
+      "oregonswildharvest.com",
+      "toniiq.com",
+      "doublewoodsupplements.com",
+      "purebulk.com",
+      "paradiseherbs.com",
+      "livemomentous.com",
+      "nakednutrition.com"
+    ],
+    "organic": {
+      "floydhome.com": "furniture. 173 products, 148 priced, 38 whole-word furniture-probe hits (sofas, sectionals, beds, tables). The cleanest of the three: 29 of its rows are Serviceability or Swatch and the rest are furniture.",
+      "branchfurniture.com": "furniture. One of only two storefronts in the entire broad corpus that stocks a COFFEE TABLE, which is the query this roster exists to answer. 220 products, 207 priced, 48 furniture-probe hits. Replays to zero products under the pre-fix ingest response ceiling, which is why that fix and this roster land together.",
+      "sabai.design": "furniture. 321 products, 296 priced, 151 furniture-probe hits — the deepest furniture shelf in the corpus by a wide margin. 145 of its rows are components, swatches, protection plans and gift cards; taken anyway because the other 176 are sofas, sectionals, ottomans and side tables and no other store carries that depth.",
+      "deathwishcoffee.com": "coffee. 142 products, 40 coffee-probe hits — the strongest coffee vocabulary in the corpus (roast, cold brew, espresso). 1 junk row.",
+      "vervecoffee.com": "coffee. 175 products, 15 coffee-probe hits, 1 junk row. Picked over onyxcoffeelab.com and counterculturecoffee.com, which are equally clean but name their coffees after farms — 4 probe hits each — so they read as breadth this corpus cannot demonstrate.",
+      "nemoequipment.com": "outdoor. 97 products, 63 outdoor-probe hits and ZERO junk rows — tents, sleeping bags, sleeping pads. The purest catalogue in the broad corpus.",
+      "hyperlitemountaingear.com": "outdoor. 119 products, packs and shelters. Picked over cotopaxi.com (1,432 products, 51 outdoor hits, 627 APPAREL hits and only 711 distinct titles among 1,431 priced rows) because cotopaxi would have made outdoor the largest category in this corpus on the strength of colourway duplicates of t-shirts.",
+      "fromourplace.com": "home-kitchen. 123 products, 123 distinct titles, 1 junk row, 14 home-kitchen-probe hits. The clean one.",
+      "fellowproducts.com": "home-kitchen. 441 products, of which 139 are Replacement Part or Internal. Taken as the SECOND kitchen store rather than the first: home-kitchen is the thinnest probe family in this roster and fromourplace.com alone scores 14, under the broad corpus's measured floor of 15. With this store the family scores 32."
+    }
+  }
+}
