@@ -96,6 +96,17 @@ class FitAssessment:
     ``ShortlistSlot.fit_score`` is a third thing again (D29). Use :func:`intent_match_by_bid`
     to cross the product→bid boundary rather than renaming by hand at the call site, which is
     where the three would get conflated.
+
+    :attr:`brand` sits beside :attr:`canonical_name` and neither is a fit FEATURE — they are
+    the platform's crawled IDENTITY for the product this measurement is about, and the pair is
+    exactly what :func:`~exchange.retrieval.relevance.identity_surface` reads. It is carried
+    because :func:`~exchange.retrieval.roster._solicited` has to know whether the organic gate
+    would keep a product before it stakes a shop's one slot on it, and the retrieval is the
+    last place the brand exists: ``ingest.graph.Candidate`` carries it, ``RerankItem``
+    deliberately does not (the reranker may not see it), and nothing downstream re-reads the
+    graph. Defaulted to ``""`` so every hand-built assessment in this tree still constructs,
+    and absent from :meth:`as_payload` for the reason ``canonical_name`` is: the receipt this
+    annotates publishes the MEASUREMENT, and the identity is published by the shortlist slot.
     """
 
     product_id: str
@@ -103,6 +114,7 @@ class FitAssessment:
     fit_score: float
     features: FitFeatures
     reranker: str
+    brand: str = ""
 
     def as_payload(self) -> dict[str, Any]:
         return {

@@ -246,6 +246,12 @@ class CandidateRetrieval:
         scores = read_rerank(self.reranker, query.query_text, items)
         reranker_name = str(getattr(self.reranker, "name", type(self.reranker).__name__))
 
+        # Read off the CANDIDATE and not off `item`: `RerankItem` is deliberately the reduced
+        # view of what the reranker may see, and a brand is not a fit feature. It travels on
+        # the assessment because `retrieval.roster` needs the crawled identity — title AND
+        # brand, which is what `identity_surface` reads — to know which of a shop's products
+        # the organic gate would keep. See `FitAssessment.brand`.
+        brands = {candidate.product_id: candidate.brand for candidate in eligible}
         assessments = [
             FitAssessment(
                 product_id=item.product_id,
@@ -256,6 +262,7 @@ class CandidateRetrieval:
                     preference_alignment=item.preference_alignment,
                 ),
                 reranker=reranker_name,
+                brand=str(brands.get(item.product_id, "")),
             )
             for item, score in zip(items, scores, strict=True)
         ]

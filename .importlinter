@@ -65,3 +65,22 @@ forbidden_modules =
     redis
 ignore_imports =
     ** -> redis.exceptions
+
+[importlinter:contract:exchange-retrieval-is-below-exchange-ranking]
+# The boundary the organic gate's keep-rule was moved across, defended mechanically instead of
+# by habit. `exchange.ranking` reads `exchange.retrieval` (filters.py and __init__.py both
+# import `..retrieval.relevance`); nothing under `exchange/retrieval/` reads `exchange.ranking`,
+# and the reverse edge would be BOTH an inverted layer and a real import cycle —
+# `exchange.retrieval.__init__` imports `roster`, so a `roster -> ranking.filters` import runs
+# `exchange.ranking.__init__` while `exchange.retrieval` is still half-initialised.
+#
+# Written down because the alternative was invisible: `exchange.retrieval.roster` needs the
+# shortlist's own relevance verdict at ROSTER time (see `_solicited`), and importing
+# `ranking.filters` for it would have satisfied every gate in this repo while inverting the
+# layering. The rule moved DOWN into `retrieval.relevance` instead and `ranking.filters`
+# re-exports it, which is only safe as long as nobody adds the edge back.
+name = exchange.ranking sits above exchange.retrieval and the edge is one-way
+type = layers
+layers =
+    exchange.ranking
+    exchange.retrieval

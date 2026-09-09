@@ -1137,9 +1137,18 @@ EXPECTED_C3_FORBIDDEN_MODULES = (
 )
 
 #: The contract names `lint-imports` must report on the shipped configuration.
+#:
+#: The third one is a `layers` contract rather than a `forbidden` one, and it was added the day
+#: `exchange.retrieval.roster` needed the shortlist's own relevance verdict at roster time: the
+#: obvious way to get it was `from ..ranking.filters import organic_relevance_reason`, which
+#: would have inverted the `ranking -> retrieval` layering AND cycled through
+#: `exchange.retrieval.__init__`, and NOTHING in this file's configuration would have said so.
+#: The rule moved down into `retrieval.relevance` instead; the contract is what stops the edge
+#: coming back.
 EXPECTED_CONTRACT_NAMES = (
     "C3/S7: exchange must never import sealed-state or envelope modules",
     "D39: only proxyshop_support may construct a Redis client",
+    "exchange.ranking sits above exchange.retrieval and the edge is one-way",
 )
 
 
@@ -1205,7 +1214,9 @@ def test_the_shipped_import_contracts_are_reported_as_kept_by_name() -> None:
             f"lint-imports did not report {name!r} as KEPT -- the contract is gone, renamed "
             f"or no longer evaluated:\n{result.stdout}"
         )
-    assert "Contracts: 2 kept, 0 broken." in result.stdout, result.stdout
+    assert f"Contracts: {len(EXPECTED_CONTRACT_NAMES)} kept, 0 broken." in result.stdout, (
+        result.stdout
+    )
 
 
 def test_the_ledger_package_has_no_sealed_module_yet_and_that_is_reported_not_hidden() -> None:

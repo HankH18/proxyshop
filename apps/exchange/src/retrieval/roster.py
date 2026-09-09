@@ -133,6 +133,7 @@ from proxyshop_support.neo4j_auth import graph_credentials
 
 from .criteria import MalformedIntent, UndecidableCriterion, build_query
 from .fit import FitAssessment
+from .relevance import identity_off_topic
 from .service import CandidateRetrieval, RetrievalResult
 from .sources import GraphCandidateSource
 
@@ -506,9 +507,84 @@ class GraphShopRoster:
                 f"auction still runs; it has no shops of the exchange's own to solicit"
             )
 
-        solicited = _solicited(shops, fit=fit)
-        solicited.sort(key=lambda shop: (-shop.intent_match, shop.store_id))
-        kept = tuple(solicited[:wanted])
+        # WHICH product each shop is rostered on, decided against the rule that will judge the
+        # row it becomes — see `_solicited`. The identity is the retrieval's own reading of the
+        # platform's crawl: title and brand, exactly what `identity_surface` reads and exactly
+        # what `catalog_identity` publishes downstream.
+        #
+        # TWO READINGS OF ONE CRAWL, and TWO INSTANCES OF ONE RULE. This reads the title and
+        # brand off the GRAPH (`ingest.graph.Candidate`) and judges them with the RETRIEVAL's
+        # `TopicalRelevance`; `rank_auction` reads them off whatever `ranking.serving.catalog_of`
+        # resolved — the graph again under `EXCHANGE_RANKING_CATALOG`, or a deployment document's
+        # `catalog` block, which the demo states and which is generated from the same crawl — and
+        # judges them with its OWN rule (`ranking/__init__.py` default-constructs one when its
+        # caller passes none, and `rank_auction` passes none). Both are default-constructed
+        # today, so they agree; verified on the demo's own document for the pair this repairs,
+        # where both readings answer `The Modular Table` / `RIZE` and `The Lift Off Coffee
+        # Table` / `RIZE`. But they are not the same object and there is no wiring that widens
+        # both at once, so what happens below is a PREDICTION of the gate's verdict rather than
+        # the verdict itself.
+        #
+        # WHAT A WRONG PREDICTION COSTS, in both directions, and why it is bounded. Too strict
+        # (this refuses a product the gate would have kept) re-points the shop onto some other
+        # product of its own; too loose re-points it onto one the gate then refuses, which is
+        # exactly today's behaviour — refused at the shortlist, with a reason. Neither can cost
+        # a shop its PLACE, because the two questions are answered by two different numbers,
+        # which is the next paragraph.
+        identities = {
+            assessment.product_id: {
+                "title": assessment.canonical_name,
+                "brand": assessment.brand,
+            }
+            for assessment in result.assessments
+        }
+        keeps_cache: dict[str, bool] = {}
+
+        def keeps(product_id: str) -> bool:
+            cached = keeps_cache.get(product_id)
+            if cached is None:
+                cached = (
+                    identity_off_topic(
+                        query.query_text, identities.get(product_id), retrieval.relevance
+                    )
+                    is None
+                )
+                keeps_cache[product_id] = cached
+            return cached
+
+        solicited = _solicited(shops, fit=fit, keeps=keeps)
+
+        # WHICH SHOPS, and WHICH PRODUCT, ARE TWO QUESTIONS AND THEY TAKE TWO NUMBERS.
+        #
+        # This list is cut to `wanted`, so whatever it is sorted by decides who is on the
+        # roster at all. Sorting it by the row's published `intent_match` — the fit of the
+        # product the shop was re-pointed ONTO — would mean that asking the gate which product
+        # to name could push a shop past the cut, and a shop that falls off here reaches
+        # NOTHING: not the shortlist, not `entries`, not `excluded`, and no reason is written
+        # anywhere, because a shop that was never solicited has nothing to be refused for.
+        # That is strictly worse than the defect this change repairs, which at least left a
+        # sentence on the response. Measured on the two products this repairs plus `limit=1`:
+        # floydhome carries the best-matching product either shop has, was the one shop
+        # rostered before, and sorting on the re-pointed fit dropped it entirely.
+        #
+        # So SELECTION keeps the number it always had — the shop's best ELIGIBLE product,
+        # which is `max(fit[pid])` over what it carries and is what `intent_match` used to be —
+        # and the roster's shop set is therefore bit-for-bit what it was before `keeps` existed.
+        # `keeps` chooses which product a shop is rostered on. It cannot choose whether.
+        #
+        # ORDERING then uses the published number, so `ShopRoster`'s own documented ordering
+        # ("by `intent_match` descending then `store_id`") stays true of what comes back and no
+        # reader has to know that a second number was ever involved.
+        best_eligible: dict[str, float] = {}
+        for shop in shops:
+            scores = [fit[pid] for pid in shop.product_ids if pid in fit]
+            if scores:
+                store = str(shop.store_id)
+                best_eligible[store] = max(best_eligible.get(store, float("-inf")), max(scores))
+        solicited.sort(key=lambda shop: (-best_eligible[shop.store_id], shop.store_id))
+        kept = tuple(
+            sorted(solicited[:wanted], key=lambda shop: (-shop.intent_match, shop.store_id))
+        )
         elapsed_ms = (self.clock() - started) * 1000.0
         if not kept:
             return ShopRoster(
@@ -597,22 +673,79 @@ def _nothing_retrieved_reason(result: RetrievalResult) -> str:
     )
 
 
-def _solicited(shops: Sequence[ShopCandidate], *, fit: Mapping[str, float]) -> list[SolicitedShop]:
+def _solicited(
+    shops: Sequence[ShopCandidate],
+    *,
+    fit: Mapping[str, float],
+    keeps: Callable[[str], bool] = lambda _product_id: True,
+) -> list[SolicitedShop]:
     """Pivot graph shops onto roster rows, dropping any that carries nothing eligible.
 
     A shop is kept only for the products that survived the intent's HARD constraints in
     :class:`~exchange.retrieval.service.CandidateRetrieval` — R19 is a filter, and a shop
     whose only matching product was excluded has nothing to be solicited about. It is
-    rostered on its BEST eligible product, and the price it carries is the cheapest
-    provenanced offer for **that** product: a shop's cheapest offer overall may be for a
-    product this auction is not about, and quoting it would price the wrong thing.
+    rostered on its best eligible product **that the shortlist will actually keep**, and the
+    price it carries is the cheapest provenanced offer for THAT product: a shop's cheapest
+    offer overall may be for a product this auction is not about, and quoting it would price
+    the wrong thing.
+
+    WHY ``keeps`` EXISTS, and what it cost to leave it out
+    -----------------------------------------------------
+    A shop gets ONE roster row, so choosing its product spends its only slot. This used to
+    choose by cosine alone::
+
+        product_ref = max(eligible, key=lambda pid: (fit[pid], pid))
+
+    and the row then met a SECOND rule it had not been chosen against:
+    ``exchange.ranking.filters.organic_relevance_reason`` judges an organic row on
+    :func:`~exchange.retrieval.relevance.identity_surface` — the crawled title and brand, all
+    ``catalog_identity`` returns — while retrieval judged the same product on
+    :func:`~exchange.retrieval.relevance.candidate_surface`, which also carries categories,
+    ingredients, attribute keys and their readings, with the observed variant names beside it.
+    The two surfaces can disagree, and where they do the shop dies holding a product both
+    layers would have kept. Measured on the served route against the nineteen-store demo graph
+    (98,001 nodes), ``"a walnut coffee table for the lounge"``::
+
+        floydhome.com  fit 0.634558  "The Modular Table"          $1275  gate: REFUSED
+        floydhome.com  fit 0.626495  "The Lift Off Coffee Table"   $700  gate: kept
+
+    0.008 apart. The roster took the Modular Table, the gate refused it on ``"The Modular
+    Table RIZE"`` — one content word of ``{walnut, coffee, table, lounge}`` where the rule
+    needs two or half — and the shopper was shown one slot where two were available. **The
+    refusal is right**: that product is a walnut table and is not a coffee table. What was
+    wrong was staking the slot on it.
+
+    ``keeps`` is that second rule, asked here. Its default accepts everything, so a caller
+    that does not pass one — every hand-built source in this tree — gets exactly the behaviour
+    this function has always had.
+
+    **The fallback is load-bearing and is not an optimisation.** A shop with no keepable
+    product is rostered on its plain best fit, unchanged, so it is still REPRESENTED in
+    ``entries`` (R10) and still reaches the shortlist as a list-price row where the gate
+    refuses it AND SAYS WHY. Dropping such a shop here would empty the same screen while
+    deleting the sentence that explains it, which is a worse defect than the one this repairs.
+
+    **"Never removes a shop" is only half the guarantee, and the other half is at the call
+    site.** This function returns one row per shop whatever ``keeps`` answers — but it also
+    sets ``intent_match`` from the chosen product, and :meth:`GraphShopRoster.solicit` CUTS the
+    list it gets back to ``limit``. Sorting that cut by the re-pointed fit would let ``keeps``
+    push a shop off the roster after all, which is why selection there is done on the shop's
+    best ELIGIBLE fit instead. See the comment above the sort; the two halves only work
+    together.
+
+    Args:
+        shops: the crawled shops to pivot, from ``ingest.graph.candidate_shops``.
+        fit: ``{product_id: fit_score}`` for the products this retrieval vouched for.
+        keeps: whether the shortlist's organic gate would keep this product's row. Consulted
+            only to CHOOSE between products a shop already has; it never removes a shop.
     """
     rows: list[SolicitedShop] = []
     for shop in shops:
         eligible = [pid for pid in shop.product_ids if pid in fit]
         if not eligible:
             continue
-        product_ref = max(eligible, key=lambda pid: (fit[pid], pid))
+        keepable = [pid for pid in eligible if keeps(pid)]
+        product_ref = max(keepable or eligible, key=lambda pid: (fit[pid], pid))
         priced = [offer for offer in shop.offers if offer.product_id == product_ref]
         cheapest = min(priced, key=lambda offer: (offer.price, offer.offer_id), default=None)
         rows.append(

@@ -127,6 +127,7 @@ from .relevance import (
     candidate_surface,
     content_terms,
     head_term,
+    identity_off_topic,
     identity_surface,
     variant_surface,
 )
@@ -241,6 +242,7 @@ __all__ = [
     "graph_sessions_from_env",
     "intent_clusters_of",
     "head_term",
+    "identity_off_topic",
     "identity_surface",
     "intent_match_by_bid",
     "make_candidate",
