@@ -87,10 +87,15 @@ from __future__ import annotations
 
 from ..intent._spellings import bind_package
 from .deferred import (
+    ANONYMOUS_CALLER,
     CLAIM_VERIFIED_KIND,
+    DEDUP_WINDOW_SECONDS,
     LIVE_CHECK_DIMENSION,
+    MAX_FETCHES_PER_ORIGIN,
     MAX_QUEUED_TARGETS,
     MAX_RECORDED_CHECKS,
+    ORIGIN_WINDOW_SECONDS,
+    FetchBudget,
     LiveCheckLedger,
     LiveCheckQueue,
     LiveCheckRecord,
@@ -133,11 +138,16 @@ from .targets import (
 
 __all__ = [
     "ALLOWED_PAGE_SCHEMES",
+    "ANONYMOUS_CALLER",
     "CLAIM_VERIFIED_KIND",
+    "DEDUP_WINDOW_SECONDS",
     "LIVE_CHECK_DIMENSION",
+    "MAX_FETCHES_PER_ORIGIN",
     "MAX_QUEUED_TARGETS",
     "MAX_RECORDED_CHECKS",
+    "ORIGIN_WINDOW_SECONDS",
     "USER_AGENT",
+    "FetchBudget",
     "FetchedPage",
     "GuardedPageFetcher",
     "LiveCheckLedger",

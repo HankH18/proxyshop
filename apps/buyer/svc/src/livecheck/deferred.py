@@ -57,12 +57,14 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 import uuid
-from collections import deque
-from collections.abc import Iterable, Mapping
+from collections import OrderedDict, deque
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from claim_verification.live_page import (
     AGREES,
@@ -83,12 +85,21 @@ from .targets import product_pages as _pages
 from .targets import registered_domains as _domains
 
 __all__ = [
+    "ANONYMOUS_CALLER",
     "CLAIM_VERIFIED_KIND",
+    "DEDUP_WINDOW_SECONDS",
     "LEDGER_SINK_METHODS",
     "LIVE_CHECK_DIMENSION",
+    "MAX_FETCHES_PER_ORIGIN",
     "MAX_PITCH_TEXT_CHARS",
     "MAX_QUEUED_TARGETS",
     "MAX_RECORDED_CHECKS",
+    "MAX_REMEMBERED_URLS",
+    "MAX_TRACKED_BUDGETS",
+    "ORIGIN_WINDOW_SECONDS",
+    "REFUSED_DUPLICATE",
+    "REFUSED_OVER_BUDGET",
+    "FetchBudget",
     "LiveCheckLedger",
     "LiveCheckQueue",
     "LiveCheckRecord",
@@ -152,6 +163,217 @@ MAX_PITCH_TEXT_CHARS = 20_000
 
 
 # ==============================================================================================
+# What one caller may cost a merchant
+# ==============================================================================================
+
+#: Which bound refused a target. A token rather than a sentence: see :meth:`FetchBudget.admit`.
+REFUSED_DUPLICATE = "duplicate"
+REFUSED_OVER_BUDGET = "over_budget"
+
+#: The caller key every render that carries no live buyer session shares.
+#:
+#: ONE bucket for the whole anonymous internet, deliberately. See :class:`FetchBudget`.
+ANONYMOUS_CALLER = "anonymous"
+
+#: How long the platform remembers having fetched a URL, and declines to fetch it again.
+#:
+#: Five minutes because of what the check IS: a drift detector over a storefront page. A page
+#: that moved its price inside five minutes moved it again by the time a shopper reads the
+#: verdict, and re-reading it that often buys the platform nothing it does not already hold —
+#: while re-reading it on demand is the cheapest amplifier there is, since replaying one
+#: captured request body costs the caller a single POST.
+DEDUP_WINDOW_SECONDS = 300.0
+
+#: The most fetches ONE caller may cause at ONE merchant host inside
+#: :data:`ORIGIN_WINDOW_SECONDS`.
+#:
+#: Twelve, against a real shortlist of four slots: a shopper who re-runs their whole shortlist
+#: three times a minute against the same store never meets it, and a caller trying to make
+#: this platform hammer one storefront meets it on their thirteenth page. The bound that
+#: matters is the ANONYMOUS one, which every caller with no session shares — so the ceiling on
+#: what the internet at large can point at one merchant through this platform is twelve
+#: fetches a minute, whatever the request rate.
+MAX_FETCHES_PER_ORIGIN = 12
+ORIGIN_WINDOW_SECONDS = 60.0
+
+#: How many recently-fetched URLs are remembered for :data:`DEDUP_WINDOW_SECONDS`.
+#:
+#: Bounded by making room, not by refusing — a full table must never become "fetch everything
+#: again", and it must never become "fetch nothing" either. Evicting the oldest URL does let a
+#: caller push a page out of memory and re-fetch it, and what keeps that out of reach is the
+#: RATIO rather than the eviction rule, exactly as it is for
+#: ``buyer_svc.auth.routes.MagicLinkRateLimiter``: the per-origin budget admits at most
+#: ``MAX_FETCHES_PER_ORIGIN`` per host per minute per caller, so one caller across the
+#: nineteen registered merchant domains can buy 19 x 12 x 5 = 1,140 entries inside one dedup
+#: window, well under this ceiling. A deployment with many more registered domains, or many
+#: authenticated callers, can reach it; the failure there is a duplicate fetch, never a
+#: refused shopper.
+MAX_REMEMBERED_URLS = 4096
+
+#: How many ``(caller, host)`` budgets are tracked at once. Same eviction posture, and the
+#: same reason: a full table that refused would be a service-wide denial of the check that an
+#: unauthenticated caller could arm for free, which is strictly worse than the flood it would
+#: be refusing.
+MAX_TRACKED_BUDGETS = 4096
+
+
+def _host_of(url: str) -> str:
+    """The merchant this URL addresses, lower-cased, or ``""`` when it addresses nobody.
+
+    Never raises: ``urlsplit("https://[")`` does, and the value reaching here came off the
+    wire. A URL with no readable host is keyed under ``""`` and therefore budgeted with the
+    other unreadable ones rather than escaping the budget entirely.
+    """
+    try:
+        return (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+class FetchBudget:
+    """What one caller may cost one merchant. Two bounds, and they close different attacks.
+
+    The live-page check gives anyone who can reach ``POST /buyer/shortlist/render`` a way to
+    make this platform issue outbound HTTP to a registered merchant.
+    :func:`buyer_svc.livecheck.targets.usable_page_url` already decides WHERE that request may
+    go — https, port 443, no userinfo, the registered domain or a proper subdomain of it — and
+    that is containment, not a budget: it says nothing about how much, how often, or on whose
+    behalf. This class is the other half.
+
+    **Dedup**, keyed on the exact URL. A captured request body replayed in a loop is the
+    cheapest amplifier available, and it is also the one shape that buys the platform nothing:
+    the second reading of a page inside :data:`DEDUP_WINDOW_SECONDS` answers a question the
+    first one already answered. Refused duplicates are NOT charged to the origin budget below,
+    because a request that causes no fetch must not be able to spend a real shopper's
+    allowance.
+
+    **A per-``(caller, host)`` budget**, for the caller who defeats dedup by varying the URL —
+    a query string is free to change and a storefront serves the same page under any number of
+    them. It counts ADMISSIONS rather than attempts, in the sense
+    ``buyer_svc.auth.routes.MagicLinkRateLimiter`` uses: an admitted target is one this
+    platform has undertaken to fetch, and whether ``POST /buyer/livecheck/run`` is ever driven
+    is not this class's business. Over-counting a queue nobody drains is the safe direction.
+
+    Why the caller is the key, and why anonymous is ONE key
+    ------------------------------------------------------
+    R5 gives a buyer a rotating pseudonym and nothing else, so the pseudonym is the only
+    stable, service-issued name a caller can have here — and it is not free: it costs a
+    mailbox and a redeemed magic link. Every caller with no live session therefore shares a
+    single bucket, which is what makes the anonymous ceiling a ceiling on the INTERNET rather
+    than a ceiling per attacker: an unauthenticated flood cannot buy more allowance by
+    arriving from more addresses, because there is no address in the key.
+
+    What that costs, said plainly: an anonymous flood can spend the anonymous allowance for a
+    merchant and a genuine signed-out shopper's slot then goes unchecked for the rest of the
+    minute. That is a denial of an optional EVIDENCE feature, and the alternative — a
+    per-IP-per-caller key — is an allowance an attacker mints for free. The shortlist itself
+    is never refused by anything in this class.
+
+    Process-local, like every other budget in this service. Behind several replicas each keeps
+    its own, and the effective ceiling is ``replicas x`` this one. ``ProcessLocalStateUnsafe``
+    already refuses a multi-worker buyer process for the session store's sake, which is what
+    keeps that honest here too.
+    """
+
+    def __init__(
+        self,
+        *,
+        dedup_window: float = DEDUP_WINDOW_SECONDS,
+        per_origin: int = MAX_FETCHES_PER_ORIGIN,
+        origin_window: float = ORIGIN_WINDOW_SECONDS,
+        max_urls: int = MAX_REMEMBERED_URLS,
+        max_budgets: int = MAX_TRACKED_BUDGETS,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self._dedup_window = max(0.0, float(dedup_window))
+        self._per_origin = max(1, int(per_origin))
+        self._origin_window = max(0.0, float(origin_window))
+        self._max_urls = max(1, int(max_urls))
+        self._max_budgets = max(1, int(max_budgets))
+        #: Monotonic, never wall-clock: a budget measured against a clock an operator can move
+        #: backwards is a budget an NTP correction refills.
+        self._clock = clock if clock is not None else time.monotonic
+        self._recent: OrderedDict[str, float] = OrderedDict()
+        self._hits: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def admit(self, url: Any, caller: Any = "") -> tuple[str, str]:
+        """``("", "")`` when this fetch may be made, else ``(why not, which bound)``.
+
+        The second element is :data:`REFUSED_DUPLICATE` or :data:`REFUSED_OVER_BUDGET` — the
+        bound that refused, as a token rather than as a sentence to be pattern-matched. They
+        are different findings and a caller that counts them must not have to read English to
+        tell them apart: duplicates mean this platform is being replayed at, a spent budget
+        means somebody is concentrating its traffic on one merchant.
+
+        The sentence, like every other refusal in this package, is returned rather than raised
+        and is written to be shown to a shopper beside the slot it explains.
+        """
+        address = text(url)
+        if not address:
+            return "", ""
+        who = text(caller) or ANONYMOUS_CALLER
+        now = self._clock()
+        with self._lock:
+            # The dedup check runs BEFORE the URL is parsed for its host, because the shape it
+            # catches — the same shortlist rendered again — is the commonest thing that
+            # reaches here, on a path whose whole budget is one append. `urlsplit` on a page
+            # this platform has already decided not to read is work bought for nothing.
+            seen = self._recent.get(address)
+            if seen is not None and now - seen < self._dedup_window:
+                return (
+                    "this platform read this exact page "
+                    f"{max(0, int(now - seen))}s ago and does not read it again inside "
+                    f"{int(self._dedup_window)}s",
+                    REFUSED_DUPLICATE,
+                )
+            key = (who, _host_of(address))
+            hits = [when for when in self._hits.get(key, ()) if now - when < self._origin_window]
+            if len(hits) >= self._per_origin:
+                self._hits[key] = hits
+                self._hits.move_to_end(key)
+                return (
+                    f"this platform has already read {len(hits)} pages at "
+                    f"{key[1] or 'this host'} for this caller inside "
+                    f"{int(self._origin_window)}s, which is its budget",
+                    REFUSED_OVER_BUDGET,
+                )
+            hits.append(now)
+            self._hits[key] = hits
+            self._hits.move_to_end(key)
+            self._recent[address] = now
+            self._recent.move_to_end(address)
+            self._evict(now)
+        return "", ""
+
+    def _evict(self, now: float) -> None:
+        """Keep both tables bounded. Caller holds ``_lock``.
+
+        Collects what has expired from the FRONT and stops at the first survivor, so a request
+        costs what it collects rather than what the table holds — the shape
+        ``MagicLinkRateLimiter._forget_stale`` arrived at after its O(tracked) sweep was
+        measured as the amplifier for the flood that filled it. Both tables are kept in
+        ascending order of their newest write, which is the order they expire in.
+        """
+        while self._recent:
+            address = next(iter(self._recent))
+            if now - self._recent[address] < self._dedup_window:
+                break
+            del self._recent[address]
+        while len(self._recent) > self._max_urls:
+            self._recent.popitem(last=False)
+
+        while self._hits:
+            key = next(iter(self._hits))
+            when = self._hits[key]
+            if when and now - when[-1] < self._origin_window:
+                break
+            del self._hits[key]
+        while len(self._hits) > self._max_budgets:
+            self._hits.popitem(last=False)
+
+
+# ==============================================================================================
 # The queue
 # ==============================================================================================
 
@@ -165,29 +387,61 @@ class LiveCheckQueue:
     ones from an hour ago.
     """
 
-    def __init__(self, maxlen: int = MAX_QUEUED_TARGETS) -> None:
+    def __init__(self, maxlen: int = MAX_QUEUED_TARGETS, budget: FetchBudget | None = None) -> None:
         self._items: deque[LiveCheckTarget] = deque(maxlen=max(1, int(maxlen)))
         self._lock = threading.Lock()
         #: How many targets have been evicted unchecked. Reported by the route, because a
         #: queue that is silently dropping work looks exactly like a queue with no work.
         self.dropped = 0
+        #: What one caller may cost one merchant. On the QUEUE rather than in
+        #: :func:`queue_live_checks`, so that nothing can enqueue a target without passing it:
+        #: a bound reachable only through one function is a bound the next caller added to
+        #: this module does not have.
+        self.budget = budget if budget is not None else FetchBudget()
+        #: How many targets this queue refused, by reason. Counted separately because they are
+        #: different findings: duplicates mean the platform is being replayed at, and spent
+        #: budgets mean somebody is trying to concentrate its traffic on one merchant.
+        self.refused_duplicate = 0
+        self.refused_over_budget = 0
 
     def __len__(self) -> int:
         with self._lock:
             return len(self._items)
 
-    def offer(self, targets: Iterable[LiveCheckTarget]) -> int:
-        """Append targets. Returns how many were accepted; never raises, never blocks on I/O."""
+    def offer(
+        self, targets: Iterable[LiveCheckTarget], *, caller: str = ""
+    ) -> tuple[int, list[tuple[LiveCheckTarget, str]]]:
+        """Append what the budget admits. ``(accepted, [(target, why it was refused), ...])``.
+
+        Never raises and never blocks on I/O: this runs on the shopper's path, where the whole
+        cost of this feature is meant to be an append.
+
+        ``caller`` is the buyer pseudonym behind the render's ``X-Buyer-Session`` header, or
+        ``""`` for a render that carried none — which every shipped surface does today, so
+        ``""`` is the ordinary case and not an error. See :class:`FetchBudget` for why every
+        such caller shares one allowance.
+        """
         accepted = 0
-        with self._lock:
-            for target in targets:
-                if not isinstance(target, LiveCheckTarget):
-                    continue
+        refused: list[tuple[LiveCheckTarget, str]] = []
+        for target in targets:
+            if not isinstance(target, LiveCheckTarget):
+                continue
+            # OUTSIDE the queue's own lock, deliberately: `FetchBudget` takes its own, and
+            # holding both would order two locks on the shopper's path for no gain.
+            why, bound = self.budget.admit(target.url, caller)
+            if why:
+                refused.append((target, why))
+                if bound == REFUSED_DUPLICATE:
+                    self.refused_duplicate += 1
+                else:
+                    self.refused_over_budget += 1
+                continue
+            with self._lock:
                 if len(self._items) == self._items.maxlen:
                     self.dropped += 1
                 self._items.append(target)
                 accepted += 1
-        return accepted
+        return accepted, refused
 
     def drain(self, limit: int | None = None) -> list[LiveCheckTarget]:
         """Take up to ``limit`` targets off the front. Oldest first."""
@@ -348,6 +602,7 @@ def queue_live_checks(
     product_pages: Any = None,
     queue: LiveCheckQueue | None = None,
     ledger: LiveCheckLedger | None = None,
+    caller: str = "",
 ) -> tuple[int, list[TargetRefused]]:
     """Resolve one shortlist's slots to targets and enqueue them. **The whole shopper cost.**
 
@@ -360,6 +615,16 @@ def queue_live_checks(
     sponsored side is the side with the motive and therefore the side checked adversarially,
     and a scraped shop's pitch was written by the platform out of its own snapshot — checking
     the platform's own prose against the store's page would be grading the wrong party.
+
+    ``caller`` is who asked, for :class:`FetchBudget`: the buyer pseudonym behind the render's
+    ``X-Buyer-Session`` header, or ``""`` for a render that carried none. Every shipped buyer
+    surface renders a shortlist without a session — ``apps/buyer/app/journey/Journey.tsx``
+    says so in as many words — so ``""`` is the ordinary case, and it is the case the tightest
+    allowance applies to. A target the budget refuses is recorded on the ledger as a
+    :class:`~buyer_svc.livecheck.targets.TargetRefused` beside the refusals
+    :func:`~buyer_svc.livecheck.targets.targets_for` made, because "we did not read this page,
+    and here is why" is the same answer whether the reason was a hostile URL or a spent
+    budget, and ``GET /buyer/livecheck/{auction_id}`` already serves it.
     """
     target_queue = queue if queue is not None else live_check_queue()
     record_ledger = ledger if ledger is not None else live_check_ledger()
@@ -411,7 +676,18 @@ def queue_live_checks(
             )
         )
 
-    accepted = target_queue.offer(carried)
+    accepted, over_budget = target_queue.offer(carried, caller=caller)
+    for target, why in over_budget:
+        refusals.append(
+            TargetRefused(
+                store_id=target.store_id,
+                product_ref=target.product_ref,
+                reason=why,
+                slot=target.slot,
+                auction_id=target.auction_id,
+                bid_ref=target.bid_ref,
+            )
+        )
     if refusals:
         record_ledger.refuse(refusals)
     return accepted, refusals

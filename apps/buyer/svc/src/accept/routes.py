@@ -11,6 +11,29 @@ Two routes, and the split between them is R2 on one side and R3 on the other::
 reach one: :func:`buyer_svc.accept.render_shortlist` takes no client, so looking at a
 shortlist cannot become accepting one no matter what a future edit does to this file.
 
+Who is asking, and what it changes
+----------------------------------
+``/render`` reads ``X-Buyer-Session``. It reads it in a **route-level dependency**, not as a
+handler parameter and never as a ``Request``, so the property above is untouched in both of
+its forms: the handler still holds no ``app.state``, and its signature is still ``{"body"}``
+— the wider fence ``tests/test_shortlist_pitch.py`` puts around that property, which this
+change satisfies rather than loosens. See :data:`_CALLER`.
+
+The posture is ``buyer_svc.feedback.routes``', character for character: the header is
+OPTIONAL, a header that is present and is not a live session is a **401**, and an absent one
+is an anonymous caller rather than an error.
+
+Optional rather than required, and this is a measurement rather than a preference. No shipped
+buyer surface sends the header on this route — ``apps/buyer/app/journey/wire.ts`` posts the
+render with ``content-type`` and nothing else, and ``apps/buyer/app/journey/Journey.tsx``
+states that steps 1 through 5 are "all sessionless already" — and the demo deployment cannot
+issue a session at all, because ``GET /buyer/auth/sign-in`` answers ``{"offered": false}``
+wherever no MTA is configured (``docs/deploy.md``). A required credential here would 401 every
+real shopper on every deployment in this repository. So the session does not gate the
+shortlist; it gates what the shortlist may COST a merchant. See
+:class:`buyer_svc.livecheck.deferred.FetchBudget`: the pseudonym is the budget's key, and
+every caller without one shares a single allowance.
+
 ``/accept`` never returns a redirect and never sets ``Location``. It returns the exchange's
 permalink as data and the client navigates. That is deliberate: an API that 302s is an API
 whose *callers* cannot see where they are being sent before they go, and R3's whole subject
@@ -38,9 +61,10 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import Any
+from contextvars import ContextVar
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel, Field, StrictBool
 
 from ..composition import DeploymentConfigurationError, ExchangeCallFailed, ensure_configured
@@ -269,7 +293,97 @@ class AcceptResponse(BaseModel):
     pinned_to_domain: str | None = None
 
 
-@router.post("/render", response_model=RenderResponse)
+#: The credential this service issues buyers, spelled as ``buyer_svc.auth.routes`` spells it
+#: and as ``apps/buyer/app/chat/session.ts`` sends it. Declared here rather than imported
+#: because importing that module would pull the auth router — and its FastAPI dependencies —
+#: into every consumer of this one.
+SessionHeader = Annotated[str | None, Header(alias="X-Buyer-Session")]
+
+
+def _caller_for(session_id: str | None) -> str:
+    """The pseudonym behind ``X-Buyer-Session``, or ``""`` when the render carried no header.
+
+    ``buyer_svc.feedback.routes._pseudonym_for``'s shape, and its reasoning transfers exactly:
+    *a header that is present and not a live session is a 401, because a caller that sent a
+    credential is telling us who they are, and quietly ignoring a bad one would mean the check
+    is skipped in exactly the case an attacker controls.* Here the check being skipped is
+    :class:`~buyer_svc.livecheck.deferred.FetchBudget`'s allowance, so a bad credential that
+    fell through to ``""`` would be a way to choose which bucket to spend.
+
+    It is written out here rather than imported from that module for the reason
+    :data:`SessionHeader` is: this file must not import a sibling feature's router. The import
+    of the auth service is deferred into the body for the same reason, and because a render
+    that carries no header must not pay for it at all.
+
+    Takes a ``str``, not a ``Request``. R2's property — this handler cannot reach an exchange
+    client — is a statement about what is in the handler's scope, and a header is a value off
+    the wire, not the application.
+    """
+    if not session_id:
+        return ""
+    try:
+        from ..auth.routes import get_auth_service
+        from ..auth.sessions import SessionError
+    except Exception as exc:  # pragma: no cover - the login package is part of this service
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="buyer sessions are unavailable, so this session could not be checked",
+        ) from exc
+    try:
+        return str(get_auth_service().session(session_id).pseudonym)
+    except SessionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="no live buyer session"
+        ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # A login service that cannot be built (T-070 refuses a multi-worker deployment) is a
+        # 503 rather than a 500: the request was fine and this deployment is not.
+        _log.warning("could not resolve a buyer session for a shortlist render: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="buyer sessions are unavailable, so this session could not be checked",
+        ) from exc
+
+
+#: Who is being served RIGHT NOW, for the one thing on this path that needs to know: the fetch
+#: budget. Set by :func:`_resolve_caller` and read by :func:`render_route`.
+#:
+#: A ``ContextVar`` rather than a handler parameter, and that is R2 rather than taste.
+#: ``tests/test_shortlist_pitch.py::test_render_still_cannot_reach_an_exchange_client`` asserts
+#: that this handler's signature is ``{"body"}`` and nothing else — a fence around "the handler
+#: holds no ``app.state``" that is deliberately wider than the property itself, so that no
+#: parameter can be added here without the addition being argued for. It is not loosened to
+#: admit a header. Instead the credential is resolved by a route-level dependency, which
+#: FastAPI runs before the handler and does NOT put in its signature, and the one value the
+#: handler needs travels the same way every other seam on this path travels: out of band, from
+#: a module-level name. ``buyer_svc.pitch.writer`` and ``buyer_svc.livecheck.deferred`` both
+#: state that pattern at length; this is its request-scoped form.
+#:
+#: Request-scoped is the whole point: an ASGI request is served in its own task with its own
+#: copy of the context, so one shopper's pseudonym cannot be read by the next request. That is
+#: an R5 claim and it is asserted, not assumed —
+#: ``tests/test_render_is_not_an_open_outbound_door.py`` drives an anonymous flood, then a
+#: signed-in render, then an anonymous render again, and each is billed to its own allowance.
+_CALLER: ContextVar[str] = ContextVar("buyer_render_caller", default="")
+
+
+async def _resolve_caller(x_buyer_session: SessionHeader = None) -> None:
+    """Check the credential this render carried, and remember whose it is.
+
+    ``async``, and that is load-bearing rather than stylistic: FastAPI runs a **sync**
+    dependency in a threadpool, which is given a COPY of the context, so a ``ContextVar`` set
+    there is discarded before the handler runs. An ``async`` dependency is awaited in the same
+    task as the endpoint and its set is therefore visible to it.
+
+    Returns ``None``. A route-level dependency's value is not injected anywhere, which is
+    exactly why this one is a route-level dependency.
+    """
+    _CALLER.set(_caller_for(x_buyer_session))
+
+
+@router.post("/render", response_model=RenderResponse, dependencies=[Depends(_resolve_caller)])
 async def render_route(body: RenderBody) -> RenderResponse:
     """Label a shortlist for display (R2) and make each candidate's case (D55).
 
@@ -291,7 +405,18 @@ async def render_route(body: RenderBody) -> RenderResponse:
     was served at before. ``POST /buyer/livecheck/run`` is the other end. See
     :mod:`buyer_svc.livecheck.deferred` for why a verdict that lands afterwards still costs
     the store, and why a synchronous check was rejected on measured numbers.
+
+    That queue is this route's one outbound consequence, and it is the reason this handler
+    reads a credential at all. It is bounded twice — the same page is not read twice inside
+    :data:`~buyer_svc.livecheck.deferred.DEDUP_WINDOW_SECONDS`, and one caller may not cause
+    more than :data:`~buyer_svc.livecheck.deferred.MAX_FETCHES_PER_ORIGIN` reads at one
+    merchant inside a minute — with the caller's pseudonym as the key and one shared allowance
+    for everybody without one. **The shortlist itself is never refused by that budget.** A
+    slot whose page went unread is served exactly as a slot whose page was refused for a
+    hostile URL is: labelled, pitched, and named in the refusals
+    ``GET /buyer/livecheck/{auction_id}`` serves.
     """
+    caller = _CALLER.get()
     slots = render_shortlist(body.shortlist, derive=body.derive_missing_labels)
     rows = slot_rows(body.shortlist)
     pitches = pitches_for(
@@ -302,7 +427,11 @@ async def render_route(body: RenderBody) -> RenderResponse:
         writer=pitch_writer(),
     )
     try:
-        queue_live_checks(rows, auction_id=str(body.shortlist.get("auction_id") or ""))
+        queue_live_checks(
+            rows,
+            auction_id=str(body.shortlist.get("auction_id") or ""),
+            caller=caller,
+        )
     except Exception:  # noqa: BLE001 - optional evidence never fails a shopper's shortlist
         # Same posture as `pitch_writer()` returning `None`: a buyer service that cannot
         # queue a check still serves every slot. Logged at exception level because it is a
