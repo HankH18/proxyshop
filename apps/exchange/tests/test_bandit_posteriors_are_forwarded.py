@@ -87,25 +87,59 @@ def test_the_durable_posterior_switch_is_documented_forwarded_and_a_word_the_cod
     _, _, default = declared.partition(":-")
     default = default.rstrip("}").strip()
 
-    # DEFAULTED OFF, and this assertion is the record of why rather than a preference. Two
-    # defects were measured on the SERVED path of the durable book and neither is closed:
+    # STILL DEFAULTED OFF — but for a DIFFERENT reason than before, and the difference is the
+    # point of this comment. The two defects this assertion used to name are CLOSED, measured on
+    # the served path before and after at PROXYSHOP_WORKER=17, against a book of 512 pairs
+    # sharing no cluster and no store (the worst case `DEFAULT_MAX_PAIRS` admits, and the shape
+    # an anonymous caller gets to choose). `durable.py::_read` no longer materialises the CROSS
+    # PRODUCT of every cluster held by every store held; it holds one cell per RECORDED pair,
+    # which fixes both at once:
     #
-    #   * `durable.py`'s read materialises the CROSS PRODUCT of every cluster by every store it
-    #     holds while `DEFAULT_MAX_PAIRS` bounds the recorded PAIRS — measured at 262,144 cells
-    #     and 178 ms per served outcome, reached through the unauthenticated
-    #     `POST /auctions/{id}/accept` door and surviving a restart for the 30-day expiry;
-    #   * the filler for a pair nobody recorded is `Posterior(1.0, 1.0)`, which is what
-    #     `bandit.initial_state` seeds ONLY where the trust snapshot says nothing. Where it
-    #     says something, the durable read flattens the trust-seeded prior on the ranking path
-    #     and lets an outcome in one cluster move another cluster's exposure.
+    #   * the cross-product blowup. POST /auctions/{id}/accept: 262,144 cells and 675.2 ms
+    #     BEFORE, 512 cells and 37.3 ms AFTER. POST /internal/outcomes: 262,144 cells and
+    #     160.6 ms BEFORE, 512 cells and 4.7 ms AFTER — warm medians, measured the same way
+    #     either side (~192 ms / ~17 ms cold). Pinned through the unauthenticated accept
+    #     door by `test_the_durable_read_is_bounded_and_keeps_the_prior.py`.
+    #   * the filler that flattened the trust-seeded prior. An absent pair is ABSENT now rather
+    #     than `Posterior(1.0, 1.0)`, so `exploration.exposure_shares` leaves standing the prior
+    #     `initial_state` seeded from the live trust snapshot. Measured on the `exploration`
+    #     block a served POST /auctions publishes: one outcome for `store-y` in `cluster-9` moved
+    #     `cluster-1`'s exploration slot from `store-x` to `store-y` BEFORE, and moves nothing
+    #     AFTER. Pinned by that file's last test.
     #
-    # Turning it back on is therefore a deliberate act that has to come through this test and
-    # read that list. Empty is the OLD behaviour and not a broken switch: the assertions below
-    # pin both halves of that — empty resolves to nothing at all, and the word still builds the
-    # book — so "off" cannot quietly become "the selector stopped working".
+    # WHAT BLOCKS ARMING NOW is not a served-path defect, it is that the flip makes the
+    # DOCUMENTED SETUP PATH's own test suite red. `README.md`, `docs/deploy.md`,
+    # `docs/demo/starting-slice.md` and `docs/demo/shopper-demo.md` all say `cp .env.example
+    # .env`, and `scripts/verify.sh` sources `.env` — so `.env.example=redis` means everyone
+    # following the runbook runs `make verify` with the durable book bound. Measured: the nine
+    # files covering this book go from 200 passed to 8 failed / 188 passed / 4 errors, and the
+    # whole exchange suite picks up 5 new failures. Three distinct causes, none of them fixed by
+    # flushing:
+    #
+    #   1. `test_outcome_identifier_bound.py` asserts `len(book._stores) == DEFAULT_BANDIT_STORES`
+    #      and `_book_bytes(...) == 0` for a refused outcome. Both read the IN-MEMORY book's
+    #      internals; `RedisBanditPosteriors` has no `_stores`, and the composition root now
+    #      always binds a book, so "a refused outcome leaves nothing behind" is false by
+    #      construction. Those tests have to wire their own book, the way
+    #      `test_durable_posteriors.durable_env` already pins `EXCHANGE_AUCTION_STORE=memory` so
+    #      a developer's shell cannot change what a test measures.
+    #   2. Cross-test state leaks: the durable book is keyed by `(cluster, store)` and the suite
+    #      REUSES `cluster-1`/`store-x`/`store-y` across files, while the tests that reach it do
+    #      not request the `redis_client` fixture and so never flush between them. That is
+    #      order-dependence by construction.
+    #   3. `e2e/test_learning.py` is 4-red under the durable book and 13-green under the
+    #      in-memory one, because `RedisBanditPosteriors.state()`'s fail-closed
+    #      `blacklisted=frozenset(stores)` makes every share it reads 0.0. That harness reads a
+    #      book's state directly rather than through `exposure_shares`, so the fail-closed flags
+    #      that never reach a served shortlist do reach it. This one is a real gap in the durable
+    #      book, not a test-isolation problem.
+    #
+    # So: the read is fixed and verified, and turning this on is a SEPARATE piece of work that
+    # has to reconcile those three first. Do not flip it to make a demo durable and discover
+    # `make verify` is red.
     assert default == "", (
         f"apps/exchange/compose.yaml defaults {ENV_BANDIT_POSTERIORS} to {default!r}. The "
-        f"durable book is defaulted OFF until the two defects in this test's comment are "
+        f"durable book is defaulted OFF until the three blockers in this test's comment are "
         f"closed; if you closed them, say so here and change this assertion deliberately."
     )
     assert bandit_posteriors_from_env({ENV_BANDIT_POSTERIORS: default}) is None, (

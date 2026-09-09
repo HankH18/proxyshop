@@ -71,7 +71,7 @@ bounds, and each answers a different failure:
 * :data:`MAX_DURABLE_IDENTIFIER_CHARS`, because a cap on the NUMBER of pairs is only a cap on
   bytes while the names are bounded too, and every served auction reads the whole book back.
   The door already holds one request to 128-character names; this holds the DATASTORE to 64,
-  which measured as the difference between 80 ms and 20 ms of worst-case read on the auction
+  which measures as the difference between 6.69 ms and 2.53 ms of worst-case read on the auction
   path. A pair with longer names still learns, in the in-process fallback; it just does not
   persist.
 
@@ -173,12 +173,21 @@ PAIRS_KEY = "bandit:pairs"
 #: unauthenticated door, so the ceiling is the thing an attacker gets to choose. Every served
 #: ``POST /auctions`` pays one ``HGETALL`` of the whole book (``exploration._learned``), so an
 #: oversized cap is a permanent, restart-surviving latency amplifier with a public handle on it.
-#: Measured on this repository at ``PROXYSHOP_WORKER=9`` against a filled book::
+#: Measured on this repository at ``PROXYSHOP_WORKER=17`` against a filled book, after
+#: :meth:`RedisBanditPosteriors._read` was made to hold one cell per RECORDED PAIR::
 #:
-#:     cap    identifiers      HGETALL payload   state() per call
-#:     1024   128 chars each   1514 KiB          79.8 ms      <- rejected
-#:      512    64 chars each    373 KiB          21.1 ms      <- shipped
-#:      (the shipped demo: 10 pairs, 0.83 KiB, 0.30 ms)
+#:     cap    identifiers      HGETALL payload   cells   state() per call
+#:     1024   128 chars each    498 KiB          1024      6.69 ms      <- rejected
+#:      512    64 chars each    121 KiB           512      2.53 ms      <- shipped
+#:      (the shipped demo: 10 pairs, 0.84 KiB, 10 cells, 0.27 ms)
+#:
+#: **The earlier table on this line read 1514 KiB / 79.8 ms and 373 KiB / 21.1 ms, and it was
+#: measured on a book whose pairs shared most of their clusters** — a best case presented as a
+#: worst one. The read then materialised the CROSS PRODUCT, so the honest worst case at this same
+#: cap was 512 x 512 = 262,144 cells and 675 ms for one served ``POST /auctions/{id}/accept``.
+#: The read is linear in recorded pairs now, which is why these numbers are smaller than the ones
+#: they replace rather than larger; the cap is left where it is because nothing here asked for a
+#: bigger book, only for an honest bound.
 #:
 #: :data:`MAX_DURABLE_IDENTIFIER_CHARS` is the other half of that arithmetic and the two have to
 #: move together — a cap on the number of pairs is only a cap on bytes while the identifiers are
@@ -190,8 +199,8 @@ DEFAULT_MAX_PAIRS = 512
 #: The door that admits an outcome already bounds both names at
 #: :func:`~.routes.identifier_ceiling` — 128 characters, ``auction.routes.MAX_IDENTIFIER_LENGTH``
 #: — and that is a bound on one request. This is the bound on the DATASTORE, which is a different
-#: question because a durable structure keeps what it is given: 128-character names doubled the
-#: worst-case read of a served auction from 20 ms to 80 ms in the measurement above, and they
+#: question because a durable structure keeps what it is given: 128-character names take the
+#: worst-case read of a served auction from 2.53 ms to 6.69 ms in the measurement above, and they
 #: survive the restart that used to reclaim them.
 #:
 #: 64 is roughly 2.5x the largest identifier the shipped stack can produce: measured on
@@ -400,6 +409,14 @@ class RedisBanditPosteriors:
         client.zadd(PAIRS_KEY, {member: time.time()})
         overflow = int(client.zcard(PAIRS_KEY) or 0) - self.max_pairs
         if overflow > 0:
+            # `ZPOPMIN` and not `ZRANGE` + `ZREMRANGEBYRANK`, because it is ONE command: it
+            # removes exactly the members it returns. The two-command form was tried here and
+            # reverted — a concurrent writer's `zadd` between the read and the remove shifts the
+            # rank window, so `ZREMRANGEBYRANK(0, n-1)` drops members `ZRANGE(0, n-1)` never
+            # named and leaves THEIR fields orphaned under the sliding expiry below. That is a
+            # worse leak than the one it was meant to close (an `hdel` that raises mid-eviction,
+            # which `record` catches and which costs the fields of pairs already popped), and it
+            # is reachable by the multi-replica writer this module is built for.
             evicted = client.zpopmin(PAIRS_KEY, overflow) or ()
             for entry in evicted:
                 stale = entry[0] if isinstance(entry, (tuple, list)) else entry
@@ -426,7 +443,14 @@ class RedisBanditPosteriors:
         client.expire(PAIRS_KEY, self.ttl_seconds)
 
     def _read(self, client: Any) -> BanditState | None:
-        """One ``HGETALL`` into a :class:`~.bandit.BanditState`, or ``None`` when empty."""
+        """One ``HGETALL`` into a :class:`~.bandit.BanditState`, or ``None`` when empty.
+
+        **The returned ``posteriors`` is SPARSE: one cell per recorded pair, and no cell for a
+        pair nobody recorded.** That is the contract, not an implementation detail — it is what
+        bounds this read by :data:`DEFAULT_MAX_PAIRS` instead of by its square, and what leaves
+        an unrecorded pair's trust-seeded prior standing in
+        :func:`~.exploration.exposure_shares`. The long comment below has the measurements.
+        """
         raw = client.hgetall(POSTERIORS_KEY) or {}
         if not raw:
             return None
@@ -443,24 +467,72 @@ class RedisBanditPosteriors:
         if not parameters:
             return None
 
-        clusters = sorted({cluster for cluster, _ in parameters})
+        # NO SECOND CEILING HERE, and that is a decision rather than an omission. A read-side
+        # `sorted(parameters)[:max_pairs]` was tried and reverted: the only state that can trip
+        # it is a hash holding pairs `PAIRS_KEY` no longer names, and sorted order knows nothing
+        # about which of them are live — measured, it kept every orphan and dropped every live
+        # pair, because the orphans happened to sort first. A bound that discards what the market
+        # learned and retains the dead rows is worse than the unbounded read it replaces, and a
+        # correct one would have to intersect with `PAIRS_KEY`, which is a second round trip on
+        # every served auction to guard a fault that `record` already degrades on. The bound that
+        # matters is below and it is structural: one cell per field pair the hash actually holds,
+        # and `_write` is what keeps that at `max_pairs`.
+        #
+        # ONLY the pairs that were recorded, which is the whole of D26's two served-path defects.
+        #
+        # This used to materialise the CROSS PRODUCT of every cluster held by every store held,
+        # filling the pairs nobody recorded with `Posterior(1.0, 1.0)`. Both defects follow from
+        # that one line, and so does their fix:
+        #
+        # * `DEFAULT_MAX_PAIRS` bounds recorded PAIRS, so a cross product is not bounded by it at
+        #   all — 512 pairs sharing no cluster and no store is 512 x 512, measured at 262,144
+        #   cells and 675 ms for one served `POST /auctions/{id}/accept`, on a door that needs no
+        #   credential, surviving restarts for the 30-day expiry. One cell per recorded pair
+        #   makes the cap the bound it was documented to be.
+        # * `Posterior(1.0, 1.0)` is what `bandit.initial_state` seeds a pair with ONLY where the
+        #   trust snapshot says nothing about the store (score 0.5, confidence 0.0). Where it says
+        #   something, that value is not the prior — it is the ABSENCE of one, and
+        #   `exploration.exposure_shares` carried it over the trust-seeded prior it had just
+        #   built, so an outcome in one cluster moved another cluster's exposure. An absent pair
+        #   must be absent: `exposure_shares` reads this map with `.get`, so a pair that is not
+        #   here leaves its own `initial_state` prior standing, which is the answer.
+        #
+        # `routes.InMemoryBanditPosteriors` reaches the same answer from the other side — it
+        # re-seeds through `initial_state` on every write, so ITS unrecorded cells already carry
+        # the store's trust-seeded prior. This book holds no snapshot at read time and so cannot
+        # fill a cell correctly; not filling it is how the two books agree.
+        #
+        # `stores` and `clusters` stay the union of what was recorded, because `blacklisted`
+        # below is derived from `stores` and fail-closed. That makes this state a LOOKUP TABLE of
+        # what was written, and it is NOT a sampler input: `bandit._probability_of_best` indexes
+        # `posteriors[cluster][store]` for every id in `stores`, so `bandit.exposure` raises
+        # `KeyError` on this map wherever a cluster did not record every store.
+        #
+        # **Said plainly, because the reasoning that used to sit here was wrong.** It claimed
+        # nothing ever passes this state to `exposure`. Something does:
+        # `e2e/support/learning/exchange_policy.py` calls `exposure(book.state(), ...)` and
+        # indexes `state.posteriors[cluster][store_id]` over `state.stores`. Against the old
+        # cross-product read that returned all-zero shares; against this one it raises. It is not
+        # a served path — that harness builds its app with the default in-memory book, whose
+        # `state()` is still dense — but "no caller" was a false claim and a `KeyError` is a worse
+        # answer than zeros for the caller that exists.
+        #
+        # The SERVED read is unaffected and that is what the sparsity is for:
+        # `exploration.exposure_shares` builds its own dense state over the AUCTION's roster from
+        # the live trust snapshot and carries values across from here with `.get`, so a pair that
+        # is absent here leaves that store's trust-seeded prior standing — which is the fix.
+        # `test_the_fail_closed_flags_never_reach_a_served_shortlist` pins the other half: the
+        # blacklist and `low_data` below never reach a shortlist.
+        posteriors: dict[str, dict[str, Posterior]] = {}
+        for (cluster, store), values in parameters.items():
+            # A recorded pair missing one of its two fields keeps the 1.0 that half started at:
+            # `_write` writes both through `HSETNX` before it increments either, so this is a torn
+            # write or an unreadable value, and it costs that half rather than the pair.
+            posteriors.setdefault(cluster, {})[store] = Posterior(
+                values.get(_ALPHA, 1.0), values.get(_BETA, 1.0)
+            )
+        clusters = sorted(posteriors)
         stores = sorted({store for _, store in parameters})
-        # Every cluster carries every store, because `BanditState` is a cross product and
-        # `bandit.exposure` indexes it as one — a sparse map would be a KeyError waiting for
-        # the first caller that reads this state the way the model's own sampler does. The
-        # filler is `Posterior(1.0, 1.0)`, which is not invented: it is exactly what
-        # `bandit.initial_state` seeds a pair with when the snapshot says nothing about the
-        # store (score 0.5, confidence 0.0), i.e. the "we know nothing" prior.
-        posteriors = {
-            cluster: {
-                store: Posterior(
-                    parameters.get((cluster, store), {}).get(_ALPHA, 1.0),
-                    parameters.get((cluster, store), {}).get(_BETA, 1.0),
-                )
-                for store in stores
-            }
-            for cluster in clusters
-        }
         return BanditState(
             stores=tuple(stores),
             clusters=tuple(clusters),

@@ -99,28 +99,48 @@ services:
       # `restart: unless-stopped`, so every restart wiped the market's memory. The demo page at
       # `apps/buyer/app/learning/` exists to show that loop move.
       #
-      # DEFAULTED OFF, and it was defaulted ON when this was written. An adversarial review of
-      # the durable book found two defects on the SERVED path, both of which this variable's
-      # default decides whether anyone ever meets:
+      # STILL DEFAULTED OFF, but the reason has CHANGED. The two served-path defects that put
+      # it here are closed in `durable.py::_read`, which no longer materialises the CROSS
+      # PRODUCT of every cluster it holds by every store it holds — it holds one cell per
+      # RECORDED pair, which is what `DEFAULT_MAX_PAIRS` already bounded. Measured before and
+      # after on the served doors, against a book of 512 pairs sharing no cluster and no store
+      # (the worst case the cap admits, and the shape an anonymous caller gets to choose):
       #
-      #   * `durable.py`'s read materialises the CROSS PRODUCT of every cluster by every store
-      #     it holds, while `DEFAULT_MAX_PAIRS` bounds the recorded PAIRS. 512 pairs spread
-      #     across many clusters and stores is not 512 cells, it is up to 512 x 512 —
-      #     measured at 262,144 cells and 178 ms per served outcome — reached through the
-      #     unauthenticated `POST /auctions/{id}/accept` door and surviving a restart.
-      #   * the filler for a pair nobody recorded is `Posterior(1.0, 1.0)`, which is what
+      #   * the cross-product blowup. `POST /auctions/{id}/accept`: 262,144 cells and 675.2 ms
+      #     BEFORE, 512 cells and 37.3 ms AFTER. `POST /internal/outcomes`: 262,144 cells and
+      #     160.6 ms BEFORE, 512 cells and 4.7 ms AFTER. All warm medians, measured the same
+      #     way either side; a cold first request measures ~192 ms before and ~17 ms after.
+      #     The unauthenticated door is no longer
+      #     an amplifier whose size the caller chooses and whose state outlives a restart.
+      #   * the filler for a pair nobody recorded was `Posterior(1.0, 1.0)`, which is what
       #     `bandit.initial_state` seeds ONLY when the trust snapshot says nothing about the
-      #     store. Where the snapshot DOES say something, the durable read flattens the
-      #     trust-seeded prior on the ranking path, and lets an outcome in one cluster move
-      #     another cluster's exposure.
+      #     store. Where the snapshot DOES say something that value is not the prior but the
+      #     ABSENCE of one, so the read flattened the trust-seeded prior on the ranking path.
+      #     An absent pair is now absent, and `exploration.exposure_shares` leaves the prior it
+      #     seeded from the live snapshot standing. Measured on the `exploration` block a
+      #     served `POST /auctions` publishes: one outcome for `store-y` in `cluster-9` moved
+      #     `cluster-1`'s exploration slot from `store-x` to `store-y` BEFORE, and moves
+      #     nothing AFTER.
       #
-      # Neither is a reason to throw the book away — the wiring, the reachability and the D55
-      # bound were all confirmed by driving the served route — but a demo must not ship a
-      # ranking-correctness bug to buy a nicety. Empty is the OLD behaviour, unchanged:
-      # `bandit_posteriors_from_env` reads an empty value as "this environment said nothing"
-      # and the process-local book is created lazily exactly as before. Set this to `redis`
-      # once the two above are closed, or to `memory` to state the process-local book
-      # explicitly.
+      # Both are pinned through the served doors by
+      # `apps/exchange/tests/test_the_durable_read_is_bounded_and_keeps_the_prior.py`, each
+      # proven red against the old read first.
+      #
+      # WHAT KEEPS IT OFF is now a different thing, and it is not a served-path defect: turning
+      # it on makes the DOCUMENTED SETUP PATH's own suite red. `.env.example` is copied to
+      # `.env` by every runbook here, `scripts/verify.sh` sources `.env`, and with the book
+      # bound the nine test files covering it go from 200 passed to 8 failed / 188 passed /
+      # 4 errors — `test_outcome_identifier_bound.py` reads the in-memory book's internals,
+      # the suite reuses `(cluster, store)` keys across files without ever flushing Redis, and
+      # `e2e/test_learning.py` goes 4-red because `state()`'s fail-closed
+      # `blacklisted=frozenset(stores)` makes every share it reads 0.0. The third is a real gap
+      # in the durable book; the first two are test isolation. See `.env.example` and
+      # `test_bandit_posteriors_are_forwarded.py` for the full list.
+      #
+      # Set this to `redis` once those are reconciled, `memory` to state the process-local book
+      # explicitly, or leave it empty for the pre-D26 behaviour — `bandit_posteriors_from_env`
+      # reads an empty value as "this environment said nothing" and the process-local book is
+      # created lazily exactly as before.
       #
       # UNLIKE EXCHANGE_SHOP_ROSTER, it works with no deployment document: `ensure_configured`
       # binds the book on both of its branches (`composition.bind_bandit_posteriors`), so this
