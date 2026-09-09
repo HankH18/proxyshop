@@ -66,6 +66,11 @@
  */
 import { Fragment, useCallback, useRef, useState, type ReactNode } from 'react'
 
+// The English for the exchange's five formula terms. `readable.ts` is the one place that
+// vocabulary lives, so the same component reads the same way here, in `WhyEmpty` and on
+// `#/metrics`. The raw key is still printed beside the name — see `PlatformRecord`.
+import { componentIsNamed, componentName, roundedScore } from '../metrics/readable'
+
 import {
   NO_AGENT_FALLBACK_FAMILY,
   VOICE_PLATFORM,
@@ -127,8 +132,20 @@ function browserFetcher(): Fetcher | undefined {
 function trustLine(slot: ShortlistSlot): string {
   const summary = slot.trust_summary ?? {}
   const entries = Object.entries(summary)
-  if (entries.length === 0) return 'no trust snapshot yet'
-  return entries.map(([key, value]) => `${key} ${value}`).join(', ')
+  if (entries.length === 0) return 'The platform holds no trust record for this shop yet.'
+  // NAMED, then spelled. The line used to be `score 0.82, confidence 0.9` and nothing on the
+  // card said WHOSE score that was — read next to `fit 0.57685` on the row above it, the
+  // obvious reading is that it is a second ranking figure, which it is not: it is the
+  // platform's standing record of the SHOP, carried on the slot and not computed for this
+  // auction. The field names stay, because they are the snapshot's own and a reader checking
+  // the record fold has to find the same words there.
+  // WHAT THE EXCHANGE ATTACHED, whatever that is. `trust_summary` is `Record<string, number>`
+  // to this client but the exchange also puts `store_id` on it, so a sentence promising "the
+  // score" would be naming one of the fields and printing the rest anyway. Every field is
+  // printed as the exchange sent it, under a heading that says whose record it is.
+  return `The platform’s trust record for this shop — ${entries
+    .map(([key, value]) => `${key} ${value}`)
+    .join(', ')}.`
 }
 
 /**
@@ -744,9 +761,22 @@ function PlatformRecord({
       </p>
       {ranking !== null && ranking.components.length > 0 ? (
         <dl className="facts">
+          {/* THE TERM IN ENGLISH, THE KEY BESIDE IT. `intent_match` and
+              `verified_claim_ratio` are the field names D13's formula is graded on and they
+              stay on the page for exactly that reason; what they are not is a description of
+              what the number measures, which is the thing a person reading "why did this one
+              rank first" actually wants. So the row is now labelled with the role and carries
+              the published key as a monospace tail. A key `readable.ts` does not know is
+              printed once, as itself, rather than twice. */}
           {ranking.components.map(([term, contribution]) => (
-            <RecordRow key={term} term={term}>
+            <RecordRow key={term} term={componentName(term)}>
               <span className="mono">{contribution}</span>
+              {componentIsNamed(term) ? (
+                <>
+                  {' '}
+                  <span className="mono record-key">{term}</span>
+                </>
+              ) : null}
             </RecordRow>
           ))}
         </dl>
@@ -1312,8 +1342,27 @@ export function ShortlistView({
                 ordinary case and draws nothing at all. */}
             {slot.pitch ? <PitchPanel slot={slot} pitch={slot.pitch} /> : null}
 
+            {/* THE FIT SCORE, SAID RATHER THAN SPELLED — and the absent case untouched.
+                `fit 0.57685` names no unit, no scale and no subject; a reader who does not
+                already know the formula cannot tell whether it is good, or what it is a
+                measure of. The number itself is unchanged and still on the card: the reading
+                form leads, the published double follows it in mono. The ABSENT branch is
+                deliberately still the exact string it has always been — `journey.test.tsx`
+                pins it with `toBe`, and its point is that a missing score must not print as
+                a zero, which is a claim about this branch and not about its wording. */}
             <p data-testid={`fit-${slot.bid_ref}`}>
-              {slot.fit_score === undefined ? 'fit not reported' : `fit ${slot.fit_score}`}
+              {slot.fit_score === undefined ? (
+                'fit not reported'
+              ) : (
+                <>
+                  {/* NOT the same words as `intent_match`'s in the record fold below, and
+                      that is deliberate. They are two different numbers — this is the slot's
+                      own `fit_score`, that is the exchange's weighted formula term — and one
+                      card was printing 0.577 and 0.175 under the same sentence. */}
+                  The shortlist’s own fit score for this slot: {roundedScore(slot.fit_score)}{' '}
+                  <span className="record-key">(fit {slot.fit_score})</span>
+                </>
+              )}
             </p>
             <p data-testid={`trust-${slot.bid_ref}`}>{trustLine(slot)}</p>
 

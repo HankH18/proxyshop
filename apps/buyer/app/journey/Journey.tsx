@@ -1,6 +1,35 @@
 /**
  * The one screen a person can look at: the whole shopper journey against the real backend.
  *
+ * =======================================================================================
+ * IT IS A CONVERSATION NOW, NOT FIVE NUMBERED STEPS — read this before the rest, because
+ * every paragraph below was written against the old shape and several still say "step 3".
+ *
+ * What this page WAS: five bordered cards with an ordinal badge on each heading, the
+ * shopper's utterances stacked together inside card one, and every reply to them in a card
+ * further down. What it IS: one thread of turns — what the shopper said, what Proxyshop
+ * said back, in the order the two happened — built by `PlatformTurn`, `ShopperTurn` and
+ * `ActionTurn` below.
+ *
+ * WHAT DID NOT CHANGE, and this is why the old prose is still readable rather than being
+ * rewritten wholesale:
+ *
+ *   * **Every section keeps its `aria-label`**, verbatim, down to `Step 5 - after your
+ *     purchase (seeded)`. Those strings are the accessible names, the stylesheet's
+ *     positional hooks and the suite's `getByLabelText` handles all at once. They read as
+ *     stale copy and they are not copy: nothing a shopper sees says "step 5" any more.
+ *     Renaming them is a separate change with its own blast radius, and it is not this one.
+ *   * **Nothing was dropped.** Every honesty statement, every gloss, every `data-testid` and
+ *     the whole "What is not wired yet" panel are where they were; what moved is the frame
+ *     around them.
+ *   * **The two voices (D55) stayed two.** See the turn components' own block comment: it is
+ *     the property a chat presentation most easily costs, and the one this change spent the
+ *     most care on keeping.
+ *
+ * So where a sentence below says "step 3 will show you", read "the shortlist turn will show
+ * you". The claims are unchanged; the numbering they refer to is gone from the screen.
+ * =======================================================================================
+ *
  * This shell owns the *flow* and nothing else. Every rule that matters was already written
  * and already tested, and is reused rather than re-stated:
  *
@@ -215,6 +244,7 @@
  *    the old shape and it is written here rather than discovered.
  */
 import {
+  Fragment,
   useCallback,
   useEffect,
   useId,
@@ -222,6 +252,7 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type ReactNode,
 } from 'react'
 
 import {
@@ -235,6 +266,7 @@ import {
 } from '../chat/session'
 import { FeedbackPromptView } from '../feedback/FeedbackPromptView'
 import { REMEMBERED_AUCTION_KEY, forget, remember } from '../metrics/telemetry'
+import { COMPONENTS_ARE, componentName, roundedScore } from '../metrics/readable'
 import { submitFeedback, type FeedbackReceipt } from '../feedback/feedback'
 import { IntentConfirm } from '../intent/IntentConfirm'
 import {
@@ -305,10 +337,202 @@ function rankLine(row: RankedBid | undefined, noRecord: boolean): string {
   return `${score} — ${describeComponents(row.components)}`
 }
 
+/**
+ * The same ranking row, said in English — printed UNDER {@link rankLine}, never instead of it.
+ *
+ * The fold this appears in is the RECORD, and its rule is that the machine rows are the point
+ * of it: `rank_score 0.564 — intent_match=0.175 verified_claim_ratio=0.18785000000000002 …` is
+ * the exchange's published answer and it stays exactly as it is, tests and all. What it is
+ * not is legible while somebody is talking, which is the whole of this function's job.
+ *
+ * `undefined` for the two absences and for a row with no components, because there is nothing
+ * to put in English that the line above has not already said in one sentence.
+ *
+ * The figures are ROUNDED here and unrounded above, deliberately: this is the reading form and
+ * that is the value. `roundedScore` never invents one — an absent score yields `undefined`
+ * and this function then says nothing rather than reading out a zero.
+ */
+function rankInEnglish(row: RankedBid | undefined): string | undefined {
+  if (row === undefined) return undefined
+  const terms = Object.entries(row.components)
+  if (terms.length === 0) return undefined
+  const parts = terms.map(
+    ([key, value]) => `${componentName(key)} ${roundedScore(value) ?? value}`,
+  )
+  const opening =
+    row.rank_score === undefined
+      ? 'The exchange published these contributions and no total this page could read.'
+      : `The exchange scored this ${roundedScore(row.rank_score)}, made up of:`
+  // NOT "out of 1", for either the total or the terms. `scoring.py` publishes
+  // `weight * feature`, so each figure below is bounded by its own term's weight and the set
+  // of them sums to the score — `intent_match 0.175` is `0.35 x 0.5`, where 0.5 is the
+  // published neutral for a feature nobody measured, and reading it as "a poor fit out of 1"
+  // is exactly the wrong conclusion.
+  return `${opening} ${parts.join('; ')}. ${COMPONENTS_ARE}`
+}
+
 interface AuctionStage {
   readonly created: AuctionCreated
   readonly record: AuctionRecord
   readonly slots: readonly RenderedSlot[]
+}
+
+/**
+ * What Proxyshop opens the shortlist turn by SAYING, given what actually came back.
+ *
+ * Four outcomes and four sentences, because the four are four different facts and the page
+ * has always kept them apart in its body copy: the exchange has forgotten the auction; it
+ * sent options and this page's own labelling step dropped them; it answered with an empty
+ * shortlist, which is a statement about the market; or there are options. Nothing here counts
+ * anything the panel below does not also count — `auction-id` and `slot-count` still print
+ * the same figures from the same fields.
+ */
+function answeredLead(stage: AuctionStage): string {
+  if (stage.record.liveness === 'forgotten') {
+    return 'I asked the shops, and the exchange no longer holds what they answered.'
+  }
+  if (stage.record.shortlist_slot_count > 0 && stage.slots.length === 0) {
+    return 'The shops answered, and something on my side of the wire dropped their answers.'
+  }
+  if (stage.slots.length === 0) {
+    // NOT "none of them was eligible", which this said and which is wrong twice.
+    // Eligibility is decided BEFORE anything is asked — `orchestration/solicitation.py` runs
+    // the R12 gate over the whole roster and a denied store never reaches the fan-out — and an
+    // empty shortlist is normally not an eligibility outcome at all but a refusal at the
+    // ranking filters, after bidding. `WhyEmpty`, immediately below this sentence, renders
+    // `denied[]` and `excluded[]` as two separate lists precisely because they are two
+    // different facts; a turn asserting one of them would contradict the panel inside it.
+    return 'I asked the shops, and nothing came back that I can show you.'
+  }
+  return stage.slots.length === 1
+    ? 'One option came back.'
+    : `${stage.slots.length} options came back.`
+}
+
+/* ------------------------------------------------------------------------------------- *
+ * THE CONVERSATION — three turn shapes, and the one rule that governs all of them.
+ *
+ * THE RULE, and it is D55's rather than a layout preference: **a turn's frame carries the
+ * voice of whoever authored the words inside it, and no frame ever carries two voices.**
+ *
+ * That is why a chat presentation is a risk here worth naming rather than glossing over. A
+ * conversation is a sequence of things said by somebody, and the strongest visual claim a
+ * chat makes is "the speaker on this bubble said what is in it". The shortlist is a bubble
+ * from Proxyshop — and it CONTAINS, in the middle of it, a block of prose a shop wrote and
+ * bought the right to have shown. Flatten the two and the page asserts that the platform
+ * said something a seller said, which is precisely what D55 forbids.
+ *
+ * So:
+ *
+ *   * {@link PlatformTurn} carries `data-voice="platform"`, an attribution line naming
+ *     Proxyshop, and the platform's own words. Everything the platform wrote lives here.
+ *   * {@link ShopperTurn} carries `data-voice="shopper"` and holds the shopper's own words,
+ *     verbatim, and nothing else. The page never writes a sentence into one of these.
+ *   * A SHOP's words are never a turn at all. They stay exactly where they already were,
+ *     inside the shortlist card, in `.voice[data-voice="store"]` with the amber rail and the
+ *     attribution line `PitchPanel` already gives them — nested inside the platform turn
+ *     rather than replacing its frame, because the platform IS relaying them and the page
+ *     should say so. `journey.test.tsx` pins that no store-voiced block is ever a turn's own
+ *     frame.
+ *
+ * {@link ActionTurn} is the third shape and it is deliberately NOT a bubble: it reports a
+ * gesture the shopper made — confirming, accepting — rather than quoting them. A bubble there
+ * would be the page putting words in a shopper's mouth, which is the same fabrication as
+ * putting them in a shop's.
+ * ------------------------------------------------------------------------------------- */
+
+/**
+ * One thing Proxyshop said, and the panel it said it with.
+ *
+ * `label` becomes the section's accessible name and is unchanged from the step headings this
+ * replaced, so the stylesheet's positional rules and the suite's `getByLabelText` keep
+ * working; `lead` is the message itself.
+ */
+function PlatformTurn({
+  label,
+  lead,
+  aside,
+  seeded = false,
+  children,
+}: {
+  readonly label: string
+  /**
+   * The message. A `ReactNode` rather than a string so the composer's turn can pass its own
+   * `<label htmlFor>` — the platform's question and the field's accessible name are then one
+   * element, which is why there is no second, hidden copy of that sentence anywhere.
+   */
+  readonly lead: ReactNode
+  /** A short qualifier after the name. Never a claim about who said what. */
+  readonly aside?: string
+  readonly seeded?: boolean
+  readonly children?: ReactNode
+}) {
+  return (
+    <li className="turn turn-platform">
+      {/*
+       * THE ATTRIBUTION IS INSIDE THE LABELLED REGION, and that is not a layout preference.
+       * It sat above the `<section>` first, which looked right and meant a screen-reader user
+       * navigating by region entered the turn without the one line the whole D55 story rests
+       * on — and put the SEEDED badge outside the region the masthead promises carries it.
+       *
+       * `data-turn-voice`, NOT `data-voice`. Everywhere else in this app `data-voice` means
+       * *whose words are these* on one `.voice` block, and every shop-voiced block on the page
+       * is a descendant of this element. Reusing the attribute here would have made
+       * `closest('[data-voice]')` answer "platform" for a shop's own pitch — the exact
+       * confusion the attribute exists to prevent. Two names, two questions: who is speaking
+       * in this turn, and whose words are in this block.
+       */}
+      <section
+        className={`step turn-body${seeded ? ' seeded' : ''}`}
+        aria-label={label}
+        data-turn-voice="platform"
+      >
+        <p className="turn-who">
+          <span className="turn-avatar" aria-hidden="true">
+            PS
+          </span>
+          <span className="turn-name">Proxyshop</span>
+          {aside === undefined ? null : <span className="turn-aside">{aside}</span>}
+          {seeded ? (
+            <span className="seeded-badge" data-testid="feedback-seeded-badge">
+              SEEDED
+            </span>
+          ) : null}
+        </p>
+        <h2 className="turn-lead">{lead}</h2>
+        {children}
+      </section>
+    </li>
+  )
+}
+
+/** One thing the shopper said, verbatim. Nothing else is ever put inside one of these. */
+function ShopperTurn({ children }: { readonly children: ReactNode }) {
+  return (
+    <li className="turn turn-shopper">
+      <p className="turn-who">
+        <span className="turn-name">You</span>
+      </p>
+      <p className="turn-body" data-turn-voice="shopper">
+        {children}
+      </p>
+    </li>
+  )
+}
+
+/**
+ * A gesture, reported rather than quoted.
+ *
+ * Confirming and accepting are things a shopper DID, and neither of them is a sentence they
+ * typed. Rendering either as a speech bubble would have this page invent the shopper's words
+ * on their behalf — the same act, in the other direction, as writing a shop's pitch for it.
+ */
+function ActionTurn({ children }: { readonly children: ReactNode }) {
+  return (
+    <li className="turn turn-action">
+      <p className="turn-body">{children}</p>
+    </li>
+  )
 }
 
 export interface JourneyProps {
@@ -685,12 +909,18 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
       <header className="masthead">
         <h1>Proxyshop</h1>
         <p className="lede">
+          {/* The two exceptions are unchanged and still both named; only the WAY they are
+              pointed at is, because there is no numbered step 5 to point at any more. The
+              seeded turn carries the same SEEDED badge on its own attribution line and the
+              same bullet under "What is not wired yet", so nothing this sentence promises has
+              moved — a reader following it finds both. */}
           Say what you need. Your agent asks the exchange, the exchange asks the stores, and
           the stores answer for themselves. Every value below arrived in an HTTP response from
           the service on this origin during this session, except in the two places that say so
           where they appear: the grey text inside the box is a hint rather than an answer, and
-          step 5&rsquo;s order is manufactured &mdash; badged SEEDED on the panel itself and
-          listed under &ldquo;What is not wired yet&rdquo;.
+          the post-purchase question at the end of the conversation is about a manufactured
+          order &mdash; badged SEEDED on the turn itself and listed under &ldquo;What is not
+          wired yet&rdquo;.
         </p>
       </header>
 
@@ -795,15 +1025,15 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
       )}
 
       {/*
-       * THE GATE. Everything from step 1 to step 5 is the journey. Where a login can be
+       * THE GATE. The whole conversation is the journey. Where a login can be
        * completed the journey needs a session, and a visitor without one sees the sign-in
        * panel above and nothing of this. Where it cannot — no MTA anywhere in the deployment
        * — there is no panel and no wall, and the journey is the page.
        *
        * WHAT THAT COSTS, and it is not nothing: without a session there is no vault-minted
        * pseudonym, so the exchange names the shopper `anon-{auction_id}` for the one auction
-       * and the stores are told empty buckets. Step 1's handle line says exactly that instead
-       * of naming a handle. Nothing else in the journey reads a session — clarify, confirm,
+       * and the stores are told empty buckets. The opening turn's handle line says exactly
+       * that instead of naming a handle. Nothing else in the journey reads a session — clarify, confirm,
        * the auction record, the label render, accept and the seeded feedback panel all take
        * no `X-Buyer-Session` header — so the rest renders and behaves identically.
        *
@@ -821,19 +1051,46 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
        *     session state. They are as true, and as worth reading, to somebody deciding
        *     whether to sign in at all.
        *
-       * Step 5 IS inside, though it is seeded and takes no session of its own: it is a
-       * post-purchase prompt, and showing a purchase-feedback form to a visitor who has not
+       * The SEEDED post-purchase turn is inside, though it takes no session of its own: it is
+       * a post-purchase prompt, and showing a purchase-feedback form to a visitor who has not
        * signed in would be the page telling a story about a journey they have not had.
        */}
       {!journeyOpen ? null : (
-        <>
-      <section aria-label="Step 1 - say what you need" className="step">
-        <h2>
-          <span className="ordinal">1</span> Say what you need
-        </h2>
-        {outcome === undefined ? (
-          <form onSubmit={sendDraft}>
+        <ol
+          className="thread"
+          aria-label="Your conversation with Proxyshop"
+          /*
+           * `transcript` NAMES THE WHOLE THREAD NOW, and that is a widening rather than a
+           * move. It used to be the `<ol>` of the shopper's own utterances, stacked together
+           * at the top of step 1 while every reply to them sat in the cards below — which is
+           * the shape this change exists to end. The shopper's words are still all inside
+           * this element, so the suite's `toContain` assertions read exactly what they read
+           * before; what is also inside it now is what Proxyshop said back, in the order the
+           * two happened. A transcript of a conversation is both halves of it.
+           */
+          data-testid="transcript"
+        >
+      <PlatformTurn
+        label="Step 1 - say what you need"
+        /*
+         * THE MESSAGE IS THE LABEL — a real `<label htmlFor>`, rendered as the turn's own
+         * lead. Two shapes were tried before this one and both were worse. A `<label>` plus a
+         * visible `<h2>` printed the same sentence twice, once hidden, and let the two drift;
+         * `aria-labelledby` pointing at the `<h2>` fixed that and silently cost click-to-focus,
+         * because only a `<label>` moves focus to its control when you click the words. This
+         * shape has one copy of the sentence, in one element, that both names the field and
+         * focuses it.
+         */
+        lead={
+          outcome === undefined ? (
             <label htmlFor={utteranceId}>What are you shopping for?</label>
+          ) : (
+            'What are you shopping for?'
+          )
+        }
+      >
+        {outcome === undefined ? (
+          <form onSubmit={sendDraft} className="composer">
             <textarea
               id={utteranceId}
               name="utterance"
@@ -851,17 +1108,11 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
               greyed-out line above is a hint, not an answer: the stores in this market stock
               a handful of things and each one only bids for the request clusters its own
               merchant envelope pursues, so a request nothing here sells comes back with no
-              options. That is the real answer and step 3 will show you the stores&rsquo; own
-              reasons for it.
+              options. That is the real answer, and when the shops have answered you will see
+              their own reasons for it.
             </p>
           </form>
-        ) : (
-          <ol className="transcript" aria-label="What you have said" data-testid="transcript">
-            {turns.map((turn, index) => (
-              <li key={`${turn}:${index}`}>{turn}</li>
-            ))}
-          </ol>
-        )}
+        ) : null}
         {/*
          * THIS BRANCH IS BACK, and its history is worth keeping because it was deleted for a
          * reason that has since stopped being true. It originally had a signed-out arm; when
@@ -891,13 +1142,48 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
             in &mdash; this browser cannot mint one &mdash; and signing out retires it.
           </p>
         )}
-      </section>
+      </PlatformTurn>
+
+      {/*
+       * THE CONVERSATION, INTERLEAVED — the change this file is really about.
+       *
+       * The shopper's words used to be stacked together in one list at the top of the page
+       * while every reply to them sat in numbered cards underneath, so a clarifying loop read
+       * as `winter hat / no / no`, and then, some distance down, a summary of it. Two people
+       * talking do not produce that shape. Each utterance is now followed by the question the
+       * service asked after it, in the order the two actually happened.
+       *
+       * `index < answers.length` is what keeps the OPEN question out of this loop, and it is
+       * not an off-by-one guard: it is the same predicate `IntentConfirm` uses to decide a
+       * question is outstanding (`questions.length > answers.length`). The pending question
+       * belongs to that component, which owns the input for answering it, and rendering it
+       * here as well would put it on the page twice — once with nowhere to reply.
+       */}
+      {turns.map((said, index) => {
+        const asked = index < answers.length ? outcome?.questions[index] : undefined
+        return (
+          <Fragment key={`said-${index}`}>
+            <ShopperTurn>{said}</ShopperTurn>
+            {asked === undefined ? null : (
+              <PlatformTurn
+                label={`Clarifying question ${index + 1}`}
+                lead={asked}
+                aside="asked before anything left this origin"
+              />
+            )}
+          </Fragment>
+        )
+      })}
 
       {outcome !== undefined && stage === undefined ? (
-        <section aria-label="Step 2 - check what we understood" className="step">
-          <h2>
-            <span className="ordinal">2</span> Check what we understood
-          </h2>
+        <PlatformTurn
+          label="Step 2 - check what we understood"
+          lead={
+            outcome.questions.length > answers.length
+              ? 'One more thing before I ask any shop.'
+              : 'Before I ask any shop anything, check I have this right.'
+          }
+        >
           {/*
            * No sign-in branch here any more, and its absence is the point. This whole section
            * is inside the `signedIn` gate below, so there is no reachable state in which this
@@ -925,14 +1211,32 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
             The exchange will match this to cluster {outcome.intent.cluster_id}, which is a hash
             of the use case, the budget band and the constraints above.
           </p>
-        </section>
+        </PlatformTurn>
       ) : null}
 
+      {stage === undefined ? null : (
+        // Reported, not quoted. Confirming is the one gesture on this page that leaves this
+        // origin, and it is the thing that happened between the two turns either side of
+        // this line; a speech bubble here would be the page writing a sentence the shopper
+        // never said.
+        <ActionTurn>
+          You confirmed, and Proxyshop asked the shops. That is the step that left this
+          origin.
+        </ActionTurn>
+      )}
+
       {stage !== undefined ? (
-        <section aria-label="Step 3 - what the stores answered" className="step">
-          <h2>
-            <span className="ordinal">3</span> What the stores answered
-          </h2>
+        <PlatformTurn
+          label="Step 3 - what the stores answered"
+          lead={answeredLead(stage)}
+          // NOT "relaying what the shops answered". This shortlist can carry ORGANIC rows no
+          // shop bid for, whose case the platform wrote itself — `ShortlistView`'s own
+          // no-store-voice branch says so on the card — and an attribution line asserting the
+          // shops answered would be the platform claiming a shop said something it did not.
+          // That is the D55 inversion, stated in the one line of the turn that names a
+          // speaker. What is true of every row is that Proxyshop is showing them.
+          aside="what it found for you"
+        >
           <p className="gloss" data-testid="auction-id">
             {/* Two clocks, and neither is this browser's. `created_at` is the confirm
                 response's; `recorded_at` is when the buyer service recorded the exchange's
@@ -1068,6 +1372,18 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
                             rankedForSlot(stage.record, slot.bid_ref),
                             stage.record.recorded_at === '',
                           )}
+                          {(() => {
+                            // The English reading of the same row, beneath the machine one.
+                            // Rendered as its own element so the pinned join above it stays
+                            // contiguous in the DOM, and out of the mono face because a
+                            // sentence set in DM Mono is not the fix for an unreadable line.
+                            const said = rankInEnglish(rankedForSlot(stage.record, slot.bid_ref))
+                            return said === undefined ? null : (
+                              <p className="reason-gloss" data-testid={`rank-english-${slot.bid_ref}`}>
+                                {said}
+                              </p>
+                            )
+                          })()}
                         </li>
                       ))}
                     </ul>
@@ -1099,14 +1415,23 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
             )}
             </>
           )}
-        </section>
+        </PlatformTurn>
       ) : null}
 
+      {accepted === undefined ? null : (
+        // `slot` is the exchange's own name for the position — `fit`, `value`,
+        // `reliability` — and it is the same word the card's banner carries, so this line
+        // names the card a shopper just pressed rather than a bid reference they never saw.
+        <ActionTurn>
+          You accepted the &ldquo;{accepted.slot}&rdquo; option.
+        </ActionTurn>
+      )}
+
       {accepted !== undefined ? (
-        <section aria-label="Step 4 - your checkout" className="step">
-          <h2>
-            <span className="ordinal">4</span> Your checkout
-          </h2>
+        <PlatformTurn
+          label="Step 4 - your checkout"
+          lead="Your checkout is ready."
+        >
           <p>
             The exchange accepted {accepted.slot} ({accepted.bid_ref}) on auction{' '}
             {accepted.auction_id}
@@ -1168,7 +1493,7 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
           <p className="gloss">
             Nothing is ordered until you finish checkout on the store&rsquo;s own site.
           </p>
-        </section>
+        </PlatformTurn>
       ) : null}
 
       {/*
@@ -1183,13 +1508,12 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
         five `apps/buyer/svc/src/feedback/prompt.py` publishes, and answering posts to the
         real `POST /buyer/feedback`. Only the order is manufactured.
       */}
-      <section aria-label="Step 5 - after your purchase (seeded)" className="step seeded">
-        <h2>
-          <span className="ordinal">5</span> After your purchase{' '}
-          <span className="seeded-badge" data-testid="feedback-seeded-badge">
-            SEEDED
-          </span>
-        </h2>
+      <PlatformTurn
+        label="Step 5 - after your purchase (seeded)"
+        lead="Days after an order arrives, I ask one question about it."
+        aside="a prompt you have not earned yet"
+        seeded
+      >
         {SEEDED_PROMPT === null ? (
           <p role="alert" data-testid="feedback-seed-refused">
             The seeded prompt was refused rather than shown: {SEEDED_REFUSAL}
@@ -1221,16 +1545,16 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
             />
           </>
         )}
-      </section>
-        </>
+      </PlatformTurn>
+        </ol>
       )}
 
       <section aria-label="What is not wired yet" className="gaps">
         <h2>What is not wired yet</h2>
         <ul>
           <li data-testid="gap-feedback-seeded">
-            <strong>Step 5 is seeded, and the real prompt is unreachable</strong> &mdash; the
-            question in step 5 is real, the form is the real{' '}
+            <strong>The post-purchase question is seeded, and the real prompt is unreachable</strong>{' '}
+            &mdash; the question is real, the form is the real{' '}
             <code>FeedbackPromptView</code>, and answering it posts to the real{' '}
             <code>POST /buyer/feedback</code>. The <em>order</em> is not: Proxyshop asks that
             question days after delivery, and this journey ends at the checkout handoff

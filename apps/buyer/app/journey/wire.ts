@@ -83,15 +83,34 @@ export const DISCOUNT_PARAM = 'discount'
  * and not an import — this app does not import the exchange's package — so it can go stale,
  * and `WhyEmpty` therefore has an explicit sentence for a family it does not recognise rather
  * than assuming this list is complete.
+ *
+ * IT HAD GONE STALE, by exactly three words, and that is why this paragraph is here. The list
+ * carried nine of the twelve `collect.py` publishes; `response_timed_out`,
+ * `fan_out_capacity_exhausted` and `bid_claim_unprovenanced` were missing, so a shopper who
+ * met one of them on the empty-shortlist panel got the "no sentence for this" fallback — a
+ * true statement, and a useless one, on the one screen whose entire job is explaining why
+ * they were shown nothing. Two of the three are the EXCHANGE's own condition rather than the
+ * shop's — a store whose reply the exchange stopped waiting for (`response_timed_out`: no
+ * response object ever reaches `collect_bids`, which is what makes it a different fact from
+ * `response_after_deadline`, where one arrived and dated itself too late), and a store the
+ * exchange never got round to asking at all (`fan_out_capacity_exhausted`). Reading either as
+ * "that shop went quiet" sends a demo audience to restart a working store.
+ *
+ * The gap survived because the test that guards this list iterates THIS list — so a word
+ * missing from the copy is a word the gate never asks about. `apps/buyer/app/shortlist/
+ * shortlist.test.tsx` names all twelve explicitly and is what caught it.
  */
 export const FALLBACK_REASON_FAMILIES = [
   'tier_0_no_agent',
   'no_response',
+  'response_timed_out',
+  'fan_out_capacity_exhausted',
   'response_after_deadline',
   'response_carried_no_bid',
   'response_not_stamped',
   'arrival_stamp_unparseable',
   'bid_price_unreconcilable',
+  'bid_claim_unprovenanced',
   'store_declined',
   'store_refused',
 ] as const

@@ -1089,6 +1089,19 @@ function recordingFetcher(body: unknown, status = 200): { fetcher: Fetcher; aske
 async function openTheRecord(bidRef: string): Promise<void> {
   fireEvent.click(screen.getByTestId(`record-toggle-${bidRef}`))
   await waitFor(() => expect(screen.getByTestId(`record-platform-${bidRef}`)).toBeInTheDocument())
+  // ...AND WAIT FOR THE FETCH TO SETTLE. The panel mounts on the click, before the record it
+  // is about has arrived, so the first condition alone is satisfied while `auction` is still
+  // `undefined` — at which point every row in the fold reads "Proxyshop's record of this
+  // auction was not read". That made every assertion on the fold's CONTENT a race, and it
+  // lost one: `still says a stand-in is a stand-in` failed on a full-suite run with exactly
+  // that sentence in place of the one it wanted, and passed on the next three.
+  //
+  // NO ASSERTION IS WEAKENED BY THIS and none is changed. It waits for `record-reading-*` —
+  // the panel's own in-flight line — to go, which it does on a failed read as well as a
+  // successful one, so the two tests that deliberately assert the FAILURE state still reach
+  // it. Nothing here decides what the fold says; it only stops the suite reading the fold
+  // before the fold has been filled in.
+  await waitFor(() => expect(screen.queryByTestId(`record-reading-${bidRef}`)).toBeNull())
 }
 
 describe('clicking into a row for the record behind it', () => {

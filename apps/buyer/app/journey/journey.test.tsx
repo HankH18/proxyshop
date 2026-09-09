@@ -1282,6 +1282,28 @@ describe('the four beats', () => {
     expect(screen.getByRole('button', { name: /accept this one/i })).toBeInTheDocument()
   })
 
+  it('keeps the published fit score on the card, not only a rounded reading of it', async () => {
+    // `readable.ts` promises, in so many words, that "every caller that uses `roundedScore`
+    // also prints the published figure unrounded" — and nothing pinned it. Deleting the mono
+    // tail from the card left the suite fully green with a three-decimal rounding as the only
+    // record of the value on screen, which is this page asserting its own number instead of
+    // the exchange's.
+    const { fetcher } = demoService({
+      rendered: [{ ...RENDERED_SLOT, fit_score: 0.5390724288732691 }],
+    })
+    render(<Journey fetcher={fetcher} />)
+
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Shortlist')
+
+    const cell = screen.getByTestId(`fit-${BID_REF}`).textContent ?? ''
+    // The reading form...
+    expect(cell).toContain('0.539')
+    // ...and the figure the service actually sent, in full.
+    expect(cell).toContain('0.5390724288732691')
+  })
+
   it('blames this service, not the exchange, when no record was kept to read a ranking from', async () => {
     // `_recorded_rows` answers `[]` both for an empty list and for "no record at all", and
     // `outcome_for` reads a per-process ring of 64 — a restart or a busy run empties every
@@ -2930,5 +2952,162 @@ describe('asking a follow-up about the shortlist', () => {
     // refused question must not blank the page a shopper is in the middle of reading.
     expect(screen.queryByTestId('journey-error')).toBeNull()
     expect(screen.getByTestId('auction-id')).toBeInTheDocument()
+  })
+})
+
+/**
+ * THE PAGE AS A CONVERSATION — and the property a conversation is most likely to cost.
+ *
+ * The journey used to be five numbered cards: a composer at the top, the shopper's utterances
+ * stacked together inside card one, and every reply to them in a card further down. It is now
+ * a thread of turns, each one attributed to whoever wrote it, in the order they happened.
+ *
+ * THE RISK THAT CHANGE CARRIES is not layout, and these tests are about the risk rather than
+ * about the layout. A chat's strongest implicit claim is *the speaker on this bubble said what
+ * is inside it* — and the shortlist is a bubble from Proxyshop that CONTAINS a block of prose
+ * a shop wrote and paid to have shown. D55 says those two voices must stay distinguishable and
+ * that the platform must never appear to be saying a shop's words. A careless chat frame
+ * flattens exactly that, silently, and every other test in this file would stay green.
+ *
+ * So what is pinned here is the separation, structurally rather than by colour:
+ *
+ *   * every turn frame is `data-voice="platform"` or `data-voice="shopper"`, and NEVER
+ *     `data-voice="store"`;
+ *   * a shop's words are inside a platform turn, in a `[data-voice="store"]` block, with its
+ *     own attribution — nested, because the platform IS relaying them;
+ *   * the shopper's own bubbles contain their words and nothing this page wrote.
+ */
+describe('the journey reads as a conversation, and the two voices stay two', () => {
+  const SHOP_WORDS = 'Hand-knitted in Donegal since 1974. Free wool wash with every order.'
+  const PITCH = {
+    platform_case:
+      'You said price was a must-have, and here it is: 78.00 USD. Also free returns: 30 days.',
+    platform_case_source: 'assembled',
+    store_pitch: SHOP_WORDS,
+    voices: ['store', 'platform'],
+    facts: [{ key: 'price', value: '78.00 USD', kind: 'price', label: null }],
+  }
+
+  function withPitch() {
+    return demoService({ rendered: [{ ...RENDERED_SLOT, pitch: PITCH }] })
+  }
+
+  it('lays the shopper’s words and the replies out as alternating turns', async () => {
+    const { fetcher } = demoService()
+    render(<Journey fetcher={fetcher} />)
+    await walkToConfirm()
+
+    const thread = screen.getByTestId('transcript')
+    // Both halves of the conversation are in it, in the order they happened: what was said,
+    // then the question that came back, then the answer to that question.
+    const said = thread.textContent ?? ''
+    const utterance = said.indexOf('warm merino wool beanie')
+    const question = said.indexOf('What is your budget?')
+    const answer = said.indexOf('about $100')
+    expect(utterance).toBeGreaterThan(-1)
+    expect(question).toBeGreaterThan(utterance)
+    expect(answer).toBeGreaterThan(question)
+  })
+
+  it('never frames a turn in a shop’s voice', async () => {
+    const { fetcher } = withPitch()
+    const { container } = render(<Journey fetcher={fetcher} />)
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Shortlist')
+
+    // THE ASSERTION THIS BLOCK EXISTS FOR. Every turn in the thread declares a speaker, and
+    // the set of speakers a TURN may declare is exactly two. A shop is not a participant in
+    // this conversation; it is quoted inside the platform's half of it.
+    const turns = Array.from(container.querySelectorAll('.thread > .turn'))
+    expect(turns.length).toBeGreaterThan(0)
+    for (const turn of turns) {
+      const framed = Array.from(turn.querySelectorAll(':scope > [data-turn-voice]'))
+      for (const frame of framed) {
+        expect(['platform', 'shopper']).toContain(frame.getAttribute('data-turn-voice'))
+      }
+    }
+
+    // AND THE TWO ATTRIBUTES STAY TWO QUESTIONS. `data-voice` means "whose words are in this
+    // block" and is what every shop pitch on the page carries; `data-turn-voice` means "who is
+    // speaking in this turn". Merging them would make `closest('[data-voice]')` answer
+    // "platform" for a shop's own pitch, which is the confusion the attribute exists to
+    // prevent — so no turn frame may claim a `data-voice` of its own.
+    for (const turn of turns) {
+      expect(turn.querySelectorAll(':scope > [data-voice]')).toHaveLength(0)
+    }
+  })
+
+  it('shows the shop’s own words inside the platform’s turn, attributed to the shop', async () => {
+    const { fetcher } = withPitch()
+    const { container } = render(<Journey fetcher={fetcher} />)
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Shortlist')
+
+    const stored = Array.from(container.querySelectorAll('[data-voice="store"]'))
+    expect(stored.length).toBeGreaterThan(0)
+    const quoting = stored[0]!
+    // Verbatim, and nested inside a platform turn rather than standing as one.
+    expect(quoting.textContent).toContain(SHOP_WORDS)
+    expect(quoting.closest('[data-turn-voice="platform"]')).not.toBeNull()
+    expect(quoting.closest('.turn-shopper')).toBeNull()
+    // ...and the block itself is the only thing on the page claiming the shop's voice: no
+    // ancestor of it says `data-voice` at all, so nothing above it can be read as the shop
+    // speaking, and nothing about it can be read as the platform having written it.
+    expect(quoting.parentElement?.closest('[data-voice]')).toBeNull()
+    // The platform's own case is in the same turn and is NOT inside the shop's block, so
+    // neither can be read as the other.
+    const platformCase = screen.getByText(PITCH.platform_case)
+    expect(quoting.contains(platformCase)).toBe(false)
+  })
+
+  it('puts nothing in a shopper turn except what the shopper typed', async () => {
+    const { fetcher } = demoService()
+    const { container } = render(<Journey fetcher={fetcher} />)
+    await walkToConfirm()
+
+    const spoken = Array.from(
+      container.querySelectorAll('.turn-shopper [data-turn-voice="shopper"]'),
+    )
+    expect(spoken.map((node) => node.textContent)).toEqual([
+      'I want a warm merino wool beanie for winter, under $100',
+      'about $100',
+    ])
+  })
+
+  it('reports confirming as a gesture rather than quoting the shopper', async () => {
+    // Confirming is something a shopper DID; they typed no sentence for it. A speech bubble
+    // there would be this page inventing the shopper's words — the same fabrication, in the
+    // other direction, as writing a shop's pitch for it.
+    const { fetcher } = demoService()
+    const { container } = render(<Journey fetcher={fetcher} />)
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Shortlist')
+
+    const action = container.querySelector('.turn-action')
+    expect(action).not.toBeNull()
+    expect(action!.textContent).toContain('You confirmed')
+    expect(action!.querySelector('[data-turn-voice]')).toBeNull()
+  })
+
+  it('adds no link of its own to the conversation', async () => {
+    // R3 counts `a[href]` over this container, and the demo nav is mounted outside the React
+    // root for exactly that reason. Restating it here beside the change most likely to break
+    // it: a thread of turns is a lot of new markup, and none of it may be an anchor.
+    const { fetcher } = demoService()
+    const { container } = render(<Journey fetcher={fetcher} />)
+    await walkToConfirm()
+    fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
+    await screen.findByLabelText('Shortlist')
+
+    // OVER THE CONTAINER, not over `.thread`. Scoping this to a class name made it a test of
+    // the selector rather than of the page: renaming `thread` to anything else left it
+    // querying nothing and passing. The container is what R3 actually counts.
+    expect(container.querySelectorAll('a[href]')).toHaveLength(0)
+    // ...and the turns really are in the tree being counted, so the zero above is a
+    // measurement of the conversation rather than of an empty selector.
+    expect(container.querySelectorAll('.turn').length).toBeGreaterThan(2)
   })
 })

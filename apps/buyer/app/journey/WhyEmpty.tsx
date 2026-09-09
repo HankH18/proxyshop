@@ -10,17 +10,27 @@
  * Two rules it keeps:
  *
  * 1. **Verbatim.** The reason strings are printed as the exchange spelled them. The only text
- *    this file adds is a plain-English gloss for each distinct `fallback_reason` on the page,
- *    and every gloss sits *beside* the raw string rather than replacing it. The glosses are
- *    keyed by the reason's FAMILY — see `wire.ts`'s `FALLBACK_REASON_FAMILIES` — and a family
- *    this file has no sentence for gets a sentence saying exactly that, so an unrecognised
- *    reason is never left on the page as a bare machine word with nothing beside it.
+ *    this file adds is a plain-English gloss, and every gloss sits *beside* the raw string
+ *    rather than replacing it. The `fallback_reason` glosses are keyed by the reason's FAMILY
+ *    — see `wire.ts`'s `FALLBACK_REASON_FAMILIES` — and a family this file has no sentence for
+ *    gets a sentence saying exactly that, so an unrecognised reason is never left on the page
+ *    as a bare machine word with nothing beside it.
+ *
+ *    **That now covers all three lists, not just the entries.** It used to cover
+ *    `fallback_reason` alone, which was the panel keeping its own rule for one column and
+ *    breaking it for two: a shopper reading why they had been shown nothing met
+ *    `organic_result_off_topic` and `blacklisted` as bare machine words with nothing beside
+ *    them, on the one screen in the product whose entire job is to explain an absence. The
+ *    exclusion and denial vocabularies come from `../metrics/readable`, shared with
+ *    `#/metrics` so that one code cannot come to read two ways on two screens, and the
+ *    verbatim rule is unchanged — the raw string is still printed whole and first.
  * 2. **No row this page invented.** A section with nothing in it says the list was empty.
  *    It never pads.
  *
  * The `<details>` at the bottom prints the parsed body itself, so the claim "this all came
  * from the service" is one click away from being checked rather than being taken on trust.
  */
+import { explainDenial, explainExclusion } from '../metrics/readable'
 import {
   NO_RESPONSE_REASON,
   UNDISCLOSED_REFUSAL_DETAIL,
@@ -141,6 +151,23 @@ function describeRefusal(detail: string): string {
 }
 
 /**
+ * What happens to a store the exchange could not read a bid from — hedged, because the
+ * unhedged version is false whenever the roster row carries no usable price.
+ *
+ * Four of these glosses used to end "so the exchange represented it at its list price". That is
+ * what `collect.py::_list_price_bid` does when the roster prices the product; when `list_price`
+ * is absent, unreadable, zero or negative it mints NO price and NO expiry, and its own comment
+ * says the resulting entry is "refused by every filter downstream" — the store is dropped from
+ * the shortlist rather than stood in for. Both outcomes are ordinary, so the sentence names
+ * both instead of asserting the flattering one.
+ */
+const STOOD_IN =
+  'Where the roster prices that store’s product, the exchange represented it at its list price ' +
+  'instead of dropping it; where it does not — an absent, unreadable, zero or negative list ' +
+  'price — there is no offer to stand in with, so the entry carries no price and no expiry and ' +
+  'is refused by every filter downstream.'
+
+/**
  * One sentence per family the exchange publishes.
  *
  * Typed `Record<FallbackReasonFamily, …>` on purpose: adding a word to
@@ -151,16 +178,39 @@ function describeRefusal(detail: string): string {
 const REASON_GLOSSES: Readonly<Record<FallbackReasonFamily, ReasonGloss>> = {
   tier_0_no_agent: () =>
     'means that store has no bidding agent for the exchange to ask. It is on the roster from ' +
-    'its catalogue alone, so the exchange represented it at its list price without anybody ' +
-    'having declined anything.',
+    'its catalogue alone, and nobody declined anything. ' + STOOD_IN,
   no_response: () =>
     'means nothing came back from that store’s agent at all — it did not answer with a usable ' +
-    'bid, or with anything else — so the exchange represented it at its list price instead of ' +
-    'dropping it. It is the word for a store that is switched off or too slow to reach, not ' +
-    'for one that said no.',
+    'bid, or with anything else. It is the word for a store that is switched off or too slow ' +
+    'to reach, not for one that said no. ' + STOOD_IN,
+  // THE EXCHANGE'S OWN CONDITION, not the store's, and that is the whole reason these two are
+  // named apart from `no_response`. Both used to be reported as silence, which sends whoever
+  // is reading this to restart a shop that answered perfectly well — `collect.py`'s own
+  // docstrings say so, and one of them carries the measurement: four live agents answering in
+  // 1.97-4.73 s against a 3.0 s window, every one logging 200 OK, every entry reading
+  // `no_response`.
+  response_timed_out: () =>
+    'means the exchange stopped waiting for that store before anything arrived from it. The ' +
+    'bidding window is a few seconds wide and no reply reached the exchange inside it, so ' +
+    'there was nothing to rank. That is the window being short or the network being slow — it ' +
+    'is not the store declining, and it is not the store being switched off. It is also not ' +
+    'the same as an answer that arrived late: a late answer arrives, and this one never did. ' +
+    STOOD_IN,
+  fan_out_capacity_exhausted: () =>
+    'means the exchange never asked that store at all — either every one of its own workers ' +
+    'was still held by a store that had not answered, or the run’s own cap on how many stores ' +
+    'it would ask in parallel was reached first. It is a limit inside the exchange and it says ' +
+    'nothing whatever about the store, which was eligible and would have been asked on a ' +
+    'quieter run. ' + STOOD_IN,
+  bid_claim_unprovenanced: () =>
+    'means that store did bid, and the exchange would not accept the provenance of something ' +
+    'in the bid — a claim, a commitment or the discount. It covers naming no source at all, ' +
+    'naming one the exchange does not recognise, putting an asserted claim somewhere the ' +
+    'verification queue cannot address, and a value the exchange could not finish reading. The ' +
+    'whole bid was set aside rather than shown to you labelled as unchecked. ' + STOOD_IN,
   response_after_deadline: () =>
-    'means that store did answer, but after the bidding window had already closed, so its bid ' +
-    'could not be counted. The exchange represented it at its list price instead.',
+    'means that store did answer, but its answer dated itself after the bidding window had ' +
+    'already closed, so its bid could not be counted. ' + STOOD_IN,
   response_carried_no_bid: () =>
     'means that store answered and its answer carried no bid — there was nothing in it to ' +
     'rank or to put on a shortlist.',
@@ -174,8 +224,8 @@ const REASON_GLOSSES: Readonly<Record<FallbackReasonFamily, ReasonGloss>> = {
     'exchange’s own record rather than the store’s answer.',
   bid_price_unreconcilable: () =>
     'means that store bid at a price its roster row does not authorise, so the exchange ' +
-    'refused to rank the bid and represented the store at its list price instead. The ' +
-    'candidates the filters refused, above, name the price rule it broke.',
+    'refused to rank the bid. The candidates the filters refused, above, name the price rule ' +
+    'it broke. ' + STOOD_IN,
   store_declined: describeDecline,
   store_refused: describeRefusal,
 }
@@ -365,7 +415,25 @@ export function WhyEmpty({ record, recorded = false }: WhyEmptyProps) {
               ) : (
                 <ul aria-label={`Why ${row.bid_ref} was refused`}>
                   {row.exclusion_reasons.map((reason, at) => (
-                    <li key={`${reason}:${at}`}>{reason}</li>
+                    <li key={`${reason}:${at}`}>
+                      {/* VERBATIM AND WHOLE, exactly as it has always been — this file's
+                          rule 1, and the reason the sentence goes BESIDE it rather than the
+                          string being split into a family and a detail here. */}
+                      {reason}
+                      {/* …and the sentence, which this panel had for `fallback_reason` and
+                          did not have for these. A shopper reading why they were shown
+                          nothing met `organic_result_off_topic` as a bare machine word with a
+                          bounded fragment of the exchange's prose after it. The vocabulary is
+                          `readable.ts`'s, shared with `#/metrics` so one code does not read
+                          two ways on two screens. */}
+                      {/* Keyed on the ROW's index as well as the reason's, because
+                          `store_id` can be blank on an excluded row — `MetricsPage` already
+                          falls back to `bid_ref` for exactly that — and two blank ids would
+                          mint the same testid twice. */}
+                      <p className="gloss reason-gloss" data-testid={`why-excluded-${index}-${at}`}>
+                        {explainExclusion(reason).sentence}
+                      </p>
+                    </li>
                   ))}
                 </ul>
               )}
@@ -387,6 +455,13 @@ export function WhyEmpty({ record, recorded = false }: WhyEmptyProps) {
             <li key={`${row.store_id}:${index}`} data-testid={`denied-${row.store_id}`}>
               <span className="key">{row.store_id}</span> <span>{row.status}</span>{' '}
               <span>{row.reason}</span>
+              {/* The gate's three statuses in English. `blacklisted` and `unavailable` are
+                  not the same denial — one is a decision about the shop, the other is the
+                  platform failing to reach an answer and refusing rather than guessing — and
+                  the bare word does not say which of those a reader is looking at. */}
+              <p className="gloss reason-gloss" data-testid={`why-denied-${row.store_id}`}>
+                {explainDenial(row.status).sentence}
+              </p>
             </li>
           ))}
         </ul>

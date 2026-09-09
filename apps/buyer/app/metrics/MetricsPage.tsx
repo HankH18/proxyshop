@@ -39,6 +39,20 @@ import {
   SESSION_PATH,
   PROFILE_PATH,
 } from './telemetry'
+import {
+  COMPONENTS_ARE,
+  componentName,
+  explainDenial,
+  explainExclusion,
+  explainOutcome,
+  explainState,
+  roundedScore,
+} from './readable'
+// The `fallback_reason` vocabulary, imported rather than restated. `WhyEmpty` owns all twelve
+// families, checks them exhaustively against `wire.ts`'s `FALLBACK_REASON_FAMILIES` at compile
+// time, and has its own suite; a second copy here is a second copy to fall out of step. See
+// `readable.ts`'s docstring for why that function is NOT in `readable.ts`.
+import { explainFallbackReason } from '../journey/WhyEmpty'
 
 /** The browser's own fetch. Relative paths only — the API is served from this origin. */
 const browserFetch: Fetcher = (input, init) => fetch(input, init)
@@ -86,6 +100,14 @@ function Panel({
  *
  * A blank and a zero are different sentences, and this is the component that keeps them
  * apart: it renders the REASON, toned by what kind of absence it is, and never a number.
+ *
+ * THE STATE WORD IS NO LONGER THE WHOLE SENTENCE. It used to be: the panel's entire visible
+ * claim was `unauthorized`, or `absent`, or `failed`, in a coloured pill, with the service's
+ * own detail after it. Those four words are the union `telemetry.ts` built precisely so that
+ * "the service has no record of this" and "this page could not read the answer" stay apart —
+ * and to a reader who has not read that module they are four spellings of "no data". So the
+ * distinction is now SAID, in {@link explainState}'s words, and the word itself stays on the
+ * page in the pill beside it rather than being replaced by the sentence.
  */
 function Blank({ reading }: { reading: Reading<unknown> }) {
   const tone =
@@ -97,6 +119,7 @@ function Blank({ reading }: { reading: Reading<unknown> }) {
   return (
     <p className="metrics-blank">
       <span data-tone={tone}>{reading.state}</span>{' '}
+      <strong className="metrics-says">{explainState(reading.state).sentence}</strong>{' '}
       <span className="metrics-blank__detail">{readingDetail(reading)}</span>
     </p>
   )
@@ -474,23 +497,46 @@ function TraceView({ trace }: { trace: AuctionTrace }) {
             const detail = reasonDetail(entry.fallback_reason)
             return (
               <li key={entry.store_id}>
-                <span className="mono">{entry.store_id}</span>{' '}
-                {entry.fallback ? (
-                  <>
-                    <span data-tone="unverified">fallback</span>{' '}
-                    <span className="mono">
-                      {family === '' ? 'the exchange named no reason' : family}
-                      {detail === '' ? '' : ` · ${detail}`}
-                    </span>
-                  </>
-                ) : (
-                  <span data-tone="confirmed">bid</span>
-                )}{' '}
-                {entry.unit_price === undefined ? (
-                  <span data-tone="unknown">no unit price on this row</span>
-                ) : (
-                  <span className="mono">unit {entry.unit_price}</span>
-                )}
+                {/* THE SENTENCE FIRST, the codes underneath. What a person watching a demo
+                    needs off this row is which of two things happened — the shop bid, or the
+                    exchange stood in for it — and that was previously carried by the single
+                    word `fallback`, which does not say it. */}
+                <p className="metrics-says">
+                  <span className="mono">{entry.store_id}</span>{' '}
+                  {entry.fallback
+                    ? 'did not bid. The exchange stood in for it at its roster list price, so ' +
+                      'this row is the platform’s doing rather than the shop’s.'
+                    : 'answered the solicitation with a bid of its own.'}{' '}
+                  {entry.unit_price === undefined
+                    ? 'The record carries no unit price for it.'
+                    : `Unit price ${entry.unit_price}.`}
+                </p>
+                {entry.fallback && entry.fallback_reason !== null ? (
+                  // The same nine sentences `WhyEmpty` prints on the journey page, from the
+                  // same function, so a reason reads identically on both surfaces.
+                  <p className="metrics-why">
+                    <code className="mono">{entry.fallback_reason}</code>{' '}
+                    {explainFallbackReason(entry.fallback_reason)}
+                  </p>
+                ) : null}
+                <p className="metrics-code">
+                  {entry.fallback ? (
+                    <>
+                      <span data-tone="unverified">fallback</span>{' '}
+                      <span className="mono">
+                        {family === '' ? 'the exchange named no reason' : family}
+                        {detail === '' ? '' : ` · ${detail}`}
+                      </span>
+                    </>
+                  ) : (
+                    <span data-tone="confirmed">bid</span>
+                  )}{' '}
+                  {entry.unit_price === undefined ? (
+                    <span data-tone="unknown">no unit price on this row</span>
+                  ) : (
+                    <span className="mono">unit {entry.unit_price}</span>
+                  )}
+                </p>
               </li>
             )
           })}
@@ -504,15 +550,43 @@ function TraceView({ trace }: { trace: AuctionTrace }) {
         <ul className="metrics-entries">
           {trace.excluded.map((row) => (
             <li key={row.bid_ref}>
-              <span className="mono">{row.store_id || row.bid_ref}</span>{' '}
+              <p className="metrics-says">
+                <span className="mono">{row.store_id || row.bid_ref}</span> got as far as being
+                a candidate and was refused before it could be scored.
+              </p>
               {row.exclusion_reasons.length === 0 ? (
-                <span data-tone="unknown">excluded, and the record states no reason</span>
+                <p className="metrics-code">
+                  <span data-tone="unknown">excluded, and the record states no reason</span>
+                </p>
               ) : (
-                row.exclusion_reasons.map((reason) => (
-                  <span key={reason} data-tone="unverified">
-                    {reason}
-                  </span>
-                ))
+                <ul className="metrics-reasons">
+                  {row.exclusion_reasons.map((reason) => {
+                    const said = explainExclusion(reason)
+                    return (
+                      <li key={reason}>
+                        {/* The RULE, in this page's words. */}
+                        <p className="metrics-why">{said.sentence}</p>
+                        {/* THIS CANDIDATE, in the exchange's own — verbatim, never trimmed
+                            or re-worded. `reasons.py` is explicit that the prefix is the
+                            contract and the text after it is the detail, so the two are shown
+                            as two things rather than run together as one machine string. */}
+                        {said.detail === '' ? null : (
+                          // VERBATIM AND WHOLE — `{reason}`, not `said.detail`. Splitting the
+                          // string into a code and a quoted detail made the exchange's own
+                          // sentence unfindable on this page: `hard_constraint_unsatisfied:
+                          // 'material': the candidate carries no such attribute (R19)` no
+                          // longer appeared anywhere, contiguously, in any form. `WhyEmpty`
+                          // prints the raw string whole and this page now does the same, which
+                          // is the rule both surfaces claim to follow.
+                          <p className="metrics-verbatim">{reason}</p>
+                        )}
+                        <p className="metrics-code">
+                          <span data-tone="unverified">{said.code}</span>
+                        </p>
+                      </li>
+                    )
+                  })}
+                </ul>
               )}
             </li>
           ))}
@@ -524,12 +598,24 @@ function TraceView({ trace }: { trace: AuctionTrace }) {
         <p className="metrics-empty">No store was denied entry.</p>
       ) : (
         <ul className="metrics-entries">
-          {trace.denied.map((row) => (
-            <li key={row.store_id}>
-              <span className="mono">{row.store_id}</span>{' '}
-              <span data-tone="unverified">{row.status}</span> {row.reason}
-            </li>
-          ))}
+          {trace.denied.map((row) => {
+            const said = explainDenial(row.status)
+            return (
+              <li key={row.store_id}>
+                <p className="metrics-says">
+                  <span className="mono">{row.store_id}</span> {said.sentence}
+                </p>
+                {/* `orchestration/solicitation.py::_denial` puts the status word at the front
+                    of this text on purpose, so it often repeats the pill below. It is still
+                    printed whole: it is the gate's own record of the condition, and the rule
+                    everywhere on this page is that the service's words are not edited. */}
+                <p className="metrics-verbatim">The gate recorded: “{row.reason}”</p>
+                <p className="metrics-code">
+                  <span data-tone="unverified">{row.status}</span>
+                </p>
+              </li>
+            )
+          })}
         </ul>
       )}
 
@@ -538,23 +624,58 @@ function TraceView({ trace }: { trace: AuctionTrace }) {
         <p className="metrics-empty">The exchange published no ranking for this auction.</p>
       ) : (
         <ul className="metrics-entries">
-          {trace.ranked.map((row) => (
-            <li key={row.bid_ref}>
-              <span className="mono">{row.store_id || row.bid_ref}</span>{' '}
-              {row.rank_score === undefined ? (
-                <span data-tone="unknown">no readable score on this row</span>
-              ) : (
-                <span className="mono">score {row.rank_score}</span>
-              )}{' '}
-              <span className="mono">
-                {Object.keys(row.components).length === 0
-                  ? 'the exchange published no components'
-                  : Object.entries(row.components)
-                      .map(([key, value]) => `${key}=${value}`)
-                      .join(' ')}
-              </span>
-            </li>
-          ))}
+          {trace.ranked.map((row) => {
+            const components = Object.entries(row.components)
+            const rounded = roundedScore(row.rank_score)
+            return (
+              <li key={row.bid_ref}>
+                <p className="metrics-says">
+                  <span className="mono">{row.store_id || row.bid_ref}</span>{' '}
+                  {rounded === undefined
+                    ? 'was published with no score this page can read as a number.'
+                    : `scored ${rounded}.`}
+                </p>
+                {components.length === 0 ? (
+                  <p className="metrics-why">
+                    The exchange published no components for it, so there is nothing here
+                    saying how that score was reached. None have been computed in their place.
+                  </p>
+                ) : (
+                  <>
+                    {/* `scoring.py` publishes `weight * feature`, so each figure below is
+                        bounded by its own term's weight rather than by 1 and the set of them
+                        sums to the score. This sentence used to read "out of a possible 1",
+                        which invited exactly the wrong reading of a `0.175` that is
+                        `0.35 x 0.5` — the published NEUTRAL, i.e. nobody measured it. */}
+                    <p className="metrics-why">
+                      What the score is made of. Every figure is the exchange’s, published when
+                      the auction was decided and not re-computed for this page. {COMPONENTS_ARE}
+                    </p>
+                    <ul className="metrics-components">
+                      {components.map(([key, value]) => (
+                        <li key={key}>
+                          {componentName(key)} —{' '}
+                          <strong>{roundedScore(value) ?? value}</strong>{' '}
+                          {/* The published double, unrounded, beside the reading form. The
+                              rounding above is for saying out loud; this is the value. */}
+                          <span className="mono">
+                            {key}={value}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+                <p className="metrics-code">
+                  {row.rank_score === undefined ? (
+                    <span data-tone="unknown">no readable score on this row</span>
+                  ) : (
+                    <span className="mono">score {row.rank_score}</span>
+                  )}
+                </p>
+              </li>
+            )
+          })}
         </ul>
       )}
 
@@ -579,19 +700,31 @@ function LiveCheckView({ reading }: { reading: LiveCheckReading }) {
         <ul className="metrics-entries">
           {reading.records.map((record, index) => (
             <li key={`${record.checked_at}-${index}`}>
-              <span
-                data-tone={
-                  record.outcome === 'agrees'
-                    ? 'confirmed'
-                    : record.outcome === 'contradicted'
-                      ? 'unverified'
-                      : 'unknown'
-                }
-              >
-                {record.outcome}
-              </span>{' '}
-              <span className="mono">{record.surface}</span>{' '}
-              <span className="mono">{record.checked_at}</span>
+              <p className="metrics-says">{explainOutcome(record.outcome).sentence}</p>
+              {/* THE REASON THE SERVICE GAVE, which this panel parsed and threw away. On a
+                  deployment with no live-page fetcher wired in — which is every deployment
+                  this repo ships — it reads "no live-page fetcher is wired into this buyer
+                  service, so no product page was read and nothing was decided". Dropping it
+                  while the sentence above claimed a page had been fetched was the page
+                  asserting the one thing the record contradicts. */}
+              {record.fetch_reason === '' ? null : (
+                <p className="metrics-verbatim">{record.fetch_reason}</p>
+              )}
+              <p className="metrics-code">
+                <span
+                  data-tone={
+                    record.outcome === 'agrees'
+                      ? 'confirmed'
+                      : record.outcome === 'contradicted'
+                        ? 'unverified'
+                        : 'unknown'
+                  }
+                >
+                  {record.outcome}
+                </span>{' '}
+                <span className="mono">{record.surface}</span>{' '}
+                <span className="mono">{record.checked_at}</span>
+              </p>
             </li>
           ))}
         </ul>

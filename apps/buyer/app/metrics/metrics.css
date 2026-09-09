@@ -107,21 +107,128 @@
   overflow-wrap: anywhere;
 }
 
+/*
+ * ONE TRACE ROW — a sentence, then the record it stands on.
+ *
+ * The rows used to be one flex line of machine words: an id, a coloured pill, a
+ * `family · detail` string and a bare number, all at the same weight. This is the rule that
+ * makes them read as English instead, and it is a layout change only — nothing is hidden and
+ * nothing is dropped. Each row now stacks:
+ *
+ *   `.metrics-says`     the sentence. Body copy, full size, first. What happened.
+ *   `.metrics-why`      why it happened, in this page's words. One step quieter.
+ *   `.metrics-verbatim` the service's own words about THIS row, quoted and left alone.
+ *   `.metrics-code`     the machine tail — the codes, the pills, the published figures.
+ *
+ * The order is the point: the last of those is the one a reader can skip and the one that was
+ * previously the only thing on the row.
+ */
 .metrics-entries {
   margin: var(--ps-3) 0;
   padding: 0;
   list-style: none;
 }
-.metrics-entries li {
+.metrics-entries > li {
+  display: block;
+  padding: var(--ps-3) 0;
+  border-top: 1px solid var(--ps-rule-soft);
+}
+.metrics-entries > li:first-child {
+  border-top: 0;
+}
+.metrics-entries > li > p {
+  margin: 0 0 var(--ps-1);
+  max-width: 52rem;
+  text-wrap: pretty;
+}
+.metrics-entries > li > p:last-child {
+  margin-bottom: 0;
+}
+
+/* The sentence. Ordinary body copy, because it is the row now. */
+.metrics-says {
+  font-size: 14px;
+  color: var(--ps-ink);
+}
+.metrics-blank .metrics-says {
+  flex: 1 1 20rem;
+  font-weight: 600;
+}
+
+/* The reason, in this page's words rather than the service's. */
+.metrics-why {
+  font-size: 13px;
+  color: var(--ps-ink-2);
+}
+
+/* The service's own words about this row. Quoted, indented, never edited — the visual
+   equivalent of the rule `WhyEmpty` states in prose: the gloss sits BESIDE the raw string. */
+.metrics-verbatim {
+  padding-left: var(--ps-3);
+  border-left: 2px solid var(--ps-rule);
+  font-size: 13px;
+  color: var(--ps-ink-2);
+}
+
+/* The machine tail: exactly what the row used to be, kept whole and moved to the bottom. */
+.metrics-code {
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
   gap: var(--ps-2);
-  padding: var(--ps-2) 0;
-  border-top: 1px solid var(--ps-rule-soft);
+  margin-top: var(--ps-2);
+  font-size: 12px;
+  color: var(--ps-ink-3);
 }
-.metrics-entries li:first-child {
+
+/* One exclusion reason per row, when a candidate carries several. */
+.metrics-reasons {
+  margin: var(--ps-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+.metrics-reasons > li {
+  padding: var(--ps-2) 0;
+  border-top: 1px dashed var(--ps-rule-soft);
+}
+.metrics-reasons > li:first-child {
   border-top: 0;
+}
+.metrics-reasons > li > p {
+  margin: 0 0 var(--ps-1);
+  max-width: 52rem;
+  text-wrap: pretty;
+}
+
+/*
+ * The score, broken into the terms that produced it.
+ *
+ * Each row is `<name in English> — <reading form> <key=exact value>`. The reading form is
+ * rounded and the published double sits beside it in mono, because the whole claim of this
+ * page is that its figures are the service's; a rounded figure standing alone would be this
+ * page's.
+ */
+.metrics-components {
+  margin: var(--ps-2) 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+  color: var(--ps-ink-2);
+}
+.metrics-components > li {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 3px 0;
+}
+.metrics-components strong {
+  font-family: var(--ps-mono);
+  font-weight: 500;
+  color: var(--ps-ink);
+}
+.metrics-components .mono {
+  color: var(--ps-ink-3);
 }
 
 .metrics-unreachable {

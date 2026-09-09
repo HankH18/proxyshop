@@ -130,6 +130,170 @@ describe('the recorded auction trace', () => {
     expect(screen.getByText('fit=0.8')).toBeInTheDocument()
   })
 
+  /*
+   * WHAT THIS BLOCK EXISTS TO COVER, and it is a hole the fixtures above created rather than
+   * closed. `TRACE` publishes `components: { fit: 0.8 }`, and
+   * `packages/contracts/tests/ranking.test.ts` asserts in so many words that `fit` is NOT a
+   * term of the formula — the five are `intent_match`, `verified_claim_ratio`, `trust`,
+   * `price_value` and `delivery_fit`. So every assertion above about component rendering is
+   * made against a key the exchange can never send, and the page's English naming of the real
+   * ones was reachable by no test at all. These drive the real vocabulary, on a real recorded
+   * shape, straight off `apps/exchange/src/ranking/scoring.py`.
+   */
+  const REAL_RANKING = {
+    ...TRACE,
+    entries: [
+      { store_id: 'woolworks', fallback: false, fallback_reason: null, unit_price: 78 },
+      {
+        store_id: 'fastfleece',
+        fallback: true,
+        fallback_reason: 'store_declined:no_matching_product',
+        unit_price: 45,
+      },
+    ],
+    denied: [
+      {
+        store_id: 'blockedco',
+        status: 'blacklisted',
+        reason: 'blacklisted: static-eligibility: blockedco is blacklisted',
+      },
+    ],
+    ranked: [
+      {
+        bid_ref: 'auc-1:woolworks',
+        store_id: 'woolworks',
+        rank_score: 0.57685,
+        components: {
+          intent_match: 0.175,
+          verified_claim_ratio: 0.18785000000000002,
+          trust: 0.164,
+          price_value: 0,
+          delivery_fit: 0.05,
+        },
+      },
+    ],
+  }
+
+  it('reads the score out in English while keeping every published figure', async () => {
+    const fetcher = stack({ [auctionPath('auc-1')]: json(REAL_RANKING) })
+    render(<MetricsPage fetcher={fetcher} location={HERE} initialAuctionId="auc-1" />)
+    await screen.findByText(/scored 0\.577\./)
+
+    const trace = document.querySelector('.metrics-trace')!
+    const said = trace.textContent ?? ''
+    // Every term named for what the code actually computes — `readable.test.ts` pins the
+    // exact strings against their producers; this pins that the page renders them.
+    expect(said).toContain('how the platform’s record of it lines up with what you asked for')
+    expect(said).toContain('verified evidence about the things you actually asked about')
+    expect(said).toContain('the shop’s standing trust score')
+    expect(said).toContain('how deeply the shop discounted its own list price')
+    expect(said).toContain('how its delivery promise compares with the others in this auction')
+    // ...and the page says what a component IS, because each one is a weighted contribution
+    // bounded by its own weight, not a mark out of 1.
+    expect(said).toContain('not a mark out of 1')
+    // ...and every published figure still on the page, unrounded. The rounding is a reading
+    // form; if it ever becomes the only record of a value, this page has started asserting
+    // its own numbers instead of the exchange's.
+    expect(said).toContain('intent_match=0.175')
+    expect(said).toContain('verified_claim_ratio=0.18785000000000002')
+    expect(said).toContain('score 0.57685')
+    // A measured zero is a value and is printed as one, not dropped for looking empty.
+    expect(said).toContain('price_value=0')
+  })
+
+  it('says what a fallback row means instead of printing the reason code alone', async () => {
+    const fetcher = stack({ [auctionPath('auc-1')]: json(REAL_RANKING) })
+    render(<MetricsPage fetcher={fetcher} location={HERE} initialAuctionId="auc-1" />)
+    await screen.findByText(/store_declined · no_matching_product/)
+
+    const trace = document.querySelector('.metrics-trace')!
+    const said = trace.textContent ?? ''
+    // The two outcomes told apart in words, not only by a green pill and an amber one.
+    expect(said).toContain('answered the solicitation with a bid of its own')
+    expect(said).toContain('The exchange stood in for it at its roster list price')
+    // The gloss is `WhyEmpty`'s, imported rather than restated, so a reason reads the same on
+    // both surfaces. This is the sentence that function returns for a decline.
+    expect(said).toContain('its answer was no')
+    // ...and the machine reason survives it, whole.
+    expect(said).toContain('store_declined:no_matching_product')
+  })
+
+  it('keeps the exchange’s own sentence for an excluded candidate, whole', async () => {
+    // The rule both trace surfaces claim to follow is that the gloss is ADDED and the raw
+    // string is KEPT. Splitting the reason into a code and a quoted detail broke it here
+    // without breaking a test: the exchange's own sentence stopped appearing on the page in
+    // one piece, while `WhyEmpty` went on printing it whole two clicks away.
+    const REASON =
+      "hard_constraint_unsatisfied: 'material': the candidate carries no such attribute, so " +
+      'the constraint is undecidable and does not count as satisfied (R19)'
+    const fetcher = stack({
+      [auctionPath('auc-1')]: json({
+        ...REAL_RANKING,
+        excluded: [
+          { bid_ref: 'auc-1:fastfleece', store_id: 'fastfleece', exclusion_reasons: [REASON] },
+        ],
+      }),
+    })
+    render(<MetricsPage fetcher={fetcher} location={HERE} initialAuctionId="auc-1" />)
+    await screen.findByText(/refused before it could be scored/)
+
+    // SCOPED TO THE EXCLUSION ROWS, not to `.metrics-trace`. The panel also carries the whole
+    // parsed body in its verbatim `<pre>` fold, so a container-wide `toContain` is satisfied by
+    // the JSON dump and passes even when the rendered row has dropped the string entirely —
+    // which is exactly how it passed when it was first written.
+    const said = document.querySelector('.metrics-reasons')!.textContent ?? ''
+    // Verbatim, contiguous, exactly as the service spelled it...
+    expect(said).toContain(REASON)
+    // ...with this page's sentence about the RULE beside it, not instead of it.
+    expect(said).toContain('not met by evidence the platform has verified')
+  })
+
+  it('says an overflow notice is a cap on the report, not a reason', async () => {
+    // `auction/routes.py` caps a candidate's list at 8 and appends this. Read as a reason it
+    // was told "nothing has been hidden" — about the one string that exists to say something
+    // was.
+    const OVERFLOW =
+      '... and 3 further exclusion reason(s) not reported: this candidate failed 11 checks ' +
+      'and the response reports the first 8'
+    const fetcher = stack({
+      [auctionPath('auc-1')]: json({
+        ...REAL_RANKING,
+        excluded: [
+          { bid_ref: 'auc-1:fastfleece', store_id: 'fastfleece', exclusion_reasons: [OVERFLOW] },
+        ],
+      }),
+    })
+    render(<MetricsPage fetcher={fetcher} location={HERE} initialAuctionId="auc-1" />)
+    await screen.findByText(/refused before it could be scored/)
+
+    const said = document.querySelector('.metrics-reasons')!.textContent ?? ''
+    expect(said).toContain('capped the list')
+    expect(said).not.toContain('nothing has been hidden')
+  })
+
+  it('says why a denied store was denied, and keeps the gate’s own words', async () => {
+    const fetcher = stack({ [auctionPath('auc-1')]: json(REAL_RANKING) })
+    render(<MetricsPage fetcher={fetcher} location={HERE} initialAuctionId="auc-1" />)
+    await screen.findByText(/never asked to bid/)
+
+    const trace = document.querySelector('.metrics-trace')!
+    const said = trace.textContent ?? ''
+    expect(said).toContain('eligibility gate has this shop blacklisted')
+    // Verbatim, and marked as the gate's rather than as this page's.
+    expect(said).toContain('blacklisted: static-eligibility: blockedco is blacklisted')
+  })
+
+  it('says what an empty panel means, and still names the state that made it empty', async () => {
+    render(<MetricsPage fetcher={stack()} location={HERE} initialAuctionId="" />)
+    // The word stays — it is the union's own tag and the page's tone is keyed off it...
+    await waitFor(() => expect(screen.getAllByText('unauthorized').length).toBeGreaterThan(0))
+    // ...and it is no longer the whole of what the panel says.
+    expect(
+      screen.getAllByText('The service refused this page — it is not allowed to read this.')
+        .length,
+    ).toBeGreaterThan(0)
+  })
+
   it('carries the answer itself, so a reader can check the panel against it', async () => {
     render(<MetricsPage fetcher={stack()} location={HERE} initialAuctionId="auc-1" />)
     expect(

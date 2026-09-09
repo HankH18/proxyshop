@@ -275,19 +275,6 @@ a:hover { color: var(--ps-accent-press); text-decoration: underline; }
   letter-spacing: -0.02em;
 }
 
-.ordinal {
-  display: inline-grid;
-  place-items: center;
-  flex: none;
-  width: 26px;
-  height: 26px;
-  border-radius: var(--ps-r-pill);
-  background: var(--ps-accent);
-  color: var(--ps-on-dark);
-  font-family: var(--ps-display);
-  font-size: 14px;
-  font-weight: 800;
-}
 
 .step h3 {
   margin: var(--ps-4) 0 var(--ps-1);
@@ -377,24 +364,157 @@ button.linkish:hover { background: none; color: var(--ps-accent-press); }
 }
 .cta:hover { background: var(--ps-accent-press); color: var(--ps-on-dark); text-decoration: none; }
 
-/* ---- transcript ----------------------------------------------------------- */
+/* ---- the conversation ------------------------------------------------ [buyer lane] ----
+ *
+ * WHAT THIS REPLACED, and why the old rules are gone rather than kept beside the new ones.
+ * There was a `.transcript` block here that drew the shopper's utterances as bubbles — the
+ * odd ones accent, the even ones sunk — and an `.ordinal` rule that drew the numbered badge
+ * on each step heading. Both are deleted because nothing emits either class any more: the
+ * page is a conversation rather than a five-step form, so there is no ordinal to draw, and
+ * the shopper's turns are `.turn-shopper` rows interleaved with the replies to them instead
+ * of one list at the top. A rule for a class no component writes is a rule that silently
+ * stops being true, which is the same defect class this project spends its time closing.
+ *
+ * THE ONE RULE THAT MATTERS HERE IS THE VOICE RULE (D55). A turn's frame carries the voice of
+ * whoever wrote what is inside it, and the two are drawn as two:
+ *
+ *   * `.turn-platform` — Proxyshop. A card on the paper, attributed by name above it.
+ *   * `.turn-shopper`  — the shopper's own words. An accent bubble, opposite side.
+ *   * `.voice[data-voice="store"]` — a SHOP talking. Unchanged, amber, quoted, with its own
+ *     rail, and NESTED inside a platform turn rather than ever being a turn's own frame. That
+ *     nesting is the accurate claim: the platform is relaying the shop, and the page says so
+ *     twice — in `PitchPanel`'s attribution sentence and in the fact that the amber block is
+ *     visibly a quotation inside somebody else's message.
+ *
+ * `.turn-action` is neither: a gesture the shopper made, reported in the platform's words
+ * rather than quoted in theirs, so it gets no bubble at all and no attribution.
+ */
 
-.transcript { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: var(--ps-2); }
-.transcript li {
-  align-self: flex-start;
-  max-width: 82%;
-  padding: 11px 15px;
+.thread {
+  list-style: none;
+  margin: 0 0 var(--ps-4);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--ps-5);
+}
+
+.turn {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* Who is talking. Small, and the FIRST line of the turn.
+ *
+ * It sat outside the `<section>` at first, which drew the same picture and meant a
+ * screen-reader user navigating by region entered the turn without it — and put the SEEDED
+ * badge outside the region the masthead promises carries it. It is inside now; the hairline
+ * under it is what keeps the two visually separate without a gap the eye reads as a break. */
+.turn-who {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 var(--ps-3);
+  padding-bottom: var(--ps-3);
+  border-bottom: 1px solid var(--ps-rule-soft);
+  font-size: 12px;
+  color: var(--ps-ink-3);
+}
+.turn-shopper .turn-who {
+  margin-bottom: 6px;
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+.turn-name { font-weight: 700; color: var(--ps-ink-2); letter-spacing: 0.01em; }
+.turn-aside { color: var(--ps-ink-3); }
+.turn-aside::before { content: '· '; }
+
+.turn-avatar {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--ps-r-pill);
+  background: var(--ps-ink);
+  color: var(--ps-on-dark);
+  font-family: var(--ps-display);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+/* The platform's message. Still `.step`, so every descendant rule this stylesheet already
+   publishes for a step's headings, lists and folds keeps applying; only the chrome changes —
+   softer, one corner squared off towards the speaker, and no drop shadow, because a thread of
+   shadowed cards reads as a dashboard rather than as a conversation. */
+.thread .step.turn-body {
+  margin: 0;
+  padding: var(--ps-3) var(--ps-5) var(--ps-5);
   border-radius: var(--ps-r-xl) var(--ps-r-xl) var(--ps-r-xl) var(--ps-r-sm);
+  box-shadow: none;
+}
+/* The attribution runs the full width of the card, so its hairline meets both edges. */
+.thread .step.turn-body > .turn-who {
+  margin-left: calc(var(--ps-5) * -1);
+  margin-right: calc(var(--ps-5) * -1);
+  padding-left: var(--ps-5);
+  padding-right: var(--ps-5);
+}
+
+/* The message itself. It is an `<h2>` because it is the section's heading and a screen reader
+   should hear it as one; it is not drawn as the old step heading, which had a rule under it
+   and an ordinal badge beside it. */
+.thread .turn-lead {
+  display: block;
+  margin: 0 0 var(--ps-3);
+  padding: 0;
+  border-bottom: 0;
+  font-family: var(--ps-display);
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  text-wrap: pretty;
+}
+
+/* A clarifying question is a turn with nothing in it but the attribution and the message. */
+.thread .step.turn-body > .turn-lead:last-child { margin-bottom: 0; }
+
+/* The shopper, opposite side, in the accent. Verbatim: nothing else is ever put in here. */
+.turn-shopper { align-items: flex-end; }
+.turn-shopper .turn-who { justify-content: flex-end; }
+.turn-shopper .turn-body {
+  max-width: 82%;
+  margin: 0;
+  padding: 11px 15px;
+  border-radius: var(--ps-r-xl) var(--ps-r-xl) var(--ps-r-sm) var(--ps-r-xl);
   background: var(--ps-accent);
   color: var(--ps-on-dark);
   font-size: 15px;
+  overflow-wrap: anywhere;
 }
-.transcript li:nth-child(even) {
-  align-self: flex-start;
-  background: var(--ps-sunk);
-  color: var(--ps-ink);
-  border: 1px solid var(--ps-rule);
+
+/* A gesture, reported. Centred, hairlined, deliberately not a bubble. */
+.turn-action { align-items: center; }
+.turn-action .turn-body {
+  display: inline-block;
+  max-width: 40rem;
+  margin: 0;
+  padding: 0 var(--ps-3);
+  color: var(--ps-ink-3);
+  font-size: 12px;
+  text-align: center;
+  text-wrap: pretty;
 }
+
+/* The composer. The label is the platform's own message, rendered by `.turn-lead` above the
+   box, so the field carries the same words as its accessible name without printing them
+   twice. */
+.composer { margin: 0; }
+.composer textarea { font-size: 15px; }
+
 
 /* ---- the reused components ------------------------------------------------ */
 
@@ -514,13 +634,24 @@ section[aria-label="Shortlist"] ul[aria-label^="What this store commits to"] > l
   font-size: 14px;
 }
 
-/* fit / trust: diagnostics, so they sit quiet and monospaced. */
+/* fit / trust: diagnostics, so they sit quiet — and, since they became SENTENCES, in the sans
+ * face rather than in DM Mono. [buyer lane]
+ *
+ * The rule used to set the whole line monospaced, which was right when the line was
+ * `fit 0.57685` and wrong the moment it became "How well this fits what you asked for: 0.577".
+ * Prose set in a mono face reads as more machine output, which is the exact thing the
+ * rewording is there to relieve. The FIGURES keep the mono treatment through `.record-key`
+ * and the spans around them, so the values still look like values. */
 section[aria-label="Shortlist"] p[data-testid^="fit-"],
 section[aria-label="Shortlist"] p[data-testid^="trust-"] {
   margin: 2px 0;
-  font-family: var(--ps-mono);
-  font-size: 12px;
+  font-family: var(--ps-sans);
+  font-size: 12.5px;
   color: var(--ps-ink-3);
+}
+section[aria-label="Shortlist"] p[data-testid^="fit-"] .record-key {
+  font-family: var(--ps-mono);
+  font-size: 11.5px;
 }
 
 /* Provenance labels: the aggregate line. */
@@ -640,15 +771,22 @@ li[data-tone="unknown"], span[data-tone="unknown"] { color: var(--ps-unknown); b
 .ask-turns > li:last-child { border-bottom: 0; padding-bottom: 0; }
 
 /* The shopper's own words, set apart from the platform's answer so nobody has to work out
-   which half of the exchange they are reading. */
+   which half of the exchange they are reading.
+ *
+ * DRAWN AS A THREAD BUBBLE, matching `.turn-shopper .turn-body` above. [buyer lane] These
+ * used to be a sunk block with a grey rail while the page's other rendering of "the shopper
+ * said this" was an accent bubble on the right — two treatments for one voice, forty pixels
+ * apart, on a page whose entire argument is that a reader can tell at a glance who is
+ * talking. The follow-up box is where that matters most: it is the easiest place in the
+ * product to lose track of whose sentence you are reading. */
 .ask-question {
-  margin: 0 0 var(--ps-3);
-  padding: 10px 14px;
-  border-radius: var(--ps-r-md);
-  background: var(--ps-sunk);
-  border-left: 3px solid var(--ps-rule);
+  max-width: 82%;
+  margin: 0 0 var(--ps-3) auto;
+  padding: 11px 15px;
+  border-radius: var(--ps-r-xl) var(--ps-r-xl) var(--ps-r-sm) var(--ps-r-xl);
+  background: var(--ps-accent);
+  color: var(--ps-on-dark);
   font-size: 15px;
-  color: var(--ps-ink-2);
   overflow-wrap: anywhere;
 }
 
@@ -795,6 +933,28 @@ pre code { background: none; color: inherit; padding: 0; }
   line-height: 1.7;
 }
 .provenance-source > li { padding: 8px 0; border-top: 1px solid var(--ps-rule-soft); }
+
+/* THE SENTENCE BESIDE A MACHINE WORD ------------------------------------ [buyer lane] ----
+ *
+ * `.diagnostics ul.mono` and `details.trace > *` both set DM Mono on everything inside them,
+ * which is right for a recorded value and wrong for the plain-English sentence that now sits
+ * under one. A gloss set in the monospace face reads as more machine output — precisely the
+ * thing it is there to relieve — so it is handed back to the sans stack and set a step
+ * quieter than the row it explains. It NEVER replaces that row: every use of this class sits
+ * beneath a verbatim string that is still on the page.
+ */
+.reason-gloss {
+  margin: 4px 0 0;
+  font-family: var(--ps-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ps-ink-2);
+  text-wrap: pretty;
+}
+
+/* The published key, kept beside the English name of the term it is. Quiet: the name is what
+   a reader is looking at, and the key is what they check it against. */
+.record-key { color: var(--ps-ink-3); }
 
 .permalink {
   overflow-wrap: anywhere;
