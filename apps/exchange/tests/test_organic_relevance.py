@@ -339,7 +339,6 @@ def test_the_rule_refuses_to_be_configured_into_a_no_op() -> None:
         TopicalRelevance(min_shared_share=0.0)
 
 
-
 # =====================================================================================
 # 1b. THE SHOPPER TYPED THE PRODUCT'S NAME — the refusal the thresholds could not avoid
 # =====================================================================================
@@ -399,14 +398,17 @@ def test_naming_rows_the_shopper_did_not_name_are_still_refused(query: str, name
 
     That module says zero-of-thirty off-corpus is "the number to re-take after any change
     here". Every one of these pairs is the row the retriever really put at the top for a query
-    this catalogue has nothing for, and every one must still be refused: the new condition is a
-    containment test on the whole title, so a wrong row sharing one coincidental word with the
-    query does not satisfy it.
+    this catalogue has nothing for, and every one must still be refused: the keep-condition
+    needs the whole title contained AND asked for, so a wrong row sharing one coincidental
+    word with the query does not satisfy it.
 
     Measured wider than this parametrisation, over the 16 off-corpus queries (these 15 plus
-    ``"garlic bread recipe book"``, written specifically to attack the new condition) against
-    all 3,086 identities in the shipped document — 49,376 verdicts, **one** newly admitted row:
-    ``Garlic 1%`` for the query written to catch it. On the 15 below it admits none.
+    ``"garlic bread recipe book"``, written specifically to attack the keep-condition) against
+    all 3,086 identities of ``deploy/demo/exchange-deployment.json`` at ``fa900c4`` — 49,376
+    verdicts, **zero** rows admitted that the thresholds would have refused. It used to be one:
+    ``Garlic 1%`` for the query written to catch it, which plain containment kept and
+    :func:`~exchange.ranking.filters.query_noun_phrases` now refuses, because ``garlic``
+    premodifies ``bread``.
     """
     identity = {"title": name, "source": "snap-x"}
     candidate = {"fallback": True, "store_id": "s1"}
@@ -457,6 +459,192 @@ def test_an_identity_with_no_readable_title_names_nothing() -> None:
     assert shopper_named_the_product("anything at all", {"title": ""}) is False
     assert shopper_named_the_product("anything at all", {"brand": "Gaia Herbs"}) is False
     assert shopper_named_the_product("anything at all", None) is False
+
+
+#: OFF-CORPUS queries that CONTAIN a shipped product's whole crawled title, because that title
+#: is one ordinary English word. Every row here is a real product out of
+#: ``deploy/demo/exchange-deployment.json`` (``Iron+``, ``SAMe Bulk``, ``Fuel``, ``Ease`` …)
+#: and every query is one a person would really type about something else entirely.
+#:
+#: **This is the leak the keep-condition used to be**, and it was reachable on the demo's own
+#: route: with two silent tier-1 stores rostered on ``Iron+`` and ``SAMe Bulk``,
+#: ``POST /auctions`` answered ``"cast iron skillet for camping"`` with ``Iron+`` at $29.95.
+#: Measured over 25 queries of this shape, plain containment filled **25 of 25**; with
+#: :func:`~exchange.ranking.filters.query_noun_phrases` guarding it, **1 of 25** — the one
+#: below that is deliberately absent from this table, ``"iron on patches for jeans"``, where
+#: ``on`` is a preposition to every tokeniser in this tree and ``iron-on`` is an English
+#: compound this rule has no way to see.
+#:
+#: The last three are the attack on :data:`~exchange.ranking.filters.NAMING_MODIFIERS`
+#: specifically: an ordinary word followed by a form word, which is the one shape that list
+#: can be talked into. ``blend``, ``complex`` and ``liquid`` are not on it for exactly this
+#: reason.
+CONTAINMENT_LEAKS = (
+    ("cast iron skillet for camping", "Iron+", "Momentous"),
+    ("an iron bed frame queen size", "Iron+", "Momentous"),
+    ("steam iron with a vertical setting", "Iron+", "Momentous"),
+    ("where can i buy scrap iron", "Iron+", "Momentous"),
+    ("bulk storage bins for the garage", "SAMe Bulk", "PureBulk, Inc."),
+    ("bulk mailing envelopes 500 count", "SAMe Bulk", "PureBulk, Inc."),
+    ("garlic bread recipe book", "Garlic 1%", "Toniiq - Elevated Nutrients"),
+    ("garlic press stainless steel", "Garlic 1%", "Toniiq - Elevated Nutrients"),
+    ("ginger ale soda cans", "Ginger", "Paradise Herbs"),
+    ("ginger jar table lamp", "Ginger", "Paradise Herbs"),
+    ("fuel injector cleaner for my truck", "Fuel", "Momentous"),
+    ("camping stove tablets fuel", "Fuel", "Momentous"),
+    ("fiber optic cable 50 ft", "Fiber+", "Momentous"),
+    ("a zinc roofing sheet", "Zinc", "Momentous"),
+    ("door handles made of zinc", "Zinc", "Momentous"),
+    ("calcium remover for shower glass", "Calcium", "Momentous"),
+    ("omega seamaster watch strap", "Omega-3", "Momentous"),
+    ("keyboard shortcuts for ease", "Ease 50:1", "Toniiq - Elevated Nutrients"),
+    ("longevity dog food for senior labradors", "Longevity", "Momentous"),
+    ("how do i put my iphone into recovery", "Recovery", "Momentous"),
+    ("nutmeg grinder wooden", "Nutmeg", "PureBulk, Inc."),
+    ("fuel blend for a two stroke engine", "Fuel", "Momentous"),
+    ("recovery complex for a sprained ankle", "Recovery", "Momentous"),
+    ("fiber liquid for a broken kayak hull", "Fiber+", "Momentous"),
+)
+
+
+@pytest.mark.parametrize(("query", "title", "brand"), CONTAINMENT_LEAKS)
+def test_containing_a_one_word_title_is_not_asking_for_it(
+    query: str, title: str, brand: str
+) -> None:
+    """THE ATTACK DIRECTION on the keep-condition itself, and the reason it has a second half.
+
+    ``Iron+`` folds to the single content word ``iron``, so the shopper's words contain this
+    product's whole crawled name — the first assertion pins exactly that, because a fixture
+    where containment did not hold would pass this test on the old rule too. What the shopper
+    ASKED FOR is a skillet, a bed frame, or an iron to press shirts with, and in every one of
+    those the product's word is a premodifier of the thing they actually want.
+    """
+    from exchange.ranking.filters import shopper_named_the_product
+
+    identity = {"title": title, "brand": brand, "source": "snap-x"}
+    assert set(content_terms(title)) <= set(content_terms(query)), (
+        "this fixture is only interesting while the query really does contain the whole title"
+    )
+    assert shopper_named_the_product(query, identity) is False, query
+
+    reason = organic_relevance_reason(
+        {"fallback": True, "store_id": "s1"}, query_text=query, identity=identity, relevance=RULE
+    )
+    assert reason is not None, f"{title!r} is not what {query!r} asked for"
+    assert reason.startswith(REASON_OFF_TOPIC_ORGANIC), reason
+
+
+#: THE HONEST DIRECTION for the same one-word products, and it comes first in weight: every one
+#: of these is a query the thresholds refuse by arithmetic (one agreeing word out of three or
+#: more) and that this condition must keep. The names lead, the way a shopper leads with what
+#: they want, and what follows is the form, the grade, or what it is for.
+NAMED_IN_THE_LEAD = (
+    ("iron supplement for anemia", "Iron+", "Momentous"),
+    ("iron capsules that dont upset my stomach", "Iron+", "Momentous"),
+    ("bacopa for memory and focus daily", "Bacopa", "Gaia Herbs"),
+    ("organic bacopa capsules 500 mg", "Bacopa", "Gaia Herbs"),
+    ("reishi extract for immune support", "Reishi", "Paradise Herbs"),
+    ("turmeric capsules for joint pain", "Turmeric", "Paradise Herbs"),
+    ("shilajit resin for energy levels", "Shilajit", "Paradise Herbs"),
+    ("zinc lozenges for a winter cold", "Zinc", "Momentous"),
+    ("calcium tablets for bone density", "Calcium", "Momentous"),
+    ("fiber powder for constipation relief", "Fiber+", "Momentous"),
+    ("omega supplement for heart health", "Omega-3", "Momentous"),
+    ("multivitamin for active men over 50", "Multivitamin", "Momentous"),
+    ("recovery supplement for after training", "Recovery", "Momentous"),
+    ("longevity supplement for healthy ageing", "Longevity", "Momentous"),
+    ("nattokinase for circulation support", "Nattokinase", "Paradise Herbs"),
+    ("berberine for blood sugar control", "Berberine", "Momentous"),
+    ("ashwagandha for stress and cortisol", "Ashwagandha", "Paradise Herbs"),
+    ("ginger capsules for nausea relief", "Ginger", "Paradise Herbs"),
+    ("garlic capsules for cholesterol", "Garlic 1%", "Toniiq - Elevated Nutrients"),
+)
+
+
+@pytest.mark.parametrize(("query", "title", "brand"), NAMED_IN_THE_LEAD)
+def test_a_one_word_product_the_shopper_led_with_is_still_kept(
+    query: str, title: str, brand: str
+) -> None:
+    """The false refusal must stay fixed. Same products, same rule, the honest half.
+
+    The first assertion is the same guard :data:`NAMED_OUTRIGHT` carries: these are only
+    interesting while the thresholds still refuse them, which is what makes this a
+    keep-condition rather than a looser threshold.
+    """
+    identity = {"title": title, "brand": brand, "source": "snap-x"}
+    assert RULE.judge(query, f"{title} {brand}").about is False, (
+        "this fixture is only interesting while the thresholds still refuse it"
+    )
+    assert (
+        organic_relevance_reason(
+            {"fallback": True, "store_id": "s1"},
+            query_text=query,
+            identity=identity,
+            relevance=RULE,
+        )
+        is None
+    ), f"the shopper asked for {title!r} by name and was told the platform could not connect it"
+
+
+def test_the_condition_cannot_change_the_gate_for_a_multi_word_title() -> None:
+    """The scope claim, asserted rather than asserted-in-prose.
+
+    ``shopper_named_the_product`` returns on containment alone once the title carries
+    ``min_shared_terms`` content words, and that shortcut is safe because the gate could not
+    have refused such a row anyway: containment puts every one of those words in the query AND
+    in the surface, so ``judge`` counts at least ``min_shared_terms`` agreements and keeps it.
+    Re-measured over all 3,086 identities in ``deploy/demo/exchange-deployment.json``: of the
+    2,982 with two or more content words, **0** had their gate answer decided by this
+    condition. This node pins the shape on the pair that would break first.
+    """
+    from exchange.ranking.filters import shopper_named_the_product
+
+    identity = {"title": "Milk Thistle Gummies", "brand": "Gaia Herbs"}
+    query = "a supplement containing milk thistle gummies for the liver"
+
+    assert shopper_named_the_product(query, identity) is True
+    assert RULE.judge(query, "Milk Thistle Gummies Gaia Herbs").about is True, (
+        "the thresholds already keep a row whose whole multi-word name the shopper typed, so "
+        "this condition has nothing left to decide for it"
+    )
+
+
+def test_the_query_is_split_where_a_shopper_stops_describing_one_thing() -> None:
+    """:func:`~exchange.ranking.filters.query_noun_phrases`, on the two shapes that decide it."""
+    from exchange.ranking.filters import query_noun_phrases
+
+    assert query_noun_phrases("cast iron skillet for camping") == (
+        ("cast", "iron", "skillet"),
+        ("camping",),
+    )
+    assert query_noun_phrases("bacopa best one for daily use under $30") == (
+        ("bacopa",),
+        ("one",),
+        ("daily",),
+    )
+    assert query_noun_phrases("") == ()
+    # A bare number is a boundary, which is what keeps `Glutathione 98%` naming itself.
+    assert query_noun_phrases("glutathione 98% for daily use") == (("glutathione",), ("daily",))
+
+
+def test_a_missing_modifier_costs_a_keep_and_never_buys_a_leak() -> None:
+    """The fail direction of :data:`~exchange.ranking.filters.NAMING_MODIFIERS`, pinned.
+
+    ``chewables`` is not on the list. The row is not refused BY this condition — it falls back
+    to the thresholds, exactly where it stood before the condition existed — so the cost of a
+    short list is an honest refusal and never a confident wrong answer. Adding a word can only
+    move rows the other way, which is why the list is short and every entry on it is a form or
+    a grade rather than a thing.
+    """
+    from exchange.ranking.filters import NAMING_MODIFIERS, shopper_named_the_product
+
+    identity = {"title": "Bacopa", "brand": "Gaia Herbs"}
+    assert "chewabl" not in NAMING_MODIFIERS
+    assert shopper_named_the_product("bacopa chewables for memory", identity) is False
+    assert shopper_named_the_product("bacopa capsules for memory", identity) is True
+    assert not {"blend", "complex", "liquid"} & NAMING_MODIFIERS, (
+        "each of these bought an off-corpus row in the harness and no honest query needed it"
+    )
 
 
 def test_naming_the_product_does_not_reach_a_row_a_store_actually_bid() -> None:
@@ -949,9 +1137,7 @@ def test_the_hard_constraint_emptiness_is_bounded_to_what_was_judged_too() -> No
     assert "hard constraints" in sentence, sentence
 
 
-def _solicited_roster(
-    *shops: SolicitedShop, vouched: tuple[str, ...] = ()
-) -> ShopRoster:
+def _solicited_roster(*shops: SolicitedShop, vouched: tuple[str, ...] = ()) -> ShopRoster:
     """A graph solicitation naming ``shops``, having vouched for ``vouched`` product refs."""
     return ShopRoster(
         shops=shops,
@@ -993,8 +1179,13 @@ class _Source:
 
 
 STATED = (
-    {"store_id": "gaiaherbs.com", "tier": 1, "product_ref": "prod-milk", "list_price": 25.49,
-     "max_discount_pct": 15.0},
+    {
+        "store_id": "gaiaherbs.com",
+        "tier": 1,
+        "product_ref": "prod-milk",
+        "list_price": 25.49,
+        "max_discount_pct": 15.0,
+    },
     {"store_id": "toniiq.com", "tier": 1, "product_ref": "prod-glutathione", "list_price": 20.97},
 )
 
@@ -1203,9 +1394,7 @@ def test_an_unwired_exchange_moves_nothing_and_asks_nobody() -> None:
     """``NoShopRoster`` is the wired default; a deployment with no graph is unchanged."""
     from exchange.retrieval.roster import NoShopRoster
 
-    rows, reason = repoint_organic_products(
-        NoShopRoster(), STATED, _intent("creatine monohydrate")
-    )
+    rows, reason = repoint_organic_products(NoShopRoster(), STATED, _intent("creatine monohydrate"))
 
     assert rows == [dict(row) for row in STATED], rows
     assert reason is None, reason

@@ -402,6 +402,80 @@ def test_a_silent_store_whose_product_the_shopper_NAMED_reaches_the_shopper() ->
     assert "Resveratrol" not in shown and "Glutathione 98%" not in shown, shown
 
 
+#: The same shape as :data:`NAMED_ROSTER`, on the two products whose one crawled content word
+#: is ORDINARY ENGLISH rather than a botanical name. Both are real rows of
+#: ``deploy/demo/exchange-deployment.json``: ``Iron+`` folds to ``iron`` and ``SAMe Bulk`` folds
+#: to ``bulk``, because ``same`` is a stopword.
+CONTAINMENT_ROSTER: tuple[tuple[str, str, str, str, float], ...] = (
+    ("livemomentous.com", "prod-iron", "Iron+", "Momentous", 29.95),
+    ("purebulk.com", "prod-same-bulk", "SAMe Bulk", "PureBulk, Inc.", 41.96),
+)
+
+#: Off-corpus queries that happen to carry one of those two words. These are the three the
+#: skeptic drove, and they are the reason
+#: :func:`~exchange.ranking.filters.shopper_named_the_product` is a position test and not a
+#: containment test: at ``fa900c4`` each of them put a supplement on the shopper's screen at
+#: its catalogue price.
+CONTAINMENT_LEAK_QUERIES = (
+    "cast iron skillet for camping",
+    "an iron bed frame queen size",
+    "bulk storage bins for the garage",
+)
+
+
+@pytest.mark.parametrize("query", CONTAINMENT_LEAK_QUERIES)
+def test_an_off_corpus_query_carrying_a_products_whole_name_shows_nothing(query: str) -> None:
+    """THE LEAK, over the served route, because that is where it was reachable.
+
+    Driven at ``fa900c4`` against this exact roster, ``POST /auctions`` answered::
+
+        "cast iron skillet for camping"     -> Iron+      at $29.95
+        "an iron bed frame queen size"      -> Iron+
+        "bulk storage bins for the garage"  -> SAMe Bulk
+
+    On the stated-roster route the organic gate is the ONLY per-query relevance defence — the
+    roster is deployment data, not a retrieval result, so nothing upstream has asked whether
+    these products answer the question. A keep-condition that fires on plain containment
+    hands that defence away for every product whose crawled title is one ordinary word, and
+    103 of the document's 3,086 products are exactly that.
+
+    Both stores are refused here, and the screen is honestly empty rather than wrong.
+    """
+    body = _serve(_app(CONTAINMENT_ROSTER, bidding=False), query, CONTAINMENT_ROSTER)
+
+    assert body["shortlist"]["slots"] == [], (
+        f"{query!r} is not about a supplement, and the shopper was shown "
+        f"{[s['product']['identity']['title'] for s in body['shortlist']['slots']]}"
+    )
+    assert len(_off_topic_reasons(body)) == len(CONTAINMENT_ROSTER), body["excluded"]
+    assert body["market"]["nothing_shown"] is True, body["market"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    (
+        "iron best one for daily use under $30",
+        "iron supplement for anemia",
+        "same bulk best one for daily use under $30",
+    ),
+)
+def test_the_same_roster_still_answers_a_shopper_who_asked_for_the_product(query: str) -> None:
+    """The honest direction on the identical roster, and it is the half that must not move.
+
+    Same two stores, same silence, same one-word titles — and here the shopper LED with the
+    product's own crawled name. Each of these is refused by the thresholds on arithmetic (one
+    agreeing word out of three), so each of them reaches the screen only because the gate
+    declines to apply them. Without this half the fix for the leak above is just the revert,
+    and the revert puts 104 false refusals back.
+    """
+    body = _serve(_app(CONTAINMENT_ROSTER, bidding=False), query, CONTAINMENT_ROSTER)
+
+    slots = body["shortlist"]["slots"]
+    assert slots, f"the shopper asked for this product by name: excluded={body['excluded']}"
+    assert all(slot["fallback"] for slot in slots), "nobody bid, so every row is a list price"
+    assert body["market"]["nothing_shown"] is False, body["market"]
+
+
 def test_an_auction_with_nothing_to_represent_does_not_claim_a_blank_screen(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

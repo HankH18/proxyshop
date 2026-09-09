@@ -70,10 +70,17 @@ from typing import Any
 from claim_verification.statuses import DECIDED_STATUSES
 from ingest.graph.model import slug
 
+from proxyshop_support.embedding import fold_for_lexical
+
 from ..checkout.codes import UnusableOffer, expiry_epoch
 from ..checkout.domain import is_on_domain
 from ..retrieval.criteria import HardCriterion, MalformedIntent
-from ..retrieval.relevance import TopicalRelevance, content_terms, identity_surface
+from ..retrieval.relevance import (
+    MIN_SHARED_TERMS,
+    TopicalRelevance,
+    content_terms,
+    identity_surface,
+)
 from .attestation import ATTESTATION_FIELD, attested_status
 from .reasons import (
     REASON_BLACKLIST_UNREADABLE,
@@ -816,12 +823,15 @@ def organic_relevance_reason(
        exchange's catalogue never named. Absent means unchecked, and an unchecked product is
        kept: an exchange whose catalogue is unwired would otherwise refuse every organic row in
        every auction, which is a misconfiguration reported as "this catalogue serves nothing".
-    3. **The shopper did not name the product outright.** See
+    3. **The shopper did not ask for the product by name.** See
        :func:`shopper_named_the_product` — when every content word of the platform's crawled
-       TITLE is in the query, the shopper asked for this thing by the name the platform gave
-       it, and no word-count threshold may overrule that. Measured on the shipped catalogue,
-       this is what stops the gate refusing 104 of its own 3,086 products for queries carrying
-       their titles verbatim; it costs one admitted row across 49,376 off-corpus verdicts.
+       TITLE is in the query AND the query's opening noun phrase is that name, the shopper
+       asked for this thing by the name the platform gave it, and no word-count threshold may
+       overrule that. Measured on the shipped catalogue, this is what stops the gate refusing
+       104 of its own 3,086 products for queries carrying their titles verbatim. The second
+       half of that condition is what keeps it from being the one-shared-word rule in
+       disguise: without it, ``"cast iron skillet for camping"`` was answered with ``Iron+``
+       on the served route.
     4. **The relevance rule could decide.** See
        :meth:`~exchange.retrieval.relevance.TopicalRelevance.judge` — a query with no content
        words, or an identity that folds to none, answers ``about=True, decidable=False`` and
@@ -874,7 +884,7 @@ def organic_relevance_reason(
     surface = identity_surface(identity)
     if not surface:
         return None
-    if shopper_named_the_product(query_text, identity):
+    if shopper_named_the_product(query_text, identity, min_named_terms=relevance.min_shared_terms):
         return None
     verdict = relevance.judge(query_text, surface)
     if verdict.about:
@@ -882,42 +892,172 @@ def organic_relevance_reason(
     return f"{REASON_OFF_TOPIC_ORGANIC}: {verdict.detail}"
 
 
-def shopper_named_the_product(query_text: str, identity: Any) -> bool:
-    """Did the shopper type the platform's own name for this product, whole?
+#: The words a shopper puts BESIDE a product's name without asking for a different product.
+#: Two classes and nothing else: the FORM the thing comes in (``capsules``, ``powder``,
+#: ``lozenges``) and the GRADE it is wanted at (``organic``, ``pure``). None of them names a
+#: thing on its own, which is the whole test for membership.
+#:
+#: It is consulted by :func:`shopper_named_the_product` alone, and only for a title that folds
+#: to ONE content word — see there for why that is the only case where any of this runs. Its
+#: job is to let ``"reishi extract for immune support"`` still name ``Reishi`` while
+#: ``"cast iron skillet for camping"`` does not name ``Iron+``.
+#:
+#: **The two directions this list fails in are not symmetric, and that is why it is short.** A
+#: word MISSING from it costs an honest keep — the row falls back to the thresholds, which is
+#: exactly where it was before this condition existed. A word wrongly ON it buys a confident
+#: wrong answer. So a word earns its place by a measured honest query that needs it, never by
+#: sounding plausible. Measured over 8 off-corpus queries shaped
+#: ``"<ordinary word> <modifier> ..."`` and about something else entirely — the last three
+#: rows of ``test_organic_relevance.CONTAINMENT_LEAKS`` are the ones that survived into the
+#: suite: ``blend``, ``complex`` and ``liquid`` each bought a leak and no honest query needed
+#: one of them, so none of the three is here. ``extract`` is the one entry that costs
+#: something: it keeps ``"reishi extract for immune support"`` and it admits ``"garlic extract
+#: for the garden pests"``, and that trade is taken deliberately because the admitted row IS a
+#: garlic extract — the query names the product and means it for the roses.
+NAMING_MODIFIERS: frozenset[str] = frozenset(
+    content_terms(
+        "capsule capsules tablet tablets softgel softgels gummy gummies powder drop drops "
+        "pill pills lozenge lozenges chew chews tincture resin extract supplement supplements "
+        "organic natural pure vegan"
+    )
+)
 
-    True when every content word of the crawled ``title`` appears in the query. It is a
-    CONTAINMENT test, not a threshold, and it is the fourth condition on the gate above — the
-    one that keeps a row the thresholds would refuse.
+
+def query_noun_phrases(query_text: str) -> tuple[tuple[str, ...], ...]:
+    """The query's content-word runs, in order, split wherever a stopword or a number falls.
+
+    ``"cast iron skillet for camping"`` -> ``(('cast', 'iron', 'skillet'), ('camping',))``.
+    ``"bacopa best one for daily use under $30"`` -> ``(('bacopa',), ('one',), ('daily',))``,
+    because :data:`~exchange.retrieval.relevance.STOPWORDS` already carries ``best``, ``use``
+    and ``under``.
+
+    A crude approximation of an English noun phrase, and crude ON PURPOSE: the only question
+    asked of it is which words the shopper grouped together, and a preposition, a determiner,
+    a conjunction or a bare number is where a shopper stops describing one thing and starts
+    describing the next. Nothing here parses; the stopword list does all the work.
+
+    **Folding is :func:`~proxyshop_support.embedding.fold_for_lexical` and NOT
+    :func:`~proxyshop_support.embedding.lexical_tokens`**, which is the same folding
+    :func:`~exchange.retrieval.relevance.content_terms` applies, minus the de-duplication.
+    ``lexical_tokens`` drops a repeated word, and a repeated word here is usually a repeated
+    STOPWORD — ``"iron for the pan for camping"`` would lose its second ``for`` and read as one
+    phrase where the shopper typed two. Order and repeats are the structure this function is
+    about, so it reads the folded string directly and lets ``content_terms`` decide each token.
+
+    Args:
+        query_text: the shopper's own words.
+
+    Returns:
+        The phrases, possibly empty. Each term is stemmed exactly as ``content_terms`` stems
+        it, so a phrase's words and a title's words are comparable without a second fold.
+    """
+    phrases: list[tuple[str, ...]] = []
+    current: list[str] = []
+    for token in fold_for_lexical(query_text).split():
+        terms = content_terms(token)
+        if terms:
+            current.extend(terms)
+        elif current:
+            phrases.append(tuple(current))
+            current = []
+    if current:
+        phrases.append(tuple(current))
+    return tuple(phrases)
+
+
+def shopper_named_the_product(
+    query_text: str, identity: Any, *, min_named_terms: int = MIN_SHARED_TERMS
+) -> bool:
+    """Did the shopper ASK FOR the thing the platform calls this product?
+
+    Two conditions, and the second one is the whole of this function's history. The crawled
+    ``title`` must be CONTAINED in the query — every one of its content words present — and
+    the containment must be evidence rather than coincidence.
 
     **The refusal it ends, measured on the shipped catalogue.** Through
     ``catalog_identity`` -> :func:`~exchange.retrieval.relevance.identity_surface` over the
-    3,086 products of ``deploy/demo/exchange-deployment.json``, with the query set to each
-    product's OWN crawled title plus four ordinary shopper words
+    3,086 products of ``deploy/demo/exchange-deployment.json`` at ``fa900c4``, with the query
+    set to each product's OWN crawled title plus four ordinary shopper words
     (``"<title> best one for daily use under $30"``), the thresholds refused **104 of 3,086**
     as not about what was asked. ``Bacopa``, ``Resveratrol``, ``Glutathione 98%``,
     ``Garlic 1%``, ``SleepThru®`` — a shopper typed the product's name verbatim and the
     platform's own gate answered that its own crawl could not connect the product to the
-    query. This condition takes that to **1 of 3,086**.
+    query. This condition takes that to **1 of 3,086** (``SAMe``, whose title folds to a
+    stopword). Re-measured after the second condition below was added: still **1 of 3,086**.
 
-    **Why the thresholds cannot get there on their own, which is why this is a keep-condition
-    rather than a looser number.** :meth:`~exchange.retrieval.relevance.TopicalRelevance.judge`
-    needs ``min(2, len(asked))`` agreeing content words or half of them, counted against the
-    QUERY's length. A one-content-word title cannot supply two, so as soon as the shopper types
-    three or more content words the row is refused by arithmetic no matter what it names. The
-    surface does carry the brand — ``Bacopa Gaia Herbs`` is three terms — but the shopper is
-    under no obligation to type the brand, and every one of those 104 has a one-word title.
+    **Why the thresholds cannot get there on their own.**
+    :meth:`~exchange.retrieval.relevance.TopicalRelevance.judge` needs ``min(2, len(asked))``
+    agreeing content words or half of them, counted against the QUERY's length. A
+    one-content-word title cannot supply two, so as soon as the shopper types three or more
+    content words the row is refused by arithmetic no matter what it names. The surface does
+    carry the brand — ``Bacopa Gaia Herbs`` is three terms — but the shopper is under no
+    obligation to type the brand, and every one of those 104 has a one-word title.
     Lowering ``MIN_SHARED_TERMS`` to reach them is the trade that module's own ablation
     measured and rejected: one shared content word served 7 of 30 off-corpus queries.
 
-    **The positive control, re-taken as that module's header requires after any change here.**
-    16 off-corpus queries — the 15 :mod:`exchange.retrieval.relevance` was measured on, plus
-    ``"garlic bread recipe book"``, written to attack this rule specifically — judged against
-    all 3,086 identities, 49,376 verdicts: this condition newly admits **one** row, ``Garlic
-    1%`` for the query written to catch it. On the 15 original off-corpus queries it admits
-    **zero**. That is the whole cost, stated rather than rounded away, and it is the right side
-    of the trade: a product whose crawled name the shopper typed in full is a product the
-    platform can honestly stand behind at its catalogue price, and refusing it is the confident
-    wrong answer pointing the other way.
+    THIS CONDITION IS ABOUT ONE-WORD TITLES AND NOTHING ELSE
+    -------------------------------------------------------
+    ``min_named_terms`` is the rule's own ``min_shared_terms``, and a title carrying that many
+    content words returns ``True`` on containment alone because THE GATE'S ANSWER CANNOT
+    DEPEND ON IT: if every word of a two-word title is in the query, then both are in the
+    surface too, so ``judge`` already counts two agreements and keeps the row without ever
+    reaching here. The proof holds for any configured threshold. Re-measured over all 3,086
+    identities, **0** of the 2,982 carrying two or more content words had their gate answer
+    decided by this condition, and
+    ``test_the_condition_cannot_change_the_gate_for_a_multi_word_title`` pins that shape on
+    the pair that would break first rather than re-taking the sweep. So everything below runs
+    only where the title folds to ONE word — 103 of the 3,086 — and that is the only place a
+    leak was ever possible.
+
+    **The leak this condition used to be, measured on the served route.** Containment on a
+    one-word title means "the query contains this one ordinary word", which is the
+    one-shared-word rule the ablation rejected, wearing a keep-condition's name. Two silent
+    tier-1 stores rostered on ``Iron+`` and ``SAMe Bulk``, driven through ``POST /auctions``::
+
+        "cast iron skillet for camping"     -> the shopper was shown Iron+ at $29.95
+        "an iron bed frame queen size"      -> Iron+
+        "bulk storage bins for the garage"  -> SAMe Bulk
+
+    103 of the 3,086 products have a one-content-word title and roughly fifteen of those words
+    are ordinary English — iron, bulk, fuel, recovery, ease, longevity, fiber, ginger, nutmeg,
+    calcium, zinc, selenium, garlic, omega, multivitamin. Over 25 realistic off-corpus queries
+    carrying one of those words, plain containment answered **25 of 25** with a wrong row.
+
+    **What separates the two, and what does not.** The obvious candidate is document frequency
+    over the corpus, and on this catalogue it is measurably the WRONG WAY ROUND. Counted over
+    all 3,086 crawled titles: ``ease`` appears in 1, ``recovery`` in 2, ``nutmeg`` in 2,
+    ``fuel`` in 3, ``longevity`` in 3 — every one of them rare in the catalogue and ordinary in
+    English — while ``resveratrol`` appears in 23, ``glutathione`` in 11 and ``bacopa`` in 7.
+    A rarity threshold that admits ``Bacopa`` admits ``Ease`` and ``Recovery`` first. The share
+    of the query the title accounts for is the other candidate and it does not separate them
+    either: ``"cast iron skillet for camping"`` gives the title 1 word of 4 and
+    ``"bacopa for memory and focus daily"`` gives it 1 of 4 as well.
+
+    What DOES separate them is not a property of the word at all — it is where the shopper put
+    it. **In an English noun phrase a premodifier is not the head**: ``"iron skillet"`` is a
+    skillet, ``"garlic bread"`` is bread, ``"bulk storage bins"`` are bins. So the second
+    condition is that the query's OPENING noun phrase (:func:`query_noun_phrases`) is the name
+    — the title's word, plus nothing but :data:`NAMING_MODIFIERS`. A shopper asking for the
+    thing leads with it and then says what it is for; a shopper asking for something made of
+    it puts it in front of the thing they actually want.
+
+    **Measured, on the shipped catalogue and on two query sets written before the rule was
+    chosen**: 25 off-corpus queries carrying one of those ordinary words, and 25 queries naming
+    a real one-word product the way a person types. The rows of each that survived into the
+    suite are ``test_organic_relevance.CONTAINMENT_LEAKS`` and ``NAMED_IN_THE_LEAD``.
+
+        rule                          104 refusals   25 honest namings   25 off-corpus
+        ----------------------------  ------------   -----------------   -------------
+        containment alone (shipped)    103 fixed          25 kept           25 filled
+        containment + this condition   103 fixed          25 kept            1 filled
+        no keep-condition at all         0 fixed           1 kept            0 filled
+
+    The one off-corpus query still filled is ``"iron on patches for jeans"``: ``on`` is a
+    preposition to every tokeniser in this tree, so ``iron`` reads as a complete opening
+    phrase and the query reads as ``"iron, for patches, for jeans"``. It is the English
+    compound ``iron-on`` split by a rule that has no compounds, and the honest shapes it would
+    cost to close it — ``"multivitamin for men over 50"`` has exactly the same structure — are
+    worth more than the one row.
 
     **It reads the TITLE, never the surface.** The brand is in the surface so that a shopper
     naming a brand finds its products; it is not part of the product's name, so requiring the
@@ -927,13 +1067,33 @@ def shopper_named_the_product(query_text: str, identity: Any) -> bool:
 
     An identity with no readable title answers ``False``: nothing was named, so nothing was
     named in full, and the row falls through to the thresholds as it did before.
+
+    Args:
+        query_text: the shopper's own words.
+        identity: the PLATFORM's crawled identity for this product, or ``None``.
+        min_named_terms: how many content words a title must carry before containment alone
+            settles it. Defaults to the shipped
+            :data:`~exchange.retrieval.relevance.MIN_SHARED_TERMS`;
+            :func:`organic_relevance_reason` passes the rule's own ``min_shared_terms`` so the
+            inertness argument above holds against whatever the caller configured.
     """
     if identity is None:
         return False
-    named = set(content_terms(str(read(identity, "title", "") or "")))
+    named = content_terms(str(read(identity, "title", "") or ""))
     if not named:
         return False
-    return named <= set(content_terms(query_text))
+    if not set(named) <= set(content_terms(query_text)):
+        return False
+    if len(named) >= min_named_terms:
+        return True
+    phrases = query_noun_phrases(query_text)
+    if not phrases:
+        return False
+    opening = phrases[0]
+    word = named[0]
+    if word not in opening:
+        return False
+    return all(term in NAMING_MODIFIERS for term in opening if term != word)
 
 
 def exclusion_reasons(
@@ -997,6 +1157,7 @@ def exclusion_reasons(
 __all__ = [
     "BUDGET_FIELDS",
     "BUDGET_OPS",
+    "NAMING_MODIFIERS",
     "VERIFIED",
     "blacklist_reason",
     "budget_reasons",
@@ -1009,6 +1170,7 @@ __all__ = [
     "is_budget_bound",
     "offer_price",
     "organic_relevance_reason",
+    "query_noun_phrases",
     "read",
     "read_criteria",
     "shopper_named_the_product",

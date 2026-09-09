@@ -1145,7 +1145,7 @@ def rank_auction(
         #
         # Passed unconditionally, and the dict being EMPTY is the fail-open. An exchange with
         # no catalogue resolves no identity for anybody, every store is unchecked, and every
-        # organic row stands exactly as it did — see `organic_relevance_reason`'s three
+        # organic row stands exactly as it did — see `organic_relevance_reason`'s four
         # conditions. What is NOT conditional is the caller: a served auction always says what
         # it holds, so this filter cannot end up wired and switched off.
         product_identities=readings.identities,
