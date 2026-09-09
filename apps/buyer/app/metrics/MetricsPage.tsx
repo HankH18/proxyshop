@@ -248,8 +248,10 @@ export function MetricsPage({
           auction &mdash; this buyer service&rsquo;s own in-process record of opening it, or
           a shortlist the exchange has not yet dropped. An id lifted from the ledger clears
           the first only if this very process opened that auction, and the second only while
-          the exchange is still holding its shortlist &mdash; so one from an earlier run, or
-          from a journey driven anywhere but here, 404s.
+          the exchange is still holding its shortlist &mdash; and either one on its own is
+          enough. So a 404 means both are gone at once, and an auction this service never
+          opened still traces while the exchange holds it, with the live half filled and the
+          recorded half empty.
         </p>
         <form onSubmit={onSubmit} className="metrics-form">
           <label htmlFor="metrics-auction">Auction id</label>

@@ -2738,9 +2738,13 @@ async def create_auction(body: CreateAuctionRequest, request: Request) -> Create
     # consult the graph" stays true, connection included, wherever it was true before; see
     # `repoint_organic_products` and `graph_roster_from_env`'s second switch.
     #
-    # What it does not keep is a PRODUCT the platform's own retrieval will not vouch for, and
-    # that is `repoint_organic_products`. A stated roster is written before the shopper types
-    # anything — the demo's is six shops each pinned to their liver-cluster lead — so with the
+    # What it does not keep is a PRODUCT this exchange's own search for the intent did not
+    # return, and that is `repoint_organic_products`. "Did not return" is not "was judged
+    # off-topic": the search is bounded to its top-25 product window, and measured over 24
+    # in-corpus queries x the demo's six rows, all 63 moved rows had a pinned product that was
+    # never retrieved and 0 had one the search judged and refused. See that function for the
+    # whole table. A stated roster is written before the shopper types anything — the demo's
+    # is six shops each pinned to their liver-cluster lead — so with the
     # relevance filter in front of it every row is honestly off-topic for any other question
     # and the shopper gets a blank screen. Measured on this exchange over 24 queries the
     # 3,093-product corpus genuinely serves: 3 of 24 returned any slot through the stated

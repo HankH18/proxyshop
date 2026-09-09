@@ -1813,10 +1813,11 @@ describe('two promises under one name', () => {
  *
  * `contracts.protocol.Provenance` validates `authority_rank` as `ge=1` and says why —
  * "validated as `>= 1` rather than pinned to that table, because a hook may legitimately
- * down-rank a stale observation" — and the identifier appears nowhere in `apps/exchange/src` or
- * `apps/buyer/svc/src`. So the number is the BID's, and the fold printed it under "how strongly
- * this network rates that kind of evidence": the platform's authority, over a seller's number,
- * on the surface where a shopper decides whom to believe.
+ * down-rank a stale observation" — and `PROVENANCE_AUTHORITY_RANK`, the table it would be
+ * checked against, is read nowhere outside `packages/contracts`. So the number is the BID's,
+ * and the fold printed it under "how strongly this network rates that kind of evidence": the
+ * platform's authority, over a seller's number, on the surface where a shopper decides whom
+ * to believe.
  */
 describe('the rank a claim gives its own evidence', () => {
   const SELLER_RANKED_ONE = [

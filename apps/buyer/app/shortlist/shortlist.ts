@@ -548,10 +548,11 @@ export function neverAsked(reason: string | null | undefined): boolean {
  * shortlist card and the empty-shortlist panel one screen away made opposite statements about
  * the same shop. `store_refused`, `response_carried_no_bid`, `response_not_stamped`,
  * `arrival_stamp_unparseable`, `bid_price_unreconcilable`, `bid_claim_unprovenanced` and
- * `response_after_deadline` are all verdicts on something that ARRIVED. Two of the twelve are
+ * `response_after_deadline` are all verdicts on something that ARRIVED. Three of the twelve are
  * neither silence nor an answer — `response_timed_out` is a store "still answering when the
  * window shut", which is the distinction the exchange minted that word to stop collapsing, and
- * a shop nobody dialled is handled above.
+ * `tier_0_no_agent` and `fan_out_capacity_exhausted` are the two nobody dialled, handled above
+ * by {@link NEVER_ASKED_FALLBACK_FAMILIES}. Eight, one and three is the whole vocabulary.
  *
  * So this screen makes three statements and no more: nobody asked, nothing came back, or — for
  * every other family AND for a family this copy has not caught up with — the exchange could not

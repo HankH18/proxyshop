@@ -27,15 +27,18 @@ and only `verified` can satisfy a hard constraint. An unknown is never treated a
 
 **Two things about that check on the demo deployment specifically**, because the mechanism being
 right is not the same as the mechanism doing work. First, the crawl the exchange grades against
-there is not the whole graph: `deploy/demo/exchange-deployment.json` carries a `catalog`
-snapshot of exactly **60 products for each of the four hosted stores** — 240 rows against 3,093
-in the graph — so a product the graph rosters from outside that window has no platform evidence
-to check and grades `ambiguous`, which cannot satisfy a hard constraint. Second, the check pays
-nothing unless the shopper asked for something checkable: in the worked example below,
-`verified_claim_ratio` reads its neutral for all seven candidates, because the query carries no
-hard constraints and a verified claim about something nobody asked is worth what silence is
-worth. Re-run with `price_usd lte 50` and the same term rises to 0.1595 for all four bidding
-stores. The gate is real and it is fail-closed; whether it does any work is up to the shopper.
+there is now all but the whole graph: `deploy/demo/exchange-deployment.json` carries a `catalog`
+snapshot of **3,086 products across all ten storefronts** — every row the corpus recorded that
+names a priced variant, against the 3,093 it recorded in total — under a 1,000-per-store trim
+no store comes near, the largest shipping 805. The seven rows outside that window are exactly
+the seven whose storefront named no price, and a product the graph rosters from outside it still
+has no platform evidence to check and grades `ambiguous`, which cannot satisfy a hard
+constraint. Second, the check pays nothing unless the shopper asked for something checkable: in
+the worked example below, `verified_claim_ratio` reads its neutral for all seven candidates,
+because the query carries no hard constraints and a verified claim about something nobody asked
+is worth what silence is worth. Re-run with `price_usd lte 50` and the same term rises to 0.1595
+for all four bidding stores. The gate is real and it is fail-closed; whether it does any work is
+up to the shopper.
 
 The platform's own copy is held to the mirror-image rule: it may choose *how* to argue but not
 *what is true*. `apps/buyer/svc/src/pitch/writing.py` throws away a generated case whole if it
@@ -123,11 +126,12 @@ said nothing. Measured: across the whole life of the exchange container,
 `docker logs proxyshop-exchange-1 | grep -ci 'bulksupplements\|nutricost'` returns **0**, so
 those two names have never appeared in an outbound solicitation, and now nothing claims they did.
 
-**One half of that is still wrong, and it is the half a shopper sees.** The wire is accurate; the
-screen is not. `priceProvenanceLine` in `apps/buyer/app/shortlist/ShortlistView.tsx` branches only
-on whether the entry fell back and whether it has a price, so an organic row still reads *"The
-shop did not answer this auction."* — word for word what a genuinely silent shop gets. It is
-written up under [What is not built](#an-organic-shop-nobody-asked-is-reported-silent).
+**The screen was the second half of that, and it has followed.** `priceProvenanceLine` in
+`apps/buyer/app/shortlist/ShortlistView.tsx` now reads the fallback reason's family through
+`neverAsked` and `askedAndSilent`, so an organic row no longer borrows the sentence a silent shop
+gets: rendered, it reads *"This shop has no bidding agent on the exchange, so nobody asked it for
+a price and it turned nothing down."* The entry that recorded the gap is kept, closed, under
+[What is not built](#an-organic-shop-nobody-asked-is-no-longer-reported-silent).
 
 **How they ranked.** The published formula, term by term, summing exactly to the score:
 
@@ -754,17 +758,19 @@ which is `trust`'s own term and is read one layer up.
 This section is the credibility argument, so it is written to be checkable and it errs toward
 saying more. The durable instruction is at the end: **believe the run, not the prose.**
 
-## An organic shop nobody asked is reported silent
+## An organic shop nobody asked is no longer reported silent
 
-Everything else on this list is something the system does not do yet. This is the one item where
-it tells a shopper something untrue, which is why it is first. An organic shop — one the exchange
-holds no `bid_endpoint` for and therefore deliberately never contacts — is disclosed to the
-shopper as a shop that was asked and stayed quiet.
+Everything else on this list is something the system does not do yet. This one was different — it
+was the single place where the system told a shopper something untrue — and it is kept here,
+closed, because a credibility section that quietly deletes its worst entry is worth less than one
+that shows the entry being paid off. An organic shop is one the exchange holds no `bid_endpoint`
+for and therefore deliberately never contacts; it used to be disclosed to the shopper as a shop
+that was asked and stayed quiet.
 
-**The wire has been fixed; the screen has not, and this entry is now only about the screen.** It
-is worth recording what moved, because the half that remains is easy to mistake for the half that
-went. `HttpBidSolicitor.solicit` (`apps/exchange/src/composition.py`) has always returned `None`
-for a store with no endpoint rather than opening a socket. What used to happen next was that
+**The wire went first, and the screen has followed.** It is worth recording what moved, because
+the two halves are easy to confuse. `HttpBidSolicitor.solicit`
+(`apps/exchange/src/composition.py`) has always returned `None` for a store with no endpoint
+rather than opening a socket. What used to happen next was that
 `collect_bids` (`apps/exchange/src/auction/collect.py`) turned that `None` into `no_response` —
 whose own definition in that file is "asked, and nothing ever came back at all" — because the
 right label, `tier_0_no_agent`, was minted only at roster tier 0 and no store the graph rosters is
@@ -776,25 +782,32 @@ closed that: `solicit_bids` (`apps/exchange/src/orchestration/solicitation.py`) 
 actually knocked on. Measured on the live stack: three organic entries reading
 `tier_0_no_agent:no_bid_endpoint`, `"solicited": 4`, `"no_endpoint": 3`, `"not_asked": 0`.
 
-What still tells a shopper something untrue is the shortlist card. `priceProvenanceLine` in
-`apps/buyer/app/shortlist/ShortlistView.tsx` branches on whether the entry fell back and whether it
-has a price, and on nothing else — the reason token is passed through untranslated. So an organic
-row renders, word for word: *"This price is Proxyshop's, not this shop's. The shop did not answer
-this auction, so the exchange stood in for it at the list price on its own roster row — nobody at
-this shop quoted the number above. The exchange gives its reason as
-tier_0_no_agent:no_bid_endpoint."* Byte-identical prose to what a genuinely silent shop gets; the
-only thing separating them is a machine token at the end that no shopper is expected to decode.
+The shortlist card was where it survived longest. `priceProvenanceLine` in
+`apps/buyer/app/shortlist/ShortlistView.tsx` used to branch on whether the entry fell back and
+whether it had a price and on nothing else, so an organic row got the silent shop's sentence word
+for word. It now reads the reason's *family* through `neverAsked` and `askedAndSilent`
+(`apps/buyer/app/shortlist/shortlist.ts`) and says three different things. Rendered through the
+component `Journey.tsx` mounts, one fallback slot per reason — the clause below is the middle of
+the card's line, the part that changes; it still opens "This price is Proxyshop's, not this
+shop's" and still closes by naming the exchange's own token:
 
-The sentence that would fix it already exists, on the wrong screen. `explainFallbackReason` in
-`apps/buyer/app/journey/WhyEmpty.tsx` glosses the `tier_0_no_agent` family as *"means that store
-has no bidding agent for the exchange to ask. It is on the roster from its catalogue alone, so the
-exchange represented it at its list price without anybody having declined anything."* `WhyEmpty`
-is mounted only when the shortlist comes back empty, and `ShortlistView.tsx` imports nothing from
-`journey/`, so a shopper looking at four filled slots never sees it.
+```
+tier_0_no_agent:no_bid_endpoint  This shop has no bidding agent on the exchange, so nobody asked
+                                 it for a price and it turned nothing down.
+fan_out_capacity_exhausted       Nobody asked this shop for a price for this auction, so it
+                                 turned nothing down.
+no_response                      This shop did not answer this auction.
+store_declined                   The exchange could not use a price from this shop for this
+response_timed_out               auction, and this page will not say more about what the shop
+bid_claim_unprovenanced          did than the exchange did.
+```
 
-Nothing here loses a shop its slot or misstates a price, and an organic result is *supposed* to
-be carried at list price with no store voice; that part works. What is wrong is the account of
-why the voice is missing, and it is now wrong in exactly one component.
+Three sentences and not twelve, deliberately. The card answers one question — was there anybody
+to ask? — and past that it prints the exchange's own token unchanged rather than forking the
+nine-family gloss in `apps/buyer/app/journey/WhyEmpty.tsx`, which is a screen `ShortlistView.tsx`
+imports nothing from. The under-claiming direction is the safe one: a family this copy of the
+vocabulary has not caught up with lands on the third sentence, which asserts nothing about the
+shop's own conduct.
 
 ## Reconciliation returns no verdict over the chain the narrated demo writes
 

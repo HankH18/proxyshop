@@ -210,6 +210,45 @@ def test_a_comparison_survives_the_whole_stack_without_a_phantom_refusal(buyer_c
     assert "I don't know about" not in body["answer"], body["answer"]
 
 
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("which shop has the best reputation?", "reliability"),
+        ("who has the best rating?", "reliability"),
+        ("what is the best return policy?", "free returns"),
+        ("which one is worse on price?", "price"),
+    ],
+)
+def test_a_comparative_is_not_a_ranking_question_once_the_record_has_aged_out(
+    buyer_client, monkeypatch, question, expected
+):
+    """The state the phantom denial needs, driven against the real exchange.
+
+    ``Corpus.ranking_recorded`` documents it and ``composition.HttpExchangeClient`` makes it
+    routine: this service's record of an auction lives in an in-process ring of
+    ``MAX_RECORDED_AUCTIONS`` = 64, so a container restart or 64 newer auctions is enough to
+    lose the ``ranked`` rows while the exchange still serves the shortlist. ``outcome_for``
+    returning ``None`` is exactly what the ring reports then, and it is the documented answer
+    for "this client never opened that auction".
+
+    In that state, and only in that state, "which shop has the best reputation?" used to open
+    "I don't hold the ranking and what went into it for the options you asked about" and then
+    recite both reliability snapshots — a bold denial of something nobody asked about, over a
+    correct answer to what they did.
+    """
+    auction_id = open_an_auction(buyer_client)
+    exchange_client = buyer_client.app.state.exchange_client
+    monkeypatch.setattr(exchange_client, "outcome_for", lambda _auction_id: None)
+
+    body = ask(buyer_client, auction_id, question)
+
+    assert body["ranking_recorded"] is False
+    assert "the ranking and what went into it" not in body["answer"], body["answer"]
+    assert body["not_held"] == [], body["not_held"]
+    assert body["grounds"], body["answer"]
+    assert expected in body["answer"], body["answer"]
+
+
 def test_the_order_of_a_real_shortlist_is_explained_from_its_own_published_ranking(buyer_client):
     """ "Why is the first one first?" — the most natural question to ask a ranked list.
 

@@ -32,24 +32,35 @@ without:
    first one first" — used to come back with a `not_held` that the answer underneath it then
    contradicted. Section 7 drives the phrasings that broke, and drives the refusals beside
    them, because widening what counts as answerable is how a refusal gate stops refusing.
+8. **A denial is never printed above an answer that supplies it.** Section 7's fix carried
+   its own version of section 7's bug, in the family half rather than the subject half, and
+   the whole of section 8 is the mechanisms that keep the two halves apart — each of which
+   was measured green with the mechanism deleted before it was written.
 """
 
 from __future__ import annotations
+
+import copy
 
 import pytest
 from fastapi.testclient import TestClient
 
 from apps.buyer.svc.src.chat import (
+    ANSWER_CONTRACT,
     NOT_HELD_DETAIL,
     SOURCE_ASSEMBLED,
     SOURCE_WRITTEN,
+    TOPICS,
     VOICE_PLATFORM,
     VOICE_SHOP_CLAIM,
     answer_about,
+    answer_prompt,
+    assemble,
     corpus_for,
     read_question,
     screen_reasons,
 )
+from apps.buyer.svc.src.chat.answering import _settles_a_comparison
 
 ASK = "/buyer/chat/ask"
 AUCTION = "auction-chat-1"
@@ -803,8 +814,12 @@ def test_a_family_this_shortlist_holds_nothing_in_is_refused_rather_than_answere
     assert body["grounds"] == [], body["grounds"]
     assert "don’t hold" in body["answer"] or "don't hold" in body["answer"], body["answer"]
     assert "ranking" in body["answer"], body["answer"]
-    # Not answered with the price instead, and the catalogue does not offer back the family
-    # the same answer has just said it does not have.
+    # Not answered with the price instead. The count below is NOT a test of `_catalogue`'s
+    # `excluding=`: no slot in this fixture has a ranking row, so the family is absent from
+    # `Corpus.topics_held` and the catalogue could not have offered it back however that
+    # argument behaved — measured, the assertion stays green with `excluding=` ignored. The
+    # gate for that is `test_the_catalogue_does_not_offer_back_the_family_the_same_answer_
+    # just_denied`, which narrows to a card with no row on a shortlist that has one.
     assert "72.00" not in body["answer"] and "19.00" not in body["answer"], body["answer"]
     assert body["answer"].count("the ranking and what went into it") == 1, body["answer"]
 
@@ -858,6 +873,379 @@ def test_an_unsupportable_word_the_record_cannot_settle_is_still_refused(questio
     reasons = screen_reasons(reply, reading)
 
     assert any(f"unsupportable: {word}" in reason for reason in reasons), reasons
+
+
+# ------------------------------------------------------------------------------------------
+# 8. the family half of the same rule — a denial above an answer that supplies it
+# ------------------------------------------------------------------------------------------
+#
+# Section 7 fixed the SUBJECT half ("I don't know about “every”" over four return windows)
+# and re-created the same defect in the FAMILY half. Mapping best/better/worse/worst to the
+# ranking made "which shop has the best reputation?" name a family this shortlist can hold
+# nothing in, so the served answer opened "I don't hold the ranking and what went into it for
+# the options you asked about" and then recited both reliability snapshots.
+#
+# Everything below is driven with `record=None`, because that is the state the defect needs
+# and it is not exotic: `composition.HttpExchangeClient` keeps its recorded auctions in an
+# in-process ring of 64, so a container restart or 64 newer auctions is enough, and
+# `Corpus.ranking_recorded` documents the state by name.
+#
+# Every test in this section was measured GREEN with the mechanism it is about deleted, on
+# the suite as it stood before them.
+
+
+@pytest.mark.parametrize(
+    ("question", "expected"),
+    [
+        ("which shop has the best reputation?", "reliability: 77%"),
+        ("who has the best rating?", "reliability: 77%"),
+        ("what is the best return policy?", "free returns: 30 days"),
+        ("which one is worse on price?", "price: 72.00 USD"),
+    ],
+)
+def test_a_comparative_asks_about_the_family_beside_it_and_never_about_the_ranking(
+    app_with, question, expected
+):
+    """ "Best" is not a family. It is an operator over the family the question named.
+
+    Each of these names a family the platform holds — trust, commitment, price — and the
+    word "best" or "worse" says which way to sort it. Read as a ranking word it made the
+    platform deny, first thing and in bold, holding something the shopper had not asked for
+    and the answer beneath it did not supply.
+    """
+    client = app_with(StubExchange(shortlist(), None))
+
+    body = client.post(ASK, json={"auction_id": AUCTION, "question": question}).json()
+
+    assert body["ranking_recorded"] is False
+    assert "the ranking and what went into it" not in body["answer"], body["answer"]
+    assert expected in body["answer"], body["answer"]
+    assert body["not_held"] == [], body["not_held"]
+
+
+@pytest.mark.parametrize("question", ["which one is better?", "which is the worst?"])
+def test_a_bare_comparative_still_asks_the_ranking_and_still_says_it_is_not_held(
+    app_with, question
+):
+    """The other direction, and the reason the four words were not simply deleted.
+
+    With no other family named there is nothing else a comparative can be about, and the
+    exchange's published order is the honest thing to answer it from. An auction whose
+    recorded rows are gone has to say so rather than introduce the slots instead.
+    """
+    client = app_with(StubExchange(shortlist(), None))
+
+    body = client.post(ASK, json={"auction_id": AUCTION, "question": question}).json()
+
+    assert body["grounds"] == [], body["grounds"]
+    assert "the ranking and what went into it" in body["answer"], body["answer"]
+    assert "72.00" not in body["answer"], body["answer"]
+
+
+def test_the_catalogue_does_not_offer_back_the_family_the_same_answer_just_denied(app_with):
+    """A refusal that ends "…and here is the ranking I can answer from" has un-said itself.
+
+    This narrows to the SECOND card, which has no recorded ranking row, on a shortlist whose
+    first card does — so the corpus holds the ranking family while the options the shopper
+    asked about hold nothing of it. That gap is the only state in which `_catalogue`'s
+    `excluding=` can bite, and the earlier test of it had no ranking evidence anywhere, so
+    the catalogue could never have offered the family back and the assertion was vacuous.
+    """
+    corpus = corpus_for(shortlist(), recorded=recorded())
+    assert "ranking" in corpus.topics_held, corpus.topics_held
+
+    client = app_with(StubExchange(shortlist(), recorded()))
+    body = client.post(
+        ASK,
+        json={"auction_id": AUCTION, "question": "why is the second one ranked where it is?"},
+    ).json()
+
+    assert body["grounds"] == [], body["grounds"]
+    assert "What I can answer from" in body["answer"], body["answer"]
+    assert body["answer"].count("the ranking and what went into it") == 1, body["answer"]
+
+
+# ------------------------------------------------------------------------------------------
+# the screen's half of rule 3, per family — satisfiable by the platform's own words, and
+# still biting on a reply that skates over the denial it was told to deliver
+# ------------------------------------------------------------------------------------------
+
+#: A question that names each family, and nothing else. Chosen so that `missing_everywhere`
+#: is empty on every one of them, which leaves the family half of the screen alone under test.
+FAMILY_QUESTION: dict[str, str] = {
+    "identity": "what is the product title here?",
+    "price": "what do these cost?",
+    "commitment": "what did each shop promise?",
+    "trust": "how reliable are these?",
+    "provenance": "what are the provenance labels?",
+    "ranking": "how were these ranked?",
+    "sourcing": "are any of these sponsored?",
+}
+
+
+def market_holding_nothing_in(topic: str) -> tuple[dict, dict | None]:
+    """The same two options with one whole family taken away. ``(shortlist, recorded)``.
+
+    Each of these is a market this service really serves: a store that fell back publishes
+    no commitment, a shop with no trust history has no snapshot, and an auction older than
+    the recorded ring has no ranking rows.
+    """
+    payload = copy.deepcopy(shortlist())
+    record: dict | None = recorded()
+    for row in payload["slots"]:
+        if topic == "identity":
+            row["product"], row["store_domain"] = None, ""
+        elif topic == "price":
+            row["price"] = None
+        elif topic == "commitment":
+            row["commitments"] = None
+        elif topic == "trust":
+            row["trust_summary"] = None
+        elif topic == "provenance":
+            row["provenance_labels"] = []
+        elif topic == "sourcing":
+            row["fallback"] = None
+    if topic == "ranking":
+        record = None
+    return payload, record
+
+
+@pytest.mark.parametrize("topic", TOPICS)
+def test_the_platforms_own_floor_is_never_refused_by_the_platforms_own_screen(topic):
+    """The false-positive direction, family by family — the invariant its sibling names.
+
+    ``test_pitch_honest_traffic.py::test_the_platforms_own_copy_is_never_refused_by_the_
+    platforms_own_screen`` states it: an assembled answer its own screen would reject is a
+    screen that will reject the model's honest prose too, and nothing would say so.
+
+    It did reject it. The check asked whether the reply used the topic's INTERNAL name —
+    ``commitment``, ``trust``, ``identity``, ``sourcing`` — and the sentence the prompt hands
+    the writer is built from ``TOPIC_BLURB``, which carries the topic's own word for only
+    three of the seven. On an all-fallback market the floor "I don't hold what each shop
+    promised, and how well checked it is…" was refused by "does not name the family the
+    platform does not hold: commitment". With ``LLM_PROVIDER=anthropic`` that made the
+    written path dead for four families and every such answer dropped silently to the floor.
+    """
+    payload, record = market_holding_nothing_in(topic)
+    reading = read_question(FAMILY_QUESTION[topic], corpus_for(payload, recorded=record))
+
+    assert reading.families_unheld == (topic,), reading.families_unheld
+    assert reading.missing_everywhere == (), reading.missing_everywhere
+    floor = assemble(reading)
+
+    assert floor.strip(), f"{topic}: assembled to nothing"
+    assert screen_reasons(floor, reading) == (), f"{topic}: refused its own floor"
+
+
+@pytest.mark.parametrize("topic", TOPICS)
+def test_a_written_answer_that_skates_over_the_unheld_family_is_still_refused(topic):
+    """The positive control for the test above, so "satisfiable" is not "switched off".
+
+    A reply that denies in general and never says WHAT is not held is the failure rule 3
+    exists for, and it costs the screen for every family.
+    """
+    payload, record = market_holding_nothing_in(topic)
+    reading = read_question(FAMILY_QUESTION[topic], corpus_for(payload, recorded=record))
+
+    evasive = "I have nothing further to add about either of the two options here."
+
+    assert screen_reasons(evasive, reading) == (
+        f"does not name the family the platform does not hold: {topic}",
+    )
+
+
+def test_the_writer_is_handed_the_denial_the_screen_then_holds_it_to():
+    """The prompt line and the screen check are the same sentence, or the writer cannot win.
+
+    Both halves in one measurement: the request really carries the NOT HELD instruction, and
+    a reply that obeys it in the writer's own words is SERVED rather than discarded. Delete
+    the instruction and the writer is judged on a rule it was never told; make the check
+    unsatisfiable and obeying it is not enough.
+    """
+
+    class Capturing:
+        def __init__(self) -> None:
+            self.prompt = ""
+
+        def complete(self, prompt, *_args, **_kwargs):
+            self.prompt = prompt.text
+            return (
+                "I don't hold the ranking and what went into it for these two options, so I "
+                "cannot say why either came where it did."
+            )
+
+    corpus = corpus_for(shortlist(), recorded=None)
+    reading = read_question("how were these ranked?", corpus)
+    writer = Capturing()
+    answer = answer_about("how were these ranked?", corpus, writer=writer)
+
+    assert "NOT HELD" in writer.prompt, writer.prompt
+    assert "I don't hold the ranking and what went into it" in writer.prompt, writer.prompt
+    assert answer.answer_source == SOURCE_WRITTEN, screen_reasons(
+        Capturing().complete(answer_prompt(reading)), reading
+    )
+
+
+# ------------------------------------------------------------------------------------------
+# the superlative exception — the scope binds to the WORD, not to the sentence
+# ------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("question", "reply", "word"),
+    [
+        # One leading "Of these," used to license every superlative after it, including one
+        # explicitly scoped to the world. All five screened clean and would have been served
+        # in the platform's own voice.
+        (
+            "which one is cheapest?",
+            "Of these, the Acrylic Beanie is the cheapest wool hat there is, and the "
+            "cheapest you will ever see.",
+            "cheapest",
+        ),
+        (
+            "which of these is best on trust?",
+            "Of these, the Merino Beanie is the best beanie you can buy, no contest.",
+            "best",
+        ),
+        (
+            "which has the lowest price?",
+            "Of the two, the Acrylic Beanie has the lowest price in the world.",
+            "lowest",
+        ),
+        (
+            "which of these is best on trust?",
+            "Among these, the Merino Beanie shop is the best shop there is; no wool seller "
+            "comes close.",
+            "best",
+        ),
+        (
+            "which one is cheapest?",
+            "Between them, the Acrylic Beanie is the cheapest hat on earth.",
+            "cheapest",
+        ),
+    ],
+)
+def test_a_scope_at_the_head_of_a_sentence_does_not_license_a_boast_at_its_end(
+    question, reply, word
+):
+    reading = read_question(question, corpus_for(shortlist(), recorded=recorded()))
+
+    reasons = screen_reasons(reply, reading)
+
+    assert any(f"unsupportable: {word}" in reason for reason in reasons), reasons
+
+
+@pytest.mark.parametrize(
+    ("question", "reply"),
+    [
+        # The silent-on-honest direction: the scope sits beside the word, so these are
+        # statements about the two prices the platform published and they must be served.
+        (
+            "which one is cheapest?",
+            "Of these two, the cheapest is the Acrylic Beanie at 19.00 USD.",
+        ),
+        (
+            "which one is cheapest?",
+            "The Acrylic Beanie at fastfashion.example is the cheapest of these two, at 19.00 USD.",
+        ),
+        (
+            "which has the lowest price?",
+            "Between them, the lowest price is 19.00 USD.",
+        ),
+        (
+            "which one is cheapest?",
+            "The cheapest on this shortlist is the Acrylic Beanie at 19.00 USD.",
+        ),
+    ],
+)
+def test_a_superlative_with_its_scope_beside_it_is_still_served(question, reply):
+    reading = read_question(question, corpus_for(shortlist(), recorded=recorded()))
+
+    assert screen_reasons(reply, reading) == ()
+
+
+@pytest.mark.parametrize(
+    ("example", "allowed"),
+    [
+        ("The cheapest of these is the one at that shop", True),
+        ("of these two, the cheapest is that one", True),
+        ("It is the cheapest", False),
+        ("Of these, the Acrylic Beanie is the cheapest hat there is", False),
+    ],
+)
+def test_rule_five_illustrates_what_the_screen_actually_does(example, allowed):
+    """The contract's four worked examples, run through the check they describe.
+
+    The writer is judged on `_settles_a_comparison` and instructed by rule 5, and an example
+    in the instruction that the check disagrees with is worse than no example: it teaches the
+    writer to produce prose that is then discarded. The first draft of this rule illustrated
+    the refusal with "of these, it is the cheapest hat there is" — measured, that one PASSES,
+    because the scope is three words from the word. The example below is the measured one.
+    """
+    reading = read_question("which one is cheapest?", corpus_for(shortlist(), recorded=recorded()))
+
+    settled = _settles_a_comparison("cheapest", example, reading)
+
+    assert settled is allowed, example
+    assert example in " ".join(ANSWER_CONTRACT.split()), example
+
+
+# ------------------------------------------------------------------------------------------
+# a trailing ordinal is not always a question about the order
+# ------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("question", "subject"),
+    [
+        ("which one ships first?", "ships"),
+        ("which of these arrives first?", "arrives"),
+        ("which one ships last?", "ships"),
+    ],
+)
+def test_an_ordinal_that_is_a_predicate_of_a_verb_is_not_a_question_about_the_order(
+    app_with, question, subject
+):
+    """ "Which one ships first?" is about shipping, and the platform holds no shipping order.
+
+    Measured on the served route before this: it came back as a refusal about ``ships`` with
+    the entire rank formula printed beside it — a denial of the question the shopper asked,
+    next to a confident answer to one they did not. The trailing ordinal names the exchange's
+    order only where nothing content-bearing sits on either side of it.
+    """
+    client = app_with(StubExchange(shortlist(), recorded()))
+
+    body = client.post(ASK, json={"auction_id": AUCTION, "question": question}).json()
+
+    assert [row["subject"] for row in body["not_held"]] == [subject], body["not_held"]
+    assert body["grounds"] == [], body["grounds"]
+    assert "rank score" not in body["answer"], body["answer"]
+
+
+def test_the_contract_does_not_forbid_the_number_the_screen_admits():
+    """Rule 5 grew a sentence that contradicted rule 2 three lines above it.
+
+    ``Reading.numbers`` deliberately admits the shopper's own numbers — echoing a budget
+    they typed asserts nothing about a shop — and rule 2 says so. "Write no number that is
+    not below", appended to rule 5, told the writer the opposite of the rule it is printed
+    under, and was stricter than the screen it was describing.
+    """
+    reading = read_question(
+        "what costs less than 40?", corpus_for(shortlist(), recorded=recorded())
+    )
+
+    echoing = (
+        "You asked about 40 dollars: the Acrylic Beanie at fastfashion.example is 19.00 USD "
+        "and the Merino Beanie at woolworks.example is 72.00 USD."
+    )
+    assert screen_reasons(echoing, reading) == ()
+
+    # Line-wrapped rather than raw, so re-adding the sentence with a different fold does not
+    # slip past the check.
+    contract = " ".join(ANSWER_CONTRACT.split())
+    assert "or in the shopper's own question" in contract
+    assert "Write no number that is not below" not in contract
 
 
 # ------------------------------------------------------------------------------------------

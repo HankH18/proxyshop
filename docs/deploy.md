@@ -643,21 +643,25 @@ The buyer `503` belongs in this list rather than being tidied out of it: it is w
 byte-identical `.env.example` **must** produce. That file leaves
 `PROXYSHOP_BUYER_MAGIC_LINK_TRANSPORT` empty and names no MTA — `..._SMTP_URL` and
 `..._SENDER` are both blank — so `buyer_svc.auth.delivery.build_magic_link_delivery`, which
-`build_auth_service` calls once at boot, returns its refusing transport `_undeliverable`
-instead of an SMTP sender. The POST then mints a link, hands it to that callable, and the
-`MagicLinkUndeliverable` it raises is caught in `buyer_svc.auth.routes` and answered as this
-`503` with a `Retry-After`. The door refuses rather than promising a mail nothing will send.
-The transcript recorded a `202` here until this line was corrected, which no clean
-`cp .env.example .env` can produce.
+`build_auth_service` calls once, lazily, on the first request that needs the login stack,
+returns its refusing transport `_undeliverable` instead of an SMTP sender. The POST then mints
+a link, hands it to that callable, and the `MagicLinkUndeliverable` it raises is caught in
+`buyer_svc.auth.routes` and answered as this `503` with a `Retry-After`. The door refuses
+rather than promising a mail nothing will send. The transcript recorded a `202` here until
+this line was corrected, which no clean `cp .env.example .env` can produce.
 
 Two log lines are the whole mechanism, from a buyer service run on loopback with those three
-variables unset — the builder's decision at boot, then the route's refusal on the request:
+variables unset. **Do not go looking for the first one in the startup log — it is not there.**
+`create_app()` returns, the ASGI lifespan completes and uvicorn says "Application startup
+complete" with neither line emitted; both land on the sign-in request, under one correlation
+id, the builder's decision immediately followed by the route's refusal:
 
 ```
-WARNING buyer_svc.auth.delivery PROXYSHOP_BUYER_MAGIC_LINK_SMTP_URL is unset: this service
-        will REFUSE magic-link logins rather than accept ones it cannot deliver ...
-ERROR   buyer_svc.auth.routes   magic-link refused: no magic-link mail transport is
-        configured, so this service cannot deliver a login link; set
+WARNING buyer_svc.auth.delivery [7453e6c832694f0c] PROXYSHOP_BUYER_MAGIC_LINK_SMTP_URL is
+        unset: this service will REFUSE magic-link logins rather than accept ones it cannot
+        deliver ...
+ERROR   buyer_svc.auth.routes   [7453e6c832694f0c] magic-link refused: no magic-link mail
+        transport is configured, so this service cannot deliver a login link; set
         PROXYSHOP_BUYER_MAGIC_LINK_SMTP_URL, ..._SENDER and ..._BASE_URL
 ```
 

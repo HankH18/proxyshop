@@ -8,10 +8,12 @@ human noticing rather than a gate. Prose that outlived its subject is the most c
 in this repo, and a route count is the cheapest possible instance of it, because the sentence
 around it stays perfectly plausible while the number goes wrong.
 
-WHAT IT DOES NOT DO. It does not check the sentence, only the arithmetic in it. A README that
-described the wrong routes in the right quantity would pass here — that is what reading is
-for. What it forbids is the specific failure that keeps happening: someone adds a served
-route and the paragraph two hundred lines away silently becomes false.
+WHAT IT DOES NOT DO. It checks the COUNTS in that sentence and the table — the two route
+totals, the word that counts the services, and every per-service row — and nothing else about
+them. A README that described the wrong routes in the right quantity would pass here; that is
+what reading is for. What it forbids is the specific failure that keeps happening: someone
+adds a served route or a service and the paragraph hundreds of lines away silently becomes
+false.
 
 The census is imported rather than shelled out to. It is a static AST walk over
 ``src/*/routes.py`` and imports no application, so this costs milliseconds and needs no
@@ -78,13 +80,48 @@ def test_the_headline_states_the_measured_total() -> None:
     )
 
 
-def test_the_headline_counts_six_services() -> None:
-    """The word "six" in that sentence is a count too, and a count can go wrong."""
-    assert len(ROW_PATH_BY_SERVICE) == len(
-        [service for service in SERVICES if not service.dev_double]
-    ), (
+#: The census's service count, spelled the way the headline spells it. The sentence writes
+#: that count as a word, so reading it back needs the word. A census that grows past this map
+#: fails below rather than quietly skipping the check — the failure this whole file exists to
+#: prevent is a check that stops checking while still reporting green.
+SERVICE_COUNT_WORDS = {
+    4: "four",
+    5: "five",
+    6: "six",
+    7: "seven",
+    8: "eight",
+    9: "nine",
+    10: "ten",
+}
+
+
+def test_the_headline_counts_the_measured_services() -> None:
+    """The word "six" in that sentence is a count too, and this opens README.md to read it.
+
+    Two assertions doing two jobs. The first pins the join table to the census, so a service
+    added to one and not the other is caught. The second READS THE SENTENCE, and it is here
+    because without it this function passed against a README saying "The seventeen product
+    services serve 59 routes" — a gate that could not fail the case it was named for.
+    """
+    served = [service for service in SERVICES if not service.dev_double]
+    assert len(ROW_PATH_BY_SERVICE) == len(served), (
         "a product service was added to or removed from the census. Update "
         "ROW_PATH_BY_SERVICE, the README's 'six product services', and its table together."
+    )
+    word = SERVICE_COUNT_WORDS.get(len(served))
+    assert word is not None, (
+        f"the census counts {len(served)} product services and SERVICE_COUNT_WORDS spells no "
+        f"word for that. Add it rather than deleting the assertion below it."
+    )
+    stated = re.search(r"\*\*The (\w+) product services serve", readme_text())
+    assert stated is not None, (
+        "README.md no longer carries the '**The <word> product services serve' headline in "
+        "the shape this gate reads. If the sentence was rewritten, rewrite this pattern with "
+        "it — do not delete the check."
+    )
+    assert stated.group(1) == word, (
+        f"README.md says the {stated.group(1)} product services serve those routes; the "
+        f"census counts {len(served)}, which this file spells '{word}'."
     )
 
 
@@ -125,5 +162,6 @@ def test_the_rows_sum_to_the_headline() -> None:
         assert match is not None, f"no table row for `{row_path}`"
         rows += int(match.group(1))
     assert rows == int(headline.group(1)), (
-        f"the six table rows sum to {rows}, and the headline says {headline.group(1)}."
+        f"the {len(ROW_PATH_BY_SERVICE)} table rows sum to {rows}, and the headline says "
+        f"{headline.group(1)}."
     )

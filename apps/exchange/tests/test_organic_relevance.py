@@ -48,7 +48,7 @@ from exchange.retrieval import (
     content_terms,
 )
 from exchange.retrieval.fit import FitAssessment, FitFeatures
-from exchange.retrieval.relevance import OFF_TOPIC_DETAIL
+from exchange.retrieval.relevance import ES_PLURAL_STEM_ENDINGS, OFF_TOPIC_DETAIL, _stem
 from exchange.retrieval.roster import (
     ShopRoster,
     SolicitedShop,
@@ -216,6 +216,54 @@ def test_a_plural_query_still_finds_a_singular_catalogue() -> None:
 def test_a_singular_and_its_own_plural_are_one_content_word(singular: str, plural: str) -> None:
     """One word, whichever way the shopper or the storefront spells it."""
     assert content_terms(singular) == content_terms(plural), (singular, plural)
+
+
+@pytest.mark.parametrize(
+    ("singular", "plural"),
+    [("potato", "potatoes"), ("tomato", "tomatoes"), ("hero", "heroes"), ("echo", "echoes")],
+)
+def test_the_o_noun_plural_is_a_KNOWN_split_and_the_docstring_must_keep_saying_so(
+    singular: str, plural: str
+) -> None:
+    """A consonant + ``-o`` singular takes ``-es`` too, and this stemmer does not fold it.
+
+    Pinned rather than fixed, and pinned because the docstring on
+    :data:`ES_PLURAL_STEM_ENDINGS` claims exactly this. Adding ``"o"`` to that tuple would fold
+    these four and break the pair below it, which is the trade the docstring records: measured
+    over the tokens of every product ``title`` on disk, the shipped 3,093-product corpus
+    (``fixtures/real-catalogs``) contains no ``-oes`` token at all, and the 17,409-product broad
+    corpus (``fixtures/real-catalogs-broad``) contains ``shoes`` x7 against ``heroes`` x1.
+    """
+    assert _stem(plural) == singular + "e", plural
+    assert _stem(singular) == singular, singular
+    assert "o" not in ES_PLURAL_STEM_ENDINGS, ES_PLURAL_STEM_ENDINGS
+
+
+@pytest.mark.parametrize(("singular", "plural"), [("shoe", "shoes"), ("canoe", "canoes")])
+def test_an_oe_singular_still_folds_onto_its_own_plural(singular: str, plural: str) -> None:
+    """The class the ``-o`` omission protects.
+
+    ``shoe`` is an ``-e`` singular whose stem also ends in ``o``, so no suffix rule can tell
+    ``sho`` from ``potato``: ``"o"`` in :data:`ES_PLURAL_STEM_ENDINGS` would answer ``shoes ->
+    sho`` against ``shoe -> shoe``. Measured on the OLD blanket ``-es`` strip these two behaved
+    differently from each other — ``shoes -> shoe`` (folded, because the four-character floor
+    sent it to the ``-s`` rule) but ``canoes -> cano`` against ``canoe -> canoe`` (split) — and
+    both fold now.
+    """
+    assert _stem(plural) == singular, (plural, _stem(plural))
+    assert _stem(singular) == singular, singular
+
+
+def test_a_stem_that_is_not_a_word_is_fine_as_long_as_both_spellings_reach_it() -> None:
+    """``series`` answers ``serie``, not ``sery`` — the docstring used to name the wrong stem.
+
+    It reaches the bare ``-s`` rule: the ``-ies`` branch needs a four-character stem and ``ser``
+    is three, and ``seri`` is not one of :data:`ES_PLURAL_STEM_ENDINGS`. Under the old blanket
+    ``-es`` strip it answered ``seri``, so the sentence was never true of either version.
+    """
+    assert _stem("series") == "serie"
+    assert _stem("studies") == "study"
+    assert _stem("gummies") == _stem("gummy") == "gummy"
 
 
 @pytest.mark.parametrize("word", ["was", "its", "gas", "this", "yes", "mass", "gras", "news"])
@@ -692,12 +740,15 @@ def test_a_sponsored_shortlist_keeps_all_four_slots(query: str) -> None:
 # =====================================================================================
 # 5. The empty answer's own sentence, and the roster that made it necessary
 # =====================================================================================
-def _retrieval_result(*, considered: int, off_topic: int) -> RetrievalResult:
+def _retrieval_result(*, considered: int, off_topic: int, excluded: int = 0) -> RetrievalResult:
     """A retrieval that reached ``considered`` products and refused ``off_topic`` of them."""
     return RetrievalResult(
         intent_id="int-1",
         assessments=(),
-        excluded=(),
+        excluded=tuple(
+            ExcludedCandidate(f"x-{index}", f"Excluded {index}", ("hard constraint",))
+            for index in range(excluded)
+        ),
         considered=considered,
         eligible_count=0,
         elapsed_ms=1.0,
@@ -733,6 +784,28 @@ def test_the_empty_answer_claims_only_what_the_search_actually_reached() -> None
     # The rule that produced the verdict is still named, because an audit has to be able to say
     # WHICH rule refused. That half was right and is not being loosened here.
     assert RULE.name in sentence, sentence
+
+
+def test_the_hard_constraint_emptiness_is_bounded_to_what_was_judged_too() -> None:
+    """The SIBLING of the sentence above, three lines down, with the identical overclaim.
+
+    ``_nothing_retrieved_reason`` has three branches on one served field. The ``off_topic`` one
+    was repaired and the ``excluded`` one was left reading "no product in this exchange's
+    catalogue graph satisfies this intent's hard constraints" — a claim about every product in
+    the graph, composed after judging ``result.considered`` of them, which the retrieval caps
+    at ``DEFAULT_ROSTER_PRODUCTS``. A product the index never surfaced was never checked
+    against a hard constraint either.
+    """
+    sentence = _nothing_retrieved_reason(_retrieval_result(considered=25, off_topic=0, excluded=25))
+
+    assert "no product in this exchange's catalogue graph satisfies" not in sentence, sentence
+    assert "nothing this search reached" in sentence, sentence
+    assert "not about the whole catalogue" in sentence, sentence
+    assert "25 product(s)" in sentence, sentence
+    # Still says WHICH emptiness this is: a hard-constraint refusal is a different sentence to
+    # the shopper than an off-topic one, and collapsing them is the defect this branch exists
+    # to avoid.
+    assert "hard constraints" in sentence, sentence
 
 
 def _solicited_roster(
@@ -785,7 +858,7 @@ STATED = (
 )
 
 
-def test_a_stated_row_the_platform_cannot_vouch_for_is_repointed_at_one_it_can() -> None:
+def test_a_stated_row_the_search_did_not_return_is_repointed_at_one_it_did() -> None:
     """THE BLANK SHORTLIST, at its root: a fixed roster answering a question it predates.
 
     The demo's roster is six shops each pinned to their liver-cluster lead, sent on every
@@ -816,14 +889,57 @@ def test_a_stated_row_the_platform_cannot_vouch_for_is_repointed_at_one_it_can()
     # another's reference.
     assert rows[0]["list_price"] == 19.99, rows[0]
     assert rows[0]["currency"] == "USD", rows[0]
-    # A statement about the SHOP, not about the product, and it survives.
+    # `max_discount_pct` is carried through untouched, so the caller's cap now applies to a
+    # product the caller never named. `auction/collect.py` judges it per ROW, beside the row's
+    # `list_price`, which moved with the product — see `repoint_organic_products` for why this
+    # is recorded rather than repaired.
     assert rows[0]["max_discount_pct"] == 15.0, rows[0]
     # The shop the graph said nothing about keeps its stated row and is refused on it.
     assert rows[1] == dict(STATED[1]), rows[1]
     assert reason is not None and "gaiaherbs.com" in reason, reason
 
 
-def test_a_stated_row_the_platform_vouched_for_is_left_exactly_as_stated() -> None:
+def test_the_repoint_reason_says_the_search_missed_it_not_that_it_judged_it() -> None:
+    """THE SERVED SENTENCE MAY NOT REPORT A JUDGEMENT THAT NEVER HAPPENED.
+
+    ``repoint_organic_products`` decides on ``ShopRoster.fit``, which is
+    ``RetrievalResult.assessments``, which ``retrieve()`` truncates to ``DEFAULT_ROSTER_PRODUCTS``
+    — so a pinned product absent from it may simply have ranked twenty-sixth. The reason used to
+    say "the product each named was not one this retrieval vouched for", which reads as "the
+    platform looked at your product and would not stand behind it".
+
+    Measured over 24 in-corpus queries x the demo's six rows against the recorded corpus
+    (3,093 ``Product`` nodes in the graph at the time of the run): of 63 moved rows, 0 had a
+    pinned product judged off-topic, 0 had one excluded by a hard constraint, and 63 had one
+    that was never retrieved and so never judged at all. The sentence a shopper and an operator
+    both read must say what happened.
+
+    This double makes that structural rather than corpus-dependent: the roster vouches for
+    ``prod-creatine`` alone and knows nothing whatever about ``prod-milk``, so there is no
+    verdict on the pinned product for the reason to be reporting.
+    """
+    source = _Source(
+        _solicited_roster(
+            SolicitedShop(
+                store_id="gaiaherbs.com",
+                tier=1,
+                product_ref="prod-creatine",
+                intent_match=0.8,
+                list_price=19.99,
+                currency="USD",
+            ),
+            vouched=("prod-creatine",),
+        )
+    )
+
+    _rows, reason = repoint_organic_products(source, STATED, _intent("creatine monohydrate"))
+
+    assert reason is not None, reason
+    assert "vouch" not in reason, reason
+    assert "did not return the product each named" in reason, reason
+
+
+def test_a_stated_row_the_search_did_return_is_left_exactly_as_stated() -> None:
     """A no-op on every auction that already works, which is what keeps this additive.
 
     Measured on ``"milk thistle liver support"`` against the demo roster: four of six rows are
@@ -1024,8 +1140,15 @@ def test_the_served_route_answers_a_query_outside_the_rosters_cluster() -> None:
     ]
     assert len(refusals) == len(DEMO_ROSTER) - 1, body["excluded"]
     # The response says the platform re-chose a product, so a reader is not left to infer it.
-    assert "re-pointed" in str(body["roster_source"]["reason"]), body["roster_source"]
+    served_reason = str(body["roster_source"]["reason"])
+    assert "re-pointed" in served_reason, body["roster_source"]
     assert body["roster_source"]["source"] == "request", body["roster_source"]
+    # ON THE WIRE, not only in the helper: the sentence a shopper and an operator read must not
+    # report a judgement the retrieval never made. `prod-milk` is absent from `fit` because this
+    # roster never mentions it, which is what "the search did not return it" means — and is not
+    # the same statement as "the search judged it and refused it".
+    assert "vouch" not in served_reason, body["roster_source"]
+    assert "did not return the product each named" in served_reason, body["roster_source"]
 
 
 def test_the_served_route_still_answers_a_furniture_query_with_nothing() -> None:

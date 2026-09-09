@@ -580,9 +580,12 @@ Re-run it after the corpus moves, and `--check` reports drift instead of writing
   `orders/paid` webhook. So `reconcile` still folds no verdict over the chain the exchange
   writes. `starting-slice.md` §3.6/§3.7 measures that gap and §4's scripted proof is where the
   whole loop is exercised.
-- **The claim grading here is as good as the shipped catalogue snapshots.** They are trimmed
-  to sixty products per hosted store; a `product_ref` the graph rosters from outside that
-  window grades `ambiguous`, which R19 will not let satisfy a hard constraint.
+- **The claim grading here is as good as the shipped catalogue snapshots.** They now carry
+  3,086 products across all ten storefronts — every row the corpus recorded that names a
+  priced variant, out of the 3,093 it recorded — under a 1,000-per-store trim the largest
+  store (805) does not reach. The seven rows outside that window are exactly the seven whose
+  storefront named no price. A `product_ref` the graph rosters from outside it grades
+  `ambiguous`, which R19 will not let satisfy a hard constraint.
 - **The shopper journey in §5 supplies its own roster, and the graph still picks the
   products.** The buyer service refuses to open an auction with no candidate set — that is its
   own fail-closed posture — so the browser path sends `buyer-roster.json`, and WHICH SHOPS

@@ -230,9 +230,29 @@ OFF_TOPIC_DETAIL = (
 )
 
 
-#: The singular endings that take ``-es`` in English: ``boxes``, ``dishes``, ``churches``,
-#: ``buzzes``, ``glasses``. Every OTHER singular takes a bare ``-s``, and that includes the
-#: whole class this module trips over — a singular ending in ``-e``.
+#: The SIBILANT singular endings, which take ``-es`` in English: ``boxes``, ``dishes``,
+#: ``churches``, ``buzzes``, ``glasses``. That covers the class this module trips over — a
+#: singular ending in ``-e``, whose plural is a bare ``-s`` and which the old blanket ``-es``
+#: strip split from itself (``capsule``/``capsul``).
+#:
+#: **It is not the whole of the English ``-es`` rule, and the gap is the ``-o`` nouns.** A
+#: singular ending in a consonant + ``-o`` also takes ``-es``, and this set does not list
+#: ``o``, so :func:`_stem` sends those to the bare ``-s`` rule and splits them. Measured::
+#:
+#:     potatoes -> potatoe   potato -> potato      tomatoes -> tomatoe   tomato -> tomato
+#:     heroes   -> heroe     hero   -> hero        echoes   -> echoe     echo   -> echo
+#:     mangoes  -> mangoe    mango  -> mango       volcanoes -> volcanoe volcano -> volcano
+#:
+#: The old blanket rule folded that class correctly, so this is a real behaviour change and not
+#: only a docstring one. **``o`` is deliberately absent anyway**, because adding it trades a
+#: rarer class for a commoner one: ``shoes``/``shoe`` and ``canoes``/``canoe`` are ``-e``
+#: singulars whose stems also end in ``o``, so no suffix rule can separate ``sho`` from
+#: ``potato``, and ``o`` in this tuple would answer ``shoes -> sho`` against ``shoe -> shoe``.
+#: Measured over the tokens of every product name on disk: the shipped 3,093-product corpus
+#: (``fixtures/real-catalogs``) contains no ``-oes`` token at all, and the 17,409-product broad
+#: corpus (``fixtures/real-catalogs-broad``) contains ``shoes`` x7 and ``heroes`` x1 — so the
+#: word the omission costs occurs once, and the word it protects occurs seven times. Both
+#: numbers come from tokenising the ``title`` of every row in ``stores/*.products.jsonl.gz``.
 ES_PLURAL_STEM_ENDINGS: tuple[str, ...] = ("s", "x", "z", "ch", "sh")
 
 
@@ -260,9 +280,13 @@ def _stem(token: str) -> str:
     'Collagen Peptides')`` answered ``about=False`` on one shared word out of four, while the
     same question with the plural spelled the same on both sides is served. Measured on the
     recorded corpus through ``POST /auctions``, before this fix: ``'bovine collagen peptides'``
-    -> 4 slots / 6 shops, ``'bovine collagen peptide'`` -> 2 slots / 2 shops. English adds
-    ``-es`` only after a sibilant (:data:`ES_PLURAL_STEM_ENDINGS`); everywhere else the plural
-    is a bare ``-s``, which the third rule already handles correctly.
+    -> 4 slots / 6 shops, ``'bovine collagen peptide'`` -> 2 slots / 2 shops. The condition
+    added is the SIBILANT one (:data:`ES_PLURAL_STEM_ENDINGS`): after a sibilant English adds
+    ``-es``, and for the ``-e`` singulars this repair is about the plural is a bare ``-s``,
+    which the third rule already handles correctly. It is not the whole of the English ``-es``
+    rule — the consonant + ``-o`` plurals also take ``-es`` and are knowingly left out; that
+    trade, and what it costs on the corpora on disk, is on
+    :data:`ES_PLURAL_STEM_ENDINGS` itself.
 
     The three guards, and why each length is what it is:
 
@@ -277,11 +301,17 @@ def _stem(token: str) -> str:
       through the rule above.
 
     What it still does not do, stated rather than left to be discovered: irregular plurals are
-    untouched (``feet``, ``mice``), and a stem this leaves is not a word (``gummies`` and
-    ``gummy`` agree on ``gummy``; ``studies`` answers ``study``, which is right, and ``series``
-    answers ``sery``, which is not). Both are the cost of a suffix rule with no lexicon. What
-    matters here is that they are symmetric noise, not a systematic split of one word from its
-    own plural, which is what the ``-es`` rule was.
+    untouched (``feet``, ``mice``), and a stem this leaves is often not a word. Measured::
+
+        _stem('gummies') -> 'gummy'    _stem('gummy')  -> 'gummy'     (agree)
+        _stem('studies') -> 'study'    _stem('study')  -> 'study'     (agree)
+        _stem('series')  -> 'serie'                                   (not a word)
+
+    ``series`` reaches the bare ``-s`` rule rather than either ``-es`` rule: the ``-ies`` branch
+    needs a four-character stem and ``ser`` is three, and ``seri`` is not a sibilant. A stem
+    that is not a word costs nothing as long as both spellings of the SAME word reach it, which
+    is what the ``-es`` repair above is about. The one class where that still fails is the
+    consonant + ``-o`` plural, and it is documented on :data:`ES_PLURAL_STEM_ENDINGS`.
     """
     if token.endswith("ies") and len(token) - 3 >= 4:
         return token[:-3] + "y"

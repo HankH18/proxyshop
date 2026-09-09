@@ -596,9 +596,9 @@ function recordValue(value: unknown): string {
  * publishes a canonical rank per source, 1 most authoritative and larger weaker. The NUMBER is
  * not: `contracts.protocol.Provenance` validates `authority_rank` as `ge=1` and says why —
  * "validated as `>= 1` rather than pinned to that table, because a hook may legitimately
- * down-rank a stale observation" — so it is whatever the bid wrote, and the identifier
- * `authority_rank` appears nowhere in `apps/exchange/src` or `apps/buyer/svc/src`: nothing
- * between the store's hook and this page compares it against the table.
+ * down-rank a stale observation" — so it is whatever the bid wrote, and nothing between the
+ * store's hook and this page compares it against the table: `PROVENANCE_AUTHORITY_RANK` is
+ * read nowhere outside `packages/contracts`.
  *
  * This line used to read "how strongly this network rates the evidence", which handed a
  * shop-written number the platform's authority — the same mis-attribution D55 forbids in the

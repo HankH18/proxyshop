@@ -97,11 +97,13 @@ from .evidence import (
 
 __all__ = [
     "ANSWER_CONTRACT",
+    "COMPARATIVE_WORDS",
     "FAMILY_WORDS",
     "MAX_ANSWER_CHARS",
     "MAX_GROUNDS_PER_SLOT",
     "MAX_GROUNDS_WIDE",
     "MAX_QUESTION_CHARS",
+    "MAX_SCOPE_WORDS",
     "MIN_ANSWER_WORDS",
     "NOT_HELD_DETAIL",
     "ORDINALS",
@@ -345,14 +347,14 @@ FAMILY_WORDS: dict[str, str] = {
     "provenance": TOPIC_PROVENANCE,
     "unverified": TOPIC_PROVENANCE,
     "verified": TOPIC_PROVENANCE,
-    # the ranking. "Which is better?" is a question about the exchange's published order, and
-    # answering it FROM that order is the honest reading: the platform is not calling a shop
-    # better, it is reciting the rank score it computed and the components that made it. Left
-    # out of this family it was a refusal — "I don't know about “better”" over a shortlist the
-    # platform ranked itself — which is the same false denial in the opposite direction.
+    # the ranking — the words that name the exchange's published ORDER and nothing else.
+    # Answering "how were these ranked?" from that order is the honest reading: the platform
+    # is not calling a shop better, it is reciting the rank score it computed and the
+    # components that made it. Left out of this family it was a refusal — "I don't know about
+    # “ranked”" over a shortlist the platform ranked itself.
+    #
+    # The bare comparatives are NOT here; see :data:`COMPARATIVE_WORDS` for why.
     "beat": TOPIC_RANKING,
-    "best": TOPIC_RANKING,
-    "better": TOPIC_RANKING,
     "choose": TOPIC_RANKING,
     "chose": TOPIC_RANKING,
     "chosen": TOPIC_RANKING,
@@ -368,8 +370,6 @@ FAMILY_WORDS: dict[str, str] = {
     "winning": TOPIC_RANKING,
     "wins": TOPIC_RANKING,
     "won": TOPIC_RANKING,
-    "worse": TOPIC_RANKING,
-    "worst": TOPIC_RANKING,
     # how the slot got onto the page at all
     "advert": TOPIC_SOURCING,
     "advertising": TOPIC_SOURCING,
@@ -383,6 +383,31 @@ FAMILY_WORDS: dict[str, str] = {
     "scraped": TOPIC_SOURCING,
     "scraping": TOPIC_SOURCING,
     "sponsored": TOPIC_SOURCING,
+}
+
+#: A bare comparative: it names the ranking ONLY when the question names no other family.
+#:
+#: These four were in :data:`FAMILY_WORDS` and that was measured wrong. A comparative is an
+#: operator over whatever family the rest of the question names, not a family of its own:
+#: *"which shop has the best reputation?"* is a trust question, *"what is the best return
+#: policy?"* is a commitment question, and *"which one is worse on price?"* is a price
+#: question. Mapped unconditionally to the ranking, each of them named a family this
+#: shortlist can hold nothing in — an auction whose recorded ranking rows have aged out of
+#: this service, which ``Corpus.ranking_recorded`` documents and
+#: ``composition.HttpExchangeClient`` makes routine, since its record of an auction is an
+#: in-process ring that a restart empties. Measured on that corpus before this split: "which
+#: shop has the best reputation?" opened *"I don't hold the ranking and what went into it for
+#: the options you asked about"* and then recited both reliability snapshots. A bold denial
+#: printed above the correct answer is the worst thing this surface does.
+#:
+#: With no other family named there is nothing else a comparative can be about, and the
+#: exchange's published order is the honest thing to answer *"which one is better?"* from —
+#: so it still reaches the ranking, and still says so when the ranking is not held.
+COMPARATIVE_WORDS: dict[str, str] = {
+    "best": TOPIC_RANKING,
+    "better": TOPIC_RANKING,
+    "worse": TOPIC_RANKING,
+    "worst": TOPIC_RANKING,
 }
 
 #: ``the second one`` -> slot index 1. Matched against the shopper's RAW word, so the
@@ -457,6 +482,12 @@ WIDENERS: frozenset[str] = frozenset(
 )
 
 #: What a family reads as, when an answer has to say what it CAN answer from.
+#:
+#: Load-bearing in three places now, so an edit here changes behaviour and not only wording:
+#: :func:`_catalogue` lists these, :func:`_family_denial` builds the refusal out of the one
+#: it is denying, and :func:`_family_names` takes the words that let a reply satisfy the
+#: screen from the same string — which is what keeps the platform's own denial from being
+#: refused by the platform's own check.
 TOPIC_BLURB: dict[str, str] = {
     TOPIC_IDENTITY: "what each product is and when we crawled it",
     TOPIC_PRICE: "price and discount",
@@ -505,10 +536,10 @@ _SENTENCE_SPLIT = re.compile(r"[.!?\n]+")
 #: about the world, and no published number settles one.
 SETTLED_SUPERLATIVES: frozenset[str] = frozenset({"best", "cheapest", "lowest"})
 
-#: What confines a superlative to the rows on the screen. Required in the SAME sentence as
-#: the word, because that is the whole of the difference between a fact the platform holds
-#: and a boast it cannot support: "the cheapest OF THESE is 19.00 USD" against "it is the
-#: cheapest".
+#: What confines a superlative to the rows on the screen. Required BESIDE the word — within
+#: :data:`MAX_SCOPE_WORDS` words of it — because that is the whole of the difference between
+#: a fact the platform holds and a boast it cannot support: "the cheapest OF THESE is 19.00
+#: USD" against "it is the cheapest".
 #:
 #: Deliberately enumerated rather than the one broad ``of the``: a shortlist is at most four
 #: rows, so "of the two", "of the three", "of the four" is the whole of the counting, and the
@@ -533,6 +564,28 @@ SHORTLIST_SCOPES: tuple[str, ...] = (
     "listed here",
     "between them",
 )
+
+#: How many words may sit between a shortlist scope and the superlative it confines.
+#:
+#: Four, and the number is the fix rather than a tuning knob. The scope used to be required
+#: only somewhere in the same SENTENCE as the word, which binds it to the punctuation instead
+#: of to the superlative: measured against the two-slot fixture, one leading "Of these,"
+#: licensed every superlative after it, and five world-boasting replies — "Of these, the
+#: Merino Beanie is the best beanie you can buy, no contest.", "Of the two, the Acrylic
+#: Beanie has the lowest price in the world.", "Between them, the Acrylic Beanie is the
+#: cheapest hat on earth." among them — screened clean and would have been served in the
+#: platform's own voice. All five put six or more words between the scope and the boast; the
+#: honest phrasings the writer actually produces put nought to two ("the cheapest of these",
+#: "of these two, the cheapest", "the lowest price of these two is 19.00 USD").
+#:
+#: Two costs, both measured and neither rounded away. A reply that separates them further —
+#: "Of these two the Acrylic Beanie at fastfashion.example is the cheapest" — is refused and
+#: the shopper reads the assembled floor instead; this screen's failure direction is "say
+#: less". And a boast that keeps the scope adjacent still gets through: "Of these, the
+#: cheapest hat there is" screens clean on this rule, because proximity cannot tell a
+#: widening noun from a narrowing one. What stops that reply is the rest of the screen —
+#: "hat" is in no checked material here, so it is refused as ungrounded — not this rule.
+MAX_SCOPE_WORDS = 4
 
 
 def _token(word: str) -> str:
@@ -563,7 +616,8 @@ class Reading:
         corpus: the material this was resolved against.
         answers: one entry per SELECTED slot, in the exchange's order.
         subject: the question's content words, in the order they were typed.
-        families: the families the question named by :data:`FAMILY_WORDS`.
+        families: the families the question named — by :data:`FAMILY_WORDS`, by a bare
+            position, or, when it named none of those, by :data:`COMPARATIVE_WORDS`.
         missing_everywhere: the subject phrases no selected slot holds anything about. The
             refusal, and the thing the writer is required to deliver.
         families_unheld: the families the question named that the selected slots hold NO
@@ -732,15 +786,21 @@ def _asks_about_position(words: list[str]) -> bool:
     title and its price. The platform denied holding, in its own voice, the ranking it had
     just published on the same screen.
 
-    Two conditions, and the second is what keeps the refusals refusing: the ordinal is not
-    :func:`_points_at_a_card` deixis, AND no content word follows it. "Is this **third**
-    party tested?" fails the second — ``third`` is modifying ``party``, so it names a claim
-    nobody published rather than a position in the exchange's order.
+    Three conditions, and the last two are what keep the refusals refusing: the ordinal is
+    not :func:`_points_at_a_card` deixis, no content word follows it, and none precedes it.
+    "Is this **third** party tested?" fails the second — ``third`` is modifying ``party``, so
+    it names a claim nobody published rather than a position in the exchange's order. "Which
+    one ships **first**?" fails the third: measured, that question came back as a refusal
+    about ``ships`` printed above the whole rank formula — a denial of the question asked,
+    beside a confident answer to a different one. The ordinal there is the predicate of
+    ``ships``, and the platform holds no shipping order for anybody.
     """
     for index, word in enumerate(words):
         if word.casefold() not in ORDINALS or _points_at_a_card(words, index):
             continue
         if index + 1 < len(words) and _content(words[index + 1]):
+            continue
+        if index and _content(words[index - 1]):
             continue
         return True
     return False
@@ -759,19 +819,24 @@ def _families(words: list[str]) -> frozenset[str]:
     A bare position — see :func:`_asks_about_position` — names the ranking family too, so
     that the correctness of "why is the first one first?" does not turn on the shopper
     happening to reach for ``top`` or ``ranked`` instead.
+
+    :data:`COMPARATIVE_WORDS` is consulted LAST and only if nothing else named a family,
+    because a comparative is an operator over the family the question named rather than a
+    family of its own. That is the whole of the rule; the measurement behind it is on
+    :data:`COMPARATIVE_WORDS` itself.
     """
     found: set[str] = set()
+    compared: set[str] = set()
     for word in words:
-        folded = word.casefold()
-        if folded in FAMILY_WORDS:
-            found.add(FAMILY_WORDS[folded])
+        spellings = {word.casefold()} | set(match_tokens(word))
+        named = {FAMILY_WORDS[token] for token in spellings if token in FAMILY_WORDS}
+        if named:
+            found |= named
             continue
-        for token in match_tokens(word):
-            if token in FAMILY_WORDS:
-                found.add(FAMILY_WORDS[token])
+        compared |= {COMPARATIVE_WORDS[token] for token in spellings if token in COMPARATIVE_WORDS}
     if _asks_about_position(words):
         found.add(TOPIC_RANKING)
-    return frozenset(found)
+    return frozenset(found or compared)
 
 
 def _selected_slots(words: list[str], corpus: Corpus) -> tuple[tuple[SlotEvidence, ...], bool]:
@@ -1049,10 +1114,12 @@ discarded in favour of a plainer answer, so breaking one costs the shopper your 
 5. No superlatives and no absolutes. Not unbeatable, flawless, guaranteed, always, never.
    The platform holds evidence about these shops, not about every other shop. One
    exception, and only this one: if the shopper's own question asked which is best,
-   cheapest or lowest, you may answer in that word — but every sentence you use it in must
-   confine it to this shortlist, in that same sentence. "The cheapest of these is the one
-   at that shop" is a statement about the prices below. "It is the cheapest" is a claim
-   about every shop there is, and it is discarded. Write no number that is not below.
+   cheapest or lowest, you may answer in that word — but each time you use it, put the
+   phrase that confines it to this shortlist within four words of it. "The cheapest of
+   these is the one at that shop" and "of these two, the cheapest is that one" are
+   statements about the prices below. "It is the cheapest" is a claim about every shop
+   there is and it is discarded, and so is "Of these, the Acrylic Beanie is the cheapest
+   hat there is", where the scope opens the sentence but is nowhere near the word.
 6. Never address the shopper by name or by any identifier, and never quote their question
    back at them. You have not been told who they are.
 7. Plain text. At most a short paragraph, under 900 characters. No markup, no lists, no
@@ -1139,6 +1206,38 @@ def _akin(token: str, written: set[str]) -> bool:
     )
 
 
+def _scope_spans(tokens: list[str]) -> list[tuple[int, int]]:
+    """Where each :data:`SHORTLIST_SCOPES` phrase sits in ``tokens``, as ``(first, last)``."""
+    spans: list[tuple[int, int]] = []
+    for phrase in SHORTLIST_SCOPES:
+        parts = phrase.split()
+        for start in range(len(tokens) - len(parts) + 1):
+            if tokens[start : start + len(parts)] == parts:
+                spans.append((start, start + len(parts) - 1))
+    return spans
+
+
+def _family_names(topic: str) -> frozenset[str]:
+    """The words that count as NAMING a family, for the screen's half of rule 3.
+
+    The topic's own spelling PLUS every content word of :data:`TOPIC_BLURB` for it, because
+    the blurb is what :func:`_family_denial` is built from and that denial is the sentence
+    the prompt hands the writer as the thing its answer must deliver. Checked against the
+    topic's internal name alone, the requirement was unsatisfiable for four of the seven
+    families — ``identity``, ``commitment``, ``trust`` and ``sourcing``, whose blurbs do not
+    contain their own word — so the screen refused the platform's own assembled floor.
+    Measured on a market where every store fell back, so nobody published a commitment:
+    ``screen_reasons(assemble(reading), reading)`` returned ``('does not name the family the
+    platform does not hold: commitment',)`` for the floor's own words. A screen its author's
+    copy cannot pass is a screen that refuses the model's honest prose too, and with
+    ``LLM_PROVIDER=anthropic`` the written path for those four families was dead.
+    """
+    named = {topic}
+    for word in TOPIC_BLURB.get(topic, "").split():
+        named |= _content(word)
+    return frozenset(named)
+
+
 def _settles_a_comparison(word: str, reply: str, reading: Reading) -> bool:
     """Whether ``word`` is a superlative this shortlist's own numbers settle, used as one.
 
@@ -1149,20 +1248,32 @@ def _settles_a_comparison(word: str, reply: str, reading: Reading) -> bool:
     * the SHOPPER used it. The platform never volunteers a superlative; it answers the
       question in the words it was asked in, and an unprompted "best" is a boast whoever
       wrote it; and
-    * every sentence carrying it also confines it to this shortlist. "The cheapest of these
-      is the Acrylic Beanie" is a statement about the prices the platform published for this
-      auction. "It is the cheapest" is a claim about every shop there is, and the platform
-      holds nothing about all but the handful on the screen.
+    * EVERY use of it has a shortlist scope beside it — within :data:`MAX_SCOPE_WORDS`
+      words. "The cheapest of these is the Acrylic Beanie" is a statement about the prices
+      the platform published for this auction. "It is the cheapest" is a claim about every
+      shop there is, and the platform holds nothing about all but the handful on the screen.
+
+    The third condition is the one that used to be a sentence test, and binding it to the
+    word rather than to the sentence is what closed it; :data:`MAX_SCOPE_WORDS` carries the
+    replies that got through. Nothing here splits sentences any more, which also drops a
+    hazard the split brought with it: ``[.!?\\n]+`` cuts "19.00" and "woolworks.example" in
+    half, so which fragment a superlative landed in turned on whether a price or a shop
+    domain happened to sit beside it.
     """
     if word not in SETTLED_SUPERLATIVES:
         return False
     if word not in {_token(part) for part in reading.question.split()}:
         return False
-    for sentence in _SENTENCE_SPLIT.split(reply):
-        if word not in {_token(part) for part in sentence.split()}:
+    tokens = [token for token in (_token(part) for part in reply.split()) if token]
+    spans = _scope_spans(tokens)
+    for index, token in enumerate(tokens):
+        if token != word:
             continue
-        folded = sentence.casefold()
-        if not any(scope in folded for scope in SHORTLIST_SCOPES):
+        near = any(
+            (start - index - 1 if index < start else index - last - 1) <= MAX_SCOPE_WORDS
+            for start, last in spans
+        )
+        if not near:
             return False
     return True
 
@@ -1177,9 +1288,9 @@ def screen_reasons(reply: Any, reading: Reading) -> tuple[str, ...]:
     Three of these have real teeth and the rest are style. ``invented numbers`` is
     arithmetic against the platform's own material. ``launders a shop's message`` is a run
     comparison against prose the writer was never shown, so a reply reproducing it did not
-    get it from the platform. And ``asserts something the platform does not hold`` is what
-    makes rule 3 a check rather than an instruction: the refusal has to be delivered, in a
-    sentence that actually denies.
+    get it from the platform. And the three ``does not …`` reasons are what make rule 3 a
+    check rather than an instruction: the refusal has to be delivered, in an opening sentence
+    that actually denies, and it has to name the subject or the family it is denying.
     """
     if not isinstance(reply, str):
         return (f"not text: {type(reply).__name__}",)
@@ -1236,12 +1347,11 @@ def screen_reasons(reply: Any, reading: Reading) -> tuple[str, ...]:
             asked_tokens = {token for word in phrase.split() for token in match_tokens(word)}
             if not any(_akin(token, written_tokens) for token in asked_tokens):
                 reasons.append(f"does not name what the platform does not hold: {phrase}")
-        # The family is named by its own word — ``ranking``, ``provenance`` — and `_akin`
-        # takes the inflections, so a reply that says "I don't hold a rank for these" names
-        # it. An unheld family the reply skates over costs it the screen, exactly as an
-        # unheld subject does.
+        # An unheld family the reply skates over costs it the screen, exactly as an unheld
+        # subject does — but it is checked against the words the PROMPT used for the family,
+        # not against the topic's internal name. See :func:`_family_names`.
         for topic in reading.families_unheld:
-            if not _akin(topic, written_tokens):
+            if not any(_akin(name, written_tokens) for name in _family_names(topic)):
                 reasons.append(f"does not name the family the platform does not hold: {topic}")
 
     vocabulary = reading.vocabulary
