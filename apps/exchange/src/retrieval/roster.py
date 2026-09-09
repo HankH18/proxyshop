@@ -180,6 +180,14 @@ class SolicitedShop:
             spelling the word here trips the rule this sentence is describing.)
         source_ids: the ``Source`` ids supporting the ``Store`` node, so a pitch built from
             this row can cite what it stands on.
+        variant_ref: the storefront's OWN id for the variant :attr:`list_price` prices —
+            what ``https://<store>/cart/{variant}:{qty}`` needs. It comes off the SAME
+            ``ShopOffer`` the price does, never another, for the reason
+            ``scripts/build_demo_deployment.py::_priced_variant`` already states in prose: a
+            permalink built on one variant while the offer quotes another's price sends the
+            shopper to a cart whose total disagrees with what they accepted. ``None`` when
+            the platform observed no price at all, or observed one for a variant the
+            storefront published no id for.
     """
 
     store_id: str
@@ -191,6 +199,7 @@ class SolicitedShop:
     list_price: float | None = None
     currency: str | None = None
     source_ids: tuple[str, ...] = ()
+    variant_ref: str | None = None
 
     @property
     def priced(self) -> bool:
@@ -215,6 +224,14 @@ class SolicitedShop:
             row["list_price"] = float(self.list_price)
             if self.currency:
                 row["currency"] = self.currency
+        # `variant_ref`, not `variant_id`: `store_agent.runtime.bidding._variant_ref` reads
+        # `("variant_ref", "variant_id")` IN THAT ORDER, so a graph key spelled `variant_id`
+        # on a row an agent ever sees would be returned as the agent's own variant and the
+        # hosted stores would regress from working to broken. Omitted when absent, for the
+        # same reason `list_price` is: an absent key reads downstream as "the platform never
+        # observed one", and there is no defensible stand-in for a variant.
+        if self.variant_ref:
+            row["variant_ref"] = self.variant_ref
         return row
 
 
@@ -608,6 +625,14 @@ def _solicited(shops: Sequence[ShopCandidate], *, fit: Mapping[str, float]) -> l
                 business_identity=shop.business_identity,
                 list_price=None if cheapest is None else float(cheapest.price),
                 currency=None if cheapest is None else cheapest.currency,
+                # From THAT offer, not from any other of the shop's: the price and the
+                # variant are one observation or they are two draws from the same set, and a
+                # cart built on the second one totals differently from the offer accepted.
+                variant_ref=(
+                    None
+                    if cheapest is None or not cheapest.native_variant_id
+                    else str(cheapest.native_variant_id)
+                ),
                 source_ids=tuple(shop.source_ids),
             )
         )
@@ -655,15 +680,17 @@ def repoint_organic_products(
        that survived the intent's hard constraints AND was judged about the query, so a pinned
        ref present there is a product this exchange has just said is relevant. It is left
        exactly as stated — which is why this is a no-op on the auctions that already work:
-       measured on ``"milk thistle liver support"``, four of the demo's six rows are returned
-       by the search and do not move.
+       measured on ``"milk thistle liver support"`` when the demo roster was six rows, four of
+       them are returned by the search and do not move. (It states fifteen now; that reading has
+       not been retaken, and it needs a live graph run rather than a re-read of the document.)
 
        **ABSENT FROM ``fit`` IS NOT "JUDGED AND REFUSED", and the sentence this rule publishes
        may not say it is.** ``fit`` is ``result.assessments``, and ``retrieve()`` is called with
        ``limit=product_limit`` (:data:`DEFAULT_ROSTER_PRODUCTS`, 25), so a product ranked
        twenty-sixth by the vector index is absent from ``fit`` having never been judged at all.
-       Measured over 24 in-corpus queries x the demo's six rows — 144 row-decisions, against
-       the recorded corpus with 3,093 ``Product`` nodes in the graph at the time of the run::
+       Measured over 24 in-corpus queries x the demo roster's six rows AT THE TIME — 144
+       row-decisions, against the recorded corpus with 3,093 ``Product`` nodes in the graph on
+       that run; the roster states fifteen rows now::
 
            moved                                                63
              pinned product judged off-topic                     0
@@ -699,6 +726,40 @@ def repoint_organic_products(
     cheapest provenanced offer the platform observed FOR that product — so the row never states
     a price for one product beside the reference of another. ``tier`` and ``max_discount_pct``
     are carried through untouched.
+
+    **``variant_ref`` moves under the same rule, and is CLEARED rather than kept when the new
+    product has none.** It is the storefront's own id for the variant the new ``list_price``
+    prices, and it is what ``https://<store>/cart/{variant}:{qty}`` is built from. A stated
+    variant left on a re-pointed row would name a variant of the product the row moved OFF, so
+    the shopper would be sent to a cart for something they were never shown — which is worse
+    than the absent field, because the absent field declines at accept time and says so
+    (:func:`~apps.exchange.src.checkout.provider.default_permalink`) while the stale one
+    succeeds and is wrong.
+
+    **A row this function does NOT move keeps whatever variant the caller stated, and nothing
+    is invented for it.** That is deliberate and it is the same rule read from the other side:
+    an unmoved row keeps the caller's ``list_price``, and pairing the caller's price with a
+    variant the PLATFORM chose would reintroduce exactly the disagreement the paragraph above
+    refuses. A stated roster that wants a working cart states its own ``variant_ref`` —
+    ``RosterEntry`` declares the field, and ``scripts/build_demo_deployment.py`` writes one per
+    row into ``deploy/demo/buyer-roster.json``.
+
+    **That last sentence was FALSE as shipped, and this paragraph is the reason it mattered.**
+    The generator declared the key on every store agent's own catalogue row and on no roster row
+    at all: measured on the tracked document, fifteen rows whose keys across all of them were
+    exactly ``{list_price, max_discount_pct, product_ref, store_id, tier}``, none carrying a
+    variant. So the asymmetry ran backwards — a row whose pinned product was WRONG was moved
+    here and given the platform's variant, while a row whose pinned product was RIGHT reached
+    accept with none and ``checkout.provider.default_permalink`` could build no cart at all. The
+    better the roster, the worse the outcome. The repair is in the generator, where the caller's
+    statement is written, rather than here, because the argument above is unchanged: an unmoved
+    row keeps the caller's ``list_price``, and inventing a variant beside it is the disagreement
+    this function exists to refuse.
+    ``apps/exchange/tests/test_the_stated_roster_names_a_variant.py``
+    grades both ends — that the shipped document names, per row, a variant the recorded
+    corpus says belongs to that row's own product and is priced at that row's own price, and
+    that a row this function declines to move still reaches ``_list_price_bid``'s fallback offer
+    carrying it.
 
     **``max_discount_pct`` is a PER-ROW cap and re-pointing moves it onto a product the caller
     did not name.** ``auction/collect.py``'s module docstring is the one that is right about
@@ -778,6 +839,16 @@ def repoint_organic_products(
         row["list_price"] = float(shop.list_price or 0.0)
         if shop.currency:
             row["currency"] = shop.currency
+        # THE VARIANT MOVES WITH THE PRODUCT TOO, and leaving it behind is worse than never
+        # having carried one. A re-pointed row that kept the caller's `variant_ref` would name
+        # the variant of the product it moved OFF — a cart permalink for a product the shopper
+        # was never shown — so the stated value is REPLACED, and cleared when the platform
+        # observed no id for the new product. Same rule as the price, one field over: the
+        # variant moves with the product, or neither moves.
+        if shop.variant_ref:
+            row["variant_ref"] = shop.variant_ref
+        else:
+            row.pop("variant_ref", None)
         moved.append(str(row.get("store_id") or ""))
     if not moved:
         return rows, None

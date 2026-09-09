@@ -473,8 +473,9 @@ A green container list is not a working demo. Drive `make demo-check` after ever
 **It does not use the catalogue graph, and you should know that before you read a shortlist off
 it.** The SPA sends no roster, so `POST /buyer/intent/confirm` falls through to the buyer
 service's `BUYER_ROSTER`, which `apps/buyer/compose.yaml` defaults to
-`/srv/deploy/buyer-roster.json` — a fixed six rows, one `product_ref` and one `list_price` each,
-the same six whatever the shopper types. That is the roster path described under
+`/srv/deploy/buyer-roster.json` — a fixed fifteen rows, each naming one `product_ref`, its
+`list_price` and the `variant_ref` that price prices (four also carry a `max_discount_pct`), the
+same fifteen whatever the shopper types. That is the roster path described under
 [Now change one thing](#now-change-one-thing): `intent_match` reads its neutral 0.175 for every
 store, so what separates two stores on that page is the live `trust` reading and whatever
 discount their agents bid. The graph path — the one at the top of this page, where retrieval
@@ -789,8 +790,10 @@ the two halves are easy to confuse. `HttpBidSolicitor.solicit`
 rather than opening a socket. What used to happen next was that
 `collect_bids` (`apps/exchange/src/auction/collect.py`) turned that `None` into `no_response` —
 whose own definition in that file is "asked, and nothing ever came back at all" — because the
-right label, `tier_0_no_agent`, was minted only at roster tier 0 and no store the graph rosters is
-ever tier 0 (`coalesce(s.tier, 2)` in `services/ingest/src/graph/query.py`). Commit `a22c63a`
+right label, `tier_0_no_agent`, was minted only at roster tier 0 and no store the graph rosters was
+ever tier 0 — the crawl wrote `tier: 2` onto every store and the read defaulted to 2 as well. Both
+halves have since moved: the crawl asserts no tier it did not observe, and the read is
+`coalesce(s.tier, 0)` (`services/ingest/src/graph/query.py`). Commit `a22c63a`
 closed that: `solicit_bids` (`apps/exchange/src/orchestration/solicitation.py`) now subtracts
 `stores_with_no_agent` from the eligible set before dialling and marks those responses
 `NO_AGENT_FIELD`, `_unusable_because` turns the marker into `NO_AGENT_REASON` —

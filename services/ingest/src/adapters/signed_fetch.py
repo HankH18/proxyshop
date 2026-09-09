@@ -62,7 +62,9 @@ from .mapping import (
     coerce_price,
     composite_hash,
     image_records,
+    native_key,
     native_product_key,
+    option_attributes,
     price_is_stated,
     product_id_for,
     safe_host,
@@ -522,7 +524,15 @@ class SignedFetchAdapter:
                 continue
             sku = str(item.get("sku") or "").strip()
             matched = by_sku.get(sku, {})
-            native_variant = str(item.get("id") or sku or item.get("title") or "").strip()
+            # TWO DIFFERENT READS OF "the variant's id", and conflating them builds carts on
+            # product titles. `native_variant` is a HASH INPUT: it may not be empty, so it
+            # falls back to the SKU and then to the title. `native_variant_id` is the
+            # STOREFRONT'S OWN ID and nothing else — the number `/cart/{variant}:{qty}` needs
+            # — so its absence is spelled as absence. `native_key` is what makes the two
+            # adapters agree on a GID-spelled id (C6); reading `item["id"]` raw here and
+            # `native_key(...)` in `catalog_mcp` would land the same variant two ways.
+            native_variant_id = native_key(item.get("id") or item.get("variant_id"))
+            native_variant = native_variant_id or sku or str(item.get("title") or "").strip()
             # `products.json` wins on anything it STATES, and a refused statement is still a
             # statement. `coerce_price` answers None both for "no price here" and for
             # "-5.00" / NaN / true / unreadable text, and reading the second as the first
@@ -548,11 +558,20 @@ class SignedFetchAdapter:
                     currency=str(matched.get("priceCurrency") or default_currency or "USD"),
                     availability=availability,
                     status="active",
+                    native_variant_id=native_variant_id,
                 )
             )
 
         categories = tuple(c for c in [str(entry.get("product_type") or "").strip()] if c)
         images, published = image_records(entry)
+        # The `options[]` block, which this adapter read past for the whole life of the crawl:
+        # `ProductRecord.attributes` was filled by nobody, so `build_upserts` emitted zero
+        # attribute ops and every R19 hard constraint was undecidable against real inventory.
+        # `option_attributes` is shared with `catalog_mcp` for the same C6 reason
+        # `image_records` is. It is handed the WHOLE entry, variants included, on purpose: a
+        # value is written only where a variant of this product carries it positionally, and
+        # passing a trimmed entry would silence the crawl's entire attribute surface.
+        attributes = option_attributes(entry)
         return ProductRecord(
             product_id=product_id,
             canonical_name=title,
@@ -565,6 +584,7 @@ class SignedFetchAdapter:
             variants=tuple(variants),
             categories=categories,
             images=images,
+            attributes=attributes,
         ), published
 
     # -- JSON-LD ---------------------------------------------------------------------------

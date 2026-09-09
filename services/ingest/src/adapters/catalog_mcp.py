@@ -83,6 +83,7 @@ from .mapping import (
     image_records,
     native_key,
     native_product_key,
+    option_attributes,
     product_id_for,
     safe_host,
     safe_split,
@@ -642,6 +643,21 @@ class CatalogMCPAdapter:
             variants=self._variants(request.store_id, native, entry, currency, url, warnings),
             categories=_categories(entry),
             images=images,
+            # Shared with `signed_fetch` (C6): the MCP catalog and `products.json` publish the
+            # same `options[]` shape, and a surface read two ways is a surface that lands two
+            # ways. An MCP server that publishes none simply produces no readings.
+            #
+            # THE READER NOW NEEDS BOTH HALVES OF THAT SHAPE: it writes an option value only
+            # where a variant of the same entry carries it in `option1`/`option2`/`option3`,
+            # because `options[].values` is the picker's domain rather than the product's facts
+            # (see `option_attributes` for the R19/D55 defect and the measurement). Measured on
+            # the recorded contract in `fixtures/mcp/catalog_list_products.json`: it publishes
+            # NEITHER `options[]` nor `option1`, so this call produced no readings before that
+            # join existed and produces none after it — the MCP path is unchanged by it. A
+            # server that begins publishing `options[]` without the variant slots will still
+            # produce none, and that is the intended answer: a value nothing can confirm is a
+            # value this platform does not assert.
+            attributes=option_attributes(entry),
         )
 
     def _variants(
@@ -668,11 +684,14 @@ class CatalogMCPAdapter:
                 warnings.append(f"{url}: skipped a variant that is not an object")
                 continue
             sku = _text(item.get("sku"))
-            native_variant = (
-                native_key(item.get("id") or item.get("variant_id"))
-                or sku
-                or _text(item.get("title"))
-            )
+            # `native_variant_id` is the STOREFRONT'S OWN id and nothing else — the number
+            # `/cart/{variant}:{qty}` needs. `native_variant` is the HASH INPUT, which may
+            # not be empty and therefore falls back to the SKU and then the title. Keeping
+            # them apart is what stops a cart URL being built on a product title; keeping
+            # `native_key` on both is what keeps this adapter and `signed_fetch` on one node
+            # for a GID-spelled id (C6).
+            native_variant_id = native_key(item.get("id") or item.get("variant_id"))
+            native_variant = native_variant_id or sku or _text(item.get("title"))
             if not native_variant:
                 warnings.append(f"{url}: variant of {native or '<unnamed>'} has no identifier")
                 continue
@@ -696,6 +715,7 @@ class CatalogMCPAdapter:
                     currency=currency,
                     availability=_availability_of(item),
                     status=_text(item.get("status")).lower() or "active",
+                    native_variant_id=native_variant_id,
                 )
             )
         return tuple(out)

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 from . import catalog_mcp, signed_fetch
 from .base import (
+    AttributeRecord,
     CatalogAdapter,
     CatalogRequest,
     CatalogSnapshot,
@@ -119,6 +120,7 @@ __all__ = [
     "MCPSession",
     "MCPToolError",
     "PRODUCT_TOKEN",
+    "AttributeRecord",
     "ProductRecord",
     "RecordedMCPSession",
     "RequestSigner",

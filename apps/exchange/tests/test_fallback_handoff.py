@@ -204,7 +204,19 @@ def test_under_the_default_solicitor_a_shortlisted_fallback_is_handed_over_with_
     assert accepted.status_code == 200, accepted.text
     assert payload["code"] is None, f"a fallback minted a discount code: {payload}"
     assert "discount" not in payload["permalink_url"], payload
-    assert payload["permalink_url"].endswith("/cart/1:1"), payload
+    # `/cart/1:1` was a placeholder pinned as a contract, and the URL it named is a 404.
+    # `services/shopify-stub/src/app.py` passes `1` through its `isdigit()` gate and then
+    # answers `404 {"errors": "Variant 1 is not available"}`, because `state.variants.get(1)`
+    # is None; and over `fixtures/real-catalogs-demo` the nineteen stores' own variant ids run
+    # 9 to 14 digits (histogram `{9: 12, 10: 3, 11: 23, 12: 1, 13: 73, 14: 28022}`), so no
+    # store in the corpus issues variant 1. `contracts.protocol.Offer.variant_ref` already
+    # said so in words: "absent means 'the bid did not name one', never 'the default
+    # variant'". A fallback whose row names no variant is now sent to the seller's own front
+    # door — on the registered domain, so S8 is unchanged — instead of to a cart for something
+    # nobody sells. This file's real claims (accepted, no code minted, no discount on the URL)
+    # are untouched.
+    assert payload["permalink_url"] == f"https://{STORES[0]['domain']}/", payload
+    assert "/cart/1:" not in payload["permalink_url"], payload
     assert payload["notice"] and "No discount applies" in payload["notice"], payload
 
 
@@ -384,7 +396,18 @@ def test_no_configuration_mints_a_discount_code_against_a_fallback(unwired: None
             minted.append(f"{label} -> {result.code!r}")
         if creator is not None and creator.calls:
             asked.append(f"{label} -> create_code{tuple(creator.calls)}")
-        assert result.permalink_url == f"https://{SELLER_DOMAIN}/cart/1:1", label
+        # `/cart/1:1` was a placeholder pinned as a contract, and the URL it named is a 404.
+        # `services/shopify-stub/src/app.py` passes `1` through its `isdigit()` gate and then
+        # answers `404 {"errors": "Variant 1 is not available"}`, because `state.variants.get(1)`
+        # is None; and over `fixtures/real-catalogs-demo` the nineteen stores' own variant ids run
+        # 9 to 14 digits (histogram `{9: 12, 10: 3, 11: 23, 12: 1, 13: 73, 14: 28022}`), so no
+        # store in the corpus issues variant 1. `contracts.protocol.Offer.variant_ref` already
+        # said so in words: "absent means 'the bid did not name one', never 'the default
+        # variant'". A fallback whose row names no variant is now sent to the seller's own front
+        # door — on the registered domain, so S8 is unchanged — instead of to a cart for something
+        # nobody sells. This file's real claims (accepted, no code minted, no discount on the URL)
+        # are untouched.
+        assert result.permalink_url == f"https://{SELLER_DOMAIN}/", label
         assert result.discount_notice, f"{label}: the buyer was told nothing"
         assert "code_created" not in result.kinds, f"{label}: {result.kinds}"
 
@@ -547,7 +570,18 @@ def test_a_bid_whose_offer_is_not_a_mapping_refuses_instead_of_burning_the_aucti
         f"producing an answer, or produced one without being spent"
     )
     if result.accepted:
-        assert result.permalink_url == f"https://{SELLER_DOMAIN}/cart/1:1", result
+        # `/cart/1:1` was a placeholder pinned as a contract, and the URL it named is a 404.
+        # `services/shopify-stub/src/app.py` passes `1` through its `isdigit()` gate and then
+        # answers `404 {"errors": "Variant 1 is not available"}`, because `state.variants.get(1)`
+        # is None; and over `fixtures/real-catalogs-demo` the nineteen stores' own variant ids run
+        # 9 to 14 digits (histogram `{9: 12, 10: 3, 11: 23, 12: 1, 13: 73, 14: 28022}`), so no
+        # store in the corpus issues variant 1. `contracts.protocol.Offer.variant_ref` already
+        # said so in words: "absent means 'the bid did not name one', never 'the default
+        # variant'". A fallback whose row names no variant is now sent to the seller's own front
+        # door — on the registered domain, so S8 is unchanged — instead of to a cart for something
+        # nobody sells. This file's real claims (accepted, no code minted, no discount on the URL)
+        # are untouched.
+        assert result.permalink_url == f"https://{SELLER_DOMAIN}/", result
         assert result.discount_notice, result
     else:
         assert result.reoffer_bid_ref, "the buyer was left with no next slot"
@@ -574,7 +608,18 @@ def test_the_handoff_records_the_two_events_that_happened_and_not_the_third(
     assert result.accepted is True, result.denial_reason
     assert result.kinds == ["accepted", "checkout_redirect"], result.kinds
     redirect = [e for e in result.events if e["kind"] == "checkout_redirect"][0]
-    assert redirect["payload"]["permalink_url"] == f"https://{SELLER_DOMAIN}/cart/1:1"
+    # `/cart/1:1` was a placeholder pinned as a contract, and the URL it named is a 404.
+    # `services/shopify-stub/src/app.py` passes `1` through its `isdigit()` gate and then
+    # answers `404 {"errors": "Variant 1 is not available"}`, because `state.variants.get(1)`
+    # is None; and over `fixtures/real-catalogs-demo` the nineteen stores' own variant ids run
+    # 9 to 14 digits (histogram `{9: 12, 10: 3, 11: 23, 12: 1, 13: 73, 14: 28022}`), so no
+    # store in the corpus issues variant 1. `contracts.protocol.Offer.variant_ref` already
+    # said so in words: "absent means 'the bid did not name one', never 'the default
+    # variant'". A fallback whose row names no variant is now sent to the seller's own front
+    # door — on the registered domain, so S8 is unchanged — instead of to a cart for something
+    # nobody sells. This file's real claims (accepted, no code minted, no discount on the URL)
+    # are untouched.
+    assert redirect["payload"]["permalink_url"] == f"https://{SELLER_DOMAIN}/"
     assert redirect["payload"]["discount_applied"] is False, redirect
     assert redirect["payload"]["fallback"] is True, redirect
     # The module docstring promises this field is on the redirect event; the handoff's used
@@ -663,4 +708,15 @@ def test_a_well_formed_registry_row_still_produces_a_destination(unwired: None) 
         registered_domains=_registry(),
     )
     assert result.accepted is True, result.denial_reason
-    assert result.permalink_url == f"https://{SELLER_DOMAIN}/cart/1:1", result
+    # `/cart/1:1` was a placeholder pinned as a contract, and the URL it named is a 404.
+    # `services/shopify-stub/src/app.py` passes `1` through its `isdigit()` gate and then
+    # answers `404 {"errors": "Variant 1 is not available"}`, because `state.variants.get(1)`
+    # is None; and over `fixtures/real-catalogs-demo` the nineteen stores' own variant ids run
+    # 9 to 14 digits (histogram `{9: 12, 10: 3, 11: 23, 12: 1, 13: 73, 14: 28022}`), so no
+    # store in the corpus issues variant 1. `contracts.protocol.Offer.variant_ref` already
+    # said so in words: "absent means 'the bid did not name one', never 'the default
+    # variant'". A fallback whose row names no variant is now sent to the seller's own front
+    # door — on the registered domain, so S8 is unchanged — instead of to a cart for something
+    # nobody sells. This file's real claims (accepted, no code minted, no discount on the URL)
+    # are untouched.
+    assert result.permalink_url == f"https://{SELLER_DOMAIN}/", result

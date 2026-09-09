@@ -55,7 +55,13 @@ from ..eligibility import (
     speaks_supported_interface,
 )
 
-__all__ = ["Denial", "SolicitationResult", "solicit_bids", "stores_with_no_agent"]
+__all__ = [
+    "Denial",
+    "SolicitationResult",
+    "solicit_bids",
+    "stores_with_an_agent",
+    "stores_with_no_agent",
+]
 
 
 @dataclass(frozen=True)
@@ -150,6 +156,60 @@ def stores_with_no_agent(solicitor: Any, stores: Sequence[Mapping[str, Any]]) ->
     return unreachable
 
 
+def stores_with_an_agent(solicitor: Any, stores: Sequence[Mapping[str, Any]]) -> set[str]:
+    """Which of these stores the SOLICITOR says it holds an address for.
+
+    The mirror of :func:`stores_with_no_agent`, and the second half of one overlay. That
+    function LOWERS — it drops a store the exchange holds no way to reach, so the auction
+    cannot claim it asked. This one RAISES: a tier-0 row for a store whose bid endpoint this
+    exchange is holding is a row whose tier is stale, and the endpoint is direct evidence
+    against it.
+
+    **Why the raise became necessary.** ``ingest.graph.model.Store`` used to write ``tier: 2``
+    for every crawled store — the most privileged tier under D28 — having contacted no agent
+    at all, and it rewrote it on every refresh cycle. Correcting that means a crawled store
+    carries no tier and reads back as 0, catalogue-only. But four of the nineteen demo stores
+    are BOTH crawled and hosted and share one ``store_id`` with their crawled selves
+    (``gaiaherbs.com`` is one graph node, not two), so the correction alone demotes four live
+    agents from bidding to a list-price fallback. Measured over all nineteen, with each hosted
+    store bidding 92.00 against a 100.00 list price::
+
+        every row tier 2 (before): solicited 4, sponsored 4, prices {92.0: 4, 100.0: 15}
+        every row tier 0, no raise: solicited 0, sponsored 0, prices {100.0: 19}
+
+    So the tier decision moves to the component that can actually make it. The crawl observes
+    a catalogue and stops there; the exchange holds ``sellers[].bid_endpoint`` in its own
+    deployment document, and that is the registry the question is really about.
+
+    **Optional, and absent means "decide on tier alone".** Same hook, same direction, and the
+    same reason as its sibling: a solicitor that does not implement ``can_solicit`` — the
+    ``NullSolicitor``, ``e2e``'s ``HostedAgentSolicitor``, the simulator's doubles, every
+    in-process test double — gets exactly the behaviour it had. A store whose ``can_solicit``
+    raises is not raised, because a question this exchange did not get an answer to is not
+    evidence of an endpoint.
+
+    This does NOT admit everybody. It raises only a store the solicitor affirmatively claims
+    an address for, so a catalogue-only merchant with no endpoint stays tier 0, stays
+    undialled, and keeps the ``tier_0_no_agent`` reason that names the cause rather than
+    blaming the store for a silence nobody asked it for.
+    """
+    knows = getattr(solicitor, "can_solicit", None)
+    if not callable(knows):
+        return set()
+    reachable: set[str] = set()
+    for store in stores:
+        store_id = str(store.get("store_id") or "")
+        if not store_id:
+            continue
+        try:
+            answered = knows(store_id)
+        except Exception:
+            continue
+        if answered:
+            reachable.add(store_id)
+    return reachable
+
+
 def solicit_bids(
     *,
     roster: Sequence[Mapping[str, Any]],
@@ -238,6 +298,26 @@ def solicit_bids(
 
     # Only now does anyone get asked. Tier-0 is catalog-only — there is no agent to ask —
     # so it is skipped here and still represented at list price by `collect_bids` (R10).
+    #
+    # UNLESS this exchange is holding that store's bid endpoint, which is direct evidence that
+    # there IS an agent. The tier can arrive from the platform's own crawl, which contacts no
+    # agent and therefore reads back D28's catalogue-only 0 for a store it merely read the
+    # catalogue of — including the four demo stores that are both crawled and hosted under one
+    # `store_id`. Without this the correction to the crawl's tier is a measured demotion:
+    # solicited 4 -> 0, and the shopper pays the list price instead of the bid.
+    #
+    # The raise happens HERE, before the filter, and the row is rewritten rather than merely
+    # let through, so `collect_bids` — which tests `tier <= 0` FIRST, before it looks at
+    # whether an answer arrived, and discards whatever came back under that store's name —
+    # sees the same corrected tier the fan-out did. Rewriting only the filter would have the
+    # store dialled, bidding, and its bid thrown away.
+    with_agent = stores_with_an_agent(solicitor, eligible)
+    eligible = [
+        dict(store) | {"tier": 1}
+        if int(store.get("tier", 1)) <= 0 and str(store.get("store_id") or "") in with_agent
+        else store
+        for store in eligible
+    ]
     tiered = [store for store in eligible if int(store.get("tier", 1)) > 0]
 
     # AND the stores this exchange holds no way to reach, which is the same fact arriving from

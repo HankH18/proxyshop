@@ -37,8 +37,19 @@ from collections.abc import Mapping
 from typing import Any
 from urllib.parse import SplitResult, urlsplit
 
-from ..graph.model import Category, MediaAsset, Offer, Product, Source, Store, Variant
-from .base import CatalogSnapshot, ImageRecord, UpsertOp
+from ..graph.model import (
+    AttributeValue,
+    Category,
+    MediaAsset,
+    Offer,
+    Product,
+    Source,
+    Store,
+    Variant,
+    canonical_text,
+    slug,
+)
+from .base import AttributeRecord, CatalogSnapshot, ImageRecord, UpsertOp
 from .hashing import content_hash
 
 __all__ = [
@@ -51,6 +62,7 @@ __all__ = [
     "coerce_price",
     "composite_hash",
     "image_records",
+    "option_attributes",
     "media_asset_id_for",
     "media_enabled",
     "native_key",
@@ -69,6 +81,33 @@ __all__ = [
 #: behind the number (96.4% of the recorded corpus kept, 2.8% of its products truncated,
 #: worst real product 81 images).
 MEDIA_PER_PRODUCT_LIMIT = 12
+
+#: How many attribute readings one product may contribute to the graph. Merchant-controlled
+#: and therefore bounded here rather than trusted, exactly as the gallery above is.
+#:
+#: Measured over the nineteen recorded storefronts (4,903 products, 23,122 readings after the
+#: sentinel drop and the variant join): mean 6.7 per product, median 5, p90 11, p95 18, p99 31,
+#: **max 104**. A limit of 48 sits well above p99 and bites 27 products — 0.55% of the corpus
+#: — while keeping 93.7% of every reading.
+#:
+#: The tail is where the junk is and that is the second reason for a bound. The worst product
+#: in the corpus, at 104 readings, is ``branchfurniture``'s ``XCover Protection Plan``, a
+#: warranty SKU. ``ingest.graph.reembed.embedding_text`` composes a product's embedded text
+#: from its attributes among other things and has no length cap of its own, so an uncapped
+#: read would embed a document dominated by colour names rather than by what the product is.
+ATTRIBUTES_PER_PRODUCT_LIMIT = 48
+
+#: Shopify writes ``options: [{"name": "Title", "values": ["Default Title"]}]`` for a product
+#: that declares no options at all. It is a placeholder, not a fact about the product, and it
+#: accounts for 1,460 of the corpus's option readings. Matched case-insensitively on BOTH
+#: halves, so a real option named ``Title`` carrying a real value is still read.
+_OPTION_SENTINEL = ("title", "default title")
+
+#: How many option slots a variant can state. Shopify's variant record carries exactly
+#: ``option1``, ``option2`` and ``option3``, so an ``options[]`` entry that binds to no slot in
+#: this range binds to nothing a variant can confirm. Measured over the nineteen recorded
+#: storefronts: 0 of 4,903 products publish a fourth option.
+_MAX_OPTION_SLOTS = 3
 
 #: The environment name that turns media writes off. Unset means ON, which is what every
 #: load in this repository has always done — see :func:`media_enabled`.
@@ -346,6 +385,206 @@ def media_asset_id_for(store_id: str, product_id: str, native_image: str) -> str
     return f"mda_{stable_id(store_id, product_id, native_image)}"
 
 
+def option_attributes(
+    entry: Mapping[str, Any], *, limit: int = ATTRIBUTES_PER_PRODUCT_LIMIT
+) -> tuple[AttributeRecord, ...]:
+    """Read a catalogue entry's ``options[]`` block into product attribute readings.
+
+    Shared by both adapters for the same reason :func:`image_records` is (C6): a surface read
+    two ways is a surface that lands two ways.
+
+    Why this surface, and only this surface
+    ---------------------------------------
+    ``options[]`` is ``{name, position, values[]}`` — machine-structured, merchant-filled in a
+    typed form, positionally bound to each variant's ``option1/2/3``, and re-checkable against
+    the same URL the crawl read. The platform's assertion is exactly *"this product publishes
+    value V under option named K"*, which is literally what the page says.
+
+    ``options[].values`` IS THE PICKER'S DOMAIN, NOT THE PRODUCT'S FACTS
+    -------------------------------------------------------------------
+    That is the one thing this surface does *not* say, and reading it as if it did was an R19
+    and D55 defect with a driven consequence. ``values[]`` is the set of choices the option
+    control can display — a merchant who shares one option block across a product family, or
+    who retires a variant without pruning the picker, leaves values in it this product does not
+    have. The witness in ``fixtures/real-catalogs-demo`` is ``nemoequipment.com``'s ``Astro™
+    Non-Insulated Lightweight Sleeping Pad``: its block declares
+    ``Insulation: ["Insulated", "Non-Insulated"]`` and its only two variants are
+    ``Non-Insulated / Regular`` and ``Non-Insulated / Long Wide``. Written unjoined, that pad
+    satisfied ``HardCriterion(field="insulation", op="eq", value="Insulated")`` and its
+    pushdown's ``value_string="insulated"`` matched ``_FILTER_AND_RETURN``'s
+    ``a.canonical_value_string = f.value_string``, so ``candidate_products`` returned the
+    **non-insulated** pad for a shopper who required insulation.
+
+    So a value is written only where **at least one variant of that product carries it**, and
+    the join is the positional one: ``options[]`` entry *n* binds to ``variants[].option``\\ *n*,
+    compared under :func:`~ingest.graph.model.canonical_text` — the same fold
+    ``AttributeValue.canonical_value_string`` stores and the candidate query compares, so the
+    join can neither keep a reading retrieval cannot match nor drop one over a stray capital.
+
+    WHICH JOIN, measured rather than assumed. Shopify states a variant's values twice: in
+    ``option1/2/3``, and again in ``title`` as those values joined with ``" / "``. Over the
+    nineteen storefronts (28,134 variant records):
+
+    * ``option1/2/3`` — **0** variants state none of them, **0** options declare a ``position``
+      disagreeing with their index, **0** products publish a fourth option, and **0** declared
+      option slots go unstated by every variant.
+    * ``title`` — **2,560 of 28,134** titles do not decompose into the number of values their
+      variant states, because a value may itself contain ``" / "``; a title join would drop
+      **2,418** readings on 112 products, 2,335 of them true. Where a title does decompose it
+      agrees with the positional slots 28,134 times out of 28,134.
+
+    The positional join is therefore the source and the title is at best its confirmation.
+    Where the join cannot be made — no variant carries the value, the option binds to no slot
+    a variant can state, the entry publishes no variants at all — **nothing is written**. That
+    is the D55 answer: a dropped true attribute costs a retrieval, an asserted false one sells
+    a shopper the wrong product.
+
+    Measured over the nineteen recorded storefronts, **after** the join: **21,667 readings on
+    3,443 of 4,903 products (70.2%), 4,090 distinct ``AttributeValue`` ids under 147 keys**,
+    led by ``size`` (2,129 products), ``style`` (803) and ``color`` (754). The join refuses 83
+    of the 21,750 readings the unjoined read produced (0.38%, on 35 products) — capacity 40,
+    gender 22, color 11, width 4, silhouette 2, length 2, insulation 2 — and **0** of them is a
+    value any variant of its product carries, so its cost in true readings on this corpus is
+    zero. All 83 are on one host, which is a fact about this corpus's composition and not
+    evidence the unjoined surface was safe.
+
+    The join costs no coverage either, measured on the same corpus: the product count is
+    unchanged at 3,443 (no product loses its last reading), and so are the 4,090 distinct
+    ``AttributeValue`` ids and 147 keys — every refused value is genuinely carried by some
+    *other* product, which is precisely why it looked plausible on the one it was not.
+
+    Three neighbouring surfaces are deliberately NOT read, each for its own reason:
+
+    * ``tags`` — 40,853 applications across 4,516 distinct tags, and a tag is a bare token
+      with **no key**, so promoting one means the platform inventing the attribute name. The
+      corpus's most common are ERP codes and theme flags: ``Prop65``, ``Els PW 8602``,
+      ``all items``, ``YBlocklist``, ``Discount %|0``, ``Not Searchable``.
+    * ``product_type`` — already promoted, as the ``category`` op and
+      ``(Product)-[:IN_CATEGORY]->(Category)``. A second copy on a different node type is two
+      records free to disagree about one fact.
+    * ``variants[].available`` / ``price`` — already the graph ``Offer``, with its own
+      ``observed_at`` and its own ``Source``. ``.swarm-loop/decisions.md`` rejects this one by
+      name.
+
+    THE KEY IS SLUGGED HERE, at the write, and that is a deliberate choice
+    ---------------------------------------------------------------------
+    The three consumers of an attribute key do not agree on spelling.
+    :meth:`~exchange.retrieval.criteria.HardCriterion.canonical_field` and
+    ``AttributeFilter.as_parameter`` both fold through :func:`~ingest.graph.model.slug`, while
+    ``claim_verification.verifier._lookup_attribute`` compares ``str(key)`` with **no**
+    normalisation against the raw spelling ``graph/query.py`` returns. So writing the
+    merchant's ``options[].name`` verbatim would give the verifier a vocabulary it cannot
+    match, and would keep the corpus's ``Bag Size`` (33 products) and ``Bag size`` (32) as two
+    keys. Slugging at the write makes ``key`` and ``canonical_key`` the same string for every
+    consumer, and it is the spelling the intent corpus already uses — ``color``, ``size``,
+    ``material``.
+
+    The cost is stated rather than hidden: the merchant's display casing is not kept. The
+    VALUE is verbatim, which is what a shopper reads and what a claim is graded against.
+
+    Args:
+        entry: one catalogue entry, exactly as the storefront published it. Untrusted (C10).
+        limit: the per-product ceiling; see :data:`ATTRIBUTES_PER_PRODUCT_LIMIT`.
+
+    Returns:
+        The readings, in catalogue order (option position, then value order), bounded by
+        ``limit`` — and only those a variant of this entry actually carries.
+    """
+    options = entry.get("options")
+    if not isinstance(options, list):
+        return ()
+    carried = _variant_option_values(entry)
+    out: list[AttributeRecord] = []
+    for index, option in enumerate(options):
+        if not isinstance(option, Mapping):
+            continue
+        name = str(option.get("name") or "").strip()
+        key = slug(name)
+        if not key:
+            continue
+        values = option.get("values")
+        if not isinstance(values, list):
+            continue
+        slot = _option_slot(option, index)
+        stated = carried.get(slot) if slot is not None else None
+        if not stated:
+            # The option binds to a slot no variant of this product states, to no slot at all
+            # (a fourth option, and a Shopify variant has three), or to a slot the merchant
+            # named two different ways. Nothing here is checkable, so nothing here is written.
+            continue
+        for raw in values:
+            if isinstance(raw, bool) or not isinstance(raw, (str, int, float)):
+                continue
+            value = str(raw).strip()
+            if not value:
+                continue
+            if (name.casefold(), value.casefold()) == _OPTION_SENTINEL:
+                continue
+            if canonical_text(value) not in stated:
+                # The picker offers it; no variant was built from it. See the docstring:
+                # writing this is what let a non-insulated sleeping pad satisfy an
+                # "insulated" hard constraint.
+                continue
+            out.append(AttributeRecord(key=key, value=value))
+            if len(out) >= limit:
+                return tuple(out)
+    return tuple(out)
+
+
+def _option_slot(option: Mapping[str, Any], index: int) -> int | None:
+    """Which ``variants[].option``\\ *n* an ``options[]`` entry binds to, 1-based, or ``None``.
+
+    The merchant states this binding TWICE — as ``options[].position`` and as the entry's place
+    in the array — and over the nineteen recorded storefronts the two never disagree: 0 of
+    4,903 products state a ``position`` other than their index plus one. So the two statements
+    are treated as one fact that has to hold, not as a preference between them:
+
+    * they agree, or no ``position`` is stated at all -> that slot;
+    * they disagree -> ``None``. Which slot the option binds to is exactly what a merchant has
+      just said two different things about, so there is nothing to check the values against and
+      :func:`option_attributes` writes none of them (C10, D55). This also disposes of two
+      options both claiming ``position: 1``: at most one of them can be first in the array, so
+      the other one is a disagreement and is dropped rather than checked against a slot holding
+      some other option's values.
+    * the slot is outside 1..3 -> ``None``. A Shopify variant states three options; a fourth
+      binds to nothing a variant can confirm.
+    """
+    slot = index + 1
+    position = option.get("position")
+    if isinstance(position, int) and not isinstance(position, bool) and position != slot:
+        return None
+    return slot if 1 <= slot <= _MAX_OPTION_SLOTS else None
+
+
+def _variant_option_values(entry: Mapping[str, Any]) -> dict[int, set[str]]:
+    """What this entry's variants ACTUALLY carry, per 1-based option slot.
+
+    Canonically folded with :func:`~ingest.graph.model.canonical_text` so the comparison is the
+    one ``AttributeValue.canonical_value_string`` and the candidate query already make: a
+    merchant whose picker says ``"Deep  NAVY"`` and whose variant says ``"deep navy"`` has
+    stated one value, not two, and both spellings resolve to one ``attr_id``.
+
+    A slot absent from the result is a slot **no** variant stated — which is not the same as a
+    slot every variant left blank on purpose, but is treated the same way, because neither is
+    evidence a value was ever built.
+    """
+    variants = entry.get("variants")
+    if not isinstance(variants, list):
+        return {}
+    carried: dict[int, set[str]] = {}
+    for variant in variants:
+        if not isinstance(variant, Mapping):
+            continue
+        for slot in range(1, _MAX_OPTION_SLOTS + 1):
+            raw = variant.get(f"option{slot}")
+            if raw is None or isinstance(raw, bool) or not isinstance(raw, (str, int, float)):
+                continue
+            text = str(raw).strip()
+            if text:
+                carried.setdefault(slot, set()).add(canonical_text(text))
+    return carried
+
+
 def image_records(
     entry: Mapping[str, Any], *, limit: int = MEDIA_PER_PRODUCT_LIMIT
 ) -> tuple[tuple[ImageRecord, ...], int]:
@@ -567,6 +806,23 @@ def build_upserts(
                 context={"store_id": snapshot.store_id, "product_id": product.product_id},
             )
         )
+        # ORDERED HERE, after the product exists and before anything that depends on it.
+        # `upsert_attribute` MATCHes both endpoints and raises `ProvenanceRequired` when
+        # either is missing rather than creating a placeholder, so an attribute op ahead of
+        # its product op fails the write.
+        #
+        # `AttributeValue.__post_init__` refuses a blank key or a reading with no value
+        # component at all; `option_attributes` cannot produce either, and a third producer
+        # that could would fail loudly here rather than writing an unreadable node.
+        for reading in product.attributes:
+            ops.append(
+                UpsertOp(
+                    kind="attribute",
+                    node=AttributeValue(key=reading.key, value_string=reading.value),
+                    source=source,
+                    context={"product_id": product.product_id},
+                )
+            )
         for name in product.categories:
             ops.append(
                 UpsertOp(
@@ -611,6 +867,13 @@ def build_upserts(
                         seller_sku=variant.seller_sku,
                         name=variant.name,
                         status=variant.status,
+                        # The storefront's own id, carried BESIDE the graph key rather than
+                        # in place of it. `offer_id` below is derived from `variant_id`, and
+                        # the raw id is not unique per variant even inside one store — one
+                        # recorded host publishes a single native id under two products 108
+                        # times — so re-keying on it would merge those pairs, and their
+                        # offers with them, under the global uniqueness constraint.
+                        native_variant_id=variant.native_variant_id,
                     ),
                     source=source,
                     context={"product_id": product.product_id},

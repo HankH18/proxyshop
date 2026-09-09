@@ -413,21 +413,76 @@ class Source:
 
 @dataclass(frozen=True)
 class Store:
-    """``Store{store_id, domain, business_identity, tier}``."""
+    """``Store{store_id, domain, business_identity, tier?}``.
+
+    :attr:`tier` is ``None`` by default and is then **omitted from the written properties**,
+    which is a deliberate narrowing rather than a missing value.
+
+    Why the default moved off ``2``
+    -------------------------------
+    D28's vocabulary is *0 = catalogue present, no agent, no envelope; 1 = network-hosted
+    agent; 2 = external self-hosted agent behind the signed door.* ``2`` is therefore the most
+    privileged tier, and it was what
+    :func:`~ingest.adapters.mapping.build_upserts` — the only non-test construction of this
+    dataclass in the tree — gave to **every crawled store**, having contacted no agent at all.
+    A crawl establishes catalogue presence; whether a store runs an agent is a fact only the
+    endpoint registry holds.
+
+    Why it is OMITTED rather than written as ``0``
+    ----------------------------------------------
+    :func:`~ingest.graph.upsert.upsert_store` delegates to ``_fact_node``, whose
+    ``MERGE (n:Store {store_id: $id}) ... SET n += $props`` runs on **every refresh cycle**,
+    not on create. A tier written here would therefore stomp, silently and with the load
+    reporting success, any tier some future onboarding path had written — so "the crawl
+    asserts the right value" is not a stable state, only "the crawl asserts nothing" is.
+    Omission is what makes the property safe for a second writer to own.
+
+    What omission does NOT do
+    -------------------------
+    ``SET n += $props`` writes the keys the map holds and leaves every other property on the
+    node alone, so omitting ``tier`` does not REMOVE one an earlier build already wrote. Every
+    ``Store`` node written before this change keeps its ``2`` permanently: ``load_corpus``
+    never deletes, ``--force`` replays the same ``+=``, and the ``neo4jdata`` volume survives
+    ``make demo-down`` (only ``make deps-down`` -- ``docker compose down -v`` -- clears it).
+
+    That residue is left alone deliberately, for two reasons. It cannot be repaired HERE:
+    naming ``tier: None`` in the map would DELETE the property on every refresh cycle, which is
+    the same stomp on a second writer that the omission exists to prevent, spelled as a delete
+    rather than an overwrite. And it changes no shopper-visible outcome, because the exchange
+    no longer decides on tier alone -- ``exchange.orchestration.solicitation`` RAISES a tier-0
+    row whose ``bid_endpoint`` it holds and DROPS a tier-2 row whose endpoint it does not, so
+    the endpoint registry settles who is dialled in both directions and a stale ``2`` on an
+    agentless store still reaches the shopper in the ``tier_0_no_agent`` family. (Both overlays
+    hang off the solicitor's optional ``can_solicit`` hook, which the shipped
+    ``HttpBidSolicitor`` implements and the in-process doubles do not; on a double, tier alone
+    still decides.) Clearing old rows is therefore a one-time operator action against a graph
+    that has them -- ``MATCH (s:Store) REMOVE s.tier`` -- and not a property of the crawl; this
+    repository has no Neo4j migration runner to hang one on (``scripts/db_migrate.py`` is
+    Postgres only).
+
+    An omitted tier reads back through ``ingest.graph.query._ROSTER_STORE_COLUMNS``'
+    ``coalesce(s.tier, 0)`` — D28's catalogue-only, which is the honest answer for a store
+    nobody has established an agent for and the fail-closed direction besides.
+
+    A caller that KNOWS the tier still states it and it is still written; the two graph
+    fixtures that seed ``Store(..., 1)`` and ``Store(..., 2)`` are unchanged.
+    """
 
     store_id: str
     domain: str
     business_identity: str = ""
-    tier: int = 2
+    tier: int | None = None
 
     def as_properties(self) -> dict[str, Any]:
-        """The node properties to write."""
-        return {
+        """The node properties to write. ``tier`` appears only when this store has one."""
+        properties: dict[str, Any] = {
             "store_id": self.store_id,
             "domain": self.domain,
             "business_identity": self.business_identity,
-            "tier": int(self.tier),
         }
+        if self.tier is not None:
+            properties["tier"] = int(self.tier)
+        return properties
 
 
 @dataclass(frozen=True)
@@ -457,12 +512,31 @@ class Product:
 
 @dataclass(frozen=True)
 class Variant:
-    """``Variant{variant_id, seller_sku, name, status}``."""
+    """``Variant{variant_id, seller_sku, name, status, native_variant_id}``.
+
+    :attr:`native_variant_id` is the storefront's OWN id for this variant — the number
+    ``https://<store>/cart/{variant}:{qty}`` needs — and it is carried beside
+    :attr:`variant_id` rather than in place of it. The graph key folds in the store and the
+    product; the raw id does neither, and one recorded store publishes a single native id
+    under two different products 108 times. Re-keying on the raw id would merge those pairs
+    under the global ``variant_id_unique`` constraint, and merge their ``Offer`` nodes with
+    them, because ``offer_id`` is derived from the variant key.
+
+    **Do not add it to** ``ID_PROPERTY``. Every entry there becomes an ``IS UNIQUE``
+    constraint in :mod:`ingest.graph.schema`, and those 108 duplicate ids would fail the
+    write. The native id identifies a variant *to its own storefront*; it is not a key here.
+
+    ``""`` means the storefront published no id, never "variant 1". Nothing may read the
+    empty string as a default variant — see
+    :func:`~apps.exchange.src.checkout.provider.default_permalink`, which declines rather
+    than guessing.
+    """
 
     variant_id: str
     seller_sku: str = ""
     name: str = ""
     status: str = "active"
+    native_variant_id: str = ""
 
     def as_properties(self) -> dict[str, Any]:
         """The node properties to write."""
@@ -471,6 +545,7 @@ class Variant:
             "seller_sku": self.seller_sku,
             "name": self.name,
             "status": self.status,
+            "native_variant_id": self.native_variant_id,
         }
 
 

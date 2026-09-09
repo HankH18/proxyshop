@@ -203,9 +203,7 @@ def _collected_hosts(corpus: Path) -> set[str]:
     so cannot be the source of both sides.
     """
     manifest = json.loads((corpus / "collection.json").read_text(encoding="utf-8"))
-    return {
-        str(row["host"]) for row in manifest.get("stores") or [] if row.get("skipped") is None
-    }
+    return {str(row["host"]) for row in manifest.get("stores") or [] if row.get("skipped") is None}
 
 
 # =====================================================================================
@@ -242,7 +240,9 @@ def test_the_loader_reads_the_directory_the_mount_fills() -> None:
     _, service, definition = corpus_loader_service()
     _, target = mounted_corpus()
     environment = definition.get("environment") or {}
-    assert isinstance(environment, dict), f"{service}: this gate reads the mapping form of `environment`"
+    assert isinstance(environment, dict), (
+        f"{service}: this gate reads the mapping form of `environment`"
+    )
     assert CORPUS_ENV in environment, (
         f"`{service}` mounts the corpus at {target} and states no {CORPUS_ENV}, so the loader "
         f"falls back to the repo-layout default and dies on a FileNotFoundError naming a "

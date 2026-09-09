@@ -43,6 +43,7 @@ __all__ = [
     "CatalogRequest",
     "CatalogSnapshot",
     "FetchedResource",
+    "AttributeRecord",
     "ImageRecord",
     "ProductRecord",
     "UpsertOp",
@@ -102,7 +103,27 @@ class FetchedResource:
 
 @dataclass(frozen=True)
 class VariantRecord:
-    """A purchasable variant plus the offer terms observed for it."""
+    """A purchasable variant plus the offer terms observed for it.
+
+    Attributes:
+        variant_id: the GRAPH's key — ``var_<hash of (store, native product, native
+            variant)>``, minted by :func:`~ingest.adapters.mapping.variant_id_for`. It folds
+            the store and the product in on purpose: ``Offer.offer_id`` is derived from it,
+            its uniqueness constraint is global rather than store-scoped, and one recorded
+            store publishes a single native variant id under two different products 108
+            times — which this key keeps apart and the raw id would silently merge.
+        native_variant_id: the STOREFRONT's own id for the variant, and **only** that.
+            ``43866134282275``, the number ``https://<store>/cart/{variant}:{qty}`` needs.
+            ``""`` when the storefront published none.
+
+            It is deliberately not the same value as the third argument to ``variant_id_for``:
+            that one falls back to the SKU and then to the product TITLE, because a hash key
+            may not be empty. Carrying that value here would build cart URLs on SKUs and on
+            titles. Measured over ``fixtures/real-catalogs-demo`` (28,134 variant records in
+            19 stores), ``seller_sku`` equals the native id 0 times and is all-digits 5,258
+            times, so a SKU-built permalink would pass the storefront's ``isdigit()`` gate and
+            name the wrong thing — silently, where the old ``1`` at least 404s loudly.
+    """
 
     variant_id: str
     seller_sku: str = ""
@@ -111,6 +132,39 @@ class VariantRecord:
     currency: str = "USD"
     availability: str = "unknown"
     status: str = "active"
+    native_variant_id: str = ""
+
+
+@dataclass(frozen=True)
+class AttributeRecord:
+    """One reading the catalogue PUBLISHED about a product — a key and a value, nothing else.
+
+    This replaces a ``Mapping[str, str]`` field of the same name that was dead on both sides:
+    ``signed_fetch`` never filled it and ``build_upserts`` never read it, so the crawl emitted
+    **zero** ``attribute`` ops while the ``HAS_ATTRIBUTE`` writer, the ``AttributeValue`` node
+    and the op kind were all already built and wired. A flat string map also could not carry
+    the shape the surface actually has: a product with four colourways publishes four values
+    under one key, and a mapping keeps the last one.
+
+    Attributes:
+        key: the attribute name, **already slugged**. See
+            :func:`~ingest.adapters.mapping.option_attributes` for why the fold happens at the
+            write rather than at each read — the short version is that retrieval and
+            answerability fold through ``slug`` while ``claim_verification`` compares the raw
+            string, so a raw spelling is decidable by two of the three consumers and not the
+            third.
+        value: the value as the catalogue published it, verbatim and untrusted (C10). Kept
+            raw because it is what a shopper sees and what a claim is graded against;
+            ``AttributeValue`` canonicalises it alongside for matching.
+
+    No ``number``, ``bool`` or ``unit`` field, deliberately. The ``AttributeValue`` node holds
+    all three, and a producer that observes one should add them here — but ``options[]``, the
+    only surface this record is built from today, publishes strings, and declaring columns no
+    producer fills is how a schema starts describing something nobody wrote.
+    """
+
+    key: str
+    value: str
 
 
 @dataclass(frozen=True)
@@ -179,7 +233,7 @@ class ProductRecord:
     changed: bool = True
     variants: tuple[VariantRecord, ...] = ()
     categories: tuple[str, ...] = ()
-    attributes: Mapping[str, str] = field(default_factory=dict)
+    attributes: tuple[AttributeRecord, ...] = ()
     #: The product's gallery, already bounded by the adapter — see
     #: :data:`~ingest.adapters.mapping.MEDIA_PER_PRODUCT_LIMIT`. Ordered by the catalogue's
     #: own ``position`` so the primary image is first.

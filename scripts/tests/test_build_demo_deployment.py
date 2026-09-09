@@ -128,9 +128,7 @@ def catalogues(generator: Any) -> dict[str, tuple[dict[str, Any], list[str]]]:
     hosts = generator.corpus_hosts()
     vocabularies = generator.store_vocabularies(hosts)
     return {
-        host: generator._store_catalog(
-            host, vocabularies, generator.SNAPSHOT_PRODUCTS_PER_STORE
-        )
+        host: generator._store_catalog(host, vocabularies, generator.SNAPSHOT_PRODUCTS_PER_STORE)
         for host in hosts
     }
 
@@ -275,8 +273,7 @@ def test_no_stores_window_is_its_cheapest_products(catalogues: Any, generator: A
         if len(catalog) <= window:
             continue  # the whole catalogue fits; there is no window to get wrong
         cheapest = {
-            ref
-            for ref in sorted(catalog, key=lambda r: (catalog[r]["list_price"], r))[:window]
+            ref for ref in sorted(catalog, key=lambda r: (catalog[r]["list_price"], r))[:window]
         }
         overlap = len(cheapest & set(ranked[:window])) / window
         assert overlap < 0.9, (
@@ -330,9 +327,7 @@ def test_only_the_four_hosted_storefronts_are_sponsored(
     depth, and a ``max_discount_pct`` on its roster row.
     """
     exchange = documents["exchange-deployment.json"]
-    bidding = {
-        str(row["store_id"]) for row in exchange["sellers"] if row.get("bid_endpoint")
-    }
+    bidding = {str(row["store_id"]) for row in exchange["sellers"] if row.get("bid_endpoint")}
     assert bidding == set(generator.HOSTED), (
         f"these stores can bid: {sorted(bidding)}; the sponsored four are "
         f"{sorted(generator.HOSTED)}"

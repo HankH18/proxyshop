@@ -854,9 +854,23 @@ def organic_relevance_reason(
     every store's whole catalogue in the snapshot: over 24 in-corpus queries through the graph
     roster, 89 shortlist slots, this layer refused **one** of them (``"nmn supplement"``), and
     over the same 24 queries through a stated roster it refused nothing that retrieval had
-    vouched for. The gap is small because this corpus carries no ``Ingredient`` or
-    ``AttributeValue`` nodes at all (measured: 0 and 0) — categories are the only component
-    ``candidate_surface`` adds — so a corpus that DID carry them would widen it. Variant names
+    vouched for. The gap was small because the graph that run read carried no ``Ingredient`` or
+    ``AttributeValue`` nodes at all (measured: 0 and 0) — categories were the only component
+    ``candidate_surface`` added.
+
+    **THE SECOND HALF OF THAT IS NO LONGER TRUE OF A FRESH CRAWL, so the 89-slot measurement
+    above is now a reading taken under conditions a re-crawl changes.** ``build_upserts`` now
+    emits attribute ops from each entry's ``options[]`` block — measured over the nineteen
+    recorded storefronts, 21,667 readings under 147 keys on 3,443 of 4,903 products — so
+    ``candidate_surface`` gains both the key words and the value words for any product loaded
+    since. The value words were largely there already through ``variant_surface`` (a Shopify
+    variant title IS the option combination joined by " / "); the KEY words are the new arm and
+    they are the risk, because several are ordinary query words that name nothing on their own:
+    ``color``, ``size``, ``style``, ``type``, ``base``, ``side``, ``length``, ``product``. A
+    query for "coffee table base" can now match a product whose only tie is an option NAMED
+    ``base``. That arm is unmeasured — it needs a graph loaded from the new crawl, which is a
+    re-load rather than a re-run — and it is written down here rather than left to be
+    discovered as a widened shortlist. Variant names
     are the other component the retrieval layer now has and this one does not, and on this
     corpus they widen nothing either: measured over 37 honest and 30 off-corpus queries through
     the real index against a private Neo4j holding it (3,093 ``Product``, 9,667 ``Variant``),

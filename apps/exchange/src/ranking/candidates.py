@@ -158,6 +158,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from typing import Any
+from urllib.parse import quote
 
 from .filters import read
 
@@ -211,8 +212,8 @@ def _registered_domain(source: Any, store_id: str) -> str | None:
     return None if domain is None else str(domain)
 
 
-def fallback_checkout_url(registered_domain: str) -> str:
-    """The D22 cart destination on a domain the PLATFORM registered, with no discount on it.
+def fallback_checkout_url(registered_domain: str, *, variant_ref: str | None = None) -> str:
+    """The D22 destination on a domain the PLATFORM registered, with no discount on it.
 
     ``build_cart_permalink`` is not reused here and the difference is not cosmetic: that
     function's whole output is ``…/cart/{variant}:{qty}?discount={code}``, and before an accept
@@ -222,18 +223,45 @@ def fallback_checkout_url(registered_domain: str) -> str:
     :func:`~apps.exchange.src.checkout.provider.default_permalink`, out of the same registry
     lookup, so the two never name different hosts.
 
-    ``1:1`` because a manufactured list-price offer names neither variant nor quantity: it is
-    one unit of the rostered product at its catalogue price. ``default_permalink`` defaults to
-    exactly the same pair on exactly the same offer (``offer.get("variant_ref") or
-    offer.get("variant_id") or 1``, and ``offer_quantity`` -> 1).
+    Two destinations, decided by whether a variant is actually known
+    ---------------------------------------------------------------
+    * **``variant_ref`` stated** -> ``…/cart/{variant}:1``. One unit of the variant the offer
+      prices. The quantity is ``1`` because a manufactured list-price offer names none, and
+      one unit IS the semantic default for a quantity — unlike a variant, where ``1`` is not a
+      neutral value but a *different specific variant*.
+    * **``variant_ref`` absent** -> the seller's own front door, ``https://{domain}/``.
+
+    This function used to answer ``…/cart/1:1`` unconditionally, and that URL was a lie the
+    platform told in its own voice. Measured over ``fixtures/real-catalogs-demo`` (28,134
+    variant records across nineteen stores) the native variant ids run 9 to 14 digits —
+    histogram ``{9: 12, 10: 3, 11: 23, 12: 1, 13: 73, 14: 28022}`` — so ``1`` names no variant
+    any of those stores issues, and ``services/shopify-stub`` answers it
+    ``404 {"errors": "Variant 1 is not available"}``. The organic majority of the demo took
+    this path: ``deploy/demo/exchange-deployment.json`` gives a ``bid_endpoint`` to 4 of its 19
+    sellers, so 11 of the 15 served rows could only be fallbacks.
+
+    **The front door is not a cart, and that is the point.** It is a destination the platform
+    can stand behind without asserting anything about the merchant's catalogue, which is the
+    same restraint the rest of this module keeps. Returning nothing instead would have been the
+    other fail-closed option and it is the wrong one here: ``ranking.filters.domain_reason``
+    fails closed on an offer with no checkout URL, so a silent store would be excluded before
+    it could be ranked — and R10 says it "can still reach the shortlist", which is the property
+    ``_completed_fallback_offer`` exists to keep.
 
     The domain is interpolated **verbatim**, deliberately. A registry row spelled
-    ``https://shop.example.com`` produces ``https://https://shop.example.com/cart/1:1``, whose
+    ``https://shop.example.com`` produces ``https://https://shop.example.com/``, whose
     host is ``https`` and which ``is_on_domain`` therefore refuses — the candidate is excluded
     ``off_domain_checkout``, which is the direction to fail in. Normalising the value here would
     be this module quietly repairing the platform's own record and then vouching for the repair.
+
+    Args:
+        registered_domain: the platform's own registry row for this seller, verbatim.
+        variant_ref: the storefront's own id for the variant the offer prices, or ``None``.
     """
-    return f"https://{registered_domain}/cart/1:1"
+    named = str(variant_ref).strip() if variant_ref is not None else ""
+    if not named:
+        return f"https://{registered_domain}/"
+    return f"https://{registered_domain}/cart/{quote(named, safe='')}:1"
 
 
 def _completed_fallback_offer(offer: Any, registered_domain: str | None) -> Any:
@@ -319,7 +347,17 @@ def _completed_fallback_offer(offer: Any, registered_domain: str | None) -> Any:
         return offer
     if not registered_domain or not str(registered_domain).strip():
         return offer
-    return {**offer, "checkout_url": fallback_checkout_url(str(registered_domain))}
+    return {
+        **offer,
+        "checkout_url": fallback_checkout_url(
+            str(registered_domain),
+            # From the OFFER, which is where `_list_price_bid` put the roster row's variant.
+            # Reading it here rather than defaulting is what keeps the pre-accept destination
+            # and the post-accept handoff naming the same cart: `accept.offer
+            # .fallback_destination` reads the same field off the same offer.
+            variant_ref=read(offer, "variant_ref", None),
+        ),
+    }
 
 
 def candidate_from_entry(

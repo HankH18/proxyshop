@@ -842,6 +842,24 @@ class RosterEntry(BaseModel):
     #: discounted bids, never its safety, which is the direction to fail in on a field that
     #: decides money.
     max_discount_pct: float | None = Field(default=None, ge=0.0, le=100.0)
+    #: The storefront's OWN id for the variant ``list_price`` prices — the value
+    #: ``https://<store>/cart/{variant}:{qty}`` is built from. Caller-supplied and therefore
+    #: untrusted exactly as ``list_price`` is: the exchange does not check that this store
+    #: issues this variant, and cannot, because it never reads the merchant's catalogue at
+    #: accept time.
+    #:
+    #: **It had to be DECLARED, not merely passed.** This model names no ``model_config``, so
+    #: pydantic's default ``extra='ignore'`` applies: before this field existed a caller who
+    #: stated a variant on a roster row had it discarded silently, with no error and a 201.
+    #: Measured — ``RosterEntry(store_id='s1', tier=1, product_ref='p1', list_price=10.0,
+    #: variant_ref='43866134282275')`` gave ``model_extra`` ``None`` and a ``model_dump()``
+    #: with no ``variant_ref`` in it.
+    #:
+    #: Absent is absent. ``auction/collect.py``'s ``_list_price_bid`` omits the key from the
+    #: fallback offer rather than writing a default, and ``checkout/provider.py``'s
+    #: ``default_permalink`` declines rather than guessing — a cart cannot be built on a
+    #: variant nobody named, and ``1`` is a different specific variant, not a neutral one.
+    variant_ref: str | None = Field(default=None, max_length=MAX_IDENTIFIER_LENGTH)
 
 
 #: The most hard constraints one intent may carry into a served auction.

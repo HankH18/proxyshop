@@ -504,7 +504,9 @@ blacklist_unreadable: no trust snapshot row for 'gaiaherbs.com', so its blacklis
 could not be established; failing closed (R12)
 ```
 
-Measured on the browser path, whose roster is six rows: six exclusions, zero slots, `entries: 6`.
+Measured on the browser path when its roster was six rows: six exclusions, zero slots,
+`entries: 6`. (`deploy/demo/buyer-roster.json` states fifteen rows now, so the counts scale with
+it; the shape is what this section is about.)
 That `entries` count is what makes this confusing — **eligibility is unaffected.**
 `deploy/demo/exchange-deployment.json` states every seller's status itself, so
 `exchange.composition.bind_eligibility` takes its first rung — the stated registry — and every

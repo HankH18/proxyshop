@@ -704,7 +704,14 @@ def test_the_fallbacks_expiry_and_checkout_url_are_the_exchanges_facts_never_a_s
         registered_domains=StaticRegisteredDomains({STORE_A: _domain(STORE_A)}),
     )
 
-    assert candidate["offer"]["checkout_url"] == f"https://{_domain(STORE_A)}/cart/1:1"
+    # `/cart/1:1` was a placeholder pinned as a contract, and the URL it named is a 404:
+    # `services/shopify-stub/src/app.py` answers `1` with
+    # `404 {"errors": "Variant 1 is not available"}`, and over `fixtures/real-catalogs-demo`
+    # the nineteen stores' own variant ids run 9 to 14 digits, so no store issues variant 1.
+    # A fallback whose row names no variant now goes to the seller's own front door — still on
+    # the registered domain, so every S8/C10 claim in this file is unchanged. A row that DOES
+    # name one gets `/cart/<that variant>:1`; see test_the_cart_names_the_real_variant.py.
+    assert candidate["offer"]["checkout_url"] == f"https://{_domain(STORE_A)}/"
     assert candidate["store_domain"] == _domain(STORE_A)
     assert "attacker" not in candidate["offer"]["checkout_url"]
     assert "attacker" not in str(candidate["store_domain"])
@@ -1815,7 +1822,14 @@ def test_a_shortlisted_fallback_is_shown_and_hands_the_buyer_over_with_no_discou
     payload = accepted.json()
     assert accepted.status_code == 200, accepted.text
     assert payload["code"] is None, f"a fallback minted a discount code: {payload}"
-    assert payload["permalink_url"] == f"https://{_domain(STORE_A)}/cart/1:1", payload
+    # `/cart/1:1` was a placeholder pinned as a contract, and the URL it named is a 404:
+    # `services/shopify-stub/src/app.py` answers `1` with
+    # `404 {"errors": "Variant 1 is not available"}`, and over `fixtures/real-catalogs-demo`
+    # the nineteen stores' own variant ids run 9 to 14 digits, so no store issues variant 1.
+    # A fallback whose row names no variant now goes to the seller's own front door — still on
+    # the registered domain, so every S8/C10 claim in this file is unchanged. A row that DOES
+    # name one gets `/cart/<that variant>:1`; see test_the_cart_names_the_real_variant.py.
+    assert payload["permalink_url"] == f"https://{_domain(STORE_A)}/", payload
     assert "discount" not in payload["permalink_url"], payload
     assert payload["notice"] and "No discount applies" in payload["notice"], payload
     assert "never answered" in payload["notice"], payload

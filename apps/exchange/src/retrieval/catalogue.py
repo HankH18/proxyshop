@@ -74,12 +74,31 @@ The vocabulary is the CRAWL's, and what the crawl actually writes is smaller tha
 -------------------------------------------------------------------------------------------
 ``claim_verification.verifier.catalog_keys`` decides a claim only on keys the snapshot
 carries, in three places: the ``attributes`` block, the ``offer`` block, and the product record
-itself. **Measured on the recorded corpus — ten storefronts, 3,093 products loaded through the
-real crawl path — the ``attributes`` block is EMPTY**, because
-``ingest.adapters.mapping.build_upserts`` emits ``store``/``product``/``sells``/``category``/
-``media``/``variant``/``offer`` ops and no ``attribute`` op at all: the graph's
-``HAS_ATTRIBUTE`` writer is reached only from ``seed_products``, which nothing outside tests
-calls. So for a crawled product the decidable vocabulary is exactly
+itself.
+
+**THE ``attributes`` BLOCK USED TO BE EMPTY AND NO LONGER IS.** Measured on the recorded
+corpus — ten storefronts, 3,093 products loaded through the real crawl path — it was empty,
+because ``ingest.adapters.mapping.build_upserts`` emitted ``store``/``product``/``sells``/
+``category``/``media``/``variant``/``offer`` ops and no ``attribute`` op at all: the graph's
+``HAS_ATTRIBUTE`` writer was reached only from ``seed_products``, which nothing outside tests
+calls. ``build_upserts`` is now a producer — it reads each catalogue entry's ``options[]``
+block through ``ingest.adapters.mapping.option_attributes``, joined to the ``variants[]`` that
+carry each value — and measured over the nineteen recorded storefronts it emits **21,667
+attribute ops, 4,090 distinct ``AttributeValue`` nodes on 3,443 of 4,903 products, under 147
+keys** led by ``size`` (8,541 readings), ``color`` (5,355) and ``style`` (1,278).
+
+Two bounds on that, so the paragraph is not read as more than it says. **A graph loaded before
+that change still has none**, and this exchange reads whichever graph it is pointed at; the
+numbers above are what a re-crawl produces, not a claim about any particular database. And the
+DEMO does not read the graph for this at all — ``composition.py`` binds
+``StaticCatalogSnapshots(deployment.catalog)`` first and the graph catalogue only ``if
+unset("ranking_catalog")``, and ``deploy/demo/exchange-deployment.json`` states a catalog for
+all nineteen stores, whose ``attributes`` blocks are the six keys
+``scripts/build_demo_deployment.py::_snapshot`` synthesises. So for the shipped demo the
+vocabulary below is still the whole of it.
+
+For a crawled product read OUT OF THE GRAPH, the decidable vocabulary is the list below plus
+whatever option keys that product publishes:
 
     price, currency, availability, observed_at        (the graph Offer)
     product_ref, canonical_name, brand, status        (the Product record)

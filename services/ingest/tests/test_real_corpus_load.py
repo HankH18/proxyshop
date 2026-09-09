@@ -211,7 +211,21 @@ def test_replaying_the_whole_corpus_opens_no_socket(recorded_corpus: RecordedCor
         report = load_recorded_corpus(recorded_corpus, session_factory=None)
 
     assert report.products == 3093
-    assert report.ops == 44803, "every graph write the whole corpus implies"
+    # THE CENSUS MOVED, and it moved by exactly one new op kind. It was 44,803 while
+    # `build_upserts` emitted store/product/sells/category/media/variant/offer and no
+    # `attribute` op at all — the graph's `HAS_ATTRIBUTE` writer was reached only from
+    # `seed_products`, which nothing outside tests calls, so every R19 hard constraint was
+    # undecidable against real inventory. `build_upserts` now reads each entry's `options[]`
+    # block. Measured over this same corpus, per kind:
+    #
+    #     attribute 10303   category 1753   media 17520   offer  9667
+    #     product    3093   sells    3093   store    10   variant 9667   = 55106
+    #
+    # i.e. 44,803 + 10,303, with every pre-existing kind unchanged to the unit. This number is
+    # a coverage armer for the socket poisoning above — it proves the map really ran over all
+    # ten stores rather than short-circuiting — so it has to move when the map legitimately
+    # emits more, and the decomposition is written down so the next move names its own cause.
+    assert report.ops == 55106, "every graph write the whole corpus implies"
     assert len(report.reports) == 10
     # The pagination loop really ran: three stores hold more than one recorded page
     # (bulksupplements 4, nutricost 4, purebulk 3), and the URLs the adapter asked for are

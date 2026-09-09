@@ -766,7 +766,12 @@ _ROSTER_STORE_COLUMNS = """
        s.store_id AS store_id,
        coalesce(s.domain, '') AS domain,
        coalesce(s.business_identity, '') AS business_identity,
-       coalesce(s.tier, 2) AS tier,
+       // 0, D28's catalogue-only, NOT 2. This arm is what a store the crawl wrote reads
+       // back through: `ingest.graph.model.Store` omits `tier` unless a caller states one,
+       // because the crawl contacted no agent and cannot know. Answering 2 here handed every
+       // crawled store the MOST privileged tier -- an external self-hosted agent behind the
+       // signed door -- on the strength of having read its `products.json`.
+       coalesce(s.tier, 0) AS tier,
        [x IN [(s)-[:SUPPORTED_BY]->(src:Source) | src.source_id] WHERE x IS NOT NULL]
            AS store_sources,
        p.product_id AS product_id"""
@@ -786,6 +791,7 @@ RETURN{_ROSTER_STORE_COLUMNS},
        'SELLS' AS via,
        null AS offer_id,
        null AS variant_id,
+       null AS native_variant_id,
        null AS price,
        null AS currency,
        null AS availability,
@@ -803,6 +809,12 @@ RETURN{_ROSTER_STORE_COLUMNS},
        'MAKES_OFFER' AS via,
        o.offer_id AS offer_id,
        v.variant_id AS variant_id,
+       // The STOREFRONT's own variant id -- the value a Shopify cart path needs. The graph
+       // key one line up is a hash of (store, product, native variant) and names no cart.
+       // `coalesce` to '' rather than null so an older node written before this property
+       // existed reads back as "the crawl recorded none" -- which every consumer already
+       // treats as absence -- instead of crashing a `str()` downstream.
+       coalesce(v.native_variant_id, '') AS native_variant_id,
        o.price AS price,
        coalesce(o.currency, '') AS currency,
        coalesce(o.availability, '') AS availability,
@@ -855,6 +867,14 @@ class ShopOffer:
     availability: str
     observed_at: str
     source_ids: list[str] = field(default_factory=list)
+    #: The storefront's OWN id for the variant this offer prices — the value
+    #: ``https://<store>/cart/{variant}:{qty}`` needs. ``""`` when the crawl recorded none,
+    #: which means "the storefront published no id", never "variant 1".
+    #:
+    #: It travels beside :attr:`variant_id` and not instead of it because the two answer
+    #: different questions: ``variant_id`` is this graph's key (and what ``offer_id`` is
+    #: derived from), while this is an identifier belonging to the merchant's own storefront.
+    native_variant_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -1056,6 +1076,7 @@ def candidate_shops(
                 availability=row["availability"],
                 observed_at=row["observed_at"],
                 source_ids=sorted(row["offer_sources"]),
+                native_variant_id=str(row.get("native_variant_id") or ""),
             )
 
     roster = [
@@ -1216,6 +1237,7 @@ WITH s, p, store_sources, store_observed, product_sources, product_observed, sel
      collect(DISTINCT {{
          offer_id: o.offer_id,
          variant_id: v.variant_id,
+         native_variant_id: coalesce(v.native_variant_id, ''),
          price: o.price,
          currency: coalesce(o.currency, ''),
          availability: coalesce(o.availability, ''),
@@ -1471,6 +1493,7 @@ def catalogue_entry(
             availability=str(offer["availability"]),
             observed_at=str(offer["observed_at"]),
             source_ids=sorted(str(one) for one in offer["source_ids"]),
+            native_variant_id=str(offer.get("native_variant_id") or ""),
         )
         for offer in row["offers"]
     ]

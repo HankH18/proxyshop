@@ -203,7 +203,9 @@ def manifest_for(source: dict[str, Any], stores: list[dict[str, Any]]) -> dict[s
     categories: dict[str, dict[str, Any]] = {}
     for store in stores:
         name = str(store.get("category") or "uncategorised")
-        row = categories.setdefault(name, {"stores": [], "stores_with_inventory": [], "products": 0})
+        row = categories.setdefault(
+            name, {"stores": [], "stores_with_inventory": [], "products": 0}
+        )
         host = str(store["host"])
         row["stores"].append(host)
         if counts[host]:
@@ -278,8 +280,8 @@ def readme_for(curated: dict[str, Any]) -> str:
         "",
         "## Why this directory exists",
         "",
-        "`fixtures/real-catalogs/` is ten supplement storefronts, which is why *\"a walnut",
-        "coffee table for the lounge\"* came back with liver capsules — there was no coffee",
+        '`fixtures/real-catalogs/` is ten supplement storefronts, which is why *"a walnut',
+        'coffee table for the lounge"* came back with liver capsules — there was no coffee',
         "table in it to find. `fixtures/real-catalogs-broad/` has the coffee tables and 38",
         "stores, and the exchange's `catalog` snapshot is capped at 4 MiB across every store,",
         "so at 38 stores each one's window is about 137 products. This roster is the middle:",
@@ -296,9 +298,7 @@ def readme_for(curated: dict[str, Any]) -> str:
     for store in curated["stores"]:
         host = str(store["host"])
         role = "incumbent" if host in INCUMBENTS else "organic (promoted)"
-        lines.append(
-            f"| `{host}` | {store.get('category')} | {counts[host]:,} | {role} |"
-        )
+        lines.append(f"| `{host}` | {store.get('category')} | {counts[host]:,} | {role} |")
     lines += [
         "",
         "### Why each promoted store",
@@ -397,7 +397,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.check:
         if drifted:
-            print("fixtures/real-catalogs-demo differs from what the roster implies:", file=sys.stderr)
+            print(
+                "fixtures/real-catalogs-demo differs from what the roster implies:", file=sys.stderr
+            )
             for line in drifted:
                 print(f"  {line}", file=sys.stderr)
             return 1

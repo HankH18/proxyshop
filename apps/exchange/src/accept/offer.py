@@ -529,7 +529,13 @@ def _fallback_destination(request: CheckoutRequest) -> str:
     from ..ranking.candidates import fallback_checkout_url  # noqa: PLC0415
 
     domain = registered_domain_for(request)
-    destination = fallback_checkout_url(domain)
+    # The SAME offer field the shortlist's pre-accept destination was built from
+    # (`ranking.candidates._completed_fallback_offer`), so the URL the buyer was shown before
+    # accepting really is the URL they are handed after — the ruling this function implements.
+    # Absent, both sides answer the seller's front door rather than a cart naming a variant
+    # nobody offered; see `fallback_checkout_url` for the measurement.
+    offer = request.offer if isinstance(request.offer, Mapping) else {}
+    destination = fallback_checkout_url(domain, variant_ref=offer.get("variant_ref"))
     # `secret=""` because nothing has been minted and there is nothing to keep out of the
     # message — the same reason the port passes it empty on its own pre-mint call.
     assert_on_domain(destination, domain, what="fallback destination")

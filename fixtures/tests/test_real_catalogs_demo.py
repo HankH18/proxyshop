@@ -390,6 +390,7 @@ def test_the_manifest_says_it_was_derived_and_from_what(corpus: Corpus) -> None:
 
 def test_loading_the_corpus_opens_no_socket() -> None:
     """D3/C9. Every socket entry point poisoned, then the whole corpus read."""
+
     def refuse(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("the corpus reader opened a socket")
 
@@ -585,11 +586,7 @@ def test_this_roster_answers_the_query_the_ten_store_corpus_cannot(corpus: Corpu
         ("floydhome.com", "Lift Off Coffee Table - Expansion Kit"),
         ("floydhome.com", "The Lift Off Coffee Table"),
     ], f"the walnut coffee tables this roster exists to hold: {with_walnut_variant}"
-    both_in_title = [
-        title
-        for _, title in tables
-        if _word("walnut").search(title)
-    ]
+    both_in_title = [title for _, title in tables if _word("walnut").search(title)]
     assert both_in_title == [], (
         f"a title now carries both words, so the demo query no longer needs the variant "
         f"surface to be answered: {both_in_title}"

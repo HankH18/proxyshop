@@ -818,6 +818,18 @@ def _list_price_bid(
         # live. This instant is the auction's, never a store's.
         "expires_at": fallback_expires_at(deadline),
     }
+    # The variant the cart permalink is built from. It is on the ROW — stated by the caller,
+    # or written there by `retrieval.roster` off the same observed offer the row's price came
+    # from — and this function's whole job is to carry the row onto an offer.
+    #
+    # OMITTED WHEN ABSENT, never defaulted, and the published `Offer.variant_ref` docstring is
+    # the reason in words: "a fallback offer minted from a roster row names no variant at all.
+    # Absent means 'the bid did not name one', never 'the default variant'." The reading that
+    # broke checkout was `... or 1` two modules downstream, and writing a `1` here would move
+    # it rather than end it.
+    variant_ref = entry.get("variant_ref")
+    if isinstance(variant_ref, str) and variant_ref.strip():
+        offer["variant_ref"] = variant_ref.strip()
     if listed is None or listed <= 0.0:
         # The roster does not price this product at anything the exchange could charge — it
         # priced it at nothing, or it priced it in a way nothing can read, or it did not price

@@ -315,8 +315,7 @@ def test_every_demo_seller_is_seeded_on_every_floor_dimension(seeder: Any, gener
         seeded.setdefault(str(event["store_id"]), set()).add(str(event["payload"]["dim"]))
 
     assert set(seeded) == set(generator.DEMO_SELLERS), (
-        f"the seed covers {sorted(seeded)} but the demo roster is "
-        f"{sorted(generator.DEMO_SELLERS)}"
+        f"the seed covers {sorted(seeded)} but the demo roster is {sorted(generator.DEMO_SELLERS)}"
     )
     for store_id, dims in sorted(seeded.items()):
         if store_id in generator.CATALOGUE_ACCURACY:

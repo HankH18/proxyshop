@@ -626,9 +626,7 @@ def _title_terms(entry: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(dict.fromkeys([*words, *pairs]))
 
 
-def _term_weights(
-    store_terms: Mapping[str, Mapping[str, int]], host: str
-) -> dict[str, float]:
+def _term_weights(store_terms: Mapping[str, Mapping[str, int]], host: str) -> dict[str, float]:
     """How much covering each of ``host``'s terms is worth, given every other store.
 
     ``log(1 + S / stores_carrying(t)) * log(1 + times this store uses t)`` — the two halves of
@@ -663,37 +661,37 @@ def _window_order(
 ) -> list[str]:
     """``window`` product refs that cover this store's vocabulary, most representative first.
 
-    A greedy maximisation of a saturating coverage objective: a product is worth the sum, over
-    the terms it carries, of ``weight(term) / sqrt(1 + times that term is already covered)``.
-    The first pick is the product carrying the most of what makes this store distinctive; every
-    pick after it is worth less the more its vocabulary has already been said.
+        A greedy maximisation of a saturating coverage objective: a product is worth the sum, over
+        the terms it carries, of ``weight(term) / sqrt(1 + times that term is already covered)``.
+        The first pick is the product carrying the most of what makes this store distinctive; every
+        pick after it is worth less the more its vocabulary has already been said.
 
-**Both halves are measured on this roster**, at a window of 250, as the fraction of on-topic
-    products falling inside it:
+    **Both halves are measured on this roster**, at a window of 250, as the fraction of on-topic
+        products falling inside it:
 
-        no saturation at all (a fixed per-product score)   86.1%
-        ``1 + k``, the obvious harmonic decay             84.3%
-        ``sqrt(1 + k)``, in the tree                      86.7%
+            no saturation at all (a fixed per-product score)   86.1%
+            ``1 + k``, the obvious harmonic decay             84.3%
+            ``sqrt(1 + k)``, in the tree                      86.7%
 
-    ``1 + k`` is the interesting loser: it forgets a term almost immediately and spends the
-    window on the store's tail. ``sqrt`` halves a term's value every fourth time it is covered,
-    which keeps the window on what the store actually sells while still refusing to fill it
-    with one product.
+        ``1 + k`` is the interesting loser: it forgets a term almost immediately and spends the
+        window on the store's tail. ``sqrt`` halves a term's value every fourth time it is covered,
+        which keeps the window on what the store actually sells while still refusing to fill it
+        with one product.
 
-    **Saturation is worth only 0.6 points HERE, and that is a fact about this roster rather
-    than about the idea.** What it defends against is a catalogue of near-duplicates —
-    ``cotopaxi.com`` publishes 1,431 priced rows under 711 distinct titles — and this roster
-    deliberately does not carry one; ``scripts/build_demo_corpus.py`` says why cotopaxi was
-    left off. Keep the saturation: the store that needs it is one re-collection away, and
-    without it the objective is a fixed per-product score that cannot see a duplicate at all.
+        **Saturation is worth only 0.6 points HERE, and that is a fact about this roster rather
+        than about the idea.** What it defends against is a catalogue of near-duplicates —
+        ``cotopaxi.com`` publishes 1,431 priced rows under 711 distinct titles — and this roster
+        deliberately does not carry one; ``scripts/build_demo_corpus.py`` says why cotopaxi was
+        left off. Keep the saturation: the store that needs it is one re-collection away, and
+        without it the objective is a fixed per-product score that cannot see a duplicate at all.
 
-    Ties break on ``product_ref`` and on nothing else. Price is absent from this function by
-    construction, which is the property the ordering it replaces did not have.
+        Ties break on ``product_ref`` and on nothing else. Price is absent from this function by
+        construction, which is the property the ordering it replaces did not have.
 
-    Implemented lazily (Robertson's accelerated greedy): the objective is monotone and
-    submodular, so a product's gain never rises, and a heap entry whose recomputed gain still
-    equals its stored key is the true maximum. Exact, not approximate — the same answer the
-    quadratic loop gives, measured on every store in this roster.
+        Implemented lazily (Robertson's accelerated greedy): the objective is monotone and
+        submodular, so a product's gain never rises, and a heap entry whose recomputed gain still
+        equals its stored key is the true maximum. Exact, not approximate — the same answer the
+        quadratic loop gives, measured on every store in this roster.
     """
     covered: dict[str, int] = {}
 
@@ -967,9 +965,7 @@ def agent_service(host: str) -> str:
 def corpus_hosts() -> list[str]:
     """Every storefront the corpus carries, in the order its manifest lists them."""
     manifest = json.loads((CORPUS / "collection.json").read_text(encoding="utf-8"))
-    return [
-        str(store["host"]) for store in manifest["stores"] if store.get("skipped") is None
-    ]
+    return [str(store["host"]) for store in manifest["stores"] if store.get("skipped") is None]
 
 
 def store_vocabularies(hosts: Sequence[str]) -> dict[str, dict[str, int]]:
@@ -1087,15 +1083,47 @@ def build() -> dict[str, Any]:
         "trust_url": "http://trust:8084",
     }
 
+    # THE ROSTER ROW CARRIES THE VARIANT, and the row that does NOT move is the reason.
+    #
+    # `exchange.retrieval.roster.repoint_organic_products` fills `variant_ref` only on rows it
+    # MOVES, and it moves a row only when the exchange's own search did not return the product
+    # the row pinned. So without this the asymmetry ran the wrong way round: a row whose pinned
+    # product was WRONG got a working cart link off the graph, and a row whose pinned product
+    # was RIGHT got none at all -- `checkout.provider.default_permalink` had no variant to build
+    # the D25 permalink from, so accepting the slot handed the shopper nothing. How many rows are
+    # held is a fact about the query: that function records "four of the demo's six" on `milk
+    # thistle liver support`, measured when the roster was six rows, and it has not been
+    # re-measured at fifteen. The shape does not depend on the count.
+    #
+    # That function is right to invent nothing for an unmoved row: such a row keeps the CALLER's
+    # `list_price`, so pairing it with a variant the PLATFORM chose would state one observation's
+    # price beside another observation's variant. It says so, and names this script as what
+    # states the row's own variant instead. This is that sentence being true.
+    #
+    # The value is the row's OWN listing's -- `_catalog_row` put it there off `_priced_variant`,
+    # which returns the id and the price of the SAME variant, so `list_price` two lines up and
+    # `variant_ref` here are one observation rather than two draws. It is the storefront's own
+    # id and nothing else (`ingest.adapters.base.VariantRecord`: over this corpus `seller_sku` is
+    # all-digits 5,258 times and equals the native id 0 times, so a SKU-built permalink passes
+    # the storefront's `isdigit()` gate and names the WRONG product silently).
+    #
+    # ABSENT rather than null when the storefront published no usable id, exactly as
+    # `_catalog_row` omits it: `RosterEntry.variant_ref` defaults to `None`, `_list_price_bid`
+    # omits the key from the offer rather than writing a default, and a key that is sometimes
+    # null invites a reader to treat it as always present. Measured over the fifteen rostered
+    # storefronts, every lead product publishes one, so the branch is a guard rather than a case.
     roster = []
     for host in ROSTER_HOSTS:
         lead = ranked[host][0]
+        listing = catalogs[host][lead]
         entry = {
             "store_id": host,
             "tier": 1,
             "product_ref": lead,
-            "list_price": catalogs[host][lead]["list_price"],
+            "list_price": listing["list_price"],
         }
+        if listing.get("variant_ref"):
+            entry["variant_ref"] = listing["variant_ref"]
         if host in MAX_DISCOUNT_PCT:
             entry["max_discount_pct"] = MAX_DISCOUNT_PCT[host]
         roster.append(entry)
