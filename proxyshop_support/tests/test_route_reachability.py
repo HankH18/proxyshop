@@ -127,13 +127,18 @@ UNDRIVEN_ALLOWLIST: dict[tuple[str, str, str], str] = {}
 #: can tell a real drift from a deliberate addition.
 EXPECTED_COUNTS: dict[str, int] = {
     "exchange": 7,
-    "buyer": 17,  # 14 at first census; +GET /buyer/store-window (T-142, the store's read of
+    "buyer": 18,  # 14 at first census; +GET /buyer/store-window (T-142, the store's read of
     # the buyer window), +POST /buyer/feedback/order (the order reference R14's
     # post-purchase prompt needs, fetched from the network's own reconciled record),
     # +GET /buyer/auth/sign-in — one boolean saying whether this deployment holds a mail
     # transport it could really deliver a login link through. The SPA reads it on load and
     # renders the sign-in form only when it is true, so a deployment with no MTA stops
     # showing a panel that says "we email you a single-use link" and cannot.
+    # +POST /buyer/chat/ask (060225e, the ask-about-these-options stretch stream): the
+    # shopper's follow-up questions about a rendered shortlist. Deliberate and driven —
+    # `test_chat_ask.py` and `test_chat_ask_live.py`, the latter against a real exchange on a
+    # real socket — and published in `packages/contracts/src/openapi.py`. The hand count was
+    # simply not moved with it, which is the drift this second opinion exists to catch.
     "merchant": 13,  # +1: POST /stores/{id}/revive, the kill switch's other half
     # (12 was 11 routes + the /dashboard SPA mount)
     "trust": 10,
