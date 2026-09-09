@@ -20,12 +20,20 @@ Three rules this file obeys, all non-negotiable
    companies' catalogues. Prices and inventory move, so every economic assertion here is about
    *shape and relationship* — "the spread is wide", "these stores stock none of this" — never
    "milk thistle costs $5.75". See ``fixtures/real-catalogs/README.md``.
-3. **Breadth is asserted, not hoped for.** An earlier draft of this corpus sampled each store
-   biased toward the liver-supplement category, which would have built a system able to answer
-   exactly one question while deleting the hardest part of retrieval: discriminating relevant
-   inventory from a large body of irrelevant inventory. The gates under "breadth" below exist
-   to stop the corpus silently narrowing back into a single-category sample. The irrelevant
-   stock is not overhead — it is the test.
+3. **Depth is asserted; breadth is NOT, and this file no longer pretends otherwise.** An
+   earlier draft sampled each store biased toward the liver-supplement category, which would
+   have deleted the hardest part of retrieval: discriminating relevant inventory from a large
+   body of irrelevant inventory. The gates below stop *that* — the corpus narrowing back onto
+   its own demo query — and they work, because their probes are supplement vocabulary and the
+   corpus is a supplement corpus.
+
+   What they cannot do is see category breadth, and one of them used to claim it did.
+   ``test_no_single_category_dominates_the_corpus`` scored a corpus with zero furniture exactly
+   as broad as one with 714 furniture products, because all sixteen of its probes were
+   sub-categories of the one category all ten of these stores sell. Every store here is a
+   supplement store; that is stated and pinned below rather than argued around, and the real
+   cross-category gate lives in ``test_real_catalogs_broad.py``, over a corpus that has more
+   than one category to be broad across.
 """
 
 from __future__ import annotations
@@ -139,9 +147,13 @@ DEMO_QUERIES: tuple[DemoQuery, ...] = (
     DemoQuery("probiotics", ("probiotic", "lactobacillus", "bifido"), 6, 2, 8, 1.0),
 )
 
-# Categories that must all be genuinely stocked for the corpus to count as broad. These are
-# NOT demo queries — they are the proof that the corpus is a catalogue and not a shelf.
-BREADTH_PROBES: dict[str, tuple[str, ...]] = {
+# Sub-categories of the ONE category these ten stores sell, all of which must be genuinely
+# stocked for the corpus to be a catalogue rather than a shelf. Named for what they are: every
+# one of them is supplement vocabulary — creatine, magnesium, collagen, ashwagandha,
+# cholecalciferol, withania — so they measure the DEPTH of a supplement corpus and say nothing
+# whatever about its breadth. They were called ``BREADTH_PROBES`` and backed a gate that
+# claimed to detect a single-category corpus while being unable to see one.
+SUPPLEMENT_SUB_CATEGORY_PROBES: dict[str, tuple[str, ...]] = {
     "liver support": ("milk thistle", "silymarin", "tudca", "liver"),
     "protein": ("whey", "casein", "protein powder", "pea protein"),
     "creatine": ("creatine",),
@@ -369,6 +381,31 @@ def test_the_manifest_declares_that_whole_catalogues_were_taken(corpus: Corpus) 
     assert corpus.manifest["totals"]["duplicates_dropped"] == 0
 
 
+def recorded_requests(manifest: dict[str, Any]) -> int:
+    """The requests this collection can account for, recomputed from ``stores``.
+
+    A number published in an artifact has to be readable back OUT of that artifact, and this
+    one was not: ``totals.requests_made`` was ``sum(len(fetches) + 1)`` over one record per
+    store, which counts a page the per-host budget REFUSED (recorded with ``status: -1``) as a
+    request and invents a robots fetch for a store whose budget ran out before robots.txt. This
+    is the arithmetic ``politeness.request_accounting`` states, run against the artifact that
+    states it.
+
+    It remains a FLOOR on what the merchants saw, and deliberately says so rather than being
+    published as a total: the record is per store and a re-walk replaces it, so requests made by
+    a walk that was later replaced are only in the number when the record carries
+    ``requests_charged`` (collector 2.2.0 and later).
+    """
+    total = 0
+    for store in manifest["stores"]:
+        if "requests_charged" in store:
+            total += int(store["requests_charged"])
+            continue
+        asked = sum(1 for f in store.get("fetches") or [] if int(f.get("status", 0)) != -1)
+        total += asked + (1 if store.get("robots") else 0)
+    return total
+
+
 def test_politeness_is_recorded_and_was_actually_respected(corpus: Corpus) -> None:
     """These are real businesses whose whole catalogues were walked. The rate limit is
     evidence in the manifest, not a claim in a docstring."""
@@ -377,11 +414,47 @@ def test_politeness_is_recorded_and_was_actually_respected(corpus: Corpus) -> No
     assert politeness["min_seconds_between_requests_per_host"] >= 2.0
     assert politeness["max_pages_per_host"] >= 1
     assert politeness["max_requests_per_host"] >= 1
-    assert "none" in politeness["retries"], "403/404/429 must be recorded, never retried around"
     assert politeness["scope"] == "public catalogue data only"
     # Walking whole catalogues is more requests than sampling, so the budget must be visibly
     # modest: ten catalogues cost fewer requests than a single careless crawler's first minute.
-    assert corpus.manifest["totals"]["requests_made"] <= 200
+    counted = recorded_requests(corpus.manifest)
+    assert counted <= 200, f"this collection accounts for {counted} requests"
+    published = corpus.manifest["totals"].get(
+        "requests_recorded", corpus.manifest["totals"].get("requests_made")
+    )
+    assert published == counted, (
+        f"the manifest publishes {published} requests but its own store records add up to "
+        f"{counted}; a number nobody can recompute from the artifact is not evidence"
+    )
+
+
+def test_nothing_in_this_collection_was_ever_re_requested(corpus: Corpus) -> None:
+    """The "no retries" claim, checked instead of read.
+
+    ``politeness.retries`` used to say ``none — 403/404/429 is a recorded outcome, not something
+    to retry around`` and this suite asserted that literal string. It stopped being the whole
+    truth when ``--resume`` landed: a resume re-asks a host whose recorded outcome was retryable
+    (429, 5xx, transport error) on the next run. That is a person starting a fresh run days
+    later rather than a loop hammering a host that just answered — a defensible posture, but not
+    the one the sentence described, and the gate asserting the sentence could not tell.
+
+    So the property is checked directly: within this collection, no URL was fetched twice. And
+    the sentence is required to match what the corpus records about itself.
+    """
+    for store in corpus.stores:
+        urls = [fetch["url"] for fetch in store.entry["fetches"]]
+        repeated = {url for url in urls if urls.count(url) > 1}
+        assert not repeated, f"{store.host} requested the same URL more than once: {repeated}"
+
+    retries = corpus.manifest["politeness"]["retries"]
+    reused = list((corpus.manifest.get("run") or {}).get("reused_from_earlier_runs") or [])
+    if reused:
+        assert "within a run" in retries and "resume" in retries.lower(), (
+            f"{len(reused)} stores in this corpus came from an earlier run, so the retry "
+            f"posture must say what a resume does: {retries!r}"
+        )
+    else:
+        assert "none" in retries, f"nothing was resumed here, so 'none' is the claim: {retries!r}"
 
 
 def test_every_store_records_its_robots_decision(corpus: Corpus) -> None:
@@ -568,13 +641,19 @@ def test_no_catalogue_is_truncated_and_any_that_were_would_say_so(corpus: Corpus
     assert corpus.manifest["totals"]["stores_truncated"] == 0
 
 
-def test_the_corpus_spans_many_product_categories(corpus: Corpus) -> None:
-    """The breadth assertion. Sixteen unrelated categories, each genuinely stocked, so a
-    matcher has a large body of irrelevant inventory to discriminate against — which is the
-    part of retrieval a category-biased corpus silently deletes."""
+def test_the_supplement_shelf_is_deep_across_sixteen_sub_categories(corpus: Corpus) -> None:
+    """Sixteen supplement sub-categories, each genuinely stocked, so a matcher has a large body
+    of NEARBY irrelevant inventory to discriminate against — the hardest kind, because milk
+    thistle and magnesium look alike to a bag of words.
+
+    This is a depth gate. It was called a breadth gate and its docstring called these "sixteen
+    unrelated categories"; they are sixteen flavours of one category, and the corpus they score
+    is ten supplement storefronts. Cross-category breadth is gated in
+    ``test_real_catalogs_broad.py``.
+    """
     hits = {
         name: sum(1 for _, p in _iter_products(corpus) if _title_matches(p, terms))
-        for name, terms in BREADTH_PROBES.items()
+        for name, terms in SUPPLEMENT_SUB_CATEGORY_PROBES.items()
     }
     thin = {name: n for name, n in hits.items() if n < 8}
     assert not thin, f"these categories are barely stocked, so the corpus is not broad: {thin}"
@@ -583,29 +662,75 @@ def test_the_corpus_spans_many_product_categories(corpus: Corpus) -> None:
     matched = {
         id(p)
         for _, p in _iter_products(corpus)
-        for terms in BREADTH_PROBES.values()
+        for terms in SUPPLEMENT_SUB_CATEGORY_PROBES.values()
         if _title_matches(p, terms)
     }
     assert len(matched) >= 400, f"only {len(matched)} distinct products across 16 categories"
 
 
-def test_no_single_category_dominates_the_corpus(corpus: Corpus) -> None:
-    """The sharpest anti-narrowing gate, and the one that would have failed the corpus this
-    lane replaced. If a re-collection biases the sample toward the demo query again, that
-    category's share of the corpus jumps and this fails — you cannot satisfy it by editing a
-    pinned count."""
+def test_no_single_sub_category_dominates_the_supplement_shelf(corpus: Corpus) -> None:
+    """The anti-narrowing gate that does work: if a re-collection biases the sample back toward
+    the demo query, that sub-category's share jumps and this fails, and you cannot satisfy it by
+    editing a pinned count.
+
+    What it is NOT is a breadth gate, which is what it used to be called. Its probes are
+    supplement vocabulary and this corpus is 100% supplements, so it passes at maximum comfort
+    on a corpus with exactly one category — see the test below, which pins that.
+    """
     total = sum(1 for _ in _iter_products(corpus))
-    for name, terms in BREADTH_PROBES.items():
+    for name, terms in SUPPLEMENT_SUB_CATEGORY_PROBES.items():
         share = sum(1 for _, p in _iter_products(corpus) if _title_matches(p, terms)) / total
         assert share <= 0.15, (
             f"{name!r} is {share:.1%} of the corpus — this is a {name} corpus, not a catalogue"
         )
     liver = sum(
-        1 for _, p in _iter_products(corpus) if _title_matches(p, BREADTH_PROBES["liver support"])
+        1
+        for _, p in _iter_products(corpus)
+        if _title_matches(p, SUPPLEMENT_SUB_CATEGORY_PROBES["liver support"])
     )
     assert liver / total <= 0.05, (
         f"liver support is {liver / total:.1%} of the corpus; it is meant to be one demo "
         f"query among several, not the organising principle"
+    )
+
+
+def test_this_corpus_is_a_single_category_corpus_and_says_so(corpus: Corpus) -> None:
+    """The corpus's one real limitation, pinned so it cannot be quietly claimed away.
+
+    Every store here sells supplements. That is why ``"a walnut coffee table for the lounge"``
+    comes back with liver capsules: retrieval is working and there is no coffee table on disk to
+    find. Breadth is a hostname problem, and the hostnames are in ``candidate-hosts.txt``.
+
+    The second half is the uncomfortable one and the reason this test exists at all: the gate
+    above, which was named ``test_no_single_category_dominates_the_corpus``, passes on this
+    corpus with room to spare. A corpus that is 100% one category satisfies a "no category
+    exceeds 15%" gate, because the gate's sixteen probes are sixteen sub-categories OF that
+    category. The gate was not weak; it was blind, and it would have scored a hypothetical
+    corpus of nothing but liver capsules as broad too, provided the capsules were named
+    variously enough. Nothing here can be fixed by tuning its threshold.
+    """
+    roster = (CORPUS / "incumbent-hosts.txt").read_text(encoding="utf-8").splitlines()
+    declared = {
+        line.split()[0]: line.split()[1]
+        for line in roster
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert set(declared) == set(ALL_HOSTS), "the roster file no longer describes this corpus"
+    assert set(declared.values()) == {"supplements"}, (
+        f"this corpus is no longer single-category ({sorted(set(declared.values()))}); if a "
+        f"store from another category was added, the honest gate is the cross-category one in "
+        f"fixtures/tests/test_real_catalogs_broad.py, not this one"
+    )
+
+    # And the measurement that makes the blindness concrete rather than asserted.
+    total = sum(1 for _ in _iter_products(corpus))
+    worst = max(
+        sum(1 for _, p in _iter_products(corpus) if _title_matches(p, terms)) / total
+        for terms in SUPPLEMENT_SUB_CATEGORY_PROBES.values()
+    )
+    assert worst <= 0.15, (
+        f"the supplement-vocabulary probes peak at {worst:.1%} of a corpus that is 100% "
+        f"supplements — which is exactly why they cannot be read as a breadth measurement"
     )
 
 

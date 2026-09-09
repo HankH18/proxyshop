@@ -9,11 +9,18 @@
 # coffee table in the corpus to find. **Category breadth is the fix, and it is a hostname-list
 # problem** — which is why the list is a reviewable file rather than a tuple in the collector.
 #
-# This is a CANDIDATE list, not a collected corpus. Nothing here has been fetched. Fetching it
-# is `scripts/collect_real_catalogs.py fetch --hosts-file fixtures/real-catalogs/candidate-hosts.txt`
-# and it will take roughly nine minutes of deliberately slow, serial requests; the collector
-# records the outcome of every host, including the ones that turn out not to serve the
-# endpoint. Expect misses. See "What is measured and what is not", below.
+# STATUS: COLLECTED. All 43 hosts below were fetched on 2026-09-08, walked as one roster with
+# `incumbent-hosts.txt`. This file was a candidate list when it was written and the sentence
+# "Nothing here has been fetched" survived the collection it describes; it is corrected here
+# rather than deleted, because the hit rate a candidate list predicted and the hit rate it got
+# are both worth keeping. 28 of the 43 served a catalogue and 15 did not — the recorded
+# outcomes are in `../real-catalogs-broad/collection.json` and tabulated in that directory's
+# README. The corpus is STAGED, not adopted: `fixtures/real-catalogs/` is untouched.
+#
+# Re-fetching it is
+# `scripts/collect_real_catalogs.py fetch --hosts-file fixtures/real-catalogs/candidate-hosts.txt`
+# and it takes roughly nine minutes of deliberately slow, serial requests; the collector records
+# the outcome of every host, including the ones that do not serve the endpoint.
 #
 # ======================================================================================
 # Format
@@ -26,10 +33,12 @@
 #   relevant              expect a catalogue.
 #   negative_control      expect a catalogue that answers the HEADLINE query with nothing.
 #   off_platform_control  expect NO catalogue — measured to be off Shopify entirely. A skip
-#                         here is the CORRECT result. Two of these are on the roster on
-#                         purpose (bottom of the file) so that "the endpoint is not there"
-#                         can be told apart from "the endpoint was there and we failed": the
-#                         collector counts them separately and shouts if one answers.
+#                         here is the CORRECT result. The rows marked so at the bottom of this
+#                         file (there are three) are on the roster on purpose, so that "the
+#                         endpoint is not there" can be told apart from "the endpoint was there
+#                         and we failed": the collector counts them separately and shouts if one
+#                         answers. This line said "two" while the file carried three rows and
+#                         its own closing block said "all three".
 #
 # ======================================================================================
 # What is measured and what is not — read this before quoting any number here
@@ -42,7 +51,9 @@
 #     most hosts because it is the query that fails today, tools/beauty/electronics get the
 #     fewest because they are where the endpoint is thinnest.
 #   * Big-box retail (Home Depot, LEGO, Anker, Chewy, REI, Petco) is off-platform and
-#     unreachable. That is where the two `off_platform_control` rows come from.
+#     unreachable. That is where two of the three `off_platform_control` rows come from
+#     (homedepot.com, chewy.com); the third, thuma.co, came from the plumbing probe below and
+#     is the more useful one, being a DTC brand of exactly the shape the `relevant` rows have.
 #   * Three specific stores were counted: cotopaxi.com 1,430 products (walked to exhaustion),
 #     marinelayer.com >=1,901, taylorstitch.com >=1,235. For scale, the largest store in the
 #     current corpus is bulksupplements.com at 805.
@@ -62,11 +73,12 @@
 #                        quietly deleted: a candidate list that hides the ones that failed
 #                        teaches the next person the wrong hit rate.
 #
-# NOT MEASURED: whether any OTHER individual host below serves the endpoint, what it stocks,
-# or how many products it has. Per-host claims are absent from the notes for that reason. At a
-# 66% hit rate, expect roughly a dozen of the 40 `relevant` rows to come back with nothing,
-# and expect that to be recorded rather than hidden — `collection.json` carries every host's
-# robots decision and `walk_outcome`, and a store that answers nothing is a recorded skip.
+# MEASURED SINCE, by the collection on 2026-09-08: every host below was walked. The prediction
+# above — "roughly a dozen of the 40 `relevant` rows come back with nothing" — landed at 12 of
+# the 40, which is the 66% hit rate holding. The per-host notes below were written BEFORE that
+# run and are deliberately left as they were: what each host actually did is recorded in
+# `../real-catalogs-broad/collection.json`, per host, with its robots decision and its
+# `walk_outcome`, and a list that quietly back-fills its own predictions teaches nothing.
 #
 # ======================================================================================
 # Selection rules
@@ -145,7 +157,9 @@ peakdesign.com               electronics
 # ======================================================================================
 # The deliberate misses
 # ======================================================================================
-# All three were MEASURED to serve no catalogue at this endpoint. They are on the roster so
+# All three (homedepot.com, chewy.com, thuma.co) were MEASURED to serve no catalogue at this
+# endpoint, and all three behaved on 2026-09-08: `/products.json` -> HTTP 404 for each, and
+# `totals.off_platform_controls_that_answered` is 0. They are on the roster so
 # the corpus has, on the record, cases where the collector asked and correctly got nothing:
 # without one, a skip in `collection.json` is ambiguous between "this merchant does not serve
 # the endpoint" and "the collector broke". Each costs at most two requests.

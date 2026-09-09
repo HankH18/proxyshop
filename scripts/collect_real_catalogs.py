@@ -2,15 +2,20 @@
 """Record a point-in-time snapshot of real Shopify storefronts' ENTIRE catalogues.
 
 **Run by hand. Never by the test suite.** The gates in ``fixtures/tests/test_real_catalogs.py``
-read the recorded corpus off disk and open no socket (D3/C9); this script is the only thing in
-the repository that talks to those hosts, and it is invoked deliberately by a person.
+(the committed ten-store corpus) and ``fixtures/tests/test_real_catalogs_broad.py`` (the staged
+38-store one) read the recorded corpora off disk and open no socket (D3/C9); this script is the
+only thing in the repository that talks to those hosts, and it is invoked deliberately by a
+person.
 
 Two phases, and the split is deliberate
 ---------------------------------------
 ``fetch``
     Walks ``/products.json?limit=250&page=N`` per host to exhaustion and writes every response
     body **verbatim** into a scratch directory, together with a fetch log. This is the only
-    phase that opens a socket, and it should be run exactly once.
+    phase that opens a socket. It is **resumable and re-runnable**: a store already walked to
+    a non-retryable outcome under the same settings costs zero requests on the next run (see
+    *Resume*, below), which is what makes an interrupted collection recoverable without
+    re-hitting the merchants who already answered.
 ``build``
     Reads that scratch directory and derives the committed corpus. It never fetches. Any later
     decision about the corpus's *shape* — compression, which dimensions to trim — is therefore
@@ -57,10 +62,14 @@ record on disk is *provably* complete. "Provably" is the load-bearing word, beca
 half-collected store silently treated as finished would poison the corpus:
 
 * the record is written atomically (temp file + ``rename``), so a record that exists parses;
-* it carries ``complete``, which is set from **why the walk stopped**, not from the fact that
-  it stopped. A short page, an empty page, a robots decision, a 404 — those are outcomes, and
-  they are complete. A transport error, a 429, a 5xx, an unparseable body, or a robots.txt
-  that could not be read are *retryable*, and a store that ended on one is re-walked;
+* it carries ``walk_outcome`` — **why the walk stopped**, not the fact that it stopped — and
+  the read path re-judges it with ``outcome_is_retryable`` rather than trusting the
+  ``complete`` boolean stored beside it. A short page, an empty page, a robots decision, a
+  403/404: outcomes, and terminal. A transport error, a 429, a 5xx, an unparseable body, an
+  unreadable ``robots.txt``, or **an outcome this version has never heard of**: retryable, and
+  the store is walked again. ``complete`` is then required to *agree* with that judgement, so a
+  record whose two fields disagree — the shape a hand edit leaves — is refused rather than
+  believed;
 * it carries the settings that decide the result (page size, page cap, request cap, collector
   version, User-Agent). Raise ``--max-pages`` and every record taken under the old cap is
   invalidated, so a truncated catalogue cannot survive as "already collected";
@@ -69,6 +78,13 @@ half-collected store silently treated as finished would poison the corpus:
 
 Anything short of all four re-walks the store and says on stdout which check failed. Reuse is
 printed per store; it is never silent.
+
+A walk that FAILS never destroys what an earlier walk collected. Stale page files are removed
+only after a walk has produced pages of its own, and ``write_store_record`` refuses to replace
+a terminal record with a retryable one — the failed walk is parked beside it as
+``store.last-failed-walk.json``. Before this, the stale-page sweep ran before the robots fetch,
+so a single ``--no-resume`` run made while the egress IP happened to be blocked emptied the raw
+directory host by host while collecting nothing.
 
 What is collected: EVERYTHING each store serves
 ------------------------------------------------
@@ -88,13 +104,21 @@ Politeness, which is not optional — these are real businesses
   host that disallows the path is skipped, and the skip and its reason are recorded. There is
   no override flag, deliberately.
 * Every request carries an identifying User-Agent with a contact address (SPEC C6).
-* At least ``--min-interval`` seconds (default 2.0) between requests to the same host, and a
-  declared ``Crawl-delay`` widens that and never narrows it. Walking a whole catalogue is more
-  requests than sampling one, so the gap matters more, not less.
+* At least ``--min-interval`` seconds between requests to the same host, and a declared
+  ``Crawl-delay`` widens that and never narrows it. Walking a whole catalogue is more requests
+  than sampling one, so the gap matters more, not less. 2.0 s is a **floor, not a default**:
+  ``MIN_INTERVAL_FLOOR`` is enforced by ``parse_args`` *and* by ``PolitenessBudget`` itself, so
+  there is no argument vector and no direct construction that walks a merchant faster. It used
+  to be only a default, and ``--min-interval 0`` was accepted in silence.
 * ``--max-pages`` (default 40, i.e. 10,000 products) is a runaway guard, not a sampling knob.
   A store that hits it has a TRUNCATED catalogue, and both ``collection.json`` and the README say so
   per store rather than presenting a partial catalogue as complete.
-* HTTP 403/404/429 is a *recorded outcome*, not a failure to retry around. Nothing retries.
+* **No retry loop.** Within a run nothing is re-requested: a 403, a 404 or a 429 ends that
+  store's walk and is recorded as its outcome. Across runs, ``--resume`` does re-ask a host
+  whose recorded outcome was retryable (429, 5xx, transport error) — that is a fresh run, made
+  deliberately by a person, not a loop hammering a host that just answered. Saying "nothing
+  retries" full stop was false the moment resume landed, and ``collection.json`` now says which
+  of the two it means.
 * Public catalogue data only. ``/products.json`` carries no personal data and this script goes
   looking for none.
 
@@ -108,8 +132,13 @@ Two gzipped files per store, plus one collection record:
     re-serialised. Nothing is normalised, cleaned or repaired: the mess is the specimen, and
     normalisation belongs downstream in entity resolution.
 ``collection.json``
-    The run itself: politeness settings, every host's robots decision, every HTTP request made,
-    the per-store counts, whether any catalogue is truncated, and a digest of each file.
+    The run itself: politeness settings, every host's robots decision, every fetch the
+    surviving walk of each host made, the per-store counts, whether any catalogue is truncated,
+    and a digest of each file. ``totals.requests_recorded`` is the count the merchants can be
+    said to have seen, and it is recomputable from ``stores`` — a re-walk replaces its own
+    record, so requests it superseded reach the total through ``requests_charged`` rather than
+    through the ``fetches`` rows, which are gone. ``politeness.request_accounting`` states the
+    arithmetic; both corpus gate files run it against the artifact that states it.
 ``stores/<host>.provenance.jsonl.gz``
     Row-aligned with the products file. Per product: the URL, the HTTP status, the fetch
     instant, the digest of the whole response, the byte span inside it, and the digest of the
@@ -118,10 +147,15 @@ Two gzipped files per store, plus one collection record:
     corpus that cannot say where a product came from produces a graph that looks full and
     rosters empty.
 
-Gzip because this is a git repository and this JSON compresses 7.6x (measured: 20.4 MB of
-catalogue to 2.70 MB on disk, level 9). It is a *storage*
-decision: no product is dropped and no field is trimmed, so the corpus stays the whole
-catalogue. ``--no-compress`` writes plain ``.jsonl`` for inspection.
+Gzip because this is a git repository and this JSON compresses about 10x. Measured on the
+38-store corpus in ``fixtures/real-catalogs-broad``: 140,688,214 raw JSONL bytes stored as
+13,954,284 on disk, 10.1x at level 9. Reproduce with::
+
+    python -c "import json;m=json.load(open('fixtures/real-catalogs-broad/collection.json'));\
+t=m['totals'];print(t['bytes_raw'],t['bytes_on_disk'],round(t['bytes_raw']/t['bytes_on_disk'],2))"
+
+It is a *storage* decision: no product is dropped and no field is trimmed, so the corpus stays
+the whole catalogue. ``--no-compress`` writes plain ``.jsonl`` for inspection.
 """
 
 from __future__ import annotations
@@ -141,7 +175,19 @@ from typing import Any
 
 USER_AGENT = "ProxyShopBot/0.1 (catalog research; contact: hank.holcomb@challenger.gauntletai.com)"
 
-CORPUS_VERSION = "2.1.0"
+CORPUS_VERSION = "2.2.0"
+
+#: The politeness floor, in seconds between requests to one origin. A FLOOR, not a default:
+#: ``parse_args`` refuses a smaller ``--min-interval`` and ``PolitenessBudget`` refuses to be
+#: constructed with one, so neither an argument vector nor a direct call can walk a merchant
+#: faster than this. The manifest declares 2.0 s and the egress IP still works; the feasibility
+#: study watched Cloudflare answer parallel probing with an IP-wide 429 in 5.9 seconds, and
+#: this gap is 73-74% of the wall clock of a collection precisely because it is what buys that.
+#:
+#: Raising ``CORPUS_VERSION`` to 2.2.0 is what retires the records taken before the floor
+#: existed: ``collector_version`` sits in ``fetch_fingerprint``, so a record written by a
+#: collector that could have walked at zero seconds is not reusable by this one.
+MIN_INTERVAL_FLOOR = 2.0
 
 # The built-in roster. The DELIBERATE NEGATIVES for a liver-support query are named below, in
 # `NEGATIVE_CONTROL_HOSTS`, rather than pointed at by position here: measured, they answer a
@@ -292,15 +338,40 @@ class FetchRecord:
         }
 
 
+def _pause(seconds: float) -> None:
+    """The only sleep in this file, named so a test can make waiting free.
+
+    A test that patches this does NOT get a shorter interval: ``min_interval`` is floored in
+    two places that this function is not one of, and the interval a store was walked at is
+    recorded per host in ``robots.crawl_delay_seconds``. So the fake clock buys speed and
+    cannot buy an impolite manifest.
+    """
+    time.sleep(seconds)
+
+
 @dataclass
 class PolitenessBudget:
-    """Per-host rate limit and request cap. There is no way to spend past the cap."""
+    """Per-host rate limit and request cap. There is no way to spend past the cap.
+
+    ``min_interval`` below :data:`MIN_INTERVAL_FLOOR` is a ``ValueError`` here as well as in
+    ``parse_args``. Two checks rather than one because the CLI is not the only caller: this
+    class is constructible directly, and a floor that only exists in argument parsing is a
+    default wearing a floor's name.
+    """
 
     min_interval: float
     max_requests: int
     _last: dict[str, float] = field(default_factory=dict)
     _count: dict[str, int] = field(default_factory=dict)
     _host_interval: dict[str, float] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.min_interval < MIN_INTERVAL_FLOOR:
+            raise ValueError(
+                f"min_interval={self.min_interval} is below the {MIN_INTERVAL_FLOOR}s "
+                f"politeness floor these are real businesses depend on. The floor is not a "
+                f"knob; if a merchant needs a wider gap, raise it, never lower it."
+            )
 
     @staticmethod
     def key(host: str) -> str:
@@ -315,7 +386,7 @@ class PolitenessBudget:
 
     def honour_crawl_delay(self, host: str, delay: float) -> None:
         """A declared ``Crawl-delay`` widens this host's interval and never narrows it."""
-        self._host_interval[self.key(host)] = max(self.min_interval, delay)
+        self._host_interval[self.key(host)] = max(self.min_interval, MIN_INTERVAL_FLOOR, delay)
 
     def interval_for(self, host: str) -> float:
         return self._host_interval.get(self.key(host), self.min_interval)
@@ -330,7 +401,7 @@ class PolitenessBudget:
         if last is not None:
             wait = self.interval_for(host) - (time.monotonic() - last)
             if wait > 0:
-                time.sleep(wait)
+                _pause(wait)
         self._last[host] = time.monotonic()
         self._count[host] = used + 1
         return True
@@ -377,6 +448,19 @@ def fetch(
     return record, body
 
 
+def _requests_in(entry: dict[str, Any]) -> int:
+    """HTTP requests this walk really made: the robots fetch, plus every page actually asked for.
+
+    Not ``len(fetches) + 1``. A page the per-host budget refused is recorded in ``fetches`` with
+    ``status: -1`` and the note "not fetched", and counting it would inflate what the merchant
+    saw; and a walk whose budget ran out before robots.txt has no ``robots`` block at all, so
+    the ``+ 1`` would invent a request that never happened.
+    """
+    fetches = entry.get("fetches") or []
+    asked = sum(1 for f in fetches if int(f.get("status", 0)) != -1)
+    return asked + (1 if entry.get("robots") else 0)
+
+
 # --------------------------------------------------------------------------------------
 # phase one: fetch (the only phase that opens a socket)
 # --------------------------------------------------------------------------------------
@@ -416,16 +500,19 @@ def fetch_store(
     }
     store_dir = raw_dir / host
     store_dir.mkdir(parents=True, exist_ok=True)
-    # A previous, longer walk's pages would otherwise sit here confusing anyone reading the
-    # scratch directory by hand. `build` reads the entry rather than the directory listing, so
-    # this is hygiene rather than correctness — but a stale `page-007.json` beside a four-page
-    # record is exactly the kind of thing that gets believed.
-    for stale in sorted(store_dir.glob("page-*.json")):
-        stale.unlink()
+    # Pages of a previous, longer walk are swept in `write_store_record`, once a record that
+    # does not claim them has actually been written. This loop used to run HERE — after
+    # `mkdir`, before the robots fetch, before any request at all — so a walk that then failed
+    # on robots had already deleted everything an earlier successful walk collected. Measured:
+    # with a client raising `ConnectError`, floydhome.com's 3.7 MB `page-001.json` was gone and
+    # the walk collected nothing, so one `--no-resume` run made while the egress IP happened to
+    # be blocked emptied the raw directory host by host. That directory is what makes the
+    # corpus's "promotion is offline and costs the merchants nothing" true.
 
     def skip(reason: str, outcome: str) -> dict[str, Any]:
         entry["skipped"] = {"reason": reason}
         entry["walk_outcome"] = outcome
+        entry["requests"] = _requests_in(entry)
         print(f"  SKIPPED {host}: {reason}")
         return entry
 
@@ -570,6 +657,7 @@ def fetch_store(
             )
             entry["walk_outcome"] = "page_cap"
 
+    entry["requests"] = _requests_in(entry)
     seen = sum(p["products"] for p in entry["pages"])
     print(
         f"  {len(entry['pages'])} pages, {seen:,} products{'  TRUNCATED' if entry['truncated'] else ''}"
@@ -622,6 +710,12 @@ def outcome_is_retryable(outcome: str) -> bool:
     recognising an ending is re-walking a store rather than skipping one that was never
     finished. Costing a merchant one extra polite walk is the cheap error; putting half a
     catalogue in the corpus with a whole catalogue's label is the expensive one.
+
+    That protection is only real because ``reusable_entry`` CALLS this on the read path. It did
+    not: it trusted the ``complete`` boolean ``write_store_record`` had stored beside the
+    outcome, so a record saying ``{"complete": true, "walk_outcome": "interrupted"}`` was reused
+    with no request and this function never ran. Every resume fixture wrote its record through
+    ``write_store_record``, where the two fields cannot disagree, so nothing noticed.
     """
     if outcome in _RETRYABLE_OUTCOMES:
         return True
@@ -637,11 +731,18 @@ def outcome_is_retryable(outcome: str) -> bool:
 def fetch_fingerprint(args: argparse.Namespace) -> dict[str, Any]:
     """The settings that decide what a walk *contains*, so a resume cannot cross them.
 
-    ``--min-interval`` and ``--timeout`` are deliberately absent: they change how long a walk
-    takes and how polite it is, never which products come back. ``--max-pages`` and
-    ``--max-requests`` are present precisely because they can leave a catalogue TRUNCATED, and
-    a truncated store that survived a cap being raised would be a partial catalogue presented
-    as a whole one.
+    ``--min-interval`` and ``--timeout`` are absent because they change how long a walk takes,
+    never which products come back — and, for the interval, because two other things now make
+    its absence safe rather than merely defensible. It cannot go below
+    :data:`MIN_INTERVAL_FLOOR` at all, so there is no impolite value to splice in; and the
+    interval each host was actually walked at is recorded per store in
+    ``robots.crawl_delay_seconds``, so a corpus assembled from several runs can be *checked*
+    rather than assumed. ``collector_version`` is what retires records taken before the floor
+    existed.
+
+    ``--max-pages`` and ``--max-requests`` are present precisely because they can leave a
+    catalogue TRUNCATED, and a truncated store that survived a cap being raised would be a
+    partial catalogue presented as a whole one.
     """
     return {
         "collector_version": CORPUS_VERSION,
@@ -652,15 +753,52 @@ def fetch_fingerprint(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def write_store_record(raw_dir: Path, entry: dict[str, Any], fingerprint: dict[str, Any]) -> Path:
+FAILED_WALK_RECORD = "store.last-failed-walk.json"
+
+
+def _read_record(path: Path) -> dict[str, Any] | None:
+    """The store record at ``path``, or ``None`` if there is not a parseable one there."""
+    if not path.is_file():
+        return None
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (ValueError, OSError):
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def write_store_record(
+    raw_dir: Path, entry: dict[str, Any], fingerprint: dict[str, Any]
+) -> dict[str, Any]:
     """Write ``<raw-dir>/<host>/store.json`` atomically, the moment that store finishes.
 
     Atomically because the whole mechanism turns on "a record that exists is a record that
     parses": a record half-written by a process that died would otherwise be a third state,
     and the resume check would have to guess. ``Path.replace`` is an atomic rename on POSIX,
     so the file either is not there or is complete.
+
+    **A failed walk does not overwrite a finished one.** Every walk used to replace the record
+    unconditionally, so a run made while the egress IP was blocked — one ``--no-resume``, or one
+    ``--max-pages`` bump on a bad afternoon — replaced each host's good record with a
+    ``robots_transport_error`` and the next resume re-fetched all of them. The failed walk is
+    kept, because a failure that leaves no trace is its own problem: it goes to
+    ``store.last-failed-walk.json`` beside the record it was not allowed to replace.
     """
     outcome = str(entry.get("walk_outcome") or "interrupted")
+    path = raw_dir / str(entry["host"]) / STORE_RECORD
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = _read_record(path)
+    if existing is not None and existing.get("schema") != STORE_RECORD_SCHEMA:
+        existing = None
+    # Every walk of this host that this raw directory has ever seen, added up. `requests` is
+    # what THIS walk cost; `requests_charged` is what the host has been charged in total, and it
+    # is the only one of the two that survives a re-walk — the record is per store and a re-walk
+    # replaces it, so a total derived from `fetches` alone structurally cannot see the walk it
+    # replaced. `collection.json` publishes the charged number for exactly that reason.
+    made = int(entry.get("requests") or _requests_in(entry))
+    entry["requests"] = made
+    earlier = int(((existing or {}).get("entry") or {}).get("requests_charged") or 0)
+    entry["requests_charged"] = earlier + made
     record = {
         "schema": STORE_RECORD_SCHEMA,
         "recorded_at": datetime.now(UTC).isoformat(),
@@ -669,12 +807,42 @@ def write_store_record(raw_dir: Path, entry: dict[str, Any], fingerprint: dict[s
         "fingerprint": fingerprint,
         "entry": entry,
     }
-    path = raw_dir / str(entry["host"]) / STORE_RECORD
-    path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_name(path.name + ".partial")
+    if not record["complete"] and existing is not None:
+        if not outcome_is_retryable(str(existing.get("walk_outcome") or "interrupted")):
+            parked = path.with_name(FAILED_WALK_RECORD)
+            parked.write_text(
+                json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+            # The walk failed; the requests it made still happened. Charging them to the record
+            # that survives is the whole point of keeping the number separately from `fetches`:
+            # a failed walk leaves no fetch rows behind in the corpus, so an accounting that
+            # only ever reads `fetches` under-reports exactly the runs that went wrong.
+            kept_entry = existing.get("entry")
+            if isinstance(kept_entry, dict):
+                kept_entry["requests_charged"] = entry["requests_charged"]
+                temp.write_text(
+                    json.dumps(existing, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+                )
+                temp.replace(path)
+            print(
+                f"  KEPT the earlier finished record for {entry['host']}: this walk ended on "
+                f"{outcome!r}, which is retryable. The failed walk is in {parked.name}, and "
+                f"its {made} request(s) are charged to the record that stands."
+            )
+            return existing
     temp.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     temp.replace(path)
-    return path
+    # Only now, with a record on disk that does not claim them, are a longer earlier walk's
+    # pages stale. Sweeping is tied to the record rather than to the start of a walk because the
+    # record is what `build` and the resume both read; a `page-007.json` beside a four-page
+    # record is the kind of thing that gets believed, but deleting it before the walk that
+    # replaces it has succeeded is how a bad minute became a re-fetch of every merchant.
+    keep = {str(page.get("file") or "").rsplit("/", 1)[-1] for page in entry.get("pages") or []}
+    for stale in sorted(path.parent.glob("page-*.json")):
+        if stale.name not in keep:
+            stale.unlink()
+    return record
 
 
 def reusable_entry(
@@ -697,9 +865,22 @@ def reusable_entry(
         return None, f"store record unreadable ({type(exc).__name__}: {exc})"
     if not isinstance(record, dict) or record.get("schema") != STORE_RECORD_SCHEMA:
         return None, f"store record is not {STORE_RECORD_SCHEMA}"
-    if not record.get("complete"):
+    # The OUTCOME is the authority, not the boolean stored beside it. `write_store_record`
+    # derives one from the other, so in a record this collector wrote they cannot disagree —
+    # which is exactly why trusting the boolean read as safe and was not: nothing on this path
+    # ever called `outcome_is_retryable`, so a record with `complete: true` and an outcome of
+    # `interrupted`, `transport_error` or a value no version has ever emitted was reused with
+    # no request. Judge the outcome first; then require `complete` to agree, because a record
+    # whose two fields contradict each other is not a record, it is damage.
+    outcome = record.get("walk_outcome")
+    if not isinstance(outcome, str) or not outcome:
+        return None, "store record does not say why the walk ended (`walk_outcome` is missing)"
+    if outcome_is_retryable(outcome):
+        return None, f"the previous walk ended on {outcome!r}, which is retryable"
+    if record.get("complete") is not True:
         return None, (
-            f"the previous walk ended on {record.get('walk_outcome')!r}, which is retryable"
+            f"store record disagrees with itself: `walk_outcome` {outcome!r} is terminal but "
+            f"`complete` is {record.get('complete')!r}"
         )
     if record.get("fingerprint") != fingerprint:
         return None, "the collector's settings changed since that walk (see `fingerprint`)"
@@ -716,6 +897,18 @@ def reusable_entry(
         if hashlib.sha256(page_path.read_bytes()).hexdigest() != page.get("sha256"):
             return None, f"page file {page.get('file')!r} no longer matches its recorded digest"
     return entry, ""
+
+
+def relabel(entry: dict[str, Any], spec: HostSpec) -> None:
+    """The roster is the authority on labels; the record is the authority on bytes.
+
+    Re-categorising a host in the hosts file, or moving it to another role, must land without
+    re-fetching it — the category is what makes breadth checkable and it is not worth a request.
+    """
+    entry["role"] = spec.role
+    entry["category"] = spec.category
+    entry["note"] = spec.note
+    entry["roster_source"] = spec.source
 
 
 def run_fetch(args: argparse.Namespace) -> dict[str, Any]:
@@ -777,13 +970,7 @@ def run_fetch(args: argparse.Namespace) -> dict[str, Any]:
             if args.resume:
                 entry, why_not = reusable_entry(raw_dir, spec.host, fingerprint)
                 if entry is not None:
-                    # The roster is the authority on labels; the record is the authority on
-                    # bytes. Re-categorising a host in the hosts file must land without
-                    # re-fetching it.
-                    entry["role"] = spec.role
-                    entry["category"] = spec.category
-                    entry["note"] = spec.note
-                    entry["roster_source"] = spec.source
+                    relabel(entry, spec)
                     pages = len(entry.get("pages") or [])
                     products = sum(int(p["products"]) for p in entry.get("pages") or [])
                     print(
@@ -797,8 +984,17 @@ def run_fetch(args: argparse.Namespace) -> dict[str, Any]:
                 if (raw_dir / spec.host).exists():
                     print(f"[{spec.host}] re-walking: {why_not}")
             print(f"[{spec.host}] ({spec.category}/{spec.role})")
-            entry = fetch_store(client, spec, budget, args, raw_dir)
-            write_store_record(raw_dir, entry, fingerprint)
+            walked = fetch_store(client, spec, budget, args, raw_dir)
+            # The RECORD is the authority on what this raw directory now holds, and it is not
+            # always the walk that just finished: a failed walk is refused when a finished
+            # record is already there. Logging `walked` regardless would drop that store from
+            # the corpus on the say-so of the run that failed to collect it.
+            record = write_store_record(raw_dir, walked, fingerprint)
+            governing = record.get("entry")
+            entry = governing if isinstance(governing, dict) else walked
+            if entry is not walked:
+                print(f"[{spec.host}] logging the earlier finished record, not this failed walk")
+            relabel(entry, spec)
             entries.append(entry)
             log = flush()
 
@@ -872,6 +1068,10 @@ def build_store(entry: dict[str, Any], raw_dir: Path, out: Path, compress: bool)
         "robots": entry["robots"],
         "skipped": entry["skipped"],
         "fetches": entry["fetches"],
+        # What this host was actually asked, carried across every walk of it this scratch
+        # directory has seen — see POLITENESS_POSTURE["request_accounting"].
+        "requests": entry.get("requests", _requests_in(entry)),
+        "requests_charged": entry.get("requests_charged", _requests_in(entry)),
         "pages_fetched": len(entry["pages"]),
         "page_cap": entry["page_cap"],
         "truncated": entry["truncated"],
@@ -984,6 +1184,12 @@ def run_build(args: argparse.Namespace, log: dict[str, Any]) -> dict[str, Any]:
 
     manifest: dict[str, Any] = {
         "corpus_version": CORPUS_VERSION,
+        # `build` is offline and re-runnable, so the version that DERIVED a corpus is routinely
+        # newer than the one that fetched its bytes. Recording only one of the two made a
+        # rebuilt corpus claim its bytes were taken under rules that did not exist yet.
+        "collector_version_at_fetch": str(
+            (log.get("fingerprint") or {}).get("collector_version") or "unknown"
+        ),
         "collected_at": log["fetched_at"],
         # `collected_at` is when the RUN started, and with --resume that is not when every
         # store was read. The span is the honest answer: a corpus whose stores were fetched
@@ -998,7 +1204,10 @@ def run_build(args: argparse.Namespace, log: dict[str, Any]) -> dict[str, Any]:
         },
         "collector": "scripts/collect_real_catalogs.py",
         "user_agent": log["user_agent"],
-        "politeness": log["politeness"],
+        # The numbers a run was given come from its log; the description of what the collector
+        # DOES comes from this file. A corpus rebuilt by `build` would otherwise keep whatever
+        # the fetching run wrote down about behaviour, including sentences later found false.
+        "politeness": {**log["politeness"], **POLITENESS_POSTURE},
         "selection": {
             "policy": "entire catalogue — every product on every page, nothing filtered",
             "why": (
@@ -1032,7 +1241,15 @@ def run_build(args: argparse.Namespace, log: dict[str, Any]) -> dict[str, Any]:
         "stores_truncated": sum(1 for s in stores if s["truncated"]),
         "products": sum(s["products_recorded"] for s in stores),
         "duplicates_dropped": sum(s["duplicates_dropped"] for s in stores),
-        "requests_made": sum(len(s["fetches"]) + 1 for s in stores),
+        # NOT `sum(len(fetches) + 1)`. That counted a budget-refused page as a request, invented
+        # a robots fetch for a store whose budget ran out before robots.txt, and — structurally —
+        # could not see a re-walk, because the record it read is per store and a re-walk replaces
+        # it. `requests_charged` accumulates instead. The name says what it is: the requests this
+        # collection can ACCOUNT for, recomputable from `stores` by the recipe in
+        # POLITENESS_POSTURE["request_accounting"].
+        "requests_recorded": sum(
+            int(s.get("requests_charged") or 0) or _requests_in(s) for s in stores
+        ),
         "bytes_raw": sum(v["raw"] for s in stores for v in s["bytes"].values()),
         "bytes_on_disk": sum(v["on_disk"] for s in stores for v in s["bytes"].values()),
     }
@@ -1081,21 +1298,51 @@ def run_build(args: argparse.Namespace, log: dict[str, Any]) -> dict[str, Any]:
 # --------------------------------------------------------------------------------------
 
 
+# The posture: what this collector DOES, as opposed to the numbers a particular run was given.
+# Kept as a constant because it is a description of this source file, which means a corpus
+# rebuilt by `build` gets the description that matches the code rather than the one the fetching
+# run happened to write down. `retries` used to say "none — 403/404/429 is a recorded outcome,
+# not something to retry around" flat out, and `fixtures/tests/test_real_catalogs.py` asserted
+# that literal string; it stopped being true the day `--resume` landed, because a resume asks a
+# 429 host again on the next run. Both halves are stated separately now, because they are
+# different promises with different justifications.
+POLITENESS_POSTURE: dict[str, Any] = {
+    "robots_txt": "fetched and respected per host",
+    "crawl_delay": "a declared Crawl-delay widens the interval and never narrows it",
+    "retries": (
+        "no retry loop within a run — a 403, 404 or 429 ends that store's walk and is recorded "
+        "as its outcome, and nothing is re-requested. ACROSS runs, --resume re-walks a store "
+        "whose recorded outcome was retryable (429, 5xx, transport error, unparseable body): a "
+        "later run started by a person, never a loop against a host that just answered."
+    ),
+    "scope": "public catalogue data only",
+    "concurrency": (
+        "none — one host at a time, one request at a time. Measured: 8 concurrent "
+        "connections across 30 Cloudflare-fronted zones drew an IP-wide 429 at request 41, "
+        "5.9 seconds in; the same 80 zones serially cost 209 requests and zero blocks."
+    ),
+    "request_accounting": (
+        "totals.requests_recorded is the sum of each store record's `requests_charged`: one "
+        "robots.txt fetch plus every catalogue page actually asked for, accumulated across "
+        "every walk of that host this scratch directory has seen. Records written before "
+        "collector 2.2.0 carry no `requests_charged`, and for those the number falls back to "
+        "the surviving walk alone — a FLOOR, because a re-walk replaced its own record. "
+        "Recompute it from the artifact: "
+        "sum(s['requests_charged'] if 'requests_charged' in s else "
+        "len([f for f in s['fetches'] if f['status'] != -1]) + bool(s['robots']) "
+        "for s in collection['stores'])."
+    ),
+    "min_interval_floor_seconds": MIN_INTERVAL_FLOOR,
+}
+
+
 def politeness_block(args: argparse.Namespace) -> dict[str, Any]:
     return {
-        "robots_txt": "fetched and respected per host",
+        **POLITENESS_POSTURE,
         "min_seconds_between_requests_per_host": args.min_interval,
         "max_requests_per_host": args.max_requests,
         "max_pages_per_host": args.max_pages,
         "page_size": args.page_size,
-        "crawl_delay": "a declared Crawl-delay widens the interval and never narrows it",
-        "retries": "none — 403/404/429 is a recorded outcome, not something to retry around",
-        "scope": "public catalogue data only",
-        "concurrency": (
-            "none — one host at a time, one request at a time. Measured: 8 concurrent "
-            "connections across 30 Cloudflare-fronted zones drew an IP-wide 429 at request 41, "
-            "5.9 seconds in; the same 80 zones serially cost 209 requests and zero blocks."
-        ),
         "resume": (
             "a store already walked to a non-retryable outcome under these same settings is "
             "not re-fetched; every skip is checked against the page digests on disk"
@@ -1133,7 +1380,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--max-pages", type=int, default=40, help="runaway guard: pages of products.json per host"
     )
     parser.add_argument("--page-size", type=int, default=250, help="?limit= per page (max 250)")
-    parser.add_argument("--min-interval", type=float, default=2.0, help="seconds between hits")
+    parser.add_argument(
+        "--min-interval",
+        type=float,
+        default=MIN_INTERVAL_FLOOR,
+        help=(
+            f"seconds between requests to one origin (default and FLOOR: "
+            f"{MIN_INTERVAL_FLOOR}). Values below the floor are rejected."
+        ),
+    )
     parser.add_argument("--max-requests", type=int, default=45, help="total requests per host")
     parser.add_argument("--timeout", type=float, default=60.0, help="per-request timeout")
     parser.add_argument(
@@ -1173,6 +1428,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     for host in args.only:
         if not _SAFE_HOST.match(host):
             parser.error(f"--only {host!r} is not a hostname")
+    if args.min_interval < MIN_INTERVAL_FLOOR:
+        # Not clamped with a warning: a clamp makes the manifest and the traffic agree by
+        # ignoring what was asked for, and the next reader cannot tell a clamped run from a
+        # polite one. `--min-interval 0` used to be accepted in silence.
+        parser.error(
+            f"--min-interval {args.min_interval} is below the {MIN_INTERVAL_FLOOR}s politeness "
+            f"floor. These are real businesses and the floor is the reason the egress IP still "
+            f"works; it can be widened, never narrowed."
+        )
     return args
 
 

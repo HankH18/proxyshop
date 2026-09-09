@@ -1,5 +1,6 @@
 {
-  "corpus_version": "2.1.0",
+  "corpus_version": "2.2.0",
+  "collector_version_at_fetch": "2.1.0",
   "collected_at": "2026-09-08T22:50:34.239557+00:00",
   "collected_span": {
     "earliest": "2026-09-08T22:42:58.145187+00:00",
@@ -74,10 +75,12 @@
     "max_pages_per_host": 40,
     "page_size": 250,
     "crawl_delay": "a declared Crawl-delay widens the interval and never narrows it",
-    "retries": "none — 403/404/429 is a recorded outcome, not something to retry around",
+    "retries": "no retry loop within a run — a 403, 404 or 429 ends that store's walk and is recorded as its outcome, and nothing is re-requested. ACROSS runs, --resume re-walks a store whose recorded outcome was retryable (429, 5xx, transport error, unparseable body): a later run started by a person, never a loop against a host that just answered.",
     "scope": "public catalogue data only",
     "concurrency": "none — one host at a time, one request at a time. Measured: 8 concurrent connections across 30 Cloudflare-fronted zones drew an IP-wide 429 at request 41, 5.9 seconds in; the same 80 zones serially cost 209 requests and zero blocks.",
-    "resume": "a store already walked to a non-retryable outcome under these same settings is not re-fetched; every skip is checked against the page digests on disk"
+    "resume": "a store already walked to a non-retryable outcome under these same settings is not re-fetched; every skip is checked against the page digests on disk",
+    "request_accounting": "totals.requests_recorded is the sum of each store record's `requests_charged`: one robots.txt fetch plus every catalogue page actually asked for, accumulated across every walk of that host this scratch directory has seen. Records written before collector 2.2.0 carry no `requests_charged`, and for those the number falls back to the surviving walk alone — a FLOOR, because a re-walk replaced its own record. Recompute it from the artifact: sum(s['requests_charged'] if 'requests_charged' in s else len([f for f in s['fetches'] if f['status'] != -1]) + bool(s['robots']) for s in collection['stores']).",
+    "min_interval_floor_seconds": 2.0
   },
   "selection": {
     "policy": "entire catalogue — every product on every page, nothing filtered",
@@ -125,6 +128,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -208,6 +213,8 @@
           "note": ""
         }
       ],
+      "requests": 5,
+      "requests_charged": 5,
       "pages_fetched": 4,
       "page_cap": 40,
       "truncated": false,
@@ -291,6 +298,8 @@
           "note": ""
         }
       ],
+      "requests": 5,
+      "requests_charged": 5,
       "pages_fetched": 4,
       "page_cap": 40,
       "truncated": false,
@@ -347,6 +356,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -403,6 +414,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -459,6 +472,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -533,6 +548,8 @@
           "note": ""
         }
       ],
+      "requests": 4,
+      "requests_charged": 4,
       "pages_fetched": 3,
       "page_cap": 40,
       "truncated": false,
@@ -589,6 +606,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -645,6 +664,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -701,6 +722,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -759,6 +782,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 0,
       "page_cap": 40,
       "truncated": false,
@@ -800,6 +825,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -848,6 +875,8 @@
         "reason": "robots.txt for industrywest.com could not be read, so https://industrywest.com/products.json was not fetched — robots.txt returned 403"
       },
       "fetches": [],
+      "requests": 1,
+      "requests_charged": 1,
       "pages_fetched": 0,
       "page_cap": 40,
       "truncated": false,
@@ -898,6 +927,8 @@
           "note": ""
         }
       ],
+      "requests": 3,
+      "requests_charged": 3,
       "pages_fetched": 2,
       "page_cap": 40,
       "truncated": false,
@@ -956,6 +987,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 0,
       "page_cap": 40,
       "truncated": false,
@@ -997,6 +1030,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -1053,6 +1088,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -1109,6 +1146,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -1165,6 +1204,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -1221,6 +1262,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -1412,6 +1455,8 @@
           "note": ""
         }
       ],
+      "requests": 17,
+      "requests_charged": 17,
       "pages_fetched": 16,
       "page_cap": 40,
       "truncated": false,
@@ -1558,6 +1603,8 @@
           "note": ""
         }
       ],
+      "requests": 12,
+      "requests_charged": 12,
       "pages_fetched": 11,
       "page_cap": 40,
       "truncated": false,
@@ -1623,6 +1670,8 @@
           "note": ""
         }
       ],
+      "requests": 3,
+      "requests_charged": 3,
       "pages_fetched": 2,
       "page_cap": 40,
       "truncated": false,
@@ -1671,6 +1720,8 @@
         "reason": "robots.txt for bombas.com could not be read, so https://bombas.com/products.json was not fetched — robots.txt returned 429"
       },
       "fetches": [],
+      "requests": 1,
+      "requests_charged": 1,
       "pages_fetched": 0,
       "page_cap": 40,
       "truncated": false,
@@ -1757,6 +1808,8 @@
           "note": ""
         }
       ],
+      "requests": 7,
+      "requests_charged": 7,
       "pages_fetched": 6,
       "page_cap": 40,
       "truncated": false,
@@ -1813,6 +1866,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -1869,6 +1924,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -1925,6 +1982,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -1981,6 +2040,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -2037,6 +2098,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -2093,6 +2156,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -2158,6 +2223,8 @@
           "note": ""
         }
       ],
+      "requests": 3,
+      "requests_charged": 3,
       "pages_fetched": 2,
       "page_cap": 40,
       "truncated": false,
@@ -2216,6 +2283,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 0,
       "page_cap": 40,
       "truncated": false,
@@ -2259,6 +2328,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 0,
       "page_cap": 40,
       "truncated": false,
@@ -2309,6 +2380,8 @@
           "note": ""
         }
       ],
+      "requests": 3,
+      "requests_charged": 3,
       "pages_fetched": 2,
       "page_cap": 40,
       "truncated": false,
@@ -2365,6 +2438,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -2413,6 +2488,8 @@
         "reason": "robots.txt for katzmosestools.com could not be read, so https://katzmosestools.com/products.json was not fetched — robots.txt returned 0"
       },
       "fetches": [],
+      "requests": 1,
+      "requests_charged": 1,
       "pages_fetched": 0,
       "page_cap": 40,
       "truncated": false,
@@ -2456,6 +2533,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 0,
       "page_cap": 40,
       "truncated": false,
@@ -2497,6 +2576,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -2553,6 +2634,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -2611,6 +2694,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 0,
       "page_cap": 40,
       "truncated": false,
@@ -2652,6 +2737,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -2708,6 +2795,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -2766,6 +2855,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 0,
       "page_cap": 40,
       "truncated": false,
@@ -2807,6 +2898,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -2863,6 +2956,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -3009,6 +3104,8 @@
           "note": ""
         }
       ],
+      "requests": 12,
+      "requests_charged": 12,
       "pages_fetched": 11,
       "page_cap": 40,
       "truncated": false,
@@ -3065,6 +3162,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 1,
       "page_cap": 40,
       "truncated": false,
@@ -3123,6 +3222,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 0,
       "page_cap": 40,
       "truncated": false,
@@ -3166,6 +3267,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 0,
       "page_cap": 40,
       "truncated": false,
@@ -3209,6 +3312,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 0,
       "page_cap": 40,
       "truncated": false,
@@ -3252,6 +3357,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 0,
       "page_cap": 40,
       "truncated": false,
@@ -3295,6 +3402,8 @@
           "note": ""
         }
       ],
+      "requests": 2,
+      "requests_charged": 2,
       "pages_fetched": 0,
       "page_cap": 40,
       "truncated": false,
@@ -3313,7 +3422,7 @@
     "stores_truncated": 0,
     "products": 17409,
     "duplicates_dropped": 0,
-    "requests_made": 155,
+    "requests_recorded": 155,
     "bytes_raw": 140688214,
     "bytes_on_disk": 13954284,
     "categories": 11,

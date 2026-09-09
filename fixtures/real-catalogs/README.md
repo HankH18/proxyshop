@@ -66,16 +66,30 @@ partial catalogue as complete.
 ## Politeness — these are real businesses
 
 The whole collection cost **28 HTTP requests**: 10 `robots.txt` fetches and 18 catalogue pages.
+One pass, no resumed stores, nothing re-requested — recompute it straight off the record:
+
+```sh
+python -c "import json;m=json.load(open('fixtures/real-catalogs/collection.json'));\
+print(sum(len([f for f in s['fetches'] if f['status']!=-1])+bool(s['robots']) for s in m['stores']))"
+```
 
 * **`robots.txt` is fetched per host before anything else** and parsed with `protego`. A host
   that disallows the path is skipped, with the skip and its reason recorded. There is no
   override flag, deliberately. All 10 hosts returned HTTP 200 and allowed `/products.json`.
 * **User-Agent:** `ProxyShopBot/0.1 (catalog research; contact: hank.holcomb@challenger.gauntletai.com)`
-* **At least 2 seconds between requests to the same host.** A declared `Crawl-delay` widens
-  that interval and never narrows it. `www.` and the bare host share one budget, so a redirect
-  cannot hand the same machine two independent rate limits.
+* **At least 2 seconds between requests to the same host, and that is a FLOOR rather than a
+  default.** `scripts/collect_real_catalogs.py` refuses a `--min-interval` below
+  `MIN_INTERVAL_FLOOR` — in `parse_args`, and again in `PolitenessBudget`, because the CLI is
+  not its only caller. `--min-interval 0` used to be accepted in silence. A declared
+  `Crawl-delay` widens the interval and never narrows it. `www.` and the bare host share one
+  budget, so a redirect cannot hand the same machine two independent rate limits.
 * **A hard per-host cap** of 40 pages and 45 requests as a runaway guard.
-* **403/404/429 are recorded outcomes, not failures to retry around.** Nothing retries.
+* **No retry loop.** Within a run nothing is re-requested: a 403, 404 or 429 ends that store's
+  walk and is recorded as its outcome. **Across runs, `--resume` does re-walk a host whose
+  recorded outcome was retryable** — a fresh run started by a person, not a loop against a host
+  that just answered. This collection was a single pass with nothing resumed, so for *this*
+  corpus "nothing retries" is literally true and `collection.json` says so; the broad corpus in
+  `../real-catalogs-broad/` was assembled with resume and its manifest says the other thing.
 * **Public catalogue data only.** `/products.json` carries no personal data and the collector
   goes looking for none.
 
@@ -182,12 +196,13 @@ Every store above sells supplements. That is this corpus's single real limitatio
 visible in the demo: **`"a walnut coffee table for the lounge"` returns four liver
 supplements.** Retrieval is working; there is no coffee table in the corpus to find. Breadth is
 a *hostname* problem, so the roster now lives in reviewable files rather than a tuple in the
-collector:
+collector — and the hostnames have since been walked into `../real-catalogs-broad/`, which
+holds six of them:
 
 | file | what it is |
 |---|---|
 | `incumbent-hosts.txt` | these ten, restated in the roster format. A test asserts it matches the collector's built-in `RELEVANT_HOSTS`/`NEGATIVE_CONTROL_HOSTS` exactly, so the two cannot drift. |
-| `candidate-hosts.txt` | **43 proposed** direct-to-consumer storefronts across **11 categories** — furniture, coffee, apparel, outdoor, pet, home/kitchen, tools, food, beauty, sports, electronics — with three deliberate misses. Nothing in it has been collected. |
+| `candidate-hosts.txt` | **43** direct-to-consumer storefronts across **11 categories** — furniture, coffee, apparel, outdoor, pet, home/kitchen, tools, food, beauty, sports, electronics — with three deliberate misses. **All 43 were collected on 2026-09-08** into `../real-catalogs-broad/`; 28 served a catalogue, 15 did not, and every outcome is on the record. That corpus is STAGED, not adopted — this one is untouched. |
 
 The format is one host per line with its **category** beside it, `#` for comments:
 
@@ -247,7 +262,10 @@ failed when they do not:
    transport error, a 429, a 5xx, an empty body, an unparseable page or an unreadable
    `robots.txt` are *retryable* and the store is walked again. An outcome the collector does
    not recognise is retryable too: re-walking a store is the cheap error, skipping one that
-   never finished is not;
+   never finished is not. The read path **re-judges `walk_outcome`** rather than trusting the
+   `complete` flag written beside it, and then requires the two to agree — it used to trust the
+   flag, so a record saying `{"complete": true, "walk_outcome": "interrupted"}` was reused with
+   no request and the three-way protection above never ran;
 3. the settings that decide the *result* are unchanged — page size, page cap, request cap,
    collector version, User-Agent. Raise `--max-pages` and every record taken under the old cap
    is invalidated, so a truncated catalogue cannot survive as "already collected";
@@ -258,7 +276,12 @@ file and still has the right name; only the digest knows. Measured, on a real pa
 `onyxcoffeelab.com/page-001.json` by five bytes made the next run print
 `re-walking: page file … no longer matches its recorded digest` and fetch it again.
 
-`--no-resume` forces a clean re-walk of everything.
+`--no-resume` forces a clean re-walk of everything — and a re-walk that FAILS no longer costs
+anything. The stale-page sweep used to run before the robots fetch, so a `--no-resume` run made
+while the egress IP happened to be blocked emptied the scratch directory host by host while
+collecting nothing. Pages are now swept only once a record that does not claim them is on disk,
+and a retryable walk cannot replace a finished record: the failed walk is parked beside it as
+`store.last-failed-walk.json`.
 
 **A re-collection changes the counts, and that is meant to be noticed.** The per-store totals
 above and the pinned counts in `fixtures/tests/test_real_catalogs.py` will fail until they are
