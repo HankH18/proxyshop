@@ -5,7 +5,8 @@ one box the demo is hosted on, and it exists because that path had no written fo
 step below was reconstructed from a session transcript the second time somebody needed it, and
 four of them fail in ways that look like something else.
 
-Everything here was measured on 2026-09-09 while deploying `e9d7c8c` through `d71205e`.
+Everything here was measured while deploying `e9d7c8c` through `d71205e` — the commits are the
+anchor, so a reader can diff against them rather than trust a date.
 
 ---
 
@@ -129,7 +130,8 @@ the challenge is answered on port 80 of the box the name points at. Pointing the
 means waiting for a retry.
 
 Adding a second hostname is one line in `deploy/caddy/Caddyfile` plus the DNS record. Let's
-Encrypt allows **5 issuances per name per week** — the `caddy_data` volume holds the certificates
+Encrypt allows **5 issuances per name in a rolling 7-day window** — the `caddy_data` volume
+holds the certificates
 and must survive `docker compose down`, or the fifth redeploy locks the name out with an error
 that reads as a Caddy fault rather than a quota one.
 
@@ -185,7 +187,7 @@ Each of these cost a real deploy, and each fails as something else.
 
 **1. `docker compose up -d` keeps a stale image.** Services whose image changed are *not*
 recreated without `--force-recreate`; `ingest`, `merchant-svc` and `trust` kept pre-deploy image
-IDs through a deploy that reported success. Measured again on 2026-09-09 in the other direction:
+IDs through a deploy that reported success. Measured again in the other direction:
 the local exchange served `variant_ref: null` from an image built fourteen hours before the fix,
 while every container reported `(healthy)` — that reading was taken on a laptop running fifteen;
 the droplet runs fourteen. **Check image build timestamps, not health.**
