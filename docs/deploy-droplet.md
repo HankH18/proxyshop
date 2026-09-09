@@ -34,7 +34,11 @@ lost access and is not.
 
 ```sh
 # 1. Ship the code. `droplet` is a bare repo; the checkout pulls from it.
-git push droplet main:main
+#    The key is NOT in ~/.ssh/config (see "The box"), so git has to be told which one —
+#    a bare `git push droplet` fails "make sure you have the correct access rights",
+#    which reads as a permissions or missing-repo problem and is neither.
+GIT_SSH_COMMAND='ssh -i ~/.ssh/proxyshop_deploy' git push droplet main:main
+#    Or `ssh-add ~/.ssh/proxyshop_deploy` once, after which a bare push works.
 ssh -i ~/.ssh/proxyshop_deploy root@162.243.162.24 'cd /srv/proxyshop && git pull --ff-only'
 
 # 2. Rebuild. --build and --force-recreate are BOTH required; see trap 1.
@@ -56,6 +60,13 @@ ssh -i ~/.ssh/proxyshop_deploy root@162.243.162.24 \
 
 Every timestamp must be **after** the commit you just shipped. If one is older, that service is
 running the previous build and reporting `(healthy)` while it does so.
+
+**A BLANK is not a pass.** A container can run an image that has since been untagged and
+garbage-collected, and `docker image inspect` then prints nothing at all — measured on this box,
+where `buyer-svc` ran a vanished image for ninety minutes while the loop above printed an empty
+timestamp beside its name. An empty field there means *unknown*, which is strictly worse than
+old, because nothing on the box can now tell you what code is serving. Treat it as a failure and
+recreate that service.
 
 ### Reloading the corpus
 
@@ -176,7 +187,8 @@ Each of these cost a real deploy, and each fails as something else.
 recreated without `--force-recreate`; `ingest`, `merchant-svc` and `trust` kept pre-deploy image
 IDs through a deploy that reported success. Measured again on 2026-09-09 in the other direction:
 the local exchange served `variant_ref: null` from an image built fourteen hours before the fix,
-while all fifteen containers reported `(healthy)`. **Check image build timestamps, not health.**
+while every container reported `(healthy)` — that reading was taken on a laptop running fifteen;
+the droplet runs fourteen. **Check image build timestamps, not health.**
 
 **2. A bare `docker compose build` misses five of ten images.** The four per-shop store agents and
 `buyer-web` are behind the `demo` profile. Name the services explicitly, as step 2 does.
@@ -214,6 +226,22 @@ exchange, trust, ingest and the four store agents is the DigitalOcean cloud fire
 Adding Caddy did not close `:8080` or `:8082` — both remain published and reachable by IP
 alongside the domain.
 
-Two known-open items, neither fixed by this page: the Postgres superuser on the box is still the
-development password, and sign-in still uses the console transport, so anyone who can read the
-service logs can sign in as anyone. Both are firewall-dependent rather than safe.
+Two known-open items, neither fixed by this page.
+
+**The Postgres superuser is still the development password.** Neo4j is NOT — it was rotated and
+carries a 28-character password that matches no dev default, so this is one credential rather
+than the general rot the plural would imply.
+
+**Sign-in is an authentication bypass, and the UI hides that rather than preventing it.**
+`GET /buyer/auth/sign-in` answers `{"offered": false}` on this box, so the SPA renders no sign-in
+form and the door looks closed. It is not: `POST /buyer/auth/magic-link` still answers anyone who
+calls it directly — the routes stay live under every transport — and console delivery is a
+literal `print(...)` to stdout. So `docker logs proxyshop-buyer-svc-1` lets anyone who can read
+it sign in as any address, and checking the UI for a sign-in form is exactly the wrong test.
+
+Both are firewall-dependent rather than safe. The firewall itself is confirmed: `doctl compute
+firewall list` shows `proxyshop-demo` on this droplet allowing inbound tcp 22/80/443/8080/8082
+from `0.0.0.0/0`. One latent caveat — those rules are **IPv4-only** while every container also
+publishes on `[::]`. The droplet has no global IPv6 today, so it is a future footgun rather than
+a live hole: enabling IPv6 would expose Postgres, Redis, Neo4j, the exchange, trust and ingest
+immediately.
