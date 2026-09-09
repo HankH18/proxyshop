@@ -18,6 +18,7 @@ include:
   - apps/buyer/compose.yaml
   - apps/seller-reference/compose.yaml
   - packages/store-agent/compose.yaml
+  - deploy/caddy/compose.yaml
 services:
   postgres:
     image: postgres:16-alpine        # already cached locally; arm64 native

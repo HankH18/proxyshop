@@ -1,0 +1,35 @@
+# TLS termination for the hosted demo.
+#
+# Nothing in this stack listened on 80 or 443 before this file: `buyer-web` publishes 8080 and
+# `merchant-svc` publishes 8082, so the demo was only reachable with a port in the URL and only
+# over http. This is the one process that binds the well-known ports, and it terminates TLS with
+# a certificate Caddy obtains from Let's Encrypt on first boot.
+#
+# THE DOMAIN IS A BUILD-TIME FACT, NOT A DEFAULT. `PROXYSHOP_PUBLIC_DOMAIN` has no fallback on
+# purpose: a Caddyfile that silently fell back to `localhost` would serve a self-signed
+# certificate the browser refuses, and the failure would look like a DNS or firewall problem
+# rather than an unset variable. Unset, Caddy refuses to start and says which variable is empty.
+{
+	# Let's Encrypt sends expiry warnings here. Unset is FINE and is the default: ACME issues
+	# certificates without it. Set it only if you want the mail — it goes to a third party.
+	email {$CADDY_ACME_EMAIL}
+}
+
+{$PROXYSHOP_PUBLIC_DOMAIN} {
+	encode gzip
+
+	# The merchant console FIRST, because the buyer SPA's nginx answers `try_files` for any
+	# path it does not recognise — including this one — so a catch-all placed above would
+	# swallow `/dashboard/` and serve the shopper page instead. Order is the whole routing
+	# rule here. The path is preserved rather than stripped: `merchant-svc` serves the console
+	# AT `/dashboard/`, and a bare `/` on that service is a 404 by design.
+	handle /dashboard* {
+		reverse_proxy merchant-svc:8082
+	}
+
+	# Everything else is the shopper journey. `buyer-web` is itself nginx and already proxies
+	# `/buyer/` to the buyer service, so the API travels this same hop and needs no rule here.
+	handle {
+		reverse_proxy buyer-web:8080
+	}
+}

@@ -1,0 +1,49 @@
+# The public edge. PROFILE-GATED so it never starts on a laptop.
+#
+# `profiles: ["public"]` is not tidiness: this service binds 80 and 443 and asks Let's Encrypt
+# for a certificate on boot. On a developer machine both ports are usually taken and the ACME
+# request would fail against a domain that does not point there, so an unprofiled service would
+# make `make deps-up` noisy-red for everyone who is not deploying. It runs only under
+# `docker compose --profile public up -d caddy`.
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    profiles: ["public"]
+    ports:
+      - "80:80"     # ACME http-01 lives here; it is also the http -> https redirect Caddy adds
+      - "443:443"
+      - "443:443/udp"   # HTTP/3
+    environment:
+      # No default. See the Caddyfile's header for why an unset domain must fail loudly.
+      # PLAIN interpolation, NOT `${VAR:?message}`. The `:?` form is tempting here and is
+      # wrong: compose interpolates every service's environment while PARSING, before profiles
+      # are applied, so `:?` on a profiled service fails `docker compose config` for everyone
+      # who never asked for this service — measured, it broke the whole stack on a laptop.
+      # Unset, this arrives empty and Caddy refuses to start on an empty site address, which is
+      # the loud failure at the moment it actually matters.
+      PROXYSHOP_PUBLIC_DOMAIN: "${PROXYSHOP_PUBLIC_DOMAIN:-}"
+      CADDY_ACME_EMAIL: "${CADDY_ACME_EMAIL:-}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and ACME account keys. NAMED VOLUMES, not bind mounts, and they must
+      # survive `docker compose down`: Let's Encrypt rate-limits issuance for a name to 5 per
+      # week, so a deploy that discarded this directory each time would lock the domain out
+      # after the fifth redeploy — with an error that reads as a Caddy fault rather than a
+      # quota one.
+      - caddy_data:/data
+      - caddy_config:/config
+    mem_limit: 128m
+    healthcheck:
+      # Ask Caddy's own admin API, not the public port: a healthcheck that curled the site
+      # would report unhealthy for the ~30s of the first ACME handshake, and again during any
+      # renewal, neither of which is a fault.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  caddy_data:
+  caddy_config:
