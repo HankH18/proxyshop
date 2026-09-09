@@ -302,6 +302,12 @@ class SignedFetchAdapter:
         page = 1
         page_size = min(_PAGE_SIZE, request.max_products)
         stopped_at_product_ceiling = False
+        # The first budget refusal of the crawl, as text; empty until one happens. It is the
+        # flag AND the message: once a budget has refused a fetch, this method issues no
+        # further requests of ANY kind, because the budget refused *the crawl*, not the loop
+        # it happened to be raised in. See the product-page phase below for what that is
+        # worth in requests.
+        budget_refusal = ""
         while len(raw) < request.max_products:
             query = urlencode({"limit": page_size, "page": page})
             url = f"{base}{PRODUCTS_PATH}?{query}"
@@ -326,6 +332,7 @@ class SignedFetchAdapter:
                     f"budget: {exc}; abandoned {url} after {len(raw)} product(s) — this store's "
                     f"product list is what was read before the ceiling, not its catalogue"
                 )
+                budget_refusal = str(exc)
                 break
             if result is None or result.status != 200:
                 if result is not None and result.status != 200:
@@ -368,6 +375,7 @@ class SignedFetchAdapter:
 
         products: list[ProductRecord] = []
         truncated_galleries = 0
+        skipped_product_pages = 0
         for entry, page_url, entry_hash in raw:
             if not native_product_key(entry):
                 # `product_id_for` derives the node id from the store's own identifier, and an
@@ -384,12 +392,30 @@ class SignedFetchAdapter:
             jsonld: dict[str, Any] = {}
             product_url = urljoin(base + "/", f"products/{handle}") if handle else ""
             if request.fetch_product_pages and handle and ledger.may_enqueue(1):
-                if may_fetch(robots_text, product_url, self.user_agent):
+                if budget_refusal:
+                    # A budget has already refused a fetch on this crawl, so no request is
+                    # made for this product's page. Breaking the pagination loop alone was
+                    # not enough: control falls straight into this loop, which used to
+                    # attempt a fetch PER PRODUCT and merely warn when each was refused. A
+                    # store serving one oversized catalogue page therefore went from 3
+                    # charged requests to the whole page budget (measured: 40 of 40, 37 of
+                    # them product pages) and from 1 warning to 214 — 213 of them the same
+                    # sentence. `max_response_bytes` is a per-response ceiling raised inside
+                    # the transport, so the crawl still had pages, bytes and time left and
+                    # nothing else stopped it. The entries already in `raw` are still turned
+                    # into records below — throwing those away is the defect this loop's
+                    # pagination handler exists to prevent — they simply carry their catalog
+                    # entry without the page's JSON-LD, which the summary warning states.
+                    skipped_product_pages += 1
+                elif may_fetch(robots_text, product_url, self.user_agent):
                     try:
                         ledger.charge_depth(1)
                         result = get(product_url)
                     except BudgetExceeded as exc:
-                        warnings.append(f"budget: {exc}")
+                        # First refusal in this phase ends the fetching for the rest of it,
+                        # rather than being reported once per remaining product.
+                        budget_refusal = str(exc)
+                        skipped_product_pages += 1
                         result = None
                     if result is not None and result.status == 200:
                         resource = record(result)
@@ -419,6 +445,18 @@ class SignedFetchAdapter:
             products.append(product_record)
             if published_images > len(product_record.images):
                 truncated_galleries += 1
+
+        if skipped_product_pages:
+            # One warning for the crawl, not one per product — the same reason the gallery
+            # warning below is aggregated. It names the count because that is the operator's
+            # question: these products are in the graph, and this many of them were built
+            # from `products.json` alone.
+            warnings.append(
+                f"budget: {budget_refusal}; fetched no product page for "
+                f"{skipped_product_pages} product(s) — the budget refused a request and the "
+                f"crawl stopped fetching, so those products carry their catalog entry "
+                f"without the JSON-LD their page states"
+            )
 
         if truncated_galleries:
             # Aggregated, not per product: 88 of the 3,093 recorded products publish more

@@ -803,6 +803,140 @@ def test_the_adapter_refuses_a_private_base_url_under_the_default_policy(storefr
     assert stub.requests == [], "the guard let a request reach a private address"
 
 
+# ---- a blown budget ends the crawl, not merely its pagination ------------------------
+
+
+def _bulk_catalog(count: int) -> list[dict]:
+    """``count`` minimal but complete `products.json` entries, each with its own page."""
+    return [
+        {
+            "id": 9_000_000 + i,
+            "title": f"Bulk Product {i}",
+            "handle": f"bulk-product-{i}",
+            "vendor": "Cascade",
+            "variants": [
+                {
+                    "id": 4_400_000 + i,
+                    "title": "One Size",
+                    "sku": f"BULK-{i}",
+                    "price": "10.00",
+                    "available": True,
+                }
+            ],
+        }
+        for i in range(count)
+    ]
+
+
+def test_a_budget_that_ends_the_pagination_ends_the_crawls_fetching(storefront_factory):
+    """A refused fetch ends the crawl's *fetching*, not just the loop it was refused in.
+
+    The adapter's stated contract is that a blown budget "ends the crawl and is reported in
+    snapshot.warnings with whatever was gathered before it", and ``catalog_mcp`` — the sibling
+    adapter sharing the mapping (C6, T-023) — does exactly that: its budget handlers break the
+    page loop, and nothing after that loop makes another request.
+
+    ``signed_fetch`` has a second fetching phase after pagination. Its ``except BudgetExceeded``
+    breaks the pagination ``while`` and then falls into the per-product loop, which fetches a
+    product page *per product* under its own ``except BudgetExceeded`` that warns and carries on
+    to the next one. ``max_response_bytes`` is a PER-RESPONSE ceiling raised inside the
+    transport, so the crawl still has pages, bytes and time left when one oversized catalogue
+    page is refused — and a store serving one such page went from 3 charged requests to the
+    whole page budget, and from 1 warning to one per product.
+
+    Both halves are asserted, because the repair must not undo the one before it: the products
+    read before the ceiling still reach the caller (a store that blew page 2 having parsed 250
+    products on page 1 must report 250, not 0), and the abandonment is still stated.
+    """
+    base_url, stub = storefront_factory(products=_bulk_catalog(250))
+    stub.oversized_page = 2  # page 1 is a full, honest page; page 2 is over the ceiling
+
+    snapshot = SignedFetchAdapter().fetch_catalog(
+        _request(
+            base_url,
+            budget=CrawlBudget(max_pages=40, max_seconds=30.0, max_response_bytes=256 * 1024),
+            max_products=500,
+            fetch_product_pages=True,
+        )
+    )
+
+    catalog_pages = [p for p in stub.paths_fetched() if p == "/products.json"]
+    product_pages = [p for p in stub.paths_fetched() if p.startswith("/products/")]
+
+    # Positive control: the ceiling really did fire on the second catalogue page, so the
+    # assertions below are measuring a refused crawl rather than a store that ran out.
+    assert len(catalog_pages) == 2, f"the oversized page was never requested: {catalog_pages}"
+    assert any("response_bytes" in w for w in snapshot.warnings), (
+        f"the per-response ceiling did not fire: {list(snapshot.warnings)}"
+    )
+
+    assert product_pages == [], (
+        f"the budget refused a catalogue page and the crawl then fetched "
+        f"{len(product_pages)} product page(s) anyway"
+    )
+    assert snapshot.usage.pages == 3, (
+        f"a refused crawl charged {snapshot.usage.pages} requests (robots + 2 catalogue "
+        f"pages is 3); it kept fetching after the budget said no"
+    )
+    assert len(snapshot.warnings) <= 3, (
+        f"a refused crawl produced {len(snapshot.warnings)} warnings — one per product, not "
+        f"one for the crawl: {list(snapshot.warnings)[:5]}"
+    )
+    assert any("fetched no product page for 250 product(s)" in w for w in snapshot.warnings), (
+        f"nothing states that all 250 products carry no page: {list(snapshot.warnings)}"
+    )
+
+    # The repair 9ac007d made, unchanged: what was read before the ceiling still arrives, and
+    # the loss is still stated rather than hidden behind the count.
+    assert len(snapshot.products) == 250, (
+        f"the products parsed before the ceiling were thrown away: {len(snapshot.products)}"
+    )
+    assert any("not its catalogue" in w for w in snapshot.warnings), (
+        f"the abandonment is no longer stated: {list(snapshot.warnings)}"
+    )
+
+
+def test_a_refused_product_page_is_not_retried_once_per_remaining_product(storefront_factory):
+    """The same rule where the refusal happens *inside* the product-page phase.
+
+    Nothing above stops the crawl here — the catalogue was read cleanly and it is the product
+    pages themselves that exhaust the page budget. The refusal was reported once per product
+    and the next fetch attempted anyway, so the budget bought one warning per product instead
+    of ending the phase. Whatever was already fetched still merges: the products read before
+    the ceiling keep their page's JSON-LD (``currency`` exists only there), and the rest reach
+    the caller from ``products.json`` alone rather than being dropped.
+    """
+    base_url, stub = storefront_factory(products=_bulk_catalog(10))
+
+    snapshot = SignedFetchAdapter().fetch_catalog(
+        _request(
+            base_url,
+            # robots + one catalogue page + three product pages, and the fourth is refused.
+            budget=CrawlBudget(max_pages=5, max_seconds=30.0),
+            fetch_product_pages=True,
+        )
+    )
+
+    product_pages = [p for p in stub.paths_fetched() if p.startswith("/products/")]
+    assert len(product_pages) == 3, (
+        f"the page budget was 5 (robots + catalogue + 3) and {len(product_pages)} product "
+        f"pages were fetched"
+    )
+    assert snapshot.usage.pages == 5, snapshot.usage
+    assert len(snapshot.warnings) == 1, (
+        f"a refused product page was reported once per remaining product: "
+        f"{list(snapshot.warnings)[:3]}"
+    )
+    assert "fetched no product page for 7 product(s)" in snapshot.warnings[0], (
+        f"the warning does not say how many products carry no page: {snapshot.warnings[0]}"
+    )
+    assert len(snapshot.products) == 10, "products with no page were dropped instead of kept"
+    # The three pages that WERE fetched are still recorded, so the phase ended rather than
+    # being abandoned wholesale.
+    recorded_pages = [r.url for r in snapshot.resources if "/products/bulk-product-" in r.url]
+    assert len(recorded_pages) == 3, f"the pages fetched before the refusal: {recorded_pages}"
+
+
 # ---- change detection (acceptance 3) -------------------------------------------------
 
 

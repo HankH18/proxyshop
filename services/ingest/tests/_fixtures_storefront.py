@@ -160,6 +160,16 @@ class StorefrontStub:
         #: redirect at a host that is on the caller's allow-list yet resolves into private
         #: space — the one target that only the per-hop SSRF re-check can refuse.
         self.redirect_target = "https://elsewhere.example.com/"
+        #: Which ``/products.json`` page comes back padded past any sane
+        #: ``max_response_bytes`` — ``None`` for a store that serves every page honestly.
+        #: A store whose catalogue is fine until page N is the shape that matters: the
+        #: per-response ceiling is raised inside the transport, so the crawl still has
+        #: pages, bytes and time left when that one page is refused, and what the adapter
+        #: does with the rest of the crawl is then a decision rather than an accident.
+        self.oversized_page: int | None = None
+        #: Padding on that page. Only its length is read: the transport refuses the
+        #: response on its ``Content-Length`` before any of it is parsed.
+        self.oversized_page_bytes = 1024 * 1024
         #: How many 1 KiB dribbles ``/slow`` emits. Deliberately far more than any test's
         #: time budget permits: a client that only checks its deadline once the *whole*
         #: body has arrived would sit here for `slow_chunks * slow_chunk_seconds` seconds,
@@ -251,7 +261,10 @@ class StorefrontStub:
             limit = int((query.get("limit") or ["250"])[0])
             start = (page - 1) * limit
             chunk = self.products[start : start + limit]
-            payload = json.dumps({"products": chunk}).encode()
+            body: dict[str, Any] = {"products": chunk}
+            if self.oversized_page is not None and page == self.oversized_page:
+                body["padding"] = "x" * self.oversized_page_bytes
+            payload = json.dumps(body).encode()
             return await self._send(send, 200, payload, "application/json")
 
         if path.startswith("/products/"):
