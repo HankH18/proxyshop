@@ -1,5 +1,10 @@
 # Running the ProxyShop stack under docker compose
 
+> **Deploying the hosted demo instead?** This page is about your own machine. The box at
+> `proxyshop.hankholcomb.com` has its own procedure — a different rebuild invocation, a corpus
+> wipe, a trust seed that must run with host networking, and four traps that each fail as
+> something else. See [`deploy-droplet.md`](deploy-droplet.md).
+
 This is the deploy lane's record of how the deployables actually start, what was observed
 when they did, and what still does not work. Everything below was RUN, not reasoned about;
 where something was not run, it says so.
