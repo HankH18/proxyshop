@@ -678,9 +678,10 @@ def test_no_pitch_names_a_gate_the_registry_cannot_grade() -> None:
     The two guards above both run registry-first and neither ever reads the gate strings the
     golden set actually carries. `test_every_eval_gate_has_a_content_grader` compares
     `set(GATE_CONTENT_CHECKS)` to `set(EVAL_GATES)` — two hardcoded dicts in this file, so it
-    is true or false before the golden set is even opened. `test_every_pitch_tagged_with_a_
-    gate_really_carries_that_gates_case` iterates `EVAL_GATES.items()` and looks only for
-    pitches matching a KNOWN alias. A gate in neither is therefore invisible to both.
+    is true or false before the golden set is even opened.
+    `test_every_pitch_tagged_with_a_gate_really_carries_that_gates_case` iterates
+    `EVAL_GATES.items()` and looks only for pitches matching a KNOWN alias. A gate in neither is
+    therefore invisible to both.
 
     Measured, on the approved set with every digest re-pinned so the seal could not mask it:
     appending `"hallucinated_citation"` to `gp-001`'s `gates` left the whole golden-set suite

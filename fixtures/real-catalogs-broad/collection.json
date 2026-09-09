@@ -75,7 +75,7 @@
     "max_pages_per_host": 40,
     "page_size": 250,
     "crawl_delay": "a declared Crawl-delay widens the interval and never narrows it",
-    "retries": "no retry loop within a run — a 403, 404 or 429 ends that store's walk and is recorded as its outcome, and nothing is re-requested. ACROSS runs, --resume re-walks a store whose recorded outcome was retryable (429, 5xx, transport error, unparseable body): a later run started by a person, never a loop against a host that just answered.",
+    "retries": "no retry loop within a run — a 403 or a 404 on /products.json ends that store's walk and is recorded as its outcome, and nothing is re-requested. ACROSS runs, --resume re-walks a store whose recorded outcome was retryable, which is: a 429, a 5xx, a transport error, an empty body, an unparseable page, an interrupted walk, a robots.txt that could not be read — including a 403 on robots.txt, which is a policy we were never shown rather than an answer about the catalogue — a budget spent before robots.txt was read, or an outcome this collector does not recognise. That is a later run started by a person, never a loop against a host that just answered.",
     "scope": "public catalogue data only",
     "concurrency": "none — one host at a time, one request at a time. Measured: 8 concurrent connections across 30 Cloudflare-fronted zones drew an IP-wide 429 at request 41, 5.9 seconds in; the same 80 zones serially cost 209 requests and zero blocks.",
     "resume": "a store already walked to a non-retryable outcome under these same settings is not re-fetched; every skip is checked against the page digests on disk",

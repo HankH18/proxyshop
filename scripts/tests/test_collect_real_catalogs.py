@@ -453,6 +453,68 @@ def test_an_ending_that_is_a_bad_minute_is_retried(outcome: str) -> None:
     assert crc.outcome_is_retryable(outcome) is True
 
 
+#: Every retryable ending, and the words ``POLITENESS_POSTURE['retries']`` must use to name it.
+#: The posture string is SERIALISED INTO EVERY MANIFEST, so a class of ending the code retries
+#: and the sentence omits is a published artifact describing a rule the collector does not
+#: follow. That is exactly what happened to ``robots_http_403``: the reversal landed in
+#: ``outcome_is_retryable`` and the posture went on enumerating "429, 5xx, transport error,
+#: unparseable body", which ``fixtures/real-catalogs-broad/collection.json`` then shipped.
+_RETRYABLE_ENDING_IN_THE_POSTURE = {
+    "interrupted": "interrupted walk",
+    "transport_error": "transport error",
+    "empty_body": "empty body",
+    "unparseable_page": "unparseable page",
+    "robots_transport_error": "could not be read",
+    "robots_budget": "budget spent before robots.txt",
+    "http_429": "429",
+    "http_503": "5xx",
+    "robots_http_403": "403 on robots.txt",
+    "something_a_later_version_invented": "does not recognise",
+}
+
+
+@pytest.mark.parametrize(("outcome", "phrase"), sorted(_RETRYABLE_ENDING_IN_THE_POSTURE.items()))
+def test_the_posture_string_names_every_ending_the_code_actually_retries(
+    outcome: str, phrase: str
+) -> None:
+    """The sentence in the manifest, pinned to the function the manifest describes.
+
+    Nothing tied the two together before: ``outcome_is_retryable`` had its own tests and the
+    posture string had none, so the robots-403 reversal changed the behaviour and left the
+    published enumeration behind. Both halves are asserted here — the ending really is
+    retryable, and the posture really does name it — so making one true without the other is
+    red.
+    """
+    assert crc.outcome_is_retryable(outcome) is True
+    assert phrase in crc.POLITENESS_POSTURE["retries"], (
+        f"{outcome!r} is retryable but the posture published in every manifest does not say "
+        f"so: no {phrase!r} in {crc.POLITENESS_POSTURE['retries']!r}"
+    )
+
+
+def test_no_retryable_ending_can_be_added_without_stating_it_in_the_posture() -> None:
+    """The gate above only covers the endings someone remembered to list. This one covers the
+    NEXT one: a name added to ``_RETRYABLE_OUTCOMES`` with no entry in
+    :data:`_RETRYABLE_ENDING_IN_THE_POSTURE` goes red until the posture is made to say it.
+    """
+    unstated = sorted(set(crc._RETRYABLE_OUTCOMES) - set(_RETRYABLE_ENDING_IN_THE_POSTURE))
+    assert not unstated, (
+        f"{unstated} are retryable endings with no phrase pinned in the posture; add the words "
+        f"to POLITENESS_POSTURE['retries'] and the pairing here, or every manifest written "
+        f"from now on publishes a rule the collector does not follow"
+    )
+
+
+def test_the_posture_says_which_403_is_terminal_so_the_pair_can_be_told_apart() -> None:
+    """``http_403`` is terminal and ``robots_http_403`` is not, and a reader with only the
+    manifest has nothing but this sentence to tell them apart. It must name the resource."""
+    retries = crc.POLITENESS_POSTURE["retries"]
+    assert crc.outcome_is_retryable("http_403") is False
+    assert "/products.json" in retries, (
+        f"the posture calls a 403 terminal without saying a 403 on WHAT: {retries!r}"
+    )
+
+
 @pytest.fixture
 def raw_store(tmp_path: Path) -> Iterator[Callable[..., tuple[Path, Any, dict[str, Any]]]]:
     """Build a raw directory holding one finished store, and hand back its pieces."""

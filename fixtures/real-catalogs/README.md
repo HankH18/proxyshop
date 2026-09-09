@@ -274,9 +274,10 @@ A store is skipped only when all four of these hold, and the run says on stdout 
 failed when they do not:
 
 1. the record exists and parses — it is written temp-file-plus-rename, so it is never half-there;
-2. it ended on an **answer** — a short page, a page cap, a robots decision, a 403/404. A
-   transport error, a 429, a 5xx, an empty body, an unparseable page or an unreadable
-   `robots.txt` are *retryable* and the store is walked again. An outcome the collector does
+2. it ended on an **answer** — a short page, a page cap, a written robots refusal, a 403 or 404
+   on `/products.json`, a 404 on `robots.txt`. A transport error, a 429, a 5xx, an empty body,
+   an unparseable page, an interrupted walk or a `robots.txt` that could not be read — a 403 on
+   it included — are *retryable* and the store is walked again. An outcome the collector does
    not recognise is retryable too: re-walking a store is the cheap error, skipping one that
    never finished is not. The read path **re-judges `walk_outcome`** rather than trusting the
    `complete` flag written beside it, and then requires the two to agree — it used to trust the

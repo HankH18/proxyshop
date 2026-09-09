@@ -433,8 +433,33 @@ def assert_retry_posture_matches_the_run(manifest: dict[str, Any]) -> None:
     So the no-resume branch checks the *property* instead. If nothing was reused, then every
     request this collection accounts for belongs to a walk whose fetch rows are still in the
     artifact, and no store can have been charged for a walk that was replaced.
+
+    That still left this function asserting NOTHING about the artifact it ships beside. Measured
+    on ``fixtures/real-catalogs/collection.json``: it is corpus_version 2.0.0, it has no ``run``
+    block, so ``reused`` was empty and the ``retries`` string was bound and never read; and no
+    store in it carries ``requests_charged``, so ``charged == asked`` compared ``asked`` to
+    itself and ``requests_recorded_is_floor`` was absent, which the ``in (False, None)`` check
+    accepts. Blanking ``politeness.retries`` to ``""``, replacing it with "this collector
+    retries every failure in a tight loop", and duplicating a fetch row all passed. The
+    within-a-run promise is now checked off the rows for EVERY manifest, which is the half that
+    is true in both vocabularies, and a manifest with no ``run`` block has to say so by being
+    old rather than by being silent.
     """
     retries = manifest["politeness"]["retries"]
+    assert isinstance(retries, str) and retries.strip(), (
+        "politeness.retries is what the artifact promises about re-requesting; an empty one "
+        "promises nothing and this gate would have accepted it"
+    )
+    # Every version of this posture makes the same within-a-run promise, in different words, so
+    # the promise is checked against the rows rather than the wording: a URL may appear once.
+    for store in manifest["stores"]:
+        urls = [fetch["url"] for fetch in store.get("fetches") or []]
+        repeated = sorted({url for url in urls if urls.count(url) > 1})
+        assert not repeated, (
+            f"{store['host']}: politeness.retries says nothing is re-requested within a run, "
+            f"and this store's own rows show {repeated}"
+        )
+
     reused = list((manifest.get("run") or {}).get("reused_from_earlier_runs") or [])
     if reused:
         assert "within a run" in retries and "resume" in retries.lower(), (
@@ -442,9 +467,24 @@ def assert_retry_posture_matches_the_run(manifest: dict[str, Any]) -> None:
             f"posture must say what a resume does: {retries!r}"
         )
         return
+    if manifest.get("run") is None:
+        # No `run` block is not evidence that nothing was reused — it is a manifest written
+        # before the field existed, which is only this corpus's own 2.0.0 one. A newer manifest
+        # arriving here has LOST the block, and the accounting checks below would then pass by
+        # reading fields it does not carry.
+        assert manifest.get("corpus_version") == "2.0.0", (
+            f"this manifest is corpus_version {manifest.get('corpus_version')!r} and has no "
+            f"`run` block, so whether anything was reused is unrecorded; only the 2.0.0 "
+            f"manifest predates the field"
+        )
+        return
     for store in manifest["stores"]:
         asked = surviving_requests(store)
-        charged = int(store.get("requests_charged", asked))
+        assert "requests_charged" in store, (
+            f"{store['host']}: this manifest carries a `run` block, so it is new enough to "
+            f"charge each store its requests; without the field the check below is vacuous"
+        )
+        charged = int(store["requests_charged"])
         assert charged == asked, (
             f"{store['host']} is charged {charged} requests but the walk recorded here made "
             f"{asked}, so it was walked more than once — which contradicts an empty "
@@ -484,7 +524,9 @@ def test_nothing_in_this_collection_was_ever_re_requested(corpus: Corpus) -> Non
     ``politeness.retries`` used to say ``none — 403/404/429 is a recorded outcome, not something
     to retry around`` and this suite asserted that literal string. It stopped being the whole
     truth when ``--resume`` landed: a resume re-asks a host whose recorded outcome was retryable
-    (429, 5xx, transport error) on the next run. That is a person starting a fresh run days
+    — a 429, a 5xx, a transport error, an empty body, an unparseable page, an interrupted walk,
+    a ``robots.txt`` that could not be read (a 403 on it included), or an outcome the collector
+    does not recognise — on the next run. That is a person starting a fresh run days
     later rather than a loop hammering a host that just answered — a defensible posture, but not
     the one the sentence described, and the gate asserting the sentence could not tell.
 

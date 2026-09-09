@@ -1057,8 +1057,18 @@ def test_the_readmes_discrimination_table_agrees_with_the_pinned_probe_counts() 
 
     empty = sorted(name for name, n in INCUMBENT_PROBE_HITS.items() if n == 0)
     assert f"{len(empty)} of {len(INCUMBENT_PROBE_HITS)}" in zero_row, zero_row
-    missing = [name for name in empty if name not in zero_row]
-    assert not missing, f"the README's zero-scoring list leaves out {missing}: {zero_row}"
+    # An EQUALITY, both ways. Requiring only that every zero-scoring family is named let the row
+    # name families that score: measured, adding `tools` (12 hits on the incumbent corpus) to
+    # this row passed. A count that agrees while the list does not is the same wrong table.
+    named = {
+        name
+        for name in INCUMBENT_PROBE_HITS
+        if re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", zero_row)
+    }
+    assert named == set(empty), (
+        f"the README's zero-scoring list is {sorted(named)} but the families that actually "
+        f"score 0 on the incumbent corpus are {empty}: {zero_row}"
+    )
 
     thin = {name: n for name, n in INCUMBENT_PROBE_HITS.items() if n < PROBE_FLOOR}
     survivor = sorted(set(INCUMBENT_PROBE_HITS) - set(thin))

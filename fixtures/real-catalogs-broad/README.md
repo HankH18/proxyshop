@@ -160,7 +160,8 @@ Measured, from `collection.json`, and recomputable from it:
 * The research User-Agent, unspoofed, with a contact address.
 * **No retry loop.** Within the run, no URL was requested twice — checkable, and checked by
   `test_the_retry_posture_says_what_a_resume_actually_does`. **Across runs, `--resume` does
-  re-walk a host whose recorded outcome was retryable** (429, 5xx, transport error, and now a
+  re-walk a host whose recorded outcome was retryable** (429, 5xx, transport error, empty body,
+  unparseable page, interrupted walk, an unrecognised outcome, and now a
   403 on robots.txt): 51 of these 53 stores came from an earlier run, and three records here
   are retryable — bombas.com, katzmosestools.com and industrywest.com. In practice the next
   `fetch` against that scratch directory re-walks all 53 anyway, because `collector_version`
@@ -384,11 +385,41 @@ record separately.
 | `test_all_ten_stores_are_accounted_for` | exact set equality against `ALL_HOSTS` | 10 → 53 hosts |
 | `test_the_per_store_and_total_product_counts_are_pinned` | exact dict equality against `RECORDED_COUNTS` | 3,093 → 17,409, and livemomentous 90 → 89 |
 | `test_every_page_reassembles_byte_for_byte_into_the_response_that_was_served` | ends on `assert pages == 18` | 18 → 90 pages |
-| `test_the_corpus_stays_small_enough_to_live_in_git` | `assert total < 5 MB` | 2.7 MB → 14.1 MB |
+| `test_the_corpus_stays_small_enough_to_live_in_git` | `assert total < 5 MB` | 2.8 MB → 14.1 MB |
 | `test_every_store_contributes_a_catalogue_rather_than_a_shelf` | `assert min(counts.values()) >= 50` | smallest store 90 (paradiseherbs, livemomentous) → flybyjing.com at 32 |
 | `test_this_corpus_is_a_single_category_corpus_and_says_so` | asserts every roster line reads `supplements` | would correctly fail: the corpus is no longer single-category |
 | `DEMO_QUERIES` gates (`stores_with` / `stores_without`) | exact store counts over the whole corpus | 10-store denominators → 38 |
-| `scripts/build_demo_deployment.py` → `exchange-deployment.json` | `composition.MAX_DEPLOYMENT_BYTES` is 4 MiB | see below |
+| `scripts/build_demo_deployment.py` → `exchange-deployment.json` | the EXCHANGE's `apps/exchange/src/composition.py` `MAX_DEPLOYMENT_BYTES`, 4 MiB — not the buyer's constant of the same name in `apps/buyer/svc/src/composition.py`, which is 64 KiB and holds a different document | see below |
+
+Every row of that table's third column comes out of this, which reads the two manifests and the
+bytes on disk and asserts nothing:
+
+```sh
+.venv/bin/python - <<'EOF'
+import json
+from pathlib import Path
+for d in ("fixtures/real-catalogs", "fixtures/real-catalogs-broad"):
+    m = json.loads((Path(d) / "collection.json").read_text())
+    live = [s for s in m["stores"] if s["skipped"] is None]
+    c = {s["host"]: s["products_recorded"] for s in live}
+    lo = min(c.values())
+    size = sum(f.stat().st_size for f in Path(d).rglob("*") if f.is_file())
+    print(d, "| rows", len(m["stores"]), "| collected", len(live),
+          "| products", sum(c.values()), "| pages", sum(s["pages_fetched"] for s in live),
+          "| smallest", lo, sorted(h for h, n in c.items() if n == lo),
+          "| livemomentous", c.get("livemomentous.com"), f"| {size / 1e6:.1f} MB")
+EOF
+# fixtures/real-catalogs       | rows 10 | collected 10 | products  3093 | pages 18 | smallest 90 ['livemomentous.com', 'paradiseherbs.com'] | livemomentous 90 |  2.8 MB
+# fixtures/real-catalogs-broad | rows 53 | collected 38 | products 17409 | pages 90 | smallest 32 ['flybyjing.com']                              | livemomentous 89 | 14.1 MB
+```
+
+The size is that `rglob` sum, which is the one
+`test_the_corpus_stays_small_enough_to_live_in_git` itself computes — README and `collection.json`
+included, not the gzip payload alone. It is printed to one decimal because **this file is inside
+the directory it measures**: editing these paragraphs moves the byte count, so a byte-exact
+figure here would be stale the moment it was written. The row read **2.7 MB** until 2026-09-08,
+which was `totals.bytes_on_disk` (2,697,017) — the gzip payload, a smaller definition of "total"
+on the left of the arrow than on the right. Both halves are now the gate's own definition.
 
 `ranking.verification.MAX_CATALOG_PRODUCTS` (1,000) is **not** breached, because
 `SNAPSHOT_PRODUCTS_PER_STORE` already trims each store to 1,000 before the document is built.

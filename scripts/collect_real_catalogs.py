@@ -64,10 +64,12 @@ half-collected store silently treated as finished would poison the corpus:
 * the record is written atomically (temp file + ``rename``), so a record that exists parses;
 * it carries ``walk_outcome`` — **why the walk stopped**, not the fact that it stopped — and
   the read path re-judges it with ``outcome_is_retryable`` rather than trusting the
-  ``complete`` boolean stored beside it. A short page, an empty page, a robots decision, a
-  403/404: outcomes, and terminal. A transport error, a 429, a 5xx, an unparseable body, an
-  unreadable ``robots.txt``, or **an outcome this version has never heard of**: retryable, and
-  the store is walked again. ``complete`` is then required to *agree* with that judgement, so a
+  ``complete`` boolean stored beside it. A short page, an empty page, a written robots refusal,
+  a 403 or 404 on ``/products.json``, a 404 on ``robots.txt``: outcomes, and terminal. A
+  transport error, a 429, a 5xx, an empty body, an unparseable page, an interrupted walk, a
+  ``robots.txt`` that could not be read — **including a 403 on it** — or **an outcome this
+  version has never heard of**: retryable, and the store is walked again. ``complete`` is then
+  required to *agree* with that judgement, so a
   record whose two fields disagree — the shape a hand edit leaves — is refused rather than
   believed;
 * it carries the settings that decide the result (page size, page cap, request cap, collector
@@ -117,7 +119,9 @@ Politeness, which is not optional — these are real businesses
   per store rather than presenting a partial catalogue as complete.
 * **No retry loop.** Within a run nothing is re-requested: a 403, a 404 or a 429 ends that
   store's walk and is recorded as its outcome. Across runs, ``--resume`` does re-ask a host
-  whose recorded outcome was retryable (429, 5xx, transport error) — that is a fresh run, made
+  whose recorded outcome was retryable — a 429, a 5xx, a transport error, an empty body, an
+  unparseable page, an interrupted walk, a ``robots.txt`` that could not be read (**including a
+  403 on it**), or an outcome this collector does not recognise — that is a fresh run, made
   deliberately by a person, not a loop hammering a host that just answered. Saying "nothing
   retries" full stop was false the moment resume landed, and ``collection.json`` now says which
   of the two it means.
@@ -207,8 +211,10 @@ def is_polite_interval(seconds: float) -> bool:
     returned NaN, ``spend`` computed ``wait = nan`` and tested ``if wait > 0``, which is False
     as well — so a six-request walk of one host slept **zero times** under a manifest declaring
     2.0 s. ``max(nan, delay)`` defeated ``honour_crawl_delay`` the same way. Measured against
-    the mock transport before this function existed; ``test_no_argument_vector_can_reach_an_
-    unenforceable_interval`` and its neighbours are that measurement, kept.
+    the mock transport before this function existed;
+    ``test_no_argument_vector_can_reach_an_unenforceable_interval`` and its neighbours are that
+    measurement, kept — and the name is on one line here because the wrapped version could not
+    be found by grep, which is the same defect as citing a line number.
 
     Infinity is refused for the opposite reason: it passes ``>=`` honestly and then parks the
     walk forever on its second request. Negative zero was already refused (``-0.0 < 2.0``) and
@@ -612,7 +618,8 @@ def fetch_store(
         # connection means the file could not be read at all, and recording that as the
         # merchant's written refusal turns our own bad minute into their stated policy.
         # `refusal_outcome` already tells the two apart — `robots_disallowed` is terminal and
-        # is never re-asked, while a transport error or a 429 is retryable — so a reason line
+        # is never re-asked, while all three ways of failing to READ the file (a transport
+        # error, a 429, and a 403 on robots.txt) are retryable — so a reason line
         # that says "disallows" for all of them contradicts the record it sits beside. Both
         # were observed live on 2026-09-08: katzmosestools.com dropped the connection and
         # bombas.com answered 429, and both were logged as having disallowed us.
@@ -1395,10 +1402,14 @@ POLITENESS_POSTURE: dict[str, Any] = {
     "robots_txt": "fetched and respected per host",
     "crawl_delay": "a declared Crawl-delay widens the interval and never narrows it",
     "retries": (
-        "no retry loop within a run — a 403, 404 or 429 ends that store's walk and is recorded "
-        "as its outcome, and nothing is re-requested. ACROSS runs, --resume re-walks a store "
-        "whose recorded outcome was retryable (429, 5xx, transport error, unparseable body): a "
-        "later run started by a person, never a loop against a host that just answered."
+        "no retry loop within a run — a 403 or a 404 on /products.json ends that store's walk "
+        "and is recorded as its outcome, and nothing is re-requested. ACROSS runs, --resume "
+        "re-walks a store whose recorded outcome was retryable, which is: a 429, a 5xx, a "
+        "transport error, an empty body, an unparseable page, an interrupted walk, a robots.txt "
+        "that could not be read — including a 403 on robots.txt, which is a policy we were "
+        "never shown rather than an answer about the catalogue — a budget spent before "
+        "robots.txt was read, or an outcome this collector does not recognise. That is a later "
+        "run started by a person, never a loop against a host that just answered."
     ),
     "scope": "public catalogue data only",
     "concurrency": (
