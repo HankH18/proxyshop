@@ -91,6 +91,7 @@ from ingest.graph import (
     provenance_violations,
     rebuild_vector_index,
     reembed_products,
+    run_schema_statement,
     schema_report,
     schema_statements,
     seed_products,
@@ -863,6 +864,196 @@ def test_apply_schema_from_an_empty_database_is_idempotent(neo4j_session: Any) -
     assert first.indexes[VECTOR_INDEX_NAME] == "VECTOR"
     assert first.vector_dimensions == 1024
     assert first.vector_similarity == "cosine"
+
+
+def _drop_schema(session: Any) -> set[str]:
+    """Take the T-012 schema off the database, and return the built-ins that must survive.
+
+    Neo4j's two token-lookup indexes are identified by TYPE, never by name: their generated
+    names differ per container, so a hardcoded pair is correct only on one machine, and
+    dropping them permanently degrades a database several agents share.
+
+    Args:
+        session: an open ``neo4j.Session``.
+
+    Returns:
+        The names of the built-in ``LOOKUP`` indexes, which were left alone.
+    """
+    builtin = {
+        name for name, kind in schema_report(session).indexes.items() if kind.upper() == "LOOKUP"
+    }
+    assert len(builtin) == 2, f"expected the two token-lookup indexes, found {builtin}"
+    for name in list(schema_report(session).constraints):
+        session.run(f"DROP CONSTRAINT {name} IF EXISTS").consume()
+    for name in list(schema_report(session).indexes):
+        if name not in builtin:
+            session.run(f"DROP INDEX {name} IF EXISTS").consume()
+    return builtin
+
+
+@pytest.mark.docker
+@pytest.mark.graph
+def test_five_callers_can_apply_the_schema_to_a_cold_database_at_once(
+    neo4j_driver: Any, neo4j_session: Any
+) -> None:
+    """The parallel-load case: five loaders reach ``apply_schema`` before anyone has run it.
+
+    ``test_apply_schema_from_an_empty_database_is_idempotent`` above calls the function
+    twice in a row and passes, which is why the concurrency claim in its docstring survived
+    so long unexamined. Sequentially there is nothing to collide with. Concurrently there
+    is: ``CREATE CONSTRAINT ... IF NOT EXISTS`` checks and creates under one schema lock,
+    several clients holding a shared lock all try to upgrade it, and Forseti breaks the
+    cycle by failing every client but one with
+    ``Neo.TransientError.Transaction.DeadlockDetected``.
+
+    MEASURED against Neo4j 5.26.30 Community before the retry existed: **4 of 5 callers
+    deadlocked, and 11 of 12 did, in every trial**. It is not a flake and it is not rare —
+    it is the first thing a parallel corpus load hits, on its first statement, which is why
+    a 17,409-product load could not simply be split across processes.
+
+    The database only has to be cold for it to fire — which is why this test drops the
+    schema first, and restores it in a ``finally`` so a failure here cannot cascade into
+    every later test in the file.
+    """
+    import threading  # noqa: PLC0415 - only this test needs it
+
+    callers = 5
+    barrier = threading.Barrier(callers)
+    outcomes: list[str] = []
+    lock = threading.Lock()
+
+    def apply_once() -> None:
+        try:
+            barrier.wait(timeout=30)
+            with neo4j_driver.session() as session:
+                apply_schema(session)
+            outcome = "ok"
+        except Exception as exc:  # noqa: BLE001 - the failure is the measurement
+            outcome = f"{type(exc).__name__} {getattr(exc, 'code', '')}".strip()
+        with lock:
+            outcomes.append(outcome)
+
+    try:
+        builtin = _drop_schema(neo4j_session)
+        emptied = schema_report(neo4j_session)
+        assert emptied.constraints == {}, "the database must genuinely start without the schema"
+        assert VECTOR_INDEX_NAME not in emptied.indexes
+
+        threads = [threading.Thread(target=apply_once) for _ in range(callers)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=180)
+        assert not [t for t in threads if t.is_alive()], "an apply_schema() caller never returned"
+    finally:
+        apply_schema(neo4j_session)
+
+    assert outcomes == ["ok"] * callers, (
+        f"apply_schema() must be safe to call concurrently on a cold database, got {outcomes}"
+    )
+    report = schema_report(neo4j_session)
+    assert set(report.constraints) == {constraint_name(label) for label in ID_PROPERTY}
+    for name, _label, _prop in LOOKUP_INDEXES:
+        assert name in report.indexes
+    assert report.indexes[VECTOR_INDEX_NAME] == "VECTOR"
+    assert builtin <= set(report.indexes), "the built-in token-lookup indexes must survive"
+
+
+class _FailingSession:
+    """A session whose ``run`` raises a scripted sequence, counting the attempts."""
+
+    def __init__(self, errors: Sequence[BaseException]) -> None:
+        self.errors = list(errors)
+        self.attempts = 0
+
+    def run(self, statement: str, **_: Any) -> Any:
+        self.attempts += 1
+        if self.errors:
+            raise self.errors.pop(0)
+
+        class _Result:
+            def consume(self) -> None:
+                return None
+
+        return _Result()
+
+
+def _server_error(code: str) -> Exception:
+    """An exception shaped like the driver's: a message plus a ``code`` attribute."""
+    error = RuntimeError(code)
+    error.code = code  # type: ignore[attr-defined]
+    return error
+
+
+def test_a_deadlocked_schema_statement_is_retried_until_it_lands() -> None:
+    """Two deadlocks then a success is three attempts and no exception."""
+    session = _FailingSession(
+        [
+            _server_error("Neo.TransientError.Transaction.DeadlockDetected"),
+            _server_error("Neo.TransientError.Transaction.DeadlockDetected"),
+        ]
+    )
+    attempt = run_schema_statement(
+        session, "CREATE INDEX x IF NOT EXISTS FOR (n:N) ON (n.p)", sleep=lambda _: None
+    )
+    assert (attempt, session.attempts) == (3, 3)
+
+
+def test_a_syntax_error_is_not_retried_even_once() -> None:
+    """The silent-on-honest-traffic direction: only Neo4j's *transient* class is retried.
+
+    A ``CREATE VECTOR INDEX`` that does not parse — the exact failure this module's header
+    documents — is a permanent error. Retrying it ten times would turn one immediate, honest
+    failure into a ten-attempt back-off ending in the same failure, and would hide the
+    difference between "the server is busy" and "the statement is wrong".
+    """
+    session = _FailingSession([_server_error("Neo.ClientError.Statement.SyntaxError")])
+    with pytest.raises(RuntimeError, match="SyntaxError"):
+        run_schema_statement(session, "CREATE NONSENSE", sleep=lambda _: None)
+    assert session.attempts == 1, "a permanent error must fail on the first attempt"
+
+
+def test_losing_the_race_to_an_identical_rule_counts_as_success() -> None:
+    """The second cold-start failure mode, which only appeared once the deadlock was retried.
+
+    ``IF NOT EXISTS`` checks and creates in one statement but not in one atom across
+    clients: a caller that passes the check and is then beaten to the commit gets
+    ``Neo.ClientError.Schema.EquivalentSchemaRuleAlreadyExists``. It is permanent, so
+    retrying it would spin; it means the rule the statement asked for is in the database, so
+    failing on it would make a parallel load flaky in a second way after the first was fixed.
+    """
+    session = _FailingSession(
+        [_server_error("Neo.ClientError.Schema.EquivalentSchemaRuleAlreadyExists")]
+    )
+    assert run_schema_statement(session, "CREATE INDEX x", sleep=lambda _: None) == 1
+    assert session.attempts == 1
+
+
+def test_no_OTHER_schema_error_is_treated_as_success() -> None:
+    """Exactly one code means "already done"; every neighbouring one still raises.
+
+    ``Neo.ClientError.Schema.ConstraintWithNameAlreadyExists`` is a real code on this server
+    — measured, it is what ``CREATE CONSTRAINT product_id_unique FOR (n:Widget) REQUIRE
+    n.widget_id IS UNIQUE`` answers when that name belongs to a different rule — and it means
+    the schema is not what this module believes it is. Swallowing it, or anything else in the
+    ``Schema`` family, would turn a corrupted schema into a silent success.
+    """
+    session = _FailingSession(
+        [_server_error("Neo.ClientError.Schema.ConstraintWithNameAlreadyExists")]
+    )
+    with pytest.raises(RuntimeError, match="ConstraintWithNameAlreadyExists"):
+        run_schema_statement(session, "CREATE CONSTRAINT x", sleep=lambda _: None)
+    assert session.attempts == 1
+
+
+def test_an_endless_deadlock_gives_up_rather_than_retrying_forever() -> None:
+    """The retry is bounded, and the caller still sees the driver's own exception."""
+    session = _FailingSession(
+        [_server_error("Neo.TransientError.Transaction.DeadlockDetected")] * 20
+    )
+    with pytest.raises(RuntimeError, match="DeadlockDetected"):
+        run_schema_statement(session, "CREATE INDEX x", attempts=4, sleep=lambda _: None)
+    assert session.attempts == 4
 
 
 @pytest.mark.docker

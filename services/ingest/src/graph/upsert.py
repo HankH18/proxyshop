@@ -37,8 +37,10 @@ Two consequences of that shape, stated because an adapter author will hit both:
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Iterator, Sequence
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Any
 
 from .model import (
@@ -85,6 +87,94 @@ class EmbeddingDimensionMismatch(InvalidEmbeddingVector):
 
 
 # ---------------------------------------------------------------------------------------
+# The write memo
+# ---------------------------------------------------------------------------------------
+
+
+@dataclass
+class WriteMemo:
+    """What one batch of writes has already put in the graph, so it need not ask again.
+
+    WHY. This module is round-trip bound, and MEASURED on the ten-store recorded corpus
+    (3,093 products) two thirds of those round-trips carry no new information:
+
+    * **91,324 of 234,119 statements — 39.0% — were ``MERGE (s:Source …)``** for only
+      **3,103 distinct** ``Source`` nodes, because :func:`_fact_node` and :func:`_fact_edge`
+      each re-merge the source of every fact they write, and one crawled product's ~14 facts
+      all name the same source.
+    * **46,521 — 19.9% — were existence probes** from :func:`_require_nodes`, asking whether
+      a ``Product`` exists a few statements after this same batch created it.
+
+    Both are answerable from what this batch has already done, which is all this memo holds.
+
+    WHAT MAKES IT SAFE, since a stale cache here would be a data defect rather than a slow
+    load. Three properties, and they are the reason it is a scoped object rather than a
+    module-level dict:
+
+    1. **It records only this batch's own successful writes.** Nothing is assumed present
+       because it "should" be; an entry exists because a statement returned.
+    2. **The source key is the whole node, not its id.** ``(source_id, every property)`` —
+       so a second reading of the same ``source_id`` that changed ``observed_at`` or
+       ``confidence`` misses the memo and is written. A key of ``source_id`` alone would
+       silently drop that update.
+    3. **It is bound to one session and one ``with`` block.** :func:`write_memo` is entered
+       by :func:`~ingest.adapters.base.apply_upserts` around a single batch and exits with
+       it, so a memo cannot outlive the session it was populated against, cannot be shared
+       between two loads of different corpora, and cannot survive a graph reset — the three
+       ways this optimisation could otherwise turn into missing rows. A memo handed a
+       different session than the one it was opened for is ignored rather than trusted.
+    """
+
+    #: The session this memo was opened for. Consulted only for that same object.
+    session: Any
+
+    #: ``(source_id, sorted properties)`` for every ``Source`` this batch merged.
+    sources: set[tuple[str, tuple[tuple[str, Any], ...]]] = field(default_factory=set)
+
+    #: ``(label, stable_id)`` for every node this batch merged, so an existence probe for
+    #: one of them is a question this process already knows the answer to.
+    nodes: set[tuple[str, str]] = field(default_factory=set)
+
+
+#: The memo in force for the current thread, or ``None`` — which is the state for every
+#: caller that does not go through :func:`write_memo`, and which restores the pre-memo
+#: behaviour statement for statement. A ``ContextVar`` rather than a global because threads
+#: start with their own context, so two concurrent refreshes cannot see each other's memo.
+_ACTIVE_MEMO: ContextVar[WriteMemo | None] = ContextVar("ingest_graph_write_memo", default=None)
+
+
+def _memo_for(session: Any) -> WriteMemo | None:
+    """The active memo, but only if it belongs to ``session``.
+
+    Args:
+        session: the session a write is about to go through.
+
+    Returns:
+        The memo, or ``None`` when there is none or it was opened for a different session.
+    """
+    memo = _ACTIVE_MEMO.get()
+    return memo if memo is not None and memo.session is session else None
+
+
+@contextmanager
+def write_memo(session: Any) -> Iterator[WriteMemo]:
+    """Remember this batch's own writes for the duration of the block.
+
+    Args:
+        session: the session every write inside the block will use.
+
+    Yields:
+        The :class:`WriteMemo`, so a caller (or a test) can read what it elided.
+    """
+    memo = WriteMemo(session=session)
+    token = _ACTIVE_MEMO.set(memo)
+    try:
+        yield memo
+    finally:
+        _ACTIVE_MEMO.reset(token)
+
+
+# ---------------------------------------------------------------------------------------
 # Source
 # ---------------------------------------------------------------------------------------
 
@@ -98,6 +188,10 @@ RETURN s.source_id AS source_id
 def upsert_source(session: Any, source: Source) -> str:
     """Create or update the ``Source`` node every fact points at.
 
+    Inside a :func:`write_memo` block this is a no-op for a source whose every property this
+    batch has already written through this same session — see :class:`WriteMemo` for why
+    that is the whole node and not just its id.
+
     Args:
         session: an open ``neo4j.Session`` or transaction.
         source: the provenance record.
@@ -105,7 +199,14 @@ def upsert_source(session: Any, source: Source) -> str:
     Returns:
         ``source.source_id``.
     """
-    session.run(_UPSERT_SOURCE, source_id=source.source_id, props=source.as_properties()).consume()
+    properties = source.as_properties()
+    memo = _memo_for(session)
+    key = (source.source_id, tuple(sorted(properties.items())))
+    if memo is not None and key in memo.sources:
+        return source.source_id
+    session.run(_UPSERT_SOURCE, source_id=source.source_id, props=properties).consume()
+    if memo is not None:
+        memo.sources.add(key)
     return source.source_id
 
 
@@ -204,7 +305,7 @@ def _fact_node(
         if not order_independent_properties
         else "SET " + ", ".join(_least_of(name) for name in order_independent_properties)
     )
-    session.run(
+    result = session.run(
         f"""
         MATCH (src:Source {{source_id: $source_id}})
         MERGE (n:{label} {{{id_property}: $id_value}})
@@ -213,11 +314,26 @@ def _fact_node(
         {fold}
         MERGE (n)-[r:{SUPPORTED_BY}]->(src)
         SET r.observed_at = src.observed_at, r.confidence = src.confidence
+        RETURN count(n) AS written
         """,
         source_id=source.source_id,
         id_value=id_value,
         props=props,
-    ).consume()
+    ).single()
+    # The statement OPENS with `MATCH (src:Source …)`, so a Source that is not there makes
+    # the whole write a no-match: no node, no edge, no error, and a fact quietly absent from
+    # a graph whose load reported success. Costing nothing (the row is on a result already
+    # being read) this turns that into a refusal. It matters most for the write memo, whose
+    # entire premise is that this process has already merged that Source — a memo that were
+    # ever wrong would otherwise fail exactly this silently.
+    if (result or {"written": 0})["written"] == 0:
+        raise ProvenanceRequired(
+            f"cannot write {label}({id_value}): its Source {source.source_id} is not in the "
+            f"graph, so the fact would have been written unsourced or not at all"
+        )
+    memo = _memo_for(session)
+    if memo is not None:
+        memo.nodes.add((label, id_value))
     return id_value
 
 
@@ -239,6 +355,9 @@ def _vocabulary_node(session: Any, label: str, id_property: str, props: dict[str
         id_value=id_value,
         props=props,
     ).consume()
+    memo = _memo_for(session)
+    if memo is not None:
+        memo.nodes.add((label, str(id_value)))
     return str(id_value)
 
 
@@ -253,6 +372,11 @@ def _require_nodes(session: Any, endpoints: Sequence[tuple[str, str]]) -> None:
     it is properly sourced; it is simply attached to nothing. Checking first makes the whole
     operation all-or-nothing in the only way available here.
 
+    Inside a :func:`write_memo` block an endpoint this same batch already merged is not
+    probed again — the probe would be asking the database to confirm a statement this
+    process just watched succeed. Everything else is still probed, so an endpoint that was
+    supposed to exist and does not still refuses here rather than landing an orphan.
+
     Args:
         session: an open ``neo4j.Session`` or transaction.
         endpoints: ``(label, stable_id)`` pairs that must already exist.
@@ -261,9 +385,11 @@ def _require_nodes(session: Any, endpoints: Sequence[tuple[str, str]]) -> None:
         ProvenanceRequired: one or more endpoints do not exist. Named so the caller sees the
             same error whether the endpoint was missing before or during the write.
     """
+    memo = _memo_for(session)
+    unknown = [pair for pair in endpoints if memo is None or tuple(pair) not in memo.nodes]
     missing = [
         f"{label}({identity})"
-        for label, identity in endpoints
+        for label, identity in unknown
         if session.run(
             f"MATCH (n:{label} {{{ID_PROPERTY[label]}: $identity}}) RETURN count(n) AS c",
             identity=identity,
@@ -1033,6 +1159,7 @@ __all__ = [
     "EmbeddingDimensionMismatch",
     "ProvenanceRequired",
     "ProvenanceViolation",
+    "WriteMemo",
     "assert_provenance_complete",
     "clear_product_embedding",
     "link_category",
@@ -1055,4 +1182,5 @@ __all__ = [
     "upsert_source",
     "upsert_store",
     "upsert_variant",
+    "write_memo",
 ]

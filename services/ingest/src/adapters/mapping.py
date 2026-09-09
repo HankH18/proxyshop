@@ -31,6 +31,7 @@ seam a seam:
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from collections.abc import Mapping
 from typing import Any
@@ -42,6 +43,7 @@ from .hashing import content_hash
 
 __all__ = [
     "AVAILABILITY_VOCABULARY",
+    "MEDIA_ENV",
     "MEDIA_PER_PRODUCT_LIMIT",
     "build_upserts",
     "catalog_source",
@@ -50,6 +52,7 @@ __all__ = [
     "composite_hash",
     "image_records",
     "media_asset_id_for",
+    "media_enabled",
     "native_key",
     "native_product_key",
     "on_seller_domain",
@@ -66,6 +69,45 @@ __all__ = [
 #: behind the number (96.4% of the recorded corpus kept, 2.8% of its products truncated,
 #: worst real product 81 images).
 MEDIA_PER_PRODUCT_LIMIT = 12
+
+#: The environment name that turns media writes off. Unset means ON, which is what every
+#: load in this repository has always done — see :func:`media_enabled`.
+MEDIA_ENV = "PROXYSHOP_INGEST_MEDIA"
+
+#: The values that mean "off". Anything else, including an unset variable and an empty
+#: string, means on: a typo must not silently stop writing a third of the graph.
+MEDIA_OFF_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def media_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Whether a load writes ``MediaAsset`` nodes and ``HAS_MEDIA`` edges.
+
+    WHAT MEDIA COSTS, measured on the ten-store recorded corpus (3,093 products, one
+    process): 17,520 ``MediaAsset`` merges and 17,520 ``HAS_MEDIA`` merges — 15.0% of the
+    234,119 statements — plus the 17,520 existence probes those media ops were the only
+    reason for. Media is the single largest kind of write in the load.
+
+    WHY IT IS STILL ON BY DEFAULT. Nothing in this repository *reads* it — searched for
+    ``MediaAsset``, ``HAS_MEDIA`` and ``asset_id`` across every app, service and package,
+    and every match is in ``services/ingest`` (this mapping, the upsert, the model, and
+    their tests); ``exchange.retrieval.catalogue`` builds its snapshot out of
+    ``ingest.graph.query.catalogue_entry``, whose Cypher names no media at all. But
+    ``ingest`` writes it deliberately, for a downstream verified-primary media rule that is
+    designed and not yet built (see ``services/ingest/tests/test_catalog_images.py``), and a
+    loader that silently stopped recording 17,520 real image records would be a much worse
+    defect than the round-trips it saves. So this is a switch an operator throws, per load,
+    and its default is exactly what the code did before it existed.
+
+    Args:
+        env: the environment to read; the process environment when ``None``.
+
+    Returns:
+        ``False`` only when the variable is set to one of :data:`MEDIA_OFF_VALUES`
+        (case-insensitively).
+    """
+    source = os.environ if env is None else env
+    return str(source.get(MEDIA_ENV, "") or "").strip().lower() not in MEDIA_OFF_VALUES
+
 
 #: ``1,234`` and ``1,234,567.89`` are prices; ``12,50`` and ``1,2345`` are not. A comma that
 #: does not group digits in threes is a decimal comma or a typo, and either way the number it
@@ -436,6 +478,7 @@ def build_upserts(
     *,
     extractor_version: str = "",
     source_class: str = "scraped",
+    include_media: bool | None = None,
 ) -> list[UpsertOp]:
     """Map a catalog snapshot to ordered graph writes. Pure — no I/O, no clock.
 
@@ -454,6 +497,11 @@ def build_upserts(
             not carry one of its own. The snapshot's value wins so that the provenance names
             the adapter that actually did the reading.
         source_class: the provenance class for every ``Source`` minted here.
+        include_media: emit ``media`` ops. ``None`` — the default everywhere — asks
+            :func:`media_enabled`, which is on unless the environment turns it off, so the
+            default behaviour is unchanged. Passing ``False`` drops the ``MediaAsset`` nodes
+            and ``HAS_MEDIA`` edges and nothing else: no other op's identity, order or
+            provenance depends on an image.
 
     Raises:
         ValueError: neither the snapshot nor the caller named an extractor version, which
@@ -462,6 +510,7 @@ def build_upserts(
     changed = snapshot.changed_products
     if not changed:
         return []
+    with_media = media_enabled() if include_media is None else bool(include_media)
 
     version = str(snapshot.extractor_version or "").strip() or str(extractor_version or "").strip()
     if not version:
@@ -527,7 +576,8 @@ def build_upserts(
                     context={"product_id": product.product_id},
                 )
             )
-        for image in product.images:
+        images = product.images if with_media else ()
+        for image in images:
             # The asset is keyed on the store's own image identifier, NOT on the URL alone:
             # Shopify re-stamps `?v=<epoch>` on every image edit, so a URL-keyed node would
             # mint a fresh MediaAsset on every re-crawl of a store that touched its gallery,

@@ -206,6 +206,7 @@ def load_recorded_corpus(
     force: bool = False,
     apply_schema_first: bool = True,
     clock: Any = observed_now,
+    include_media: bool | None = None,
 ) -> CorpusLoadReport:
     """Replay the recorded corpus into the graph and read the result back.
 
@@ -221,6 +222,9 @@ def load_recorded_corpus(
             half is exercised against the real uniqueness constraints.
         apply_schema_first: apply the idempotent schema before writing.
         clock: the observation-timestamp source.
+        include_media: write ``MediaAsset`` nodes and ``HAS_MEDIA`` edges. ``None`` defers
+            to :func:`~ingest.adapters.mapping.media_enabled` — the environment, whose
+            default is on — so an unmodified call loads exactly what it always loaded.
 
     Returns:
         A :class:`CorpusLoadReport`.
@@ -253,7 +257,9 @@ def load_recorded_corpus(
             active.refresh(
                 store.store_id,
                 force=force,
-                adapter=SignedFetchAdapter(client=transport, clock=clock),
+                adapter=SignedFetchAdapter(
+                    client=transport, clock=clock, include_media=include_media
+                ),
             )
         )
 
@@ -324,6 +330,18 @@ def build_parser() -> argparse.ArgumentParser:
             "do not take the D37 cross-process Neo4j flock. Only when you own the database: "
             "measured, a concurrent graph test wiped a full-corpus load halfway through and "
             "the load reported success over a graph holding one store"
+        ),
+    )
+    parser.add_argument(
+        "--no-media",
+        dest="no_media",
+        action="store_true",
+        help=(
+            "do not write MediaAsset nodes or HAS_MEDIA edges. Measured on the ten-store "
+            "corpus they are 15.0%% of the load's statements and the only reason for 17,520 "
+            "of its existence probes, and nothing in this repository reads them yet — but "
+            "the whole point of them is a media rule that is not built, so this is opt-in "
+            "and the default writes them"
         ),
     )
     parser.add_argument(
@@ -423,6 +441,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             corpus,
             force=args.force,
             apply_schema_first=not args.no_schema,
+            include_media=False if args.no_media else None,
         )
         probe_roster = _probe(args.probe, args.probe_limit) if args.probe else None
 

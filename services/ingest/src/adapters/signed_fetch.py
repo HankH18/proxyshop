@@ -111,12 +111,16 @@ class SignedFetchAdapter:
         client: HTTPTransport | None = None,
         clock=_now,
         session_password_path: str = PASSWORD_PATH,
+        include_media: bool | None = None,
     ) -> None:
         self.user_agent = user_agent
         self.signer = signer
         self._client = client
         self._clock = clock
         self.session_password_path = session_password_path
+        #: Emit ``media`` ops. ``None`` defers to
+        #: :func:`~ingest.adapters.mapping.media_enabled`, i.e. the environment, i.e. on.
+        self.include_media = include_media
 
     # -- CatalogAdapter ------------------------------------------------------------------
 
@@ -233,7 +237,9 @@ class SignedFetchAdapter:
         produces zero re-extraction work" guarantee actually lives: for a crawl whose every
         hash matched, this returns ``[]`` without inspecting a single product.
         """
-        return build_upserts(snapshot, extractor_version=EXTRACTOR_VERSION)
+        return build_upserts(
+            snapshot, extractor_version=EXTRACTOR_VERSION, include_media=self.include_media
+        )
 
     # -- storefront password (A1) ---------------------------------------------------------
 

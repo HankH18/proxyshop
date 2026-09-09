@@ -268,11 +268,24 @@ def apply_upserts(session: Any, ops: Iterable[UpsertOp]) -> list[str]:
     enforces that with :class:`~ingest.graph.upsert.ProvenanceRequired` rather than
     creating a placeholder node behind your back.
 
+    **This is where the batch's write memo begins and ends.** One call is one batch through
+    one session, which is the widest scope in which
+    :class:`~ingest.graph.upsert.WriteMemo`'s two claims — "this batch already merged that
+    exact ``Source``" and "this batch already created that node" — are things this process
+    watched happen rather than things it is assuming. The memo is discarded when this
+    function returns, so nothing it learned can be believed on the next batch.
+
     Returns:
         The stable IDs written, in the order they were written.
     """
     from ..graph import upsert as graph_upsert
 
+    with graph_upsert.write_memo(session):
+        return _apply_upserts(session, ops, graph_upsert)
+
+
+def _apply_upserts(session: Any, ops: Iterable[UpsertOp], graph_upsert: Any) -> list[str]:
+    """The replay itself; :func:`apply_upserts` owns the memo scope around it."""
     written: list[str] = []
     for op in ops:
         context = dict(op.context or {})

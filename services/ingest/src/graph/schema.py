@@ -34,7 +34,9 @@ in the T-012 completion report so D6's text can be repaired at the source.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import random
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -200,12 +202,148 @@ class SchemaReport:
         return None if value is None else str(value).lower()
 
 
+#: Neo4j's own retry contract. A server error whose ``code`` starts with this prefix is one
+#: the driver manual defines as *transient*: the same statement may succeed if it is simply
+#: run again. Matched on the code string rather than on ``neo4j.exceptions.TransientError``
+#: so this module still imports without the driver package, which is what keeps
+#: :func:`schema_statements` usable from a test that never opens a connection.
+TRANSIENT_ERROR_PREFIX = "Neo.TransientError."
+
+#: The other thing concurrency does to ``IF NOT EXISTS``, and it is NOT transient.
+#: MEASURED once the deadlock above was retried: a caller whose ``CREATE CONSTRAINT … IF
+#: NOT EXISTS`` passed its existence check and was then beaten to the commit by an identical
+#: statement from another client gets
+#: ``Neo.ClientError.Schema.EquivalentSchemaRuleAlreadyExists``. Treating it as success is
+#: not papering over a name clash, and that is measured too: on this container a
+#: ``CREATE CONSTRAINT product_id_unique IF NOT EXISTS FOR (n:Widget) REQUIRE n.widget_id
+#: IS UNIQUE`` — the same NAME, a different rule — is a **silent no-op** that leaves the
+#: original constraint in place and raises nothing, so a name clash cannot reach this set at
+#: all. (Drop the ``IF NOT EXISTS`` and the same statement raises
+#: ``Neo.ClientError.Schema.ConstraintWithNameAlreadyExists``, and an equivalent rule under
+#: a new name raises ``Neo.ClientError.Schema.ConstraintAlreadyExists`` — different codes,
+#: neither of them this one, both still left to raise.) So the only way this code arrives is
+#: the race, where it says the statement's whole purpose is already served. Retrying it
+#: would be pointless — it would raise again, forever — and failing on it would make a cold
+#: parallel start flaky in a second way after the first was fixed.
+SCHEMA_ALREADY_SATISFIED: frozenset[str] = frozenset(
+    {"Neo.ClientError.Schema.EquivalentSchemaRuleAlreadyExists"}
+)
+
+#: Attempts per schema statement before a transient failure is re-raised. Ten, because the
+#: contention this exists for is a herd of loader processes starting at the same instant and
+#: the herd shrinks by at least one winner per round.
+SCHEMA_RETRY_ATTEMPTS = 10
+
+#: First back-off in seconds, doubled per attempt up to :data:`SCHEMA_RETRY_MAX_DELAY` and
+#: multiplied by a jitter in ``[0.5, 1.5)`` so that two deadlocked callers do not retry in
+#: lockstep and deadlock again.
+SCHEMA_RETRY_BASE_DELAY = 0.05
+SCHEMA_RETRY_MAX_DELAY = 2.0
+
+
+def is_transient_error(error: BaseException) -> bool:
+    """Whether Neo4j classified ``error`` as retryable.
+
+    Args:
+        error: an exception raised by a driver call.
+
+    Returns:
+        ``True`` when the server's error code is under :data:`TRANSIENT_ERROR_PREFIX`.
+        Anything else — a syntax error, a constraint conflict, a refused credential — is
+        false, because retrying those only turns one failure into ten.
+    """
+    return str(getattr(error, "code", "")).startswith(TRANSIENT_ERROR_PREFIX)
+
+
+def is_already_satisfied(error: BaseException) -> bool:
+    """Whether ``error`` means the statement's effect is already in the database.
+
+    Args:
+        error: an exception raised by a driver call.
+
+    Returns:
+        ``True`` for the codes in :data:`SCHEMA_ALREADY_SATISFIED`, which an
+        ``IF NOT EXISTS`` statement can only receive by losing a race to an identical one.
+    """
+    return str(getattr(error, "code", "")) in SCHEMA_ALREADY_SATISFIED
+
+
+def run_schema_statement(
+    session: Any,
+    statement: str,
+    *,
+    attempts: int = SCHEMA_RETRY_ATTEMPTS,
+    base_delay: float = SCHEMA_RETRY_BASE_DELAY,
+    max_delay: float = SCHEMA_RETRY_MAX_DELAY,
+    sleep: Callable[[float], None] = time.sleep,
+    jitter: Callable[[], float] = random.random,
+) -> int:
+    """Run one DDL statement, retrying for as long as Neo4j calls the failure transient.
+
+    WHAT COLLIDES. Measured, the server's own words, from a five-caller cold start::
+
+        Neo.TransientError.Transaction.DeadlockDetected: ForsetiClient[transactionId=10,
+        clientId=5] can't acquire UpdateLock{owners=ForsetiClient[transactionId=6,
+        clientId=1], ForsetiClient[transactionId=7, ...]}
+
+    Several clients hold the schema record's lock and one more cannot take it, so Forseti
+    breaks the cycle by failing all but one. That is not a bug to be locked around: a
+    transient error is the server telling the loser to try again, which is what this does.
+
+    A COLD PARALLEL START HAS **TWO** FAILURE MODES, not one, and the second only appeared
+    once the first was retried: a caller that passes its existence check and is then beaten
+    to the commit gets ``Neo.ClientError.Schema.EquivalentSchemaRuleAlreadyExists``, which
+    is permanent and which no amount of retrying improves. It is treated as success — see
+    :data:`SCHEMA_ALREADY_SATISFIED` for why that is not papering over a conflict.
+
+    Args:
+        session: an open ``neo4j.Session`` or transaction.
+        statement: one Cypher DDL statement.
+        attempts: how many times to run it before giving up.
+        base_delay: the first back-off in seconds.
+        max_delay: the ceiling the doubling back-off stops at.
+        sleep: the sleep function; a parameter so a test does not have to wait.
+        jitter: returns a float in ``[0, 1)``; a parameter for the same reason.
+
+    Returns:
+        The attempt number that succeeded — ``1`` when nothing collided.
+
+    Raises:
+        ValueError: ``attempts`` is less than one.
+        Exception: whatever the driver raised, either because the error was not transient or
+            because the last attempt was used up. The type is left alone so a caller
+            catching a driver exception still does.
+    """
+    if attempts < 1:
+        raise ValueError(f"attempts must be at least 1, got {attempts}")
+    for attempt in range(1, attempts + 1):
+        try:
+            session.run(statement).consume()
+            return attempt
+        except Exception as error:
+            if is_already_satisfied(error):
+                # Another client committed the identical rule first. The statement asked for
+                # a thing to exist and it exists; there is nothing left to do or to retry.
+                return attempt
+            if attempt == attempts or not is_transient_error(error):
+                raise
+            sleep(min(base_delay * 2 ** (attempt - 1), max_delay) * (0.5 + jitter()))
+    raise AssertionError("unreachable")  # pragma: no cover - the loop returns or raises
+
+
 def apply_schema(session: Any, *, await_online: bool = True, timeout: int = 300) -> SchemaReport:
     """Create every constraint and index, idempotently, and read the result back.
 
-    Safe to call from any process at any time — the first call creates, every later call is
-    a no-op, and two concurrent calls both succeed (``IF NOT EXISTS`` is the whole point of
-    D38(c)).
+    Idempotent by ``IF NOT EXISTS``, and safe to call concurrently — but the second property
+    is bought by the retries in :func:`run_schema_statement`, not by ``IF NOT EXISTS``, and
+    the docstring here claimed otherwise until it was measured. On the Neo4j 5.26.30
+    Community container this repo runs, callers entering this function at the same instant
+    against a database that has **no** schema yet all failed but one:
+    ``Neo.TransientError.Transaction.DeadlockDetected`` for 4 of 5, and for 11 of 12 in each
+    of three consecutive trials. Against a database that *already* carries the schema all
+    five succeeded, because every statement is then a no-op that never upgrades a lock —
+    which is why a defect this reproducible went unnoticed: the cold start is the only case
+    it touches, and the cold start is exactly the parallel-load case.
 
     Args:
         session: an open ``neo4j.Session``.
@@ -218,7 +356,7 @@ def apply_schema(session: Any, *, await_online: bool = True, timeout: int = 300)
         A :class:`SchemaReport` describing what is now in the database.
     """
     for statement in schema_statements():
-        session.run(statement).consume()
+        run_schema_statement(session, statement)
     if await_online:
         await_indexes(session, timeout=timeout)
     return schema_report(session)
@@ -544,6 +682,11 @@ __all__ = [
     "EMBEDDING_RUN_RUNNING",
     "LOOKUP_INDEXES",
     "QUERY_PREDICATE_INDEXES",
+    "SCHEMA_ALREADY_SATISFIED",
+    "SCHEMA_RETRY_ATTEMPTS",
+    "SCHEMA_RETRY_BASE_DELAY",
+    "SCHEMA_RETRY_MAX_DELAY",
+    "TRANSIENT_ERROR_PREFIX",
     "VECTOR_INDEX_DIMENSIONS",
     "VECTOR_INDEX_NAME",
     "VECTOR_INDEX_SIMILARITY",
@@ -555,9 +698,12 @@ __all__ = [
     "constraint_name",
     "embedding_run",
     "constraint_statements",
+    "is_already_satisfied",
+    "is_transient_error",
     "lookup_index_statements",
     "rebuild_vector_index",
     "record_embedding_run",
+    "run_schema_statement",
     "schema_report",
     "schema_statements",
     "vector_index_statement",
