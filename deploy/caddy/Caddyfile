@@ -9,11 +9,14 @@
 # purpose: a Caddyfile that silently fell back to `localhost` would serve a self-signed
 # certificate the browser refuses, and the failure would look like a DNS or firewall problem
 # rather than an unset variable. Unset, Caddy refuses to start and says which variable is empty.
-{
-	# Let's Encrypt sends expiry warnings here. Unset is FINE and is the default: ACME issues
-	# certificates without it. Set it only if you want the mail — it goes to a third party.
-	email {$CADDY_ACME_EMAIL}
-}
+# NO GLOBAL OPTIONS BLOCK, and specifically no `email`. An earlier revision carried
+# `email {$CADDY_ACME_EMAIL}` with a comment claiming an unset value was fine. It is not:
+# an unset placeholder expands to a bare `email` with no argument, which is a Caddyfile
+# PARSE error, so Caddy exits before it ever reaches ACME and restart-loops. Measured —
+# `parsing caddyfile tokens for 'email': wrong argument count`, eight times in the log
+# before it was caught. Certificates issue perfectly well without an address; it buys only
+# expiry mail. To add one later, put a real address in — never a placeholder that may be
+# empty.
 
 {$PROXYSHOP_PUBLIC_DOMAIN} {
 	encode gzip

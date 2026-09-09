@@ -23,7 +23,6 @@ services:
       # Unset, this arrives empty and Caddy refuses to start on an empty site address, which is
       # the loud failure at the moment it actually matters.
       PROXYSHOP_PUBLIC_DOMAIN: "${PROXYSHOP_PUBLIC_DOMAIN:-}"
-      CADDY_ACME_EMAIL: "${CADDY_ACME_EMAIL:-}"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       # Certificates and ACME account keys. NAMED VOLUMES, not bind mounts, and they must
