@@ -16,25 +16,38 @@ R2, verbatim: *"present a shortlist of up to 4 differentiated slots (best fit / 
 most reliable / specialist), each showing PRODUCT, PRICE, COMMITMENTS, STORE TRUST INDICATOR,
 and PROVENANCE LABELS ('store-confirmed' vs 'from their website')"*.
 
-MEASURED here, one served slot, verbatim — this is the whole of what the shopper is handed::
+MEASURED here, one served slot, re-taken through ``POST /auctions`` on this file's own fixture
+— every value below is the exchange's, none is typed by hand::
 
-    {"slot": "fit", "bid_ref": "auction-dea4…:demo-woolworks", "fit_score": 0.602,
+    {"slot": "fit", "bid_ref": "auction-16bd…:demo-woolworks", "fit_score": 0.512909090909091,
      "trust_summary": {"store_id": "demo-woolworks", "available": true, "score": 0.81,
                        "confidence": 0.7},
      "provenance_labels": ["store-confirmed"],
-     "product": {"product_ref": "beanie-1", "variant_ref": null},
+     "product": {"product_ref": "beanie-1", "variant_ref": null,
+                 "identity": {"title": "Merino Wool Beanie", "brand": "Woolworks",
+                              "source": "snap-demo-woolworks", "observed_at": null}},
      "price": {"unit_price": 72.0, "total_price": 72.0, "currency": "USD",
-               "discount": null, "expires_at": "2026-09-07T04:06:38.289327Z"},
+               "discount": null, "expires_at": "2026-09-09T02:10:14.458772Z"},
      "commitments": [{"key": "free_returns", "value": "30 days", "claim_id": null,
                       "claim_type": null, "unit": null, "source_span": null,
                       "provenance": {"source": "owner_statement", "authority_rank": 1,
                                      "ref": "envelope:store-alpha:v3#free_returns",
-                                     "observed_at": "2026-01-01T00:00:00Z"}}, …]}
+                                     "observed_at": "2026-01-01T00:00:00Z"}}, …],
+     "message": null, "fallback": false, "fallback_reason": null,
+     "store_domain": "demo-woolworks.example.com"}
 
-All five of R2's fields, and the tests below assert each carries a real per-store value rather
-than one constant repeated: the product is that store's rostered ``product_ref``, the price is
-what that store BID (10% under its listing, so it cannot be confused with the roster's number),
-and the commitments are the approved envelope's, dropped through the pinned ``Claim``.
+Twelve keys, not five: R2's five are the ones the requirement is about and the ones this file
+grades, and the slot has since learned to carry the PLATFORM's crawled ``product.identity``
+(D55's organic half, published so a shopper compares two named products rather than two opaque
+refs), the store's own ``message``, and the ``fallback`` / ``fallback_reason`` pair that says
+whether a row is a store's own quote or the exchange standing in at the roster's list price.
+``CONTRACT_SLOT_FIELDS`` is therefore a SUBSET check and not an equality, so the next thing a
+slot learns to show makes this file gain an assertion rather than lose one.
+
+The tests below assert each of R2's five carries a real per-store value rather than one constant
+repeated: the product is that store's rostered ``product_ref``, the price is what that store BID
+(10% under its listing, so it cannot be confused with the roster's number), and the commitments
+are the approved envelope's, dropped through the pinned ``Claim``.
 
 **Where the other three used to stop, and why this file is where it shows.** They were dropped at
 the *protocol schema*: ``ShortlistSlot`` declared exactly
@@ -81,6 +94,27 @@ PRODUCTS = {
 #: Every store bids under its listing, so a price read off a slot can be told apart from the
 #: roster's number.
 BID_PRICES = {store: round(LIST_PRICES[store] * 0.9, 2) for store in STORES}
+
+#: WHAT THE PLATFORM CRAWLED about each rostered product — the organic half of D55, and the
+#: surface :mod:`exchange.retrieval.relevance` judges an organic row on. A title and a brand,
+#: because that is what a crawl and a deployment document both carry; see :func:`_catalog` for
+#: the measurement that says so and for what a ref-in-the-title-field cost this file.
+#:
+#: All three are beanies and the query asks for a beanie, so every one of them is genuinely on
+#: topic. That is deliberate: this file's subject is R10 — a silent store still reaching the
+#: shopper — and a roster that was ALSO off-topic would make a passing test unable to say which
+#: rule it had confirmed. The off-topic case is a real and different rule, and it is pinned on
+#: the exchange's own route in ``apps/exchange/tests/test_a_blank_shortlist_is_never_silent.py``.
+CRAWLED_TITLES = {
+    "demo-woolworks": "Merino Wool Beanie",
+    "demo-northface": "Ribbed Merino Beanie",
+    "demo-fastfashion": "Warm Knit Merino Beanie",
+}
+CRAWLED_BRANDS = {
+    "demo-woolworks": "Woolworks",
+    "demo-northface": "Northface",
+    "demo-fastfashion": "Fastfashion",
+}
 
 #: One trust score per store, all different, so "the indicator is real" is checkable rather
 #: than a single number that could be a constant.
@@ -206,6 +240,38 @@ class Bidders:
 
 
 def _catalog() -> Any:
+    """The PLATFORM's crawl of each rostered product, shaped the way every real source shapes it.
+
+    ``canonical_name`` used to be ``PRODUCTS[store]`` — the product REF written into the title
+    field — and ``brand`` was absent. That was harmless while the field was only a key claim
+    verification joined on, and it stopped being harmless when
+    :func:`~exchange.ranking.verification.catalog_identity` made the same field the PLATFORM's
+    crawled NAME and :mod:`exchange.retrieval.relevance` began judging organic rows against it:
+    ``identity_surface`` folded ``"beanie-2"`` to the single content word ``beanie`` (the bare
+    digit is dropped), and ``TopicalRelevance`` needs ``min(2, len(asked))`` agreements or half,
+    so against this file's three-content-word query (``warm``, ``merino``, ``beanie``) a
+    one-word identity is refused **whatever product it names**. All three silent stores were
+    excluded ``organic_result_off_topic`` and the shopper got a blank screen.
+
+    MEASURED, because "no real crawl looks like that" is the whole basis for changing a fixture
+    rather than a rule. Through the served ``catalog_identity`` -> ``identity_surface`` ->
+    ``content_terms`` chain:
+
+    * ``deploy/demo/exchange-deployment.json`` — 3,086 products, every one resolving an
+      identity, minimum 2 content words, **0 below 2**.
+    * the demo graph ``proxyshop-neo4j-1``, read live — ``MATCH (p:Product) RETURN count(p)`` =
+      3,093, ``p.brand IS NULL OR p.brand = ''`` = 0, minimum 2 content words, **0 below 2**.
+
+    Titles like ``Bacopa`` and ``Resveratrol`` do occur, and they clear the rule because the
+    crawl also carries a brand: ``Bacopa Gaia Herbs`` folds to three terms. A ref in the title
+    field and no brand at all is a shape neither source produces.
+
+    So the products below are what the demo roster actually holds — beanies, for a beanie query
+    — named and branded the way the crawl names and brands them. Nothing about what these tests
+    ASSERT changed; what changed is that the fixture stopped stating something about the
+    platform's crawl that no crawl states. ``product_ref`` is untouched, so every claim the
+    verifier grades still joins on exactly the key it did.
+    """
     from exchange.ranking.verification import StaticCatalogSnapshots
 
     return StaticCatalogSnapshots(
@@ -215,7 +281,8 @@ def _catalog() -> Any:
                 "products": [
                     {
                         "product_ref": PRODUCTS[store],
-                        "canonical_name": PRODUCTS[store],
+                        "canonical_name": CRAWLED_TITLES[store],
+                        "brand": CRAWLED_BRANDS[store],
                         "evidence_ref": f"snap-{store}#{PRODUCTS[store]}",
                         "attributes": {"capacity_l": {"value": 35}},
                     }
@@ -330,6 +397,12 @@ def served_view(client: TestClient, auction_id: str) -> dict[str, Any]:
     view = client.get(f"{AUCTION_VIEW}/{auction_id}")
     assert view.status_code == 200, view.text
     return dict(view.json())
+
+
+def slot_identity(slot: dict[str, Any]) -> str | None:
+    """The PLATFORM's crawled title carried on one slot, or ``None`` if it carries none."""
+    identity = (slot.get("product") or {}).get("identity") or {}
+    return identity.get("title")
 
 
 def served_slots(client: TestClient, auction_id: str) -> list[dict[str, Any]]:
@@ -505,8 +578,13 @@ def test_a_silent_store_still_reaches_a_slot_on_its_list_price(monkeypatch):
         if store != silent:
             assert entries[store]["fallback"] is False, entries[store]
             assert entries[store]["unit_price"] == pytest.approx(BID_PRICES[store])
+    assert body["market"]["nothing_shown"] is False, body["market"]
     slots = {slot["trust_summary"]["store_id"]: slot for slot in body["shortlist"]["slots"]}
     assert silent in slots, sorted(slots)
+    # The platform's own crawled name for the silent store's product, on the slot. A fallback
+    # row is the one row nobody but the platform vouches for, so the name it is shown under has
+    # to be the platform's — and it is the same surface the relevance filter judged it on.
+    assert slot_identity(slots[silent]) == CRAWLED_TITLES[silent], slots[silent]
 
     slot = slots[silent]
     assert slot["product"]["product_ref"] == PRODUCTS[silent], slot
@@ -658,6 +736,16 @@ def test_a_market_where_every_store_fell_back_says_so_on_the_buyers_own_route(
     assert market["sponsored"] == 0, market
     assert market["list_price"] == len(STORES), market
     assert market["fallback_reasons"], "an all-fallback market that names no reason says nothing"
+    # The blank screen this test was RED on, now sayable on the shopper's own route instead of
+    # only in an exchange log line. `all_fallback` cannot carry it: it is guarded on there
+    # being rows, so it reads `false` both when the market ran well and when nothing reached
+    # the screen at all, and those are the two states this file must never confuse.
+    assert market["nothing_shown"] is False, (
+        "every store fell back and every fallback row reached a slot, so the screen was not "
+        "blank — a true here is the regression this file exists to catch"
+    )
+    assert market["shortlisted"] == len(STORES), market
+    assert market["shortlisted_sponsored"] == 0, market
 
 
 def test_an_answer_that_carried_no_market_reports_none_rather_than_an_empty_one():

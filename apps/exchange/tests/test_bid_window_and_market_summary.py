@@ -441,6 +441,10 @@ def test_a_store_that_answers_in_time_still_wins_with_its_own_price_and_its_own_
         "shortlisted": 1,
         "shortlisted_sponsored": 1,
         "all_fallback": False,
+        # The blank-screen verdict, false because this auction filled a slot. It is asserted
+        # here rather than only where it is true because this equality is the sweep that makes
+        # a new market field impossible to add without deciding what it says on a good day.
+        "nothing_shown": False,
     }
 
 

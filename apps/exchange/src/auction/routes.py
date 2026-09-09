@@ -1085,6 +1085,32 @@ class MarketSummaryOut(BaseModel):
     #: to catalogue prices". ``solicited`` and ``shortlisted`` are published beside this flag
     #: so a reader can tell all three apart without re-deriving anything.
     all_fallback: bool
+    #: **True when this auction had stores to represent and filled no slot at all** — the blank
+    #: screen. The condition ``all_fallback`` deliberately excludes, published under its own
+    #: name for the reason that flag is: the two have different fixes, and a reader who cannot
+    #: tell them apart will go looking for the wrong one.
+    #:
+    #: It was already decided, already named ``nothing_shown``, and already the loudest WARNING
+    #: this module emits — and it existed **only inside a log format string**, so the one fact
+    #: that says the shopper's screen was empty was the one fact no caller could read. The
+    #: buyer service forwards this whole mapping verbatim
+    #: (``buyer_svc.auctions.routes.AuctionView.market``), so publishing it here is what makes
+    #: the blank screen reachable by a shopper's page and assertable by a test instead of
+    #: greppable by whoever thought to look.
+    #:
+    #: **A true value is not automatically a fault**, and that is why this is a published fact
+    #: rather than a refusal. An off-corpus question — the recorded corpus holds no furniture,
+    #: and ``"a walnut coffee table for the lounge"`` is asked of it — SHOULD empty the
+    #: shortlist: :mod:`exchange.retrieval.relevance` exists to turn four confidently wrong
+    #: supplements into an honest nothing. What must never happen is the same emptiness on a
+    #: query the roster genuinely answers, and telling those two apart needs the excluded rows'
+    #: reasons, which are published beside this on ``excluded``.
+    #:
+    #: ``solicited > 0 or list_price > 0`` is the "had stores to represent" half, and it is
+    #: deliberately wider than ``all_fallback``'s :func:`_anyone_could_have_bid`: a Tier-0 store
+    #: could never have bid, but its catalogue price should still have reached the screen, so an
+    #: auction that showed it nothing is this condition even though it is not a failed market.
+    nothing_shown: bool
 
 
 class CreateAuctionResponse(BaseModel):
@@ -2032,9 +2058,9 @@ def market_summary(result: Any, *, window: float) -> dict[str, Any]:
 
     **What this half CANNOT answer, and why the summary is finished elsewhere.** Everything
     counted here is a fact about who BID. Who was SHOWN is a fact about the ranking, which has
-    not run when this is called, so ``shortlisted`` and ``shortlisted_sponsored`` come back
-    ``None`` — *not yet known*, which is a third state and not a zero.
-    :func:`with_shortlist_outcome` fills them in once the shortlist exists and re-decides
+    not run when this is called, so ``shortlisted``, ``shortlisted_sponsored`` and
+    ``nothing_shown`` come back ``None`` — *not yet known*, which is a third state and not a
+    zero. :func:`with_shortlist_outcome` fills them in once the shortlist exists and re-decides
     ``all_fallback`` on them. Splitting it that way rather than moving the whole computation is
     what keeps a market line on the auction whose ranking raises.
     """
@@ -2084,6 +2110,11 @@ def market_summary(result: Any, *, window: float) -> dict[str, Any]:
         # that path; `with_shortlist_outcome` overwrites it with the shopper's answer on
         # every auction that reaches a shortlist.
         "all_fallback": solicited > 0 and sponsored == 0,
+        # NOT YET KNOWN, for the same reason `shortlisted` is: whether the shopper was shown
+        # nothing is a fact about the shortlist, and the shortlist does not exist here. `None`
+        # rather than `False` because a `False` on this path would be this summary asserting
+        # that rows reached a screen that had not been built yet.
+        "nothing_shown": None,
     }
 
 
@@ -2114,11 +2145,14 @@ def with_shortlist_outcome(
     **``shortlisted > 0`` is a second guard, and it is not decoration.** "Every row was a
     fallback" is vacuously true of a shortlist with no rows, and an auction that showed the
     shopper NOTHING is a different condition with a different fix — an unwired ranking, a
-    catalogue that satisfies no hard constraint, a trust snapshot nobody loaded. It is not
-    silently dropped: :func:`announce_market` warns on it separately and by its own name, so
-    the loudest failure in the system is not the one nobody is told about. What it must not do
-    is claim the market reverted to catalogue prices, because there were no catalogue prices
-    either.
+    catalogue that satisfies no hard constraint, a trust snapshot nobody loaded, a relevance
+    filter that refused every organic row. It is not silently dropped: it is decided here as
+    ``nothing_shown``, published on :class:`MarketSummaryOut`, forwarded verbatim by the buyer
+    service, and said at WARNING by :func:`announce_market`. Until that field existed the
+    loudest failure in the system was one only a log reader could see — the counts on the 201
+    said ``shortlisted: 0`` and left every caller to work out for itself whether that was a
+    fault or an honest answer. What this flag must not do is claim the market reverted to
+    catalogue prices, because there were no catalogue prices either.
 
     **``COULD anybody have bid`` is the third, and it replaced a straight ``solicited > 0``
     that this repair itself had broken.** The all-fallback alarm means *the exchange had
@@ -2157,7 +2191,28 @@ def with_shortlist_outcome(
         "all_fallback": (
             bool(slots) and shortlisted_sponsored == 0 and _anyone_could_have_bid(summary)
         ),
+        # The condition the flag above excludes, decided HERE so that the response, the ledger
+        # entry and the log line cannot disagree about it — the property this two-step summary
+        # already keeps for every other count. `announce_market` used to re-derive it from
+        # `shortlisted` and publish it nowhere; now it reads this.
+        "nothing_shown": not slots and _anything_to_represent(summary),
     }
+
+
+def _anything_to_represent(summary: Mapping[str, Any]) -> bool:
+    """Whether this auction held a store whose row should have reached the screen.
+
+    Wider than :func:`_anyone_could_have_bid` on purpose, and the difference is the Tier-0
+    store. That merchant chose catalogue-only, so it can never make ``all_fallback`` fire —
+    there is no market for it to have failed. But the platform crawled it, the roster carries
+    its list price, and D55 makes that a real organic row, so an auction that showed the
+    shopper none of it is a blank screen exactly as much as one that lost a Tier-1 bid.
+
+    ``list_price > 0`` is what carries that store: it counts every ``entries`` row the exchange
+    stood up at a catalogue price, whether the store was asked and stayed silent or was never
+    askable at all.
+    """
+    return int(summary.get("solicited") or 0) > 0 or int(summary.get("list_price") or 0) > 0
 
 
 def _anyone_could_have_bid(summary: Mapping[str, Any]) -> bool:
@@ -2209,6 +2264,14 @@ def announce_market(summary: Mapping[str, Any], *, auction_id: str) -> None:
     solicited; alarming on that would alarm on every request such a deployment refuses, which
     is the one way to make a warning worth ignoring.
 
+    **Both verdicts are READ off the summary, never decided here.** ``all_fallback`` and
+    ``nothing_shown`` are :func:`with_shortlist_outcome`'s answers, published on
+    :class:`MarketSummaryOut` and forwarded to the shopper's own route, and this function's
+    whole job is to say them out loud. That matters because it is the property the summary was
+    built for: a log line that computed its own verdict could contradict the ``201`` that
+    carried the counts it was computed from, and an operator reconciling the two would be
+    debugging the arithmetic instead of the market.
+
     **The condition is the SHOPPER's, not the fan-out's**, and that is this line's own repair.
     It used to fire on ``sponsored == 0`` — nobody bid — which is a different and strictly
     narrower failure: an auction where four stores bid and the ranker excluded all four served
@@ -2235,11 +2298,13 @@ def announce_market(summary: Mapping[str, Any], *, auction_id: str) -> None:
     unknown = "?"
     shown_sponsored = summary.get("shortlisted_sponsored")
     shown = summary.get("shortlisted")
-    # An auction with stores to represent that filled no slot. `shown is None` is the
-    # ranking-raised path, where the shopper's half was never computed and a `0` here would be
-    # a measurement of something that did not happen — so it is not this condition either.
-    represented = int(summary.get("solicited") or 0) > 0 or int(summary.get("list_price") or 0) > 0
-    nothing_shown = shown == 0 and represented
+    # An auction with stores to represent that filled no slot — READ off the summary rather
+    # than re-derived here. `with_shortlist_outcome` decides it, `MarketSummaryOut` publishes
+    # it, and this line says it; one answer, three readers, which is the rule the rest of this
+    # summary already follows. `None` is the ranking-raised path, where the shopper's half was
+    # never computed and a verdict here would be a measurement of something that did not
+    # happen — `bool(None)` keeps that off both warnings, exactly as `shown == 0` did.
+    nothing_shown = bool(summary.get("nothing_shown"))
     values = (
         auction_id,
         "all_fallback"

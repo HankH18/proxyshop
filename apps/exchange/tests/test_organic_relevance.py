@@ -339,6 +339,147 @@ def test_the_rule_refuses_to_be_configured_into_a_no_op() -> None:
         TopicalRelevance(min_shared_share=0.0)
 
 
+
+# =====================================================================================
+# 1b. THE SHOPPER TYPED THE PRODUCT'S NAME — the refusal the thresholds could not avoid
+# =====================================================================================
+#: Real one-content-word titles out of ``deploy/demo/exchange-deployment.json``, with the brand
+#: the crawl carries beside each, and a query that NAMES the product and then goes on talking
+#: the way a shopper talks. Every one of these was refused ``organic_result_off_topic`` before
+#: :func:`~exchange.ranking.filters.shopper_named_the_product` existed.
+#:
+#: The arithmetic, so the fixture is not mistaken for an oddity: ``judge`` needs
+#: ``min(2, len(asked))`` agreeing content words or half of them, counted against the QUERY's
+#: length. A one-word title can supply exactly one, and the brand is in the surface but not in
+#: the shopper's typing — so past two content words in the query these are refused by
+#: arithmetic, whatever they name. Measured over the whole document: 104 of 3,086 products.
+NAMED_OUTRIGHT = (
+    ("bacopa best one for daily use under $30", "Bacopa", "Gaia Herbs"),
+    ("resveratrol best one for daily use under $30", "Resveratrol", "Gaia Herbs"),
+    ("glutathione 98% best one for daily use under $30", "Glutathione 98%", "Toniiq"),
+    ("garlic 1% best one for daily use under $30", "Garlic 1%", "BulkSupplements.com"),
+    ("tribulus 95% best one for the gym under $30", "Tribulus 95%", "BulkSupplements.com"),
+    ("sleepthru best one for daily use under $30", "SleepThru®", "Gaia Herbs"),
+)
+
+
+@pytest.mark.parametrize(("query", "title", "brand"), NAMED_OUTRIGHT)
+def test_a_product_the_shopper_named_outright_is_never_refused(
+    query: str, title: str, brand: str
+) -> None:
+    """The false positive this condition ends, on the shipped catalogue's own product names.
+
+    A shopper typed the platform's own name for the product and the platform's own gate
+    answered that its crawl could not connect the product to the query. That is the fourth
+    dominant defect class in this repo — a refusal firing on honest traffic — and it is not a
+    hypothetical shape: these are five of the 104 products in
+    ``deploy/demo/exchange-deployment.json`` it fired on.
+
+    Asserted through :func:`~exchange.ranking.filters.organic_relevance_reason` rather than
+    through ``judge``, because the thresholds are UNCHANGED and still refuse these: what
+    changed is that the gate declines to apply them to a row the shopper named. A test written
+    against ``judge`` would pass on a rule that had been loosened instead, which is the change
+    that module's own ablation table measured and rejected.
+    """
+    identity = {"title": title, "brand": brand, "source": "snap-x"}
+    candidate = {"fallback": True, "store_id": "s1"}
+
+    assert RULE.judge(query, f"{title} {brand}").about is False, (
+        "this fixture is only interesting while the thresholds still refuse it"
+    )
+    assert (
+        organic_relevance_reason(candidate, query_text=query, identity=identity, relevance=RULE)
+        is None
+    ), f"the shopper typed {title!r} and was told the platform could not connect it to {query!r}"
+
+
+@pytest.mark.parametrize(("query", "name"), OFF_CORPUS_PAIRS)
+def test_naming_rows_the_shopper_did_not_name_are_still_refused(query: str, name: str) -> None:
+    """THE POSITIVE CONTROL, re-taken as ``retrieval.relevance``'s header requires.
+
+    That module says zero-of-thirty off-corpus is "the number to re-take after any change
+    here". Every one of these pairs is the row the retriever really put at the top for a query
+    this catalogue has nothing for, and every one must still be refused: the new condition is a
+    containment test on the whole title, so a wrong row sharing one coincidental word with the
+    query does not satisfy it.
+
+    Measured wider than this parametrisation, over the 16 off-corpus queries (these 15 plus
+    ``"garlic bread recipe book"``, written specifically to attack the new condition) against
+    all 3,086 identities in the shipped document — 49,376 verdicts, **one** newly admitted row:
+    ``Garlic 1%`` for the query written to catch it. On the 15 below it admits none.
+    """
+    identity = {"title": name, "source": "snap-x"}
+    candidate = {"fallback": True, "store_id": "s1"}
+
+    reason = organic_relevance_reason(
+        candidate, query_text=query, identity=identity, relevance=RULE
+    )
+    assert reason is not None, f"{name!r} is not what {query!r} asked for"
+    assert reason.startswith(REASON_OFF_TOPIC_ORGANIC), reason
+
+
+def test_naming_only_part_of_the_title_is_not_naming_the_product() -> None:
+    """Containment is the WHOLE title, not an overlap — otherwise it is a second threshold.
+
+    ``"milk"`` is one word of ``Milk Thistle Gummies``. A rule satisfied by part of a name
+    would admit every product sharing a word with the query, which is the one-shared-word rule
+    the ablation measured at 7 of 30 off-corpus queries served.
+    """
+    from exchange.ranking.filters import shopper_named_the_product
+
+    assert shopper_named_the_product("milk for my cereal", {"title": "Milk Thistle Gummies"}) is (
+        False
+    )
+    assert shopper_named_the_product(
+        "milk thistle gummies please", {"title": "Milk Thistle Gummies"}
+    )
+
+
+def test_the_name_that_counts_is_the_titles_and_not_the_brands() -> None:
+    """A shopper naming only the BRAND has not named a product.
+
+    The brand is in the judged surface so that naming a brand can help a product agree with a
+    query. It is not part of the product's name, and requiring it here would put this condition
+    out of reach of exactly the one-word-title rows it exists for — every one of which carries
+    a brand the shopper never typed.
+    """
+    from exchange.ranking.filters import shopper_named_the_product
+
+    identity = {"title": "Bacopa", "brand": "Gaia Herbs"}
+    assert shopper_named_the_product("gaia herbs best sellers", identity) is False
+    assert shopper_named_the_product("bacopa for memory and focus daily", identity) is True
+
+
+def test_an_identity_with_no_readable_title_names_nothing() -> None:
+    """Nothing was named, so nothing was named in full. The row falls through to the rule."""
+    from exchange.ranking.filters import shopper_named_the_product
+
+    assert shopper_named_the_product("anything at all", {"title": ""}) is False
+    assert shopper_named_the_product("anything at all", {"brand": "Gaia Herbs"}) is False
+    assert shopper_named_the_product("anything at all", None) is False
+
+
+def test_naming_the_product_does_not_reach_a_row_a_store_actually_bid() -> None:
+    """The D55 asymmetry is upstream of this condition and stays that way.
+
+    A sponsored row is never judged for relevance at all, so this condition can neither keep
+    one nor refuse one. Asserted so that a later reader cannot mistake the new keep-condition
+    for the thing that protects the sponsored half.
+    """
+    identity = {"title": "Glutathione 98%", "brand": "Toniiq"}
+    for named in (True, False):
+        query = "glutathione 98% for daily use" if named else "a walnut coffee table"
+        assert (
+            organic_relevance_reason(
+                {"fallback": False, "store_id": "s1"},
+                query_text=query,
+                identity=identity,
+                relevance=RULE,
+            )
+            is None
+        )
+
+
 # =====================================================================================
 # 2. Retrieval — the organic half, over the deterministic double
 # =====================================================================================

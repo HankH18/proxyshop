@@ -714,6 +714,13 @@ def test_a_ranking_that_raises_still_tells_the_operator_what_the_bid_layer_did(
     assert lines, "a ranking that raised told the operator nothing about the market"
     assert "sponsored=1" in lines[-1], lines
     assert "shown_sponsored=?" in lines[-1], lines
+    # And the blank-screen alarm stays silent, because nobody has yet asked whether the screen
+    # is blank. ``market_summary`` leaves ``nothing_shown`` as ``None`` — not yet known, the
+    # third state ``shortlisted`` already uses — and ``with_shortlist_outcome`` never ran on
+    # this path. Firing "NOTHING REACHED THE SHOPPER" here would name the wrong failure for a
+    # 500, and send an operator looking at the ranker's output instead of at its traceback.
+    assert "NOTHING REACHED THE SHOPPER" not in lines[-1], lines[-1]
+    assert "market=nothing_shown" not in lines[-1], lines[-1]
 
     # And the auction is left OPEN, which is the state the TTL collects — a CLOSED auction with
     # no stored shortlist would have nothing for the accept door to read.

@@ -141,16 +141,21 @@ class AuctionView(BaseModel):
     relaxed_constraints: list[Any] = []
     #: RECORDED, and a MAPPING rather than one of the five arrays above, which is why it is
     #: named separately. The exchange's one-line verdict on the market it just ran --
-    #: ``{"solicited", "sponsored", "list_price", "timed_out", "not_asked", "denied",
-    #: "bid_window_seconds", "fallback_reasons", "all_fallback"}`` -- computed once so the
-    #: 201, the ``auction_closed`` ledger entry and the exchange's log cannot disagree.
+    #: ``exchange.auction.routes.MarketSummaryOut``, whose fields are not restated here on
+    #: purpose: this list has already gone stale once (it predated ``no_endpoint``,
+    #: ``shortlisted`` and ``shortlisted_sponsored``, and named none of them), and a mapping
+    #: this service forwards VERBATIM cannot have a second, drifting definition on the reading
+    #: side. It is computed once over there so the 201, the ``auction_closed`` ledger entry
+    #: and the exchange's log cannot disagree.
     #:
-    #: Forwarded because the interesting case is invisible without it. When every solicited
-    #: store falls back, the shortlist is a normal-looking list of catalogue prices: the same
-    #: shape, the same number of slots, no error anywhere. ``all_fallback`` is the only field
-    #: that distinguishes "this market ran and nobody bid" from "this market ran". The
-    #: exchange publishes it once, on the answer this service records, and it survived nowhere
-    #: else on this side -- the same argument the five arrays above are kept for.
+    #: Forwarded because the interesting cases are invisible without it, and there are two of
+    #: them. When every solicited store falls back, the shortlist is a normal-looking list of
+    #: catalogue prices -- the same shape, the same number of slots, no error anywhere -- and
+    #: ``all_fallback`` is the only field that tells that from a market that really ran. When
+    #: nothing reaches the screen at all, ``nothing_shown`` is the only field that tells an
+    #: honestly empty answer from a service that dropped every row; before it existed, the
+    #: exchange said so only in its own log and a shopper's page could not know. Both survive
+    #: nowhere else on this side -- the same argument the five arrays above are kept for.
     #:
     #: ``None`` when this service holds no record, or when the recorded answer carried no
     #: ``market``. Never ``{}``: an exchange too old to publish one and an exchange reporting

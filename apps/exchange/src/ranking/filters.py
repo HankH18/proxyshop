@@ -28,7 +28,7 @@ The six filters, and why each one denies rather than discounts:
   the shopper asked, judged by :func:`organic_relevance_reason` against the platform's own
   crawled identity of the product. It is the one filter here that is about the QUESTION rather
   than about the store, and the only one that never touches a row a store actually bid: see
-  that function for the three conditions that must all hold before it refuses anything.
+  that function for the four conditions that must all hold before it refuses anything.
 
 * **The buyer's budget.** A ``price_usd`` bound (``lte``/``gte``) is decided against the
   OFFER'S OWN PRICE by :func:`budget_reasons`, and is the one filter here that is not about
@@ -73,7 +73,7 @@ from ingest.graph.model import slug
 from ..checkout.codes import UnusableOffer, expiry_epoch
 from ..checkout.domain import is_on_domain
 from ..retrieval.criteria import HardCriterion, MalformedIntent
-from ..retrieval.relevance import TopicalRelevance, identity_surface
+from ..retrieval.relevance import TopicalRelevance, content_terms, identity_surface
 from .attestation import ATTESTATION_FIELD, attested_status
 from .reasons import (
     REASON_BLACKLIST_UNREADABLE,
@@ -799,7 +799,7 @@ def organic_relevance_reason(
     shortlist rather than an empty one. Measured through ``POST /auctions`` before this
     existed — ``"a walnut coffee table for the lounge"``, four slots, four liver supplements.
 
-    THREE conditions, all of which must hold before anything is refused. Each is the
+    FOUR conditions, all of which must hold before anything is refused. Each is the
     silent-on-honest-traffic direction of this gate, and each is here rather than left to fall
     out of the arithmetic:
 
@@ -816,7 +816,13 @@ def organic_relevance_reason(
        exchange's catalogue never named. Absent means unchecked, and an unchecked product is
        kept: an exchange whose catalogue is unwired would otherwise refuse every organic row in
        every auction, which is a misconfiguration reported as "this catalogue serves nothing".
-    3. **The relevance rule could decide.** See
+    3. **The shopper did not name the product outright.** See
+       :func:`shopper_named_the_product` — when every content word of the platform's crawled
+       TITLE is in the query, the shopper asked for this thing by the name the platform gave
+       it, and no word-count threshold may overrule that. Measured on the shipped catalogue,
+       this is what stops the gate refusing 104 of its own 3,086 products for queries carrying
+       their titles verbatim; it costs one admitted row across 49,376 off-corpus verdicts.
+    4. **The relevance rule could decide.** See
        :meth:`~exchange.retrieval.relevance.TopicalRelevance.judge` — a query with no content
        words, or an identity that folds to none, answers ``about=True, decidable=False`` and
        nothing is refused on it.
@@ -825,10 +831,14 @@ def organic_relevance_reason(
     from the audit trail. This layer judges :func:`~exchange.retrieval.relevance.identity_surface`
     — ``title`` and ``brand``, which is all :func:`~.verification.catalog_identity` returns.
     The retrieval layer judges :func:`~exchange.retrieval.relevance.candidate_surface`, which is
-    the canonical name, brand, categories, ingredients and attribute keys the graph holds. Both
-    record the verdict under one name, ``content-word-agreement/1``, so a reader of an exclusion
-    reason cannot tell which surface produced it, and the two CAN disagree: a product retrieval
-    kept on a category word can be refused here on its title alone.
+    the canonical name, brand, categories, ingredients and attribute keys the graph holds, and
+    hands ``judge`` the product's observed variant names beside it
+    (:func:`~exchange.retrieval.relevance.variant_surface`) — a surface this layer holds none
+    of, because ``catalog_identity`` carries no variants. Both record the verdict under one
+    name, ``content-word-agreement/2``, so a reader of an exclusion reason cannot tell which
+    surface produced it, and the two CAN disagree: a product retrieval kept on a category word,
+    or on a walnut its variants name and its title does not, can be refused here on its title
+    alone.
 
     Measured rather than asserted, on the recorded corpus (3,093 products, ten storefronts) with
     every store's whole catalogue in the snapshot: over 24 in-corpus queries through the graph
@@ -836,10 +846,15 @@ def organic_relevance_reason(
     over the same 24 queries through a stated roster it refused nothing that retrieval had
     vouched for. The gap is small because this corpus carries no ``Ingredient`` or
     ``AttributeValue`` nodes at all (measured: 0 and 0) — categories are the only component
-    ``candidate_surface`` adds — so a corpus that DID carry them would widen it. The fix if it
-    ever matters is to judge both layers on one surface, not to loosen this one: a title-only
-    refusal of a product the platform's own retrieval vouched for is this layer overturning a
-    decision made with more evidence.
+    ``candidate_surface`` adds — so a corpus that DID carry them would widen it. Variant names
+    are the other component the retrieval layer now has and this one does not, and on this
+    corpus they widen nothing either: measured over 37 honest and 30 off-corpus queries through
+    the real index against a private Neo4j holding it (3,093 ``Product``, 9,667 ``Variant``),
+    the variant arm moved not one retrieval row in either direction, because a supplement's
+    variants are its form and its count. A corpus of furniture is where it moves rows, and that
+    is where this gap would open. The fix if it ever matters is to judge both layers on one
+    surface, not to loosen this one: a title-only refusal of a product the platform's own
+    retrieval vouched for is this layer overturning a decision made with more evidence.
 
     It is also, on the graph route, mostly a formality: every row there was already judged by
     the retrieval layer on the fuller surface before it reached a roster at all.
@@ -859,10 +874,66 @@ def organic_relevance_reason(
     surface = identity_surface(identity)
     if not surface:
         return None
+    if shopper_named_the_product(query_text, identity):
+        return None
     verdict = relevance.judge(query_text, surface)
     if verdict.about:
         return None
     return f"{REASON_OFF_TOPIC_ORGANIC}: {verdict.detail}"
+
+
+def shopper_named_the_product(query_text: str, identity: Any) -> bool:
+    """Did the shopper type the platform's own name for this product, whole?
+
+    True when every content word of the crawled ``title`` appears in the query. It is a
+    CONTAINMENT test, not a threshold, and it is the fourth condition on the gate above — the
+    one that keeps a row the thresholds would refuse.
+
+    **The refusal it ends, measured on the shipped catalogue.** Through
+    ``catalog_identity`` -> :func:`~exchange.retrieval.relevance.identity_surface` over the
+    3,086 products of ``deploy/demo/exchange-deployment.json``, with the query set to each
+    product's OWN crawled title plus four ordinary shopper words
+    (``"<title> best one for daily use under $30"``), the thresholds refused **104 of 3,086**
+    as not about what was asked. ``Bacopa``, ``Resveratrol``, ``Glutathione 98%``,
+    ``Garlic 1%``, ``SleepThru®`` — a shopper typed the product's name verbatim and the
+    platform's own gate answered that its own crawl could not connect the product to the
+    query. This condition takes that to **1 of 3,086**.
+
+    **Why the thresholds cannot get there on their own, which is why this is a keep-condition
+    rather than a looser number.** :meth:`~exchange.retrieval.relevance.TopicalRelevance.judge`
+    needs ``min(2, len(asked))`` agreeing content words or half of them, counted against the
+    QUERY's length. A one-content-word title cannot supply two, so as soon as the shopper types
+    three or more content words the row is refused by arithmetic no matter what it names. The
+    surface does carry the brand — ``Bacopa Gaia Herbs`` is three terms — but the shopper is
+    under no obligation to type the brand, and every one of those 104 has a one-word title.
+    Lowering ``MIN_SHARED_TERMS`` to reach them is the trade that module's own ablation
+    measured and rejected: one shared content word served 7 of 30 off-corpus queries.
+
+    **The positive control, re-taken as that module's header requires after any change here.**
+    16 off-corpus queries — the 15 :mod:`exchange.retrieval.relevance` was measured on, plus
+    ``"garlic bread recipe book"``, written to attack this rule specifically — judged against
+    all 3,086 identities, 49,376 verdicts: this condition newly admits **one** row, ``Garlic
+    1%`` for the query written to catch it. On the 15 original off-corpus queries it admits
+    **zero**. That is the whole cost, stated rather than rounded away, and it is the right side
+    of the trade: a product whose crawled name the shopper typed in full is a product the
+    platform can honestly stand behind at its catalogue price, and refusing it is the confident
+    wrong answer pointing the other way.
+
+    **It reads the TITLE, never the surface.** The brand is in the surface so that a shopper
+    naming a brand finds its products; it is not part of the product's name, so requiring the
+    shopper to type it would put this condition out of reach of exactly the rows it is for. And
+    it is the PLATFORM's crawl on one side and the SHOPPER's own words on the other — no shop
+    writes either, so no shop can assert its way through this (D55).
+
+    An identity with no readable title answers ``False``: nothing was named, so nothing was
+    named in full, and the row falls through to the thresholds as it did before.
+    """
+    if identity is None:
+        return False
+    named = set(content_terms(str(read(identity, "title", "") or "")))
+    if not named:
+        return False
+    return named <= set(content_terms(query_text))
 
 
 def exclusion_reasons(
@@ -940,6 +1011,7 @@ __all__ = [
     "organic_relevance_reason",
     "read",
     "read_criteria",
+    "shopper_named_the_product",
     "trust_row",
     "unanswerable_criteria",
     "unanswerable_reason",
