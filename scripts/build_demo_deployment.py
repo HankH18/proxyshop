@@ -1027,6 +1027,19 @@ def build() -> dict[str, Any]:
             row["bid_endpoint"] = f"http://{agent_service(host)}:8086/v1/bid-requests"
         sellers.append(row)
 
+    #: WHO THIS DEPLOYMENT CAN ACTUALLY ASK — read back off the rows just built, not off
+    #: ``HOSTED`` a second time.
+    #:
+    #: This is the registry the running exchange itself consults: ``exchange.composition``
+    #: builds ``HttpBidSolicitor._endpoints`` out of ``sellers[].bid_endpoint`` above, and
+    #: ``orchestration.solicitation.stores_with_no_agent`` asks that solicitor
+    #: ``can_solicit(store_id)`` before anybody is dialled. Deriving the roster's tier from the
+    #: same list means the two halves of one document cannot disagree: adding an endpoint to a
+    #: store is the single edit that both wires it and promotes it, and taking one away demotes
+    #: it in the same stroke. Restating ``host in HOSTED`` here would be a second copy of the
+    #: fact and would go stale the first time an endpoint was added anywhere else.
+    can_bid = {str(row["store_id"]) for row in sellers if row.get("bid_endpoint")}
+
     # NO `trust_snapshot` KEY, deliberately, and this is the one line of this document worth
     # reading twice. `exchange.composition._bind_live_ranking_snapshot` returns without binding
     # a live reader whenever the document states that key, so a demo that stated one could not
@@ -1118,7 +1131,45 @@ def build() -> dict[str, Any]:
         listing = catalogs[host][lead]
         entry = {
             "store_id": host,
-            "tier": 1,
+            # THE TIER THIS DEPLOYMENT CAN BACK, and nothing above it. D28's vocabulary is
+            # `0` catalogue-only, `1` network-hosted agent, `2` external agent behind the
+            # signed door; a roster row is the buyer service's STATED claim about a store,
+            # sent on every confirmation, so tier 1 asserts an agent exists to answer.
+            #
+            # THIS LINE USED TO BE A HARDCODED `1` ON ALL FIFTEEN ROWS, and eleven of them
+            # were a claim about an agent that does not exist. What the shopper met, measured
+            # on the served buyer route with `"I want a cherry wood table under $200"`:
+            #
+            #     {"store_id": "sabai.design", "tier": 1, "fallback": true,
+            #      "fallback_reason": "tier_0_no_agent:no_bid_endpoint"}
+            #
+            # — a row whose two halves disagree about whether the store has an agent, because
+            # `auction.collect._tier` tests `tier <= 0` FIRST: a tier-1 row survives into
+            # `solicit_bids`'s `tiered`, is then dropped from `askable` by
+            # `stores_with_no_agent` (the solicitor holds no address for it), and comes back
+            # wearing the exchange's own no-endpoint marker. Eleven of the fifteen entries read
+            # that way, and it was read as tier-0 shops being DROPPED. They are not dropped —
+            # they are represented at list price exactly as R10 says, which is what
+            # `tier_0_no_agent` alone means. Only the document was lying.
+            #
+            # It also ended the agreement between the two roster paths. `ingest.graph.model
+            # .Store` asserts no tier (e9d7c8c), so `GraphShopRoster` reads
+            # `coalesce(s.tier, 0)` — catalogue-only — for the same eleven stores this
+            # hand-built document called tier 1. One store, two answers, depending on which
+            # way into the auction the request came.
+            #
+            # THE FOUR HOSTED STORES ARE STATED AS 1 HERE RATHER THAN LEFT AT 0 for
+            # `stores_with_an_agent` to raise. That raise exists for a crawl that cannot know,
+            # and it fires only when the solicitor affirmatively answers `can_solicit` — an
+            # OPTIONAL hook that `NullSolicitor`, `e2e`'s `HostedAgentSolicitor` and every
+            # in-process double deliberately do not implement, in which case the tier stands
+            # alone. Understating is not the safe direction: `collect_bids` discards whatever
+            # arrived under a tier-0 store's name, so a hosted agent rostered 0 on such a
+            # deployment is dialled, bids, and has its bid thrown away (measured in that
+            # function's docstring as `solicited 0, sponsored 0, prices {100.0: 19}`). A
+            # document states what it knows; the raise stays the repair for documents that
+            # cannot.
+            "tier": 1 if host in can_bid else 0,
             "product_ref": lead,
             "list_price": listing["list_price"],
         }

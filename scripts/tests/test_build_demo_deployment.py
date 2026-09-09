@@ -468,3 +468,109 @@ def test_the_documents_in_the_tree_parse_and_carry_the_stores_they_claim() -> No
     assert len(buyer["registered_domains"]) == 19
     assert len(roster) == 15
     assert sum(len(s["products"]) for s in exchange["catalog"].values()) == 3241
+
+
+# =====================================================================================
+# 6. the roster states a tier this deployment can actually back
+# =====================================================================================
+def _stores_this_deployment_can_solicit(documents: Mapping[str, Any]) -> set[str]:
+    """The stores the exchange holds a ``bid_endpoint`` for, read off the document itself.
+
+    THE SAME REGISTRY THE RUNNING EXCHANGE ASKS, and that is the whole point of reading it
+    here rather than re-deriving the set from ``HOSTED`` or from which ``store-contexts/``
+    files exist. ``exchange.composition`` builds ``HttpBidSolicitor._endpoints`` out of
+    ``sellers[].bid_endpoint`` in this document; ``orchestration.solicitation
+    .stores_with_no_agent`` asks that solicitor ``can_solicit(store_id)``; and a store it
+    answers ``False`` for is dropped from ``askable`` and never dialled. So this set is
+    exactly "who can bid", and a roster row claiming a bidding tier for a store outside it is
+    a claim no component of this deployment can honour.
+    """
+    return {
+        str(row["store_id"])
+        for row in documents["exchange-deployment.json"]["sellers"]
+        if row.get("bid_endpoint")
+    }
+
+
+def test_no_roster_row_claims_a_tier_the_deployment_cannot_back(
+    documents: dict[str, Any],
+) -> None:
+    """D28's tier vocabulary is ``0`` catalogue-only, ``1`` network-hosted agent, ``2`` external
+    agent behind the signed door. A roster row is the buyer service's STATED claim about a
+    store, sent on every confirmation, and a claim of tier 1 for a store this deployment holds
+    no bid endpoint for is a claim about an agent that does not exist.
+
+    **The contradiction it puts on the shopper's screen.** ``collect_bids`` tests ``tier <= 0``
+    FIRST, so a tier-1 row survives into ``tiered``, is dropped from ``askable`` by
+    ``stores_with_no_agent``, and comes back carrying the exchange's own
+    ``tier_0_no_agent:no_bid_endpoint`` marker — an entry published as ``tier: 1`` beside a
+    reason whose first word is ``tier_0``. Measured on the served buyer route before this gate,
+    on ``"I want a cherry wood table under $200"``: eleven of the fifteen entries read exactly
+    that way, and the two halves of one row disagreed about whether the store had an agent.
+
+    It also splits the two roster paths. ``ingest.graph.model.Store`` asserts no tier, so the
+    graph route reads ``coalesce(s.tier, 0)`` — catalogue-only — for the same eleven stores this
+    hand-built document called tier 1.
+    """
+    can_bid = _stores_this_deployment_can_solicit(documents)
+    lying = [
+        (str(row["store_id"]), row.get("tier"))
+        for row in documents["buyer-roster.json"]["roster"]
+        if int(row.get("tier", 1)) > 0 and str(row["store_id"]) not in can_bid
+    ]
+    assert not lying, (
+        f"{len(lying)} roster rows claim a bidding tier for a store this deployment holds no "
+        f"bid_endpoint for: {lying}. The exchange answers each of them "
+        f"tier_0_no_agent:no_bid_endpoint, so the document contradicts the service."
+    )
+
+
+def test_every_store_with_an_endpoint_is_rostered_at_a_bidding_tier(
+    documents: dict[str, Any], generator: Any
+) -> None:
+    """The other direction, and it is not symmetric with the one above.
+
+    Understating a tier is not the safe error it looks like. ``collect_bids`` reads ``tier <= 0``
+    before it looks at whether an answer arrived and DISCARDS whatever came back under that
+    store's name, so a hosted agent rostered at 0 is dialled, bids, and has its bid thrown away
+    — measured in ``stores_with_an_agent`` as ``solicited 0, sponsored 0, prices {100.0: 19}``.
+
+    ``solicit_bids`` does raise such a row back to 1, but only when the solicitor answers
+    ``can_solicit`` affirmatively, and that hook is OPTIONAL by design: ``NullSolicitor``,
+    ``e2e``'s ``HostedAgentSolicitor`` and every in-process double do not implement it and get
+    "decide on tier alone". A document that stated 0 for the four hosted stores would therefore
+    be correct only on deployments that happen to run the HTTP solicitor. So this document
+    states the tier it can justify rather than leaning on a repair meant for a crawl that
+    cannot know.
+    """
+    can_bid = _stores_this_deployment_can_solicit(documents)
+    rostered = {
+        str(row["store_id"]): int(row.get("tier", 1))
+        for row in documents["buyer-roster.json"]["roster"]
+    }
+    assert can_bid == set(generator.HOSTED)
+    for host in sorted(can_bid & set(rostered)):
+        assert rostered[host] > 0, (
+            f"{host} has a bid_endpoint in this deployment and is rostered tier "
+            f"{rostered[host]}; collect_bids would discard its bid"
+        )
+
+
+def test_the_committed_roster_in_the_tree_states_the_tiers_it_can_back() -> None:
+    """The same gate on the tracked artifact, read off disk rather than from ``build()``.
+
+    A clone runs the demo off these files without ever running the generator, so a hand-edited
+    or stale ``buyer-roster.json`` is what the shopper would actually meet.
+    """
+    exchange = json.loads((OUT / "exchange-deployment.json").read_text(encoding="utf-8"))
+    roster = json.loads((OUT / "buyer-roster.json").read_text(encoding="utf-8"))["roster"]
+    can_bid = {str(row["store_id"]) for row in exchange["sellers"] if row.get("bid_endpoint")}
+    assert len(can_bid) == 4, sorted(can_bid)
+    by_tier: dict[int, list[str]] = {}
+    for row in roster:
+        by_tier.setdefault(int(row.get("tier", 1)), []).append(str(row["store_id"]))
+    assert sorted(by_tier) == [0, 1], f"the demo roster states tiers {sorted(by_tier)}"
+    assert set(by_tier[1]) == can_bid, (
+        f"tier-1 rows are {sorted(by_tier[1])}; the stores with an endpoint are {sorted(can_bid)}"
+    )
+    assert len(by_tier[0]) == 11, sorted(by_tier[0])
