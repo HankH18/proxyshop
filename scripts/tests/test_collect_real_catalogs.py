@@ -28,6 +28,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import importlib.util
+import itertools
 import json
 import socket
 import sys
@@ -389,12 +390,41 @@ def test_the_two_checked_in_rosters_can_be_walked_as_one(tmp_path: Path) -> None
 
 @pytest.mark.parametrize(
     "outcome",
-    ["exhausted", "page_cap", "budget", "robots_disallowed", "http_404", "http_403", "http_410"],
+    [
+        "exhausted",
+        "page_cap",
+        "budget",
+        "robots_disallowed",
+        "http_404",
+        "http_403",
+        "http_410",
+        # A robots.txt that came back 404 is a policy that does not exist, which is an answer.
+        # Only the 403 case moved; see the neighbouring test.
+        "robots_http_404",
+    ],
 )
 def test_an_ending_that_is_an_answer_is_not_retried(outcome: str) -> None:
     """A short page, a page cap, a robots decision, a 404 — the merchant answered. Re-asking
     is the impoliteness this whole mechanism exists to avoid."""
     assert crc.outcome_is_retryable(outcome) is False
+
+
+def test_a_403_on_robots_txt_is_a_policy_we_never_read_not_an_answer() -> None:
+    """The one place a 403 does not end a store forever, and the difference is which request
+    got it.
+
+    ``robots_http_403`` used to be judged by the same branch as ``http_403``, so
+    ``industrywest.com`` was permanently skipped as though it had answered — while
+    ``bombas.com`` (429) and ``katzmosestools.com`` (dropped connection) stayed retryable,
+    splitting one class of event, "we could not read their robots.txt", across two verdicts.
+    The 403 was on the merchant's POLICY file, and the collector's own fail-closed rule then
+    meant ``/products.json`` was never requested at all.
+
+    ``http_403`` — the catalogue itself refusing — is unchanged, and that is the pair this test
+    exists to hold apart.
+    """
+    assert crc.outcome_is_retryable("robots_http_403") is True
+    assert crc.outcome_is_retryable("http_403") is False
 
 
 @pytest.mark.parametrize(
@@ -482,6 +512,38 @@ def test_a_store_that_ended_on_a_429_is_walked_again(raw_store: Any) -> None:
     raw_dir, args, _ = raw_store(outcome="http_429")
     entry, why_not = crc.reusable_entry(raw_dir, "burrow.com", crc.fetch_fingerprint(args))
     assert entry is None and "http_429" in why_not
+
+
+def test_a_store_whose_robots_txt_answered_403_is_asked_again(raw_store: Any) -> None:
+    """The consequence of the ``robots_http_403`` reversal, read off the resume path rather
+    than off the outcome table.
+
+    ``industrywest.com`` — a furniture store, in the category ``real-catalogs-broad`` lost most
+    of — sat in ``run.reused_from_earlier_runs`` on every subsequent run, permanently skipped
+    over a 403 that was returned for its **robots.txt**, before ``/products.json`` had been
+    asked for at all. Its two companions in that outcome (a 429 and a dropped connection) were
+    always re-asked; this is the third agreeing with them.
+    """
+    raw_dir, args, _ = raw_store(outcome="robots_http_403")
+    entry, why_not = crc.reusable_entry(raw_dir, "burrow.com", crc.fetch_fingerprint(args))
+    assert entry is None and "robots_http_403" in why_not
+
+
+def test_a_record_written_under_the_old_403_rule_is_re_walked_rather_than_believed(
+    raw_store: Any, tmp_path: Path
+) -> None:
+    """A record on disk saying ``{"complete": true, "walk_outcome": "robots_http_403"}`` is
+    exactly what collector 2.2.0 wrote, and the reason ``CORPUS_VERSION`` was NOT bumped for
+    the reversal: the outcome is judged before ``complete`` is consulted, so precisely the
+    affected records are re-walked and no other host in a scratch directory is charged a fresh
+    walk for it.
+    """
+    raw_dir, args, _ = raw_store(outcome="robots_http_403")
+    record = json.loads((raw_dir / "burrow.com" / crc.STORE_RECORD).read_text(encoding="utf-8"))
+    record["complete"] = True  # what the old rule derived from this same outcome
+    (raw_dir / "burrow.com" / crc.STORE_RECORD).write_text(json.dumps(record), encoding="utf-8")
+    entry, why_not = crc.reusable_entry(raw_dir, "burrow.com", crc.fetch_fingerprint(args))
+    assert entry is None and "retryable" in why_not
 
 
 def test_raising_the_page_cap_invalidates_every_record_taken_under_the_old_one(
@@ -892,9 +954,29 @@ def test_the_whole_fetch_build_round_trip_opens_no_socket(
 # ======================================================================================
 
 
-@pytest.mark.parametrize("value", ["0", "0.0", "1.9", "-3"])
-def test_an_interval_below_the_floor_is_refused_rather_than_silently_honoured(
-    tmp_path: Path, value: str
+@pytest.mark.parametrize(
+    "value",
+    [
+        "0",
+        "0.0",
+        "-0.0",
+        "1.9",
+        "-3",
+        # Non-finite: every comparison against NaN is False, so `nan < 2.0` cleared the floor
+        # check in `parse_args` AND the one in `PolitenessBudget`, and then `spend`'s
+        # `if wait > 0` was False too — a walk with no pause anywhere in it. `1e400` is the
+        # same hole reached without typing "inf": float() overflows it to infinity.
+        "nan",
+        "NaN",
+        "-nan",
+        "inf",
+        "Infinity",
+        "-inf",
+        "1e400",
+    ],
+)
+def test_no_argument_vector_can_reach_an_unenforceable_interval(
+    tmp_path: Path, value: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """``--min-interval 0`` used to be accepted in silence and ``PolitenessBudget`` obeyed it.
 
@@ -902,10 +984,23 @@ def test_an_interval_below_the_floor_is_refused_rather_than_silently_honoured(
     resumed run could splice zero-second pages into a corpus whose manifest declares 2.0 with
     nothing on disk recording that it happened. The only guard was an assertion on the committed
     corpus, which runs long after the requests were made.
+
+    The three sentences in this repository that say *no argument vector* walks a merchant
+    faster than the floor — the collector's module docstring, ``MIN_INTERVAL_FLOOR``'s own
+    comment, and ``fixtures/real-catalogs/README.md`` — are only true if this list is the whole
+    space of ways to be impolite. That is what the non-finite rows are here for.
+
+    ``--min-interval=<value>`` rather than two argv entries, and the refusal is required to be
+    the FLOOR's. Written as two entries, ``-inf`` and ``-nan`` are refused by argparse for
+    looking like options — a refusal that exits 2 without the floor check ever running, so a
+    test reading only the exit code would pass on a collector that had no floor at all.
     """
     with pytest.raises(SystemExit) as caught:
-        crc.parse_args(["fetch", "--raw-dir", str(tmp_path), "--min-interval", value])
+        crc.parse_args(["fetch", "--raw-dir", str(tmp_path), f"--min-interval={value}"])
     assert caught.value.code == 2
+    assert "politeness floor" in capsys.readouterr().err, (
+        "argparse refused this before the floor check ran, so this row measures nothing"
+    )
 
 
 def test_the_floor_is_not_clamped_away(tmp_path: Path) -> None:
@@ -919,13 +1014,50 @@ def test_the_floor_is_not_clamped_away(tmp_path: Path) -> None:
     assert wider.min_interval == 5.0, "widening the gap must still be allowed"
 
 
-def test_the_budget_itself_refuses_an_impolite_interval() -> None:
+@pytest.mark.parametrize(
+    "value", [0.0, -0.0, 1.99, -3.0, float("nan"), float("inf"), float("-inf")]
+)
+def test_the_budget_itself_refuses_an_impolite_interval(value: float) -> None:
     """The CLI is not the only caller. A floor that lives only in argument parsing is a default
-    wearing a floor's name."""
+    wearing a floor's name — and a floor written as a bare ``<`` is a floor NaN walks through."""
     with pytest.raises(ValueError, match="politeness floor"):
-        crc.PolitenessBudget(min_interval=0.0, max_requests=45)
-    with pytest.raises(ValueError, match="politeness floor"):
-        crc.PolitenessBudget(min_interval=1.99, max_requests=45)
+        crc.PolitenessBudget(min_interval=value, max_requests=45)
+
+
+def test_every_interval_the_budget_accepts_produces_a_real_pause(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The consequence, measured, rather than the guard restated.
+
+    ``--min-interval nan`` cleared both floor checks; ``interval_for`` then returned NaN and
+    ``spend``'s ``if wait > 0`` was False as well, so a six-request walk of one host paused
+    **zero times** while the manifest declared 2.0 s. This asserts the positive property the
+    floor exists for: with the clock advanced by a millisecond per read, every request after
+    the first waits substantially the whole interval.
+    """
+    waits: list[float] = []
+    monkeypatch.setattr(crc, "_pause", waits.append)
+    clock = itertools.count(100.0, 0.001)
+    monkeypatch.setattr(crc.time, "monotonic", lambda: next(clock))
+    budget = crc.PolitenessBudget(min_interval=crc.MIN_INTERVAL_FLOOR, max_requests=45)
+    for _ in range(6):
+        assert budget.spend("burrow.com") is True
+    assert len(waits) == 5, f"six requests to one host must pause five times; paused {waits}"
+    assert all(w == pytest.approx(1.999, abs=0.01) for w in waits), waits
+
+
+def test_a_non_finite_crawl_delay_cannot_break_the_interval() -> None:
+    """``robots.txt`` is somebody else's file, so a declared ``Crawl-delay`` is untrusted input.
+
+    An infinite one reached ``max`` and made the host's interval infinite — a hang rather than
+    a politeness — and a NaN one is the same class of value that defeated the floor. Neither is
+    fatal: the host falls back to our own floor, because refusing to walk a merchant over an
+    unparseable ``Crawl-delay`` would be the wrong answer.
+    """
+    for delay in (float("nan"), float("inf"), float("-inf")):
+        budget = crc.PolitenessBudget(min_interval=crc.MIN_INTERVAL_FLOOR, max_requests=45)
+        budget.honour_crawl_delay("burrow.com", delay)
+        assert budget.interval_for("burrow.com") == crc.MIN_INTERVAL_FLOOR, delay
 
 
 def test_the_budget_actually_waits_the_interval_between_two_hits(
@@ -978,6 +1110,68 @@ def test_the_built_manifest_declares_the_floor_it_was_walked_under(
     assert politeness["min_interval_floor_seconds"] == crc.MIN_INTERVAL_FLOOR
     store = manifest["stores"][0]
     assert store["robots"]["crawl_delay_seconds"] >= crc.MIN_INTERVAL_FLOOR
+
+
+# ======================================================================================
+# the honest rebuild: ten stores, one pass, and the committed corpus's own gates
+# ======================================================================================
+
+
+def _incumbent_corpus_gate() -> Any:
+    """``fixtures/tests/test_real_catalogs.py``, loaded as a module for its gate functions.
+
+    By path, like ``_collector`` above and for the same reason. The point of importing the
+    *committed corpus's own gate* rather than restating its rule here is that a copy of a rule
+    cannot catch the rule drifting: what follows must fail when that file's check fails, not
+    when a paraphrase of it does.
+    """
+    path = REPO_ROOT / "fixtures" / "tests" / "test_real_catalogs.py"
+    spec = importlib.util.spec_from_file_location("_incumbent_corpus_gate", path)
+    assert spec is not None and spec.loader is not None, f"{path} is not importable"
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_ten_store_corpus_can_be_rebuilt_in_one_pass_without_a_gate_going_red(
+    tmp_path: Path, net: Any
+) -> None:
+    """The honest case, which nothing exercised: the built-in ten, walked once, built once.
+
+    Every ten-store manifest in the repository was produced before ``--resume`` existed, so
+    ``run.reused_from_earlier_runs`` has only ever been read on a manifest that predates the
+    field. ``test_nothing_in_this_collection_was_ever_re_requested`` asserted the literal word
+    ``"none"`` in ``politeness.retries`` whenever nothing had been resumed, and
+    ``POLITENESS_POSTURE['retries']`` has not contained that word since it was rewritten to
+    state both halves of what a resume does. The failure was therefore waiting for the first
+    person to rebuild this corpus in a single pass — the polite way to do it — and it was not
+    reachable from any committed artifact.
+
+    The fake internet stands in for the merchants; the manifest's shape, its posture strings
+    and its request accounting are the real ones, and they are what the imported gate reads.
+    """
+    builtin = [spec.host for spec in crc.builtin_roster()]
+    fake = net({host: Storefront(products=12) for host in builtin})
+    raw, out = tmp_path / "raw", tmp_path / "out"
+    assert crc.main(["all", "--raw-dir", str(raw), "--out", str(out), "--no-compress"]) == 0
+
+    manifest = json.loads((out / "collection.json").read_text(encoding="utf-8"))
+    assert [s["host"] for s in manifest["stores"]] == builtin
+    assert manifest["run"]["reused_from_earlier_runs"] == [], (
+        "this run walked every store itself; if anything was reused the test below is checking "
+        "the other branch and proves nothing"
+    )
+    assert len(fake.requests) == manifest["totals"]["requests_recorded"], (
+        "the manifest must account for exactly the requests the transport actually saw"
+    )
+
+    gate = _incumbent_corpus_gate()
+    gate.assert_retry_posture_matches_the_run(manifest)
+    assert gate.recorded_requests(manifest) == manifest["totals"]["requests_recorded"]
+    # Nothing was replaced, so every store's charge is its own walk's and the total is exact.
+    assert manifest["totals"]["requests_recorded_is_floor"] is False
+    assert all(s["requests_charged_accumulated"] for s in manifest["stores"])
 
 
 # ======================================================================================

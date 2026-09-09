@@ -78,18 +78,34 @@ print(sum(len([f for f in s['fetches'] if f['status']!=-1])+bool(s['robots']) fo
   override flag, deliberately. All 10 hosts returned HTTP 200 and allowed `/products.json`.
 * **User-Agent:** `ProxyShopBot/0.1 (catalog research; contact: hank.holcomb@challenger.gauntletai.com)`
 * **At least 2 seconds between requests to the same host, and that is a FLOOR rather than a
-  default.** `scripts/collect_real_catalogs.py` refuses a `--min-interval` below
-  `MIN_INTERVAL_FLOOR` — in `parse_args`, and again in `PolitenessBudget`, because the CLI is
-  not its only caller. `--min-interval 0` used to be accepted in silence. A declared
-  `Crawl-delay` widens the interval and never narrows it. `www.` and the bare host share one
-  budget, so a redirect cannot hand the same machine two independent rate limits.
+  default.** `scripts/collect_real_catalogs.py` puts `--min-interval` through
+  `is_polite_interval` in `parse_args`, and `PolitenessBudget` runs the same predicate on
+  itself, because the CLI is not its only caller. The predicate requires the value to be
+  **finite** as well as at or above `MIN_INTERVAL_FLOOR`: both checks used to be a bare `<`
+  comparison, every comparison against NaN is False, and `--min-interval nan` therefore cleared
+  both — after which `spend`'s own `if wait > 0` was False as well and the walk never paused at
+  all, under a manifest declaring 2.0 s. Before that, `--min-interval 0` was accepted in
+  silence. A declared `Crawl-delay` widens the interval and never narrows it, and a non-finite
+  one is ignored rather than honoured. `www.` and the bare host share one budget, so a redirect
+  cannot hand the same machine two independent rate limits.
+
+  ```sh
+  PROXYSHOP_WORKER=14 .venv/bin/python -m pytest scripts/tests/test_collect_real_catalogs.py \
+      -k "interval or floor or crawl_delay" -q
+  ```
 * **A hard per-host cap** of 40 pages and 45 requests as a runaway guard.
-* **No retry loop.** Within a run nothing is re-requested: a 403, 404 or 429 ends that store's
-  walk and is recorded as its outcome. **Across runs, `--resume` does re-walk a host whose
-  recorded outcome was retryable** — a fresh run started by a person, not a loop against a host
-  that just answered. This collection was a single pass with nothing resumed, so for *this*
-  corpus "nothing retries" is literally true and `collection.json` says so; the broad corpus in
-  `../real-catalogs-broad/` was assembled with resume and its manifest says the other thing.
+* **No retry loop.** Within a run nothing is re-requested: a 403 or 404 on `/products.json`, or
+  a 429, ends that store's walk and is recorded as its outcome. **Across runs, `--resume` does
+  re-walk a host whose recorded outcome was retryable** — a fresh run started by a person, not
+  a loop against a host that just answered. A 403 on *robots.txt* is retryable too, and
+  `../real-catalogs-broad/README.md` sets out why that one is not a refusal.
+
+  This collection was a single pass with nothing resumed. The 2.0.0 manifest committed here
+  predates the `run` block and says `retries: none` outright; a rebuild by the current
+  collector writes a posture that describes the *collector* — both halves — and states this
+  run's own facts in `run.reused_from_earlier_runs`, which is what
+  `test_nothing_in_this_collection_was_ever_re_requested` reads. It used to read the word
+  "none", which meant an honest single-pass rebuild of this very corpus would have failed it.
 * **Public catalogue data only.** `/products.json` carries no personal data and the collector
   goes looking for none.
 

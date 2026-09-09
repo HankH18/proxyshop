@@ -107,9 +107,11 @@ Politeness, which is not optional — these are real businesses
 * At least ``--min-interval`` seconds between requests to the same host, and a declared
   ``Crawl-delay`` widens that and never narrows it. Walking a whole catalogue is more requests
   than sampling one, so the gap matters more, not less. 2.0 s is a **floor, not a default**:
-  ``MIN_INTERVAL_FLOOR`` is enforced by ``parse_args`` *and* by ``PolitenessBudget`` itself, so
-  there is no argument vector and no direct construction that walks a merchant faster. It used
-  to be only a default, and ``--min-interval 0`` was accepted in silence.
+  ``parse_args`` and ``PolitenessBudget`` both put the value through ``is_polite_interval``,
+  which requires it to be **finite** and at or above ``MIN_INTERVAL_FLOOR``, so there is no
+  argument vector and no direct construction that walks a merchant faster. It used to be only a
+  default (``--min-interval 0`` was accepted in silence), and then it was two bare ``<``
+  comparisons, which ``nan`` cleared — leaving a walk that never paused at all.
 * ``--max-pages`` (default 40, i.e. 10,000 products) is a runaway guard, not a sampling knob.
   A store that hits it has a TRUNCATED catalogue, and both ``collection.json`` and the README say so
   per store rather than presenting a partial catalogue as complete.
@@ -137,8 +139,13 @@ Two gzipped files per store, plus one collection record:
     and a digest of each file. ``totals.requests_recorded`` is the count the merchants can be
     said to have seen, and it is recomputable from ``stores`` — a re-walk replaces its own
     record, so requests it superseded reach the total through ``requests_charged`` rather than
-    through the ``fetches`` rows, which are gone. ``politeness.request_accounting`` states the
-    arithmetic; both corpus gate files run it against the artifact that states it.
+    through the ``fetches`` rows, which are gone. Whether that carrying-forward actually
+    happened for a given store is ``requests_charged_accumulated``, and
+    ``totals.requests_recorded_is_floor`` is the same fact for the collection:
+    ``requests_charged`` is written for every store, so only those two fields can tell a real
+    accumulated count from one ``build`` synthesised out of the surviving walk.
+    ``politeness.request_accounting`` states the arithmetic; both corpus gate files run it
+    against the artifact that states it.
 ``stores/<host>.provenance.jsonl.gz``
     Row-aligned with the products file. Per product: the URL, the HTTP status, the fetch
     instant, the digest of the whole response, the byte span inside it, and the digest of the
@@ -164,6 +171,7 @@ import argparse
 import gzip
 import hashlib
 import json
+import math
 import re
 import sys
 import time
@@ -178,16 +186,36 @@ USER_AGENT = "ProxyShopBot/0.1 (catalog research; contact: hank.holcomb@challeng
 CORPUS_VERSION = "2.2.0"
 
 #: The politeness floor, in seconds between requests to one origin. A FLOOR, not a default:
-#: ``parse_args`` refuses a smaller ``--min-interval`` and ``PolitenessBudget`` refuses to be
-#: constructed with one, so neither an argument vector nor a direct call can walk a merchant
-#: faster than this. The manifest declares 2.0 s and the egress IP still works; the feasibility
-#: study watched Cloudflare answer parallel probing with an IP-wide 429 in 5.9 seconds, and
-#: this gap is 73-74% of the wall clock of a collection precisely because it is what buys that.
+#: ``parse_args`` and ``PolitenessBudget`` both run :func:`is_polite_interval` over the value,
+#: so a merchant cannot be walked faster than this by any argument vector or direct call. The
+#: manifest declares 2.0 s and the egress IP still works; the feasibility study watched
+#: Cloudflare answer parallel probing with an IP-wide 429 in 5.9 seconds, and this gap is 73-74%
+#: of the wall clock of a collection precisely because it is what buys that.
 #:
 #: Raising ``CORPUS_VERSION`` to 2.2.0 is what retires the records taken before the floor
 #: existed: ``collector_version`` sits in ``fetch_fingerprint``, so a record written by a
 #: collector that could have walked at zero seconds is not reusable by this one.
 MIN_INTERVAL_FLOOR = 2.0
+
+
+def is_polite_interval(seconds: float) -> bool:
+    """Finite, and at or above :data:`MIN_INTERVAL_FLOOR`.
+
+    ``isfinite`` is here rather than a bare ``>=`` because a bare ``>=`` was the whole hole.
+    Every comparison against NaN is False, so ``--min-interval nan`` cleared the check in
+    ``parse_args`` AND the one in ``PolitenessBudget.__post_init__``; ``interval_for`` then
+    returned NaN, ``spend`` computed ``wait = nan`` and tested ``if wait > 0``, which is False
+    as well — so a six-request walk of one host slept **zero times** under a manifest declaring
+    2.0 s. ``max(nan, delay)`` defeated ``honour_crawl_delay`` the same way. Measured against
+    the mock transport before this function existed; ``test_no_argument_vector_can_reach_an_
+    unenforceable_interval`` and its neighbours are that measurement, kept.
+
+    Infinity is refused for the opposite reason: it passes ``>=`` honestly and then parks the
+    walk forever on its second request. Negative zero was already refused (``-0.0 < 2.0``) and
+    still is.
+    """
+    return math.isfinite(seconds) and seconds >= MIN_INTERVAL_FLOOR
+
 
 # The built-in roster. The DELIBERATE NEGATIVES for a liver-support query are named below, in
 # `NEGATIVE_CONTROL_HOSTS`, rather than pointed at by position here: measured, they answer a
@@ -353,10 +381,12 @@ def _pause(seconds: float) -> None:
 class PolitenessBudget:
     """Per-host rate limit and request cap. There is no way to spend past the cap.
 
-    ``min_interval`` below :data:`MIN_INTERVAL_FLOOR` is a ``ValueError`` here as well as in
-    ``parse_args``. Two checks rather than one because the CLI is not the only caller: this
-    class is constructible directly, and a floor that only exists in argument parsing is a
-    default wearing a floor's name.
+    A ``min_interval`` that is not :func:`is_polite_interval` is a ``ValueError`` here as well
+    as in ``parse_args``. Two checks rather than one because the CLI is not the only caller:
+    this class is constructible directly, and a floor that only exists in argument parsing is a
+    default wearing a floor's name. Both checks go through the one predicate so that neither
+    can be the loose one — they were two separate ``<`` comparisons, and NaN walked through
+    both.
     """
 
     min_interval: float
@@ -366,11 +396,12 @@ class PolitenessBudget:
     _host_interval: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.min_interval < MIN_INTERVAL_FLOOR:
+        if not is_polite_interval(self.min_interval):
             raise ValueError(
-                f"min_interval={self.min_interval} is below the {MIN_INTERVAL_FLOOR}s "
-                f"politeness floor these are real businesses depend on. The floor is not a "
-                f"knob; if a merchant needs a wider gap, raise it, never lower it."
+                f"min_interval={self.min_interval} is not a finite interval at or above the "
+                f"{MIN_INTERVAL_FLOOR}s politeness floor these are real businesses depend on. "
+                f"The floor is not a knob; if a merchant needs a wider gap, raise it, never "
+                f"lower it."
             )
 
     @staticmethod
@@ -385,7 +416,16 @@ class PolitenessBudget:
         return host.removeprefix("www.").lower()
 
     def honour_crawl_delay(self, host: str, delay: float) -> None:
-        """A declared ``Crawl-delay`` widens this host's interval and never narrows it."""
+        """A declared ``Crawl-delay`` widens this host's interval and never narrows it.
+
+        ``robots.txt`` is somebody else's file, so ``delay`` is untrusted input. A non-finite
+        one is ignored rather than fatal — refusing to walk a merchant because their
+        ``Crawl-delay`` is unparseable would be the wrong answer — and ignoring it leaves this
+        host on our own floor. An infinite delay reached ``max`` before this guard and made the
+        interval infinite, which is a hang, not a politeness.
+        """
+        if not math.isfinite(delay):
+            delay = 0.0
         self._host_interval[self.key(host)] = max(self.min_interval, MIN_INTERVAL_FLOOR, delay)
 
     def interval_for(self, host: str) -> float:
@@ -694,7 +734,7 @@ _TERMINAL_OUTCOMES = frozenset(
         "robots_disallowed",  # the merchant said no, in writing
     }
 )
-_HTTP_OUTCOME = re.compile(r"\A(?:robots_)?http_(\d{3})\Z")
+_HTTP_OUTCOME = re.compile(r"\A(robots_)?http_(\d{3})\Z")
 
 
 def outcome_is_retryable(outcome: str) -> bool:
@@ -703,7 +743,32 @@ def outcome_is_retryable(outcome: str) -> bool:
     429 and 5xx are the ones that matter in practice: the feasibility study watched Cloudflare
     return an IP-wide 429 within six seconds of parallel probing, and a corpus that recorded
     that as "this merchant serves nothing" would be recording the crawler's own bad behaviour
-    as a fact about somebody's shop. 403 and 404 are answers and are kept.
+    as a fact about somebody's shop. A 403 or a 404 on ``/products.json`` is the merchant's
+    server answering about the resource we asked for, and is kept.
+
+    **A 403 on robots.txt is the one exception, and it is a deliberate reversal.** It used to
+    fall in with the catalogue 403s, so ``industrywest.com`` — a furniture store, in the
+    category this corpus lost most of — was skipped forever as though it had answered. It did
+    not answer: the request that got the 403 was for the merchant's *policy file*, and the
+    collector's own fail-closed rule then meant ``/products.json`` was **never asked for at
+    all**. Recording "we could not read their policy" as "they answered" is the same mistake as
+    recording an IP-wide 429 as an empty shop, and the three hosts whose robots.txt was
+    unreadable here (403, 429, dropped connection) are one class of event, not two. The other
+    two were already retryable; this makes the third agree.
+
+    The counter-argument is real — a 403 IS a refusal, and re-asking a host that refused is
+    what the politeness posture exists to prevent — so the reversal is scoped as tightly as it
+    can be. It costs the host exactly **one robots.txt GET on a later run started by a person**,
+    at the floor interval, and no catalogue request follows unless that robots.txt is both
+    readable and permissive. It changes nothing about ``http_403``: a catalogue page that comes
+    back 403 stays terminal.
+
+    ``CORPUS_VERSION`` is deliberately NOT bumped for this. A bump retires every record in a
+    scratch directory and would charge 53 merchants a fresh walk to correct one host's
+    judgement; it is not needed, because a record written under the old table says
+    ``{"complete": true, "walk_outcome": "robots_http_403"}`` and ``reusable_entry`` judges the
+    outcome first — retryable now — so exactly the affected records, and only those, are
+    re-walked.
 
     The three-way shape is deliberate. An outcome this version has never heard of — one a later
     version invents, or a hand-edited record — is **retryable**, so the failure mode of not
@@ -724,8 +789,12 @@ def outcome_is_retryable(outcome: str) -> bool:
     match = _HTTP_OUTCOME.match(outcome)
     if match is None:
         return True  # an outcome this version does not understand fails CLOSED
-    status = int(match.group(1))
-    return status == 429 or 500 <= status <= 599
+    robots_phase, status = bool(match.group(1)), int(match.group(2))
+    if status == 429 or 500 <= status <= 599:
+        return True
+    # A robots.txt we were refused is a policy we never read. A robots.txt that came back 404 is
+    # a policy that does not exist, which IS an answer and stays terminal.
+    return robots_phase and status == 403
 
 
 def fetch_fingerprint(args: argparse.Namespace) -> dict[str, Any]:
@@ -733,8 +802,9 @@ def fetch_fingerprint(args: argparse.Namespace) -> dict[str, Any]:
 
     ``--min-interval`` and ``--timeout`` are absent because they change how long a walk takes,
     never which products come back — and, for the interval, because two other things now make
-    its absence safe rather than merely defensible. It cannot go below
-    :data:`MIN_INTERVAL_FLOOR` at all, so there is no impolite value to splice in; and the
+    its absence safe rather than merely defensible. It has to satisfy
+    :func:`is_polite_interval`, so there is no impolite value to splice in — including the
+    non-finite ones, which used to clear both floor checks and then disable every pause; and the
     interval each host was actually walked at is recorded per store in
     ``robots.crawl_delay_seconds``, so a corpus assembled from several runs can be *checked*
     rather than assumed. ``collector_version`` is what retires records taken before the floor
@@ -1072,6 +1142,14 @@ def build_store(entry: dict[str, Any], raw_dir: Path, out: Path, compress: bool)
         # directory has seen — see POLITENESS_POSTURE["request_accounting"].
         "requests": entry.get("requests", _requests_in(entry)),
         "requests_charged": entry.get("requests_charged", _requests_in(entry)),
+        # ...and whether that number is the carried-across one or a stand-in. `build` fills the
+        # field in for every store, including stores whose scratch record predates it, so the
+        # field's PRESENCE stopped meaning anything the moment it became universal: a reader
+        # could not tell a genuine accumulated count from one synthesised out of the surviving
+        # walk. False means "this store's number is a floor" — the walks that were replaced are
+        # not in it — and `totals.requests_recorded_is_floor` is the same fact for the whole
+        # collection.
+        "requests_charged_accumulated": "requests_charged" in entry,
         "pages_fetched": len(entry["pages"]),
         "page_cap": entry["page_cap"],
         "truncated": entry["truncated"],
@@ -1250,6 +1328,13 @@ def run_build(args: argparse.Namespace, log: dict[str, Any]) -> dict[str, Any]:
         "requests_recorded": sum(
             int(s.get("requests_charged") or 0) or _requests_in(s) for s in stores
         ),
+        # True when ANY store's `requests_charged` was synthesised from its surviving walk
+        # rather than carried across walks, which makes the total above a floor rather than a
+        # count. Published because the alternative is a sentence in a README claiming a
+        # distinction the artifact does not record.
+        "requests_recorded_is_floor": not all(
+            s.get("requests_charged_accumulated") for s in stores
+        ),
         "bytes_raw": sum(v["raw"] for s in stores for v in s["bytes"].values()),
         "bytes_on_disk": sum(v["on_disk"] for s in stores for v in s["bytes"].values()),
     }
@@ -1322,15 +1407,19 @@ POLITENESS_POSTURE: dict[str, Any] = {
         "5.9 seconds in; the same 80 zones serially cost 209 requests and zero blocks."
     ),
     "request_accounting": (
-        "totals.requests_recorded is the sum of each store record's `requests_charged`: one "
-        "robots.txt fetch plus every catalogue page actually asked for, accumulated across "
-        "every walk of that host this scratch directory has seen. Records written before "
-        "collector 2.2.0 carry no `requests_charged`, and for those the number falls back to "
-        "the surviving walk alone — a FLOOR, because a re-walk replaced its own record. "
-        "Recompute it from the artifact: "
+        "totals.requests_recorded is the sum of each store's `requests_charged`: one robots.txt "
+        "fetch plus every catalogue page actually asked for. Every store carries the field, so "
+        "its presence says nothing; `requests_charged_accumulated` is what says whether the "
+        "number is real. True: the scratch record carried the count forward across every walk "
+        "of that host. False: the scratch record predates that (collector 2.1.0 and earlier), "
+        "so `build` synthesised the number from the walk that survived — a FLOOR for that host, "
+        "because a re-walk replaced the record of the walk it replaced. "
+        "totals.requests_recorded_is_floor is true when any store is in the second case. "
+        "Recompute the total from the artifact: "
         "sum(s['requests_charged'] if 'requests_charged' in s else "
         "len([f for f in s['fetches'] if f['status'] != -1]) + bool(s['robots']) "
-        "for s in collection['stores'])."
+        "for s in collection['stores']) — the else branch is for manifests written before this "
+        "field existed at all."
     ),
     "min_interval_floor_seconds": MIN_INTERVAL_FLOOR,
 }
@@ -1428,14 +1517,15 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     for host in args.only:
         if not _SAFE_HOST.match(host):
             parser.error(f"--only {host!r} is not a hostname")
-    if args.min_interval < MIN_INTERVAL_FLOOR:
+    if not is_polite_interval(args.min_interval):
         # Not clamped with a warning: a clamp makes the manifest and the traffic agree by
         # ignoring what was asked for, and the next reader cannot tell a clamped run from a
-        # polite one. `--min-interval 0` used to be accepted in silence.
+        # polite one. `--min-interval 0` used to be accepted in silence, and `--min-interval
+        # nan` used to be accepted in silence AND disabled every pause in the walk.
         parser.error(
-            f"--min-interval {args.min_interval} is below the {MIN_INTERVAL_FLOOR}s politeness "
-            f"floor. These are real businesses and the floor is the reason the egress IP still "
-            f"works; it can be widened, never narrowed."
+            f"--min-interval {args.min_interval} is not a finite interval at or above the "
+            f"{MIN_INTERVAL_FLOOR}s politeness floor. These are real businesses and the floor "
+            f"is the reason the egress IP still works; it can be widened, never narrowed."
         )
     return args
 

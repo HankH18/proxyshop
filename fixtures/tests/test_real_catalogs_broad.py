@@ -3,10 +3,13 @@
 Why this file exists
 --------------------
 The broad corpus shipped with **zero gates**. All the assertions in
-``test_real_catalogs.py`` point at ``fixtures/real-catalogs``, and the 94 collector tests run
-against synthetic storefronts and never open a collected corpus, so 14 MB of recorded catalogue
-could have been corrupted, truncated or silently narrowed and nothing in this repository would
-have said a word. "Built, tested, reachable by nothing" — the corpus was the third.
+``test_real_catalogs.py`` point at ``fixtures/real-catalogs``, and every test in
+``scripts/tests/test_collect_real_catalogs.py`` runs against synthetic storefronts and opens no
+collected corpus, so 14 MB of recorded catalogue could have been corrupted, truncated or
+silently narrowed and nothing in this repository would have said a word. "Built, tested,
+reachable by nothing" — the corpus was the third. (A count of those collector tests used to sit
+in this sentence; it was stale within a day, and a number nothing checks is exactly what this
+file is about.)
 
 It also exists because the *point* of the broad corpus had no assertion anywhere. The demo's
 visible flaw was that ``"a walnut coffee table for the lounge"`` came back with liver capsules,
@@ -162,9 +165,12 @@ RECORDED_CATEGORIES = {
 # is silent about it. No probe below is supplement vocabulary except the supplement one.
 #
 # Word boundaries, not substrings. ``"table" in title`` matches "Adjustable Footrest" and
-# "Adjustable Laptop Stand", which is how a corpus-wide count of table products came out at 31
-# when there are 25. Every count in this file is a ``\b``-anchored match against the merchant's
-# own title.
+# "Adjustable Laptop Stand", which is how a count of table products in the three furniture
+# stores came out at 31 where ``\btables?\b`` finds 24 — the seven extras are those two, their
+# two Open Box twins, a portable lamp, "Adjustable Headboard Hardware" and "The Adjustable
+# Base". (Corpus-wide the substring finds 204, against 25 whole-word; a comment here once
+# called the 31 the corpus-wide figure, which it is not.) Every count in this file is a
+# ``\b``-anchored match against the merchant's own title.
 # --------------------------------------------------------------------------------------
 
 CATEGORY_PROBES: dict[str, tuple[str, ...]] = {
@@ -181,10 +187,47 @@ CATEGORY_PROBES: dict[str, tuple[str, ...]] = {
     "supplements": ("milk thistle", "creatine", "magnesium", "collagen", "probiotic", "whey"),
 }
 
+#: What :func:`_probe_hits` returns for :data:`CATEGORY_PROBES` on THIS corpus, and on the
+#: ten-supplement-store one. Pinned, because the previous round published a set of counts in a
+#: docstring and in ``README.md`` that the function does not return — outdoor 333 against 135,
+#: sports 580 against 501, apparel 3,984 against 3,253 — and nothing went red. Every probe
+#: number in either README is one of these; a re-collection moves them and is MEANT to fail
+#: here, the same deliberate act ``RECORDED_COUNTS`` demands.
+RECORDED_PROBE_HITS = {
+    "furniture": 258,
+    "coffee": 149,
+    "outdoor": 135,
+    "home-kitchen": 35,
+    "pet": 132,
+    "sports": 501,
+    "beauty": 20,
+    "food": 24,
+    "tools": 24,
+    "apparel": 3253,
+    "supplements": 274,
+}
+#: Distinct products matched by at least one probe family. Smaller than the sum of the hits:
+#: one product can answer to two families.
+RECORDED_PROBE_MATCHES = 4766
+#: The same probes on ``fixtures/real-catalogs`` — the corpus the breadth gate must REJECT.
+INCUMBENT_PROBE_HITS = {
+    "furniture": 0,
+    "coffee": 0,
+    "outdoor": 3,
+    "home-kitchen": 0,
+    "pet": 1,
+    "sports": 0,
+    "beauty": 0,
+    "food": 5,
+    "tools": 12,
+    "apparel": 6,
+    "supplements": 265,
+}
+
 #: A probe family below this many hits is not a category the corpus can be said to hold.
-#: Measured on this corpus, the thinnest family is beauty at 21 and the next is tools at 24, so
-#: the floor has real headroom without being decorative. On the ten-supplement-store corpus four
-#: families score exactly 0 — see the discrimination test.
+#: Measured on this corpus, the thinnest family is beauty at 20 and the next two are food and
+#: tools at 24, so the floor has real headroom without being decorative. On the
+#: ten-supplement-store corpus FIVE families score exactly 0 — see the discrimination test.
 PROBE_FLOOR = 15
 
 #: No declared category may hold more than this share of the corpus. Measured: apparel is 38.2%
@@ -566,13 +609,20 @@ def test_the_corpus_stays_small_enough_to_live_in_git(corpus: Corpus) -> None:
 
 def test_the_corpus_spans_genuinely_different_categories(corpus: Corpus) -> None:
     """Eleven probe families in eleven different categories' own vocabulary, every one of them
-    genuinely stocked.
+    genuinely stocked. The thinnest is beauty at 20 against a floor of 15.
 
-    Measured on this corpus: furniture 258, coffee 149, outdoor 333, home-kitchen 41, pet 136,
-    sports 580, beauty 21, food 26, tools 24, apparel 3,984, supplements 274. The thinnest is
-    beauty at 21 against a floor of 15.
+    The per-family counts are PINNED in :data:`RECORDED_PROBE_HITS` rather than described in
+    this docstring, because a docstring is where the last set of them went wrong: it published
+    outdoor 333, home-kitchen 41, sports 580, beauty 21, apparel 3,984 and more, none of which
+    ``_probe_hits`` returns on the corpus in this directory. Numbers that only a human re-reads
+    drift; numbers an assertion reads go red. Every count in ``README.md`` beside this gate is
+    now the one this test enforces.
     """
     hits = _probe_hits(corpus, CATEGORY_PROBES)
+    assert hits == RECORDED_PROBE_HITS, (
+        f"the probe counts moved; recompute the README's tables from these rather than "
+        f"editing them to taste: {hits}"
+    )
     thin = {name: n for name, n in hits.items() if n < PROBE_FLOOR}
     assert not thin, f"these categories are barely stocked, so the corpus is not broad: {thin}"
     assert len(hits) == len(CATEGORY_PROBES)
@@ -582,7 +632,10 @@ def test_the_corpus_spans_genuinely_different_categories(corpus: Corpus) -> None
         for terms in CATEGORY_PROBES.values()
         if _title_matches(product, terms)
     }
-    assert len(matched) >= 4_000, f"only {len(matched)} distinct products across the categories"
+    assert len(matched) == RECORDED_PROBE_MATCHES, (
+        f"{len(matched)} distinct products are matched by at least one family, not "
+        f"{RECORDED_PROBE_MATCHES}"
+    )
 
 
 def test_no_single_declared_category_dominates_the_corpus(corpus: Corpus) -> None:
@@ -617,19 +670,28 @@ def test_the_breadth_gate_would_have_failed_the_supplement_corpus() -> None:
     changing its threshold.
 
     So the probes and the share rule are run against ``fixtures/real-catalogs`` here and are
-    required to FAIL it. Measured on the ten-store corpus: furniture 0, coffee 0, home-kitchen 0,
-    beauty 0, tools 12, food 5 — and supplements is 100% of its declared categories.
+    required to FAIL it. Measured on the ten-store corpus and pinned in
+    :data:`INCUMBENT_PROBE_HITS`: **five** families score exactly 0 — beauty, coffee, furniture,
+    home-kitchen and sports — and **ten of the eleven** fall below the floor of 15, the only
+    exception being supplements at 265. Supplements is also 100% of its declared categories.
+
+    The count of empty families was published as four here and in ``README.md``, with sports
+    left out of a list it belongs in; both are now read off the pinned dict.
     """
     incumbent = _load(SUPPLEMENT_CORPUS)
     hits = _probe_hits(incumbent, CATEGORY_PROBES)
+    assert hits == INCUMBENT_PROBE_HITS, (
+        f"the supplement corpus's probe counts moved; the README's discrimination table is "
+        f"computed from these: {hits}"
+    )
     empty = sorted(name for name, n in hits.items() if n == 0)
-    assert {"furniture", "coffee", "home-kitchen", "beauty"} <= set(empty), (
+    assert empty == ["beauty", "coffee", "furniture", "home-kitchen", "sports"], (
         f"the probes find inventory in categories the supplement corpus does not stock: {hits}"
     )
     thin = {name: n for name, n in hits.items() if n < PROBE_FLOOR}
-    assert len(thin) >= 6, (
-        f"only {len(thin)} probe families fall below the floor on a corpus of ten supplement "
-        f"storefronts; this gate cannot tell the two corpora apart: {hits}"
+    assert len(thin) == 10 and set(hits) - set(thin) == {"supplements"}, (
+        f"{len(thin)} of {len(hits)} probe families fall below the floor on a corpus of ten "
+        f"supplement storefronts; this gate cannot tell the two corpora apart: {hits}"
     )
 
     # ...and the share rule. That manifest predates the `categories` block, so the category
@@ -715,16 +777,25 @@ def test_the_walnut_answer_exists_on_disk_and_the_identity_surface_cannot_see_it
 
     The README said "no coffee table here is made of walnut" and built a story about a hard
     discrimination on it. That is false. Measured: five of the six products whose title names a
-    coffee table sell a **walnut** finish — floydhome's ``The Lift Off Coffee Table``
-    (``Walnut / Black`` and eleven more), branchfurniture's two ``Nested Coffee Tables`` and its
-    ``Coffee Table`` (``Walnut/White``, ``Walnut/Charcoal``).
+    coffee table sell a **walnut** finish — floydhome's ``The Lift Off Coffee Table`` (12
+    walnut variants, each a size crossed with a finish) and its ``Lift Off Coffee Table -
+    Expansion Kit`` (4), branchfurniture's two ``Nested Coffee Tables`` (3 and 2) and its
+    ``Coffee Table`` (``Walnut/White``, ``Walnut/Charcoal``). The sixth is floydhome's
+    ``Serviceability - Coffee Table``, a service line with no variants at all.
+
+    An earlier draft of this docstring credited ``The Lift Off Coffee Table`` with the variant
+    title ``Walnut / Black``, which belongs to the Expansion Kit, and left the Expansion Kit
+    out of the five it was counting.
 
     What is true, and harder, is where the word sits. **Not one title in this corpus contains
     both "coffee table" and "walnut."** The finish lives in variant titles, and
     ``exchange.retrieval.relevance.identity_surface`` joins ``title`` and ``brand`` and nothing
-    else — check it with ``sed -n '369,381p' apps/exchange/src/retrieval/relevance.py``. So the
-    literal query has a correct answer sitting in the corpus that title-and-brand retrieval
-    cannot reach, while eighteen taylorstitch products DO say "walnut" in the title (fourteen
+    else. Read it by name (``grep -n 'def identity_surface'``), not by line range: an earlier
+    draft of this docstring cited a thirteen-line window in that file, the function was not in
+    it, and the function moved another fifty lines while this sentence was being written. So
+    the literal query has a correct
+    answer sitting in the corpus that title-and-brand retrieval cannot reach, while eighteen
+    taylorstitch products DO say "walnut" in the title (fourteen
     garments in a colourway called Walnut, four pieces of walnut-wood homeware) and are exactly
     what a title matcher will return instead.
 
@@ -736,17 +807,29 @@ def test_the_walnut_answer_exists_on_disk_and_the_identity_surface_cannot_see_it
         for store, product in _iter_products(corpus)
         if _title_matches(product, ("coffee table", "coffee tables"))
     ]
-    with_walnut_variant = [
-        (store.host, product["title"])
+    with_walnut_variant = sorted(
+        (store.host, product["title"], count)
         for store, product in coffee_tables
-        if any(
-            _word("walnut").search(str(variant.get("title") or ""))
-            for variant in (product.get("variants") or [])
+        if (
+            count := sum(
+                1
+                for variant in (product.get("variants") or [])
+                if _word("walnut").search(str(variant.get("title") or ""))
+            )
         )
-    ]
-    assert len(with_walnut_variant) == 5, (
-        f"walnut coffee tables are the answer this corpus was collected to hold: "
-        f"{with_walnut_variant}"
+    )
+    # Pinned per product, not just counted, because the per-product numbers are quoted in this
+    # file's README and a count of five cannot catch them being attributed to the wrong product
+    # — which is how ``Walnut / Black``, an Expansion Kit variant, ended up described as a
+    # variant of ``The Lift Off Coffee Table``.
+    assert with_walnut_variant == [
+        ("branchfurniture.com", "Coffee Table", 2),
+        ("branchfurniture.com", "Nested Coffee Tables", 2),
+        ("branchfurniture.com", "Nested Coffee Tables", 3),
+        ("floydhome.com", "Lift Off Coffee Table - Expansion Kit", 4),
+        ("floydhome.com", "The Lift Off Coffee Table", 12),
+    ], (
+        f"walnut coffee tables are the answer this corpus was collected to hold: {with_walnut_variant}"
     )
 
     both_in_title = [
@@ -784,10 +867,11 @@ def recorded_requests(manifest: Mapping[str, Any]) -> int:
     """The requests this collection can account for, recomputed from ``stores``.
 
     This is the recipe ``politeness.request_accounting`` states, run against the artifact that
-    states it. It remains a FLOOR: the record is per store and a re-walk replaces it, so a walk
-    that was later replaced is in the number only because collector 2.2.0 carries
-    ``requests_charged`` forward. Records written before that are counted by their surviving
-    walk alone.
+    states it. Whether the result is a total or a FLOOR is not something this function can tell
+    from the presence of ``requests_charged`` — ``build`` writes that field for every store —
+    so the artifact says it outright, per store in ``requests_charged_accumulated`` and for the
+    collection in ``totals.requests_recorded_is_floor``. See
+    ``test_the_manifest_says_which_of_its_request_counts_are_floors``.
     """
     total = 0
     for store in manifest["stores"]:
@@ -819,6 +903,41 @@ def test_politeness_is_recorded_and_the_count_can_be_recomputed(corpus: Corpus) 
     assert "requests_made" not in corpus.manifest["totals"], "the name that overclaimed is gone"
     # 53 whole catalogues for fewer requests than a careless crawler's first ten seconds.
     assert counted <= 250
+
+
+def test_the_manifest_says_which_of_its_request_counts_are_floors(corpus: Corpus) -> None:
+    """``requests_charged`` is on all 53 stores, so its presence cannot mean anything.
+
+    ``build_store`` synthesises the field for every store — ``entry.get("requests_charged",
+    _requests_in(entry))`` — so a reader had no way to tell a count carried across every walk
+    of a host from one derived from the single walk that happened to survive, while
+    ``politeness.request_accounting`` described exactly that distinction. Either the artifact
+    records it or the sentence goes; the artifact records it.
+
+    These 53 records were written by collector 2.1.0, which did not carry the number forward,
+    so every one of them is a floor and the collection's total is a floor. A single-pass
+    collection by 2.2.0 or later is the other case, and
+    ``test_the_ten_store_corpus_can_be_rebuilt_in_one_pass_without_a_gate_going_red`` in
+    ``scripts/tests/`` is where that one is measured.
+    """
+    accounting = corpus.manifest["politeness"]["request_accounting"]
+    assert "requests_charged_accumulated" in accounting, (
+        "the accounting sentence describes a distinction; it must name the field that records it"
+    )
+    for store in corpus.manifest["stores"]:
+        assert "requests_charged_accumulated" in store, store["host"]
+        assert isinstance(store["requests_charged_accumulated"], bool), store["host"]
+    floors = [s["host"] for s in corpus.manifest["stores"] if not s["requests_charged_accumulated"]]
+    assert len(floors) == ROSTER_SIZE, (
+        f"these were all fetched by collector 2.1.0, so all {ROSTER_SIZE} counts are floors; "
+        f"{len(floors)} say so"
+    )
+    assert corpus.manifest["totals"]["requests_recorded_is_floor"] is True
+    # And the floor is a floor of something: no store may be charged less than its own rows.
+    for store in corpus.manifest["stores"]:
+        asked = sum(1 for f in store.get("fetches") or [] if int(f.get("status", 0)) != -1)
+        asked += 1 if store.get("robots") else 0
+        assert int(store["requests_charged"]) >= asked, store["host"]
 
 
 def test_the_retry_posture_says_what_a_resume_actually_does(corpus: Corpus) -> None:
@@ -917,6 +1036,41 @@ def test_the_readme_publishes_the_counts_and_says_the_corpus_is_a_snapshot() -> 
         assert any(re.search(rf"(?<!\d){count:,}(?!\d)", row) for row in rows), (
             f"README does not publish {host}'s count of {count:,}; its rows say {rows}"
         )
+
+
+def test_the_readmes_discrimination_table_agrees_with_the_pinned_probe_counts() -> None:
+    """The table that was wrong in four places at once, gated against the dicts it summarises.
+
+    It said "probe families scoring 0 | furniture, coffee, home-kitchen, beauty" (four names for
+    a set of five — sports was missing), "8 of 11 below the floor" (ten), and "thinnest: beauty,
+    21" (twenty). Every one of those came from a docstring nothing executed. This reads the
+    table's own two rows and requires them to agree with :data:`INCUMBENT_PROBE_HITS` and
+    :data:`RECORDED_PROBE_HITS`, which the gates above require to agree with the bytes on disk.
+    """
+    rows = [
+        line
+        for line in README.read_text(encoding="utf-8").splitlines()
+        if line.startswith("| probe families")
+    ]
+    assert len(rows) == 2, f"the discrimination table's shape changed: {rows}"
+    zero_row, thin_row = rows
+
+    empty = sorted(name for name, n in INCUMBENT_PROBE_HITS.items() if n == 0)
+    assert f"{len(empty)} of {len(INCUMBENT_PROBE_HITS)}" in zero_row, zero_row
+    missing = [name for name in empty if name not in zero_row]
+    assert not missing, f"the README's zero-scoring list leaves out {missing}: {zero_row}"
+
+    thin = {name: n for name, n in INCUMBENT_PROBE_HITS.items() if n < PROBE_FLOOR}
+    survivor = sorted(set(INCUMBENT_PROBE_HITS) - set(thin))
+    assert f"{len(thin)} of {len(INCUMBENT_PROBE_HITS)}" in thin_row, thin_row
+    assert f"floor of {PROBE_FLOOR}" in thin_row, thin_row
+    for name in survivor:
+        assert name in thin_row and str(INCUMBENT_PROBE_HITS[name]) in thin_row, thin_row
+
+    thinnest, count = min(RECORDED_PROBE_HITS.items(), key=lambda kv: kv[1])
+    assert f"{thinnest}, {count}" in thin_row, (
+        f"the README calls a different family the thinnest one: {thin_row}"
+    )
 
 
 def test_the_readme_never_asserts_the_walnut_claim_that_was_measured_false() -> None:

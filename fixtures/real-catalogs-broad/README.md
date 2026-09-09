@@ -46,8 +46,10 @@ table in it to find. Breadth is a hostname problem, and this is the hostnames.
 
 ```sh
 python -c "import json;m=json.load(open('fixtures/real-catalogs-broad/collection.json'));\
-[print(f\"{k:14s} {len(v['stores']):2d} {len(v['stores_with_inventory']):2d} {v['products']:6d}\") \
-for k,v in m['categories'].items()]"
+t=m['totals']['products'];\
+[print(f\"{k:14s} {len(v['stores']):2d} {len(v['stores_with_inventory']):2d} {v['products']:6d} {100*v['products']/t:5.1f}%\") \
+for k,v in sorted(m['categories'].items(), key=lambda kv:-kv[1]['products'])];\
+print('total', sum(len(v['stores']) for v in m['categories'].values()), m['totals']['stores_collected'], t)"
 ```
 
 **Twelve categories are on the roster; eleven have inventory.** `totals.categories` counts the
@@ -58,6 +60,11 @@ quietly dropped.
 
 Four stores exceed 1,000 products: taylorstitch.com 3,805, titan.fitness 2,564,
 marinelayer.com 2,556, cotopaxi.com 1,432. See *What promotion breaks*.
+
+```sh
+python -c "import json;m=json.load(open('fixtures/real-catalogs-broad/collection.json'));\
+print(sorted(((h,n) for h,n in m['per_store_counts'].items() if n>1000), key=lambda x:-x[1]))"
+```
 
 ## What was collected and what refused
 
@@ -73,9 +80,38 @@ marinelayer.com 2,556, cotopaxi.com 1,432. See *What promotion breaks*.
 
 All three deliberate misses answered 404, so the control did not fail open —
 `totals.off_platform_controls_that_answered` is 0. **No merchant in this corpus published a
-rule against us**: not one store's `walk_outcome` is `robots_disallowed`. The three unreadable
-robots files are our bad minute, not their stated policy, and are recorded as such — their
-records stay marked retryable, which is honest.
+rule against us**: not one store's `walk_outcome` is `robots_disallowed`.
+
+The three unreadable robots files are our bad minute rather than a stated policy, and until
+this round only two of them were treated that way. `outcome_is_retryable('robots_http_403')`
+returned False — 403 fell in the same branch as a catalogue 403 — so **industrywest.com was
+permanently skipped as though it had answered**, while bombas.com (429) and katzmosestools.com
+(dropped connection) were re-asked. The manifest beside this paragraph is the evidence:
+`run.reused_from_earlier_runs` contains industrywest.
+
+That is now decided the other way, and the code, the manifest and this sentence say the same
+thing. A 403 on **robots.txt** is a policy we were not allowed to read, not an answer about a
+catalogue: the collector's own fail-closed rule means `/products.json` was never requested at
+all, so recording it as "they answered" is the same mistake as recording an IP-wide 429 as an
+empty shop. The counter-argument is real — a 403 is a refusal, and re-asking a host that
+refused is what the politeness posture exists to prevent — so the reversal is scoped as
+tightly as it can be: it costs that host exactly **one robots.txt GET on a later run started
+by a person**, at the 2 s floor, with no catalogue request following unless the file is then
+both readable and permissive. A 403 on `/products.json` (madeincookware, youthtothepeople) is
+unchanged and still terminal, and so is a robots.txt that answers 404, which is a policy that
+does not exist rather than one withheld.
+
+`CORPUS_VERSION` is deliberately not bumped for it. A bump retires every record in a scratch
+directory, charging 53 merchants a fresh walk to correct one host's judgement; it is not
+needed, because `reusable_entry` judges the outcome before it consults the `complete` boolean
+stored beside it, so exactly the affected records re-walk.
+`test_a_record_written_under_the_old_403_rule_is_re_walked_rather_than_believed` is that
+check.
+
+```sh
+PROXYSHOP_WORKER=14 .venv/bin/python -m pytest scripts/tests/test_collect_real_catalogs.py \
+    -k "403 or robots" -q
+```
 
 Furniture is the category that lost the most: 7 roster hosts produced 3 stocked ones.
 
@@ -91,33 +127,53 @@ Measured, from `collection.json`, and recomputable from it:
 * **155 HTTP requests are accounted for** across 53 hosts — one robots.txt fetch each, plus 102
   catalogue pages. That is `totals.requests_recorded`, and it is a **floor**, not a total: the
   scratch record is per store, so a host walked more than once contributes only what its
-  surviving record carries. Records written by collector 2.2.0 and later carry
-  `requests_charged`, which accumulates across walks; these were written by 2.1.0, which did
-  not, so a re-walk earlier in the collection is not in the number. An earlier draft of this
-  file put the true figure at 158 by counting from the session's own scrollback; that number
-  cannot be read off any artifact and has been removed.
+  surviving record carries.
+
+  Which of the two a number is, is now in the artifact rather than only in this paragraph.
+  `build` writes `requests_charged` for **every** store, so its presence never meant anything;
+  `requests_charged_accumulated` is the field that says whether the count was carried across
+  walks (collector 2.2.0 and later) or synthesised from the walk that survived. These 53
+  records were fetched by 2.1.0, so all 53 are the second kind and
+  `totals.requests_recorded_is_floor` is `true`. An earlier draft of this file put the true
+  figure at 158 by counting from the session's own scrollback; that number cannot be read off
+  any artifact and has been removed.
 
   ```sh
   python -c "import json;m=json.load(open('fixtures/real-catalogs-broad/collection.json'));\
   print(sum(s.get('requests_charged', len([f for f in s['fetches'] if f['status']!=-1])+bool(s['robots'])) \
-  for s in m['stores']), m['totals']['requests_recorded'])"
+  for s in m['stores']), m['totals']['requests_recorded'], m['totals']['requests_recorded_is_floor'], \
+  sum(s['requests_charged_accumulated'] for s in m['stores']))"
   ```
 
 * **Strictly serial.** One host at a time, one request at a time; no concurrency primitive
   exists in the collector.
-* **≥2.0 s between requests to one host, enforced in code** rather than defaulted. The collector
-  refuses a `--min-interval` below `MIN_INTERVAL_FLOOR`, in `parse_args` and again in
-  `PolitenessBudget`, and each store records the interval it was walked at in
-  `robots.crawl_delay_seconds`. `--min-interval 0` used to be accepted in silence.
+* **≥2.0 s between requests to one host, enforced in code** rather than defaulted. `parse_args`
+  and `PolitenessBudget` both put the value through `is_polite_interval`, which requires it to
+  be **finite** and at or above `MIN_INTERVAL_FLOOR`; each store records the interval it was
+  walked at in `robots.crawl_delay_seconds`. Both checks used to be a bare `<` comparison, and
+  every comparison against NaN is False, so `--min-interval nan` cleared both — and then
+  `spend`'s own `if wait > 0` was False too, giving a walk that never paused at all under a
+  manifest declaring 2.0 s. `--min-interval 0` was accepted in silence before that.
 * robots.txt fetched first for every host and parsed with `protego`; a declared `Crawl-delay`
-  widens the interval and never narrows it.
+  widens the interval and never narrows it. A non-finite declared delay is ignored rather than
+  honoured, because an infinite one is a hang, not a politeness.
 * The research User-Agent, unspoofed, with a contact address.
 * **No retry loop.** Within the run, no URL was requested twice — checkable, and checked by
   `test_the_retry_posture_says_what_a_resume_actually_does`. **Across runs, `--resume` does
-  re-walk a host whose recorded outcome was retryable** (429, 5xx, transport error): 51 of these
-  53 stores came from an earlier run, and bombas.com and katzmosestools.com would be asked again
-  by the next `fetch`. `politeness.retries` says both halves; it used to say "none" flat out,
-  which was false the day resume landed.
+  re-walk a host whose recorded outcome was retryable** (429, 5xx, transport error, and now a
+  403 on robots.txt): 51 of these 53 stores came from an earlier run, and three records here
+  are retryable — bombas.com, katzmosestools.com and industrywest.com. In practice the next
+  `fetch` against that scratch directory re-walks all 53 anyway, because `collector_version`
+  moved from 2.1.0 to 2.2.0 and it is part of the resume fingerprint; the three are what would
+  be re-asked on the outcome rule alone. `politeness.retries` says both halves; it used to say
+  "none" flat out, which was false the day resume landed.
+
+  ```sh
+  python -c "import json;m=json.load(open('fixtures/real-catalogs-broad/collection.json'));\
+  print(len(m['run']['reused_from_earlier_runs']), \
+  [s['host'] for s in m['stores'] if s['walk_outcome'] in \
+  ('robots_http_403','robots_http_429','robots_transport_error')])"
+  ```
 * **Zero 429s attributable to this crawler's pacing.** One host (bombas.com) answered 429 on its
   own robots.txt; no host this run had never touched returned one, which is the signature of the
   IP-wide block the feasibility study saw under parallelism.
@@ -167,17 +223,23 @@ EOF
 
 ## The query this corpus was collected for
 
-The corpus holds **25 table products** — 24 in the three furniture stores, and one camp table at
-nemoequipment.com, which is a useful reminder that a word is not a category. Of those, **6
-products name a coffee table**: floydhome's `The Lift Off Coffee Table` and two service items,
-branchfurniture's two `Nested Coffee Tables` and its `Coffee Table`. There are 153 sofa/sectional
-products and 120 desk/chair products inside the furniture stores (151 corpus-wide, because
-"desk" and "chair" also appear in apparel and office accessories).
+The corpus holds **25 table products** — 24 in the three stocked furniture stores, and one
+`Moonlander™ Dual-Height Camp Table` at nemoequipment.com, which is a useful reminder that a
+word is not a category. Of those, **6 products name a coffee table**, and all six are at two
+stores: floydhome's `The Lift Off Coffee Table`, its `Lift Off Coffee Table - Expansion Kit`
+and its `Serviceability - Coffee Table`, and branchfurniture's two products both titled
+`Nested Coffee Tables` plus its `Coffee Table`. There are 153 sofa/sectional products and 120
+desk/chair products inside the furniture stores (151 corpus-wide, because "desk" and "chair"
+also appear in apparel and office accessories).
 
-Counted with **whole-word** matching. Substring matching inflates all of these — `"table" in
-title` also matches `Adjustable Footrest` and `Adjustable Laptop Stand`, which is how an earlier
-draft of this file reported 161 desk/chair products and 25 tables "across three furniture
-stores".
+Counted with **whole-word** matching. Substring matching inflates all of these: `"table" in
+title` finds 31 products in the three furniture stores where `\btables?\b` finds 24, the seven
+extras being `Adjustable Footrest`, `Adjustable Laptop Stand`, their two `Open Box` twins,
+`Muse Portable Lamp`, `Adjustable Headboard Hardware` and `The Adjustable Base`. Corpus-wide
+the substring finds 204 against 25. That is how an earlier draft of this file came to report
+25 tables "across three furniture stores" — 25 is the corpus-wide figure and 24 is the
+furniture one. It also reported a desk/chair count this corpus does not produce under any
+matching rule tried here; that number has been removed rather than adjusted.
 
 ```sh
 python - <<'EOF'
@@ -228,18 +290,25 @@ EOF
 
 An earlier version of this file said *"no coffee table here is made of walnut"* and built a story
 about a hard discrimination on it. **That is false.** Five of the six coffee-table products offer
-a walnut finish: floydhome's `The Lift Off Coffee Table` carries `Walnut / Black` and eleven more
-walnut variants, branchfurniture's `Nested Coffee Tables` carry `Walnut / Medium`, `Walnut /
-Large`, `Walnut / Set of 2`, and its `Coffee Table` carries `Walnut/White` and `Walnut/Charcoal`.
+a walnut finish, and the sixth is floydhome's `Serviceability - Coffee Table`, a service line.
+floydhome's `The Lift Off Coffee Table` has **12** walnut variants, every one of them a size
+crossed with a finish (`One Panel - 18" w x 67" l x 15" h / Walnut / Black` through
+`Three Panel - 53" w x 67" l x 15" h / Walnut / Stainless`); its `Lift Off Coffee Table -
+Expansion Kit` has 4 (`Walnut / Almond`, `Walnut / Black`, `Walnut / Marine`,
+`Walnut / Stainless Steel`); branchfurniture's two `Nested Coffee Tables` have 3
+(`Walnut / Medium`, `Walnut / Large`, `Walnut / Set of 2`) and 2 (`Walnut / Medium`,
+`Walnut / Large`); and its `Coffee Table` has 2 (`Walnut/White`, `Walnut/Charcoal`).
 
 What is true is sharper, and it is a finding about retrieval rather than about the corpus's
 inventory:
 
 * **Not one title in this corpus contains both "coffee table" and "walnut."** The finish lives in
   *variant* titles.
-* `exchange.retrieval.relevance.identity_surface` joins `title` and `brand` and nothing else —
-  `sed -n '369,381p' apps/exchange/src/retrieval/relevance.py`. Variant titles are not in the
-  surface a query is matched against.
+* `exchange.retrieval.relevance.identity_surface` joins `title` and `brand` and nothing else.
+  Variant titles are not in the surface a query is matched against. Find it by name —
+  `grep -n 'def identity_surface' apps/exchange/src/retrieval/relevance.py` — because a line
+  range here was already wrong the day it was written, and pointed at code the function had
+  moved away from.
 * Meanwhile **20 titles do contain "walnut"**, 18 of them at taylorstitch.com: 14 garments in a
   colourway called Walnut (`The Hudson Sweater in Walnut`, `The Utility Shirt in Walnut Double
   Cloth`) and **4 pieces of walnut-wood homeware** (`Walnut Chopping Board`, `French Style Walnut
@@ -262,6 +331,7 @@ d = pathlib.Path("fixtures/real-catalogs-broad")
 m = json.load(open(d / "collection.json"))
 W, CT = re.compile(r"\bwalnut\b", re.I), re.compile(r"\bcoffee tables?\b", re.I)
 both = wal = ct = 0
+variants, taylorstitch = [], []
 for s in m["stores"]:
     if s["skipped"]:
         continue
@@ -272,7 +342,16 @@ for s in m["stores"]:
         t = p["title"] or ""
         wal += bool(W.search(t)); ct += bool(CT.search(t))
         both += bool(W.search(t) and CT.search(t))
+        if W.search(t) and s["host"] == "taylorstitch.com":
+            taylorstitch.append(t)
+        if CT.search(t):
+            n = sum(1 for v in (p.get("variants") or []) if W.search(str(v.get("title") or "")))
+            variants.append((s["host"], t, n))
 print("walnut titles", wal, "| coffee-table titles", ct, "| both", both)   # 20 6 0
+for row in sorted(variants):
+    print("   ", row)   # the six, with their walnut-variant counts: 12, 4, 3, 2, 2, and 0
+home = [t for t in taylorstitch if re.search(r"\b(board|tray)\b", t, re.I)]
+print("taylorstitch walnut", len(taylorstitch), "| walnut-wood homeware", len(home))  # 18 4
 EOF
 ```
 
@@ -306,7 +385,7 @@ record separately.
 | `test_the_per_store_and_total_product_counts_are_pinned` | exact dict equality against `RECORDED_COUNTS` | 3,093 → 17,409, and livemomentous 90 → 89 |
 | `test_every_page_reassembles_byte_for_byte_into_the_response_that_was_served` | ends on `assert pages == 18` | 18 → 90 pages |
 | `test_the_corpus_stays_small_enough_to_live_in_git` | `assert total < 5 MB` | 2.7 MB → 14.1 MB |
-| `test_every_store_contributes_a_catalogue_rather_than_a_shelf` | `assert min(counts.values()) >= 50` | smallest store 89 → flybyjing.com at 32 |
+| `test_every_store_contributes_a_catalogue_rather_than_a_shelf` | `assert min(counts.values()) >= 50` | smallest store 90 (paradiseherbs, livemomentous) → flybyjing.com at 32 |
 | `test_this_corpus_is_a_single_category_corpus_and_says_so` | asserts every roster line reads `supplements` | would correctly fail: the corpus is no longer single-category |
 | `DEMO_QUERIES` gates (`stores_with` / `stores_without`) | exact store counts over the whole corpus | 10-store denominators → 38 |
 | `scripts/build_demo_deployment.py` → `exchange-deployment.json` | `composition.MAX_DEPLOYMENT_BYTES` is 4 MiB | see below |
@@ -320,14 +399,29 @@ products, projected at **10.6 MB, 2.5x over the ceiling**. The 4 MiB document ca
 **4,387 products**, i.e. about **115 per store across 38 stores**. So promoting this corpus
 forces a real decision about what reaches the exchange snapshot — and a per-store window near 115
 is the size that was measured to cost shoppers a product NAME on 62% of graph-route shortlist
-slots when it was 60.
+slots when it was 60 (63 of 101 slots carried `identity: null`; the measurement is recorded in
+`scripts/build_demo_deployment.py` beside `SNAPSHOT_PRODUCTS_PER_STORE`).
+
+```sh
+python -c "
+import json, os
+b = os.path.getsize('deploy/demo/exchange-deployment.json')
+d = json.load(open('deploy/demo/exchange-deployment.json'))
+p = sum(len(v['products']) for v in d['catalog'].values())
+m = json.load(open('fixtures/real-catalogs-broad/collection.json'))
+c = [s['products_recorded'] for s in m['stores'] if s['skipped'] is None]
+t = sum(min(1000, x) for x in c)
+print(b, p, round(b/p), f'{100*b/(4*1024*1024):.0f}% of ceiling')
+print(t, f'{t*b/p/1e6:.1f} MB', f'{t*(b/p)/(4*1024*1024):.1f}x', int((4*1024*1024)/(b/p)), int((4*1024*1024)/(b/p)/len(c)))"
+```
 
 ### The breadth gate the incumbent suite had, and why it certified nothing
 
 `test_no_single_category_dominates_the_corpus` passed on **both** corpora, and would have passed
 on a corpus of nothing but liver capsules provided the capsules were named variously enough. All
-sixteen of its `BREADTH_PROBES` were supplement vocabulary — *creatine, magnesium, collagen,
-ashwagandha, cholecalciferol, withania* — so it scored a corpus with zero furniture exactly as
+sixteen of its `BREADTH_PROBES` — the constant is `SUPPLEMENT_SUB_CATEGORY_PROBES` now, renamed
+for what it holds — were supplement vocabulary, *creatine, magnesium, collagen,
+ashwagandha, cholecalciferol, withania*, so it scored a corpus with zero furniture exactly as
 broad as one with 714 furniture products, and stayed silent while apparel became 38.2% of this
 one. Its docstring called them "sixteen unrelated categories"; they are sixteen sub-categories of
 one category.
@@ -348,14 +442,31 @@ share rule against `fixtures/real-catalogs` and requires them to **fail** it.
 
 | | committed (10 supplement stores) | broad (38 stores) |
 |---|---|---|
-| probe families scoring 0 | furniture, coffee, home-kitchen, beauty | none |
-| probe families below the floor of 15 | 8 of 11 | none (thinnest: beauty, 21) |
+| probe families scoring 0 | 5 of 11: beauty, coffee, furniture, home-kitchen, sports | none |
+| probe families below the floor of 15 | 10 of 11 — every one but supplements, at 265 | none (thinnest: beauty, 20) |
 | largest declared category | supplements, **100%** | apparel, 38.2% |
 | verdict | **fails** | passes |
+
+Both columns are pinned — `RECORDED_PROBE_HITS` and `INCUMBENT_PROBE_HITS` in the gate file —
+and the gates below assert them, so this table cannot drift from the corpus without something
+going red. The row that used to say "furniture, coffee, home-kitchen, beauty" was missing
+sports, "8 of 11" was ten, and "thinnest: beauty, 21" was twenty; all three came from a
+docstring rather than from the function.
 
 ```sh
 PROXYSHOP_WORKER=14 .venv/bin/python -m pytest fixtures/tests/test_real_catalogs_broad.py \
     -k "breadth or spans_genuinely or dominates" -q
+```
+
+Per-family counts, both corpora, off the bytes on disk:
+
+```sh
+PROXYSHOP_WORKER=14 .venv/bin/python -c "
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location('g', 'fixtures/tests/test_real_catalogs_broad.py')
+g = importlib.util.module_from_spec(spec); sys.modules['g'] = g; spec.loader.exec_module(g)
+for name, d in (('broad', g.CORPUS), ('committed', g.SUPPLEMENT_CORPUS)):
+    print(name, g._probe_hits(g._load(d), g.CATEGORY_PROBES))"
 ```
 
 ## Provenance of the roster

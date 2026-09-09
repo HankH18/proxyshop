@@ -381,29 +381,79 @@ def test_the_manifest_declares_that_whole_catalogues_were_taken(corpus: Corpus) 
     assert corpus.manifest["totals"]["duplicates_dropped"] == 0
 
 
+def surviving_requests(store: dict[str, Any]) -> int:
+    """Requests the walk whose rows are still in this record actually made.
+
+    Not ``len(fetches) + 1``: a page the per-host budget REFUSED is recorded with
+    ``status: -1`` and counting it would inflate what the merchant saw, and a store whose
+    budget ran out before robots.txt has no ``robots`` block at all, so the ``+ 1`` would
+    invent a request that never happened.
+    """
+    asked = sum(1 for f in store.get("fetches") or [] if int(f.get("status", 0)) != -1)
+    return asked + (1 if store.get("robots") else 0)
+
+
 def recorded_requests(manifest: dict[str, Any]) -> int:
     """The requests this collection can account for, recomputed from ``stores``.
 
     A number published in an artifact has to be readable back OUT of that artifact, and this
-    one was not: ``totals.requests_made`` was ``sum(len(fetches) + 1)`` over one record per
-    store, which counts a page the per-host budget REFUSED (recorded with ``status: -1``) as a
-    request and invents a robots fetch for a store whose budget ran out before robots.txt. This
-    is the arithmetic ``politeness.request_accounting`` states, run against the artifact that
-    states it.
+    one was not: ``totals.requests_made`` was ``sum(len(fetches) + 1)``, whose two errors
+    :func:`surviving_requests` describes. This is the arithmetic
+    ``politeness.request_accounting`` states, run against the artifact that states it.
 
-    It remains a FLOOR on what the merchants saw, and deliberately says so rather than being
-    published as a total: the record is per store and a re-walk replaces it, so requests made by
-    a walk that was later replaced are only in the number when the record carries
-    ``requests_charged`` (collector 2.2.0 and later).
+    It is a FLOOR whenever a store's ``requests_charged`` was not carried forward across walks
+    — the record is per store and a re-walk replaces it. Which stores those are is
+    ``requests_charged_accumulated``, per store, and ``totals.requests_recorded_is_floor`` for
+    the collection; the ``else`` branch below is for manifests older than the field itself,
+    which this corpus's own 2.0.0 manifest is.
     """
     total = 0
     for store in manifest["stores"]:
         if "requests_charged" in store:
             total += int(store["requests_charged"])
             continue
-        asked = sum(1 for f in store.get("fetches") or [] if int(f.get("status", 0)) != -1)
-        total += asked + (1 if store.get("robots") else 0)
+        total += surviving_requests(store)
     return total
+
+
+def assert_retry_posture_matches_the_run(manifest: dict[str, Any]) -> None:
+    """The retry posture, checked against what the corpus records about itself.
+
+    A module-level function rather than the body of the test below because
+    ``scripts/tests/test_collect_real_catalogs.py`` runs this exact check against a manifest
+    produced by a fresh single-pass ``fetch`` + ``build`` over a mock internet — which is the
+    case it used to fail. Whenever ``run.reused_from_earlier_runs`` was empty it asserted the
+    literal word ``"none"`` was in ``politeness.retries``, and the posture string stopped
+    containing that word when it was rewritten to state both halves of what a resume does. It
+    was latent only because the committed manifest is corpus_version 2.0.0 and still carries
+    the old sentence: the moment anyone rebuilt this ten-store corpus in one pass — the honest
+    case — the gate would have gone red on a sentence's wording rather than on anything about
+    the collection.
+
+    So the no-resume branch checks the *property* instead. If nothing was reused, then every
+    request this collection accounts for belongs to a walk whose fetch rows are still in the
+    artifact, and no store can have been charged for a walk that was replaced.
+    """
+    retries = manifest["politeness"]["retries"]
+    reused = list((manifest.get("run") or {}).get("reused_from_earlier_runs") or [])
+    if reused:
+        assert "within a run" in retries and "resume" in retries.lower(), (
+            f"{len(reused)} stores in this corpus came from an earlier run, so the retry "
+            f"posture must say what a resume does: {retries!r}"
+        )
+        return
+    for store in manifest["stores"]:
+        asked = surviving_requests(store)
+        charged = int(store.get("requests_charged", asked))
+        assert charged == asked, (
+            f"{store['host']} is charged {charged} requests but the walk recorded here made "
+            f"{asked}, so it was walked more than once — which contradicts an empty "
+            f"`reused_from_earlier_runs`"
+        )
+    assert manifest["totals"].get("requests_recorded_is_floor") in (False, None), (
+        "nothing was resumed and every walk's rows survive, so the request count is exact; a "
+        "manifest calling it a floor is describing a different collection"
+    )
 
 
 def test_politeness_is_recorded_and_was_actually_respected(corpus: Corpus) -> None:
@@ -439,22 +489,16 @@ def test_nothing_in_this_collection_was_ever_re_requested(corpus: Corpus) -> Non
     the one the sentence described, and the gate asserting the sentence could not tell.
 
     So the property is checked directly: within this collection, no URL was fetched twice. And
-    the sentence is required to match what the corpus records about itself.
+    the posture is required to match what the corpus records about itself — see
+    :func:`assert_retry_posture_matches_the_run`, which used to demand a WORD there and would
+    have gone red on the first honest single-pass rebuild of this corpus.
     """
     for store in corpus.stores:
         urls = [fetch["url"] for fetch in store.entry["fetches"]]
         repeated = {url for url in urls if urls.count(url) > 1}
         assert not repeated, f"{store.host} requested the same URL more than once: {repeated}"
 
-    retries = corpus.manifest["politeness"]["retries"]
-    reused = list((corpus.manifest.get("run") or {}).get("reused_from_earlier_runs") or [])
-    if reused:
-        assert "within a run" in retries and "resume" in retries.lower(), (
-            f"{len(reused)} stores in this corpus came from an earlier run, so the retry "
-            f"posture must say what a resume does: {retries!r}"
-        )
-    else:
-        assert "none" in retries, f"nothing was resumed here, so 'none' is the claim: {retries!r}"
+    assert_retry_posture_matches_the_run(corpus.manifest)
 
 
 def test_every_store_records_its_robots_decision(corpus: Corpus) -> None:
