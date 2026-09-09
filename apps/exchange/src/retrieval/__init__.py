@@ -120,12 +120,15 @@ from .relevance import (
     MIN_SHARED_SHARE,
     MIN_SHARED_TERMS,
     OFF_TOPIC_DETAIL,
+    PHRASE_BREAK_WORDS,
     STOPWORDS,
     RelevanceVerdict,
     TopicalRelevance,
     candidate_surface,
     content_terms,
+    head_term,
     identity_surface,
+    variant_surface,
 )
 from .rerank import (
     DETERMINISTIC_RERANKER_SIMILARITY_SHARE,
@@ -155,9 +158,11 @@ from .service import (
 )
 from .sources import (
     LOCAL_FILTER_OVERSAMPLE,
+    VARIANT_NAMES_PER_PRODUCT,
     CandidateSource,
     GraphCandidateSource,
     InMemoryCandidateSource,
+    VariantCandidate,
     attribute_rows,
     make_candidate,
 )
@@ -172,6 +177,7 @@ __all__ = [
     "DETERMINISTIC_RERANKER_SIMILARITY_SHARE",
     "FIT_LEDGER_KIND",
     "LOCAL_FILTER_OVERSAMPLE",
+    "VARIANT_NAMES_PER_PRODUCT",
     "MAX_CANDIDATE_LIMIT",
     "MAX_CATALOGUE_CLUSTERS",
     "MIN_SHARED_SHARE",
@@ -179,6 +185,7 @@ __all__ = [
     "NEUTRAL_ALIGNMENT",
     "NEUTRAL_SIMILARITY",
     "OFF_TOPIC_DETAIL",
+    "PHRASE_BREAK_WORDS",
     "PREFERENCE_DIRECTIONS",
     "RERANKER_INTERFACE_VERSION",
     "RETRIEVAL_LATENCY_BUDGET_MS",
@@ -218,6 +225,7 @@ __all__ = [
     "ShopRosterSource",
     "SoftPreference",
     "TopicalRelevance",
+    "VariantCandidate",
     "SolicitedShop",
     "StaticIntentClusterCatalogue",
     "UndecidableCriterion",
@@ -232,9 +240,11 @@ __all__ = [
     "graph_roster_from_env",
     "graph_sessions_from_env",
     "intent_clusters_of",
+    "head_term",
     "identity_surface",
     "intent_match_by_bid",
     "make_candidate",
+    "variant_surface",
     "read_rerank",
     "record_fit_scores",
 ]

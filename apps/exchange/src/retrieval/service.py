@@ -14,9 +14,12 @@ The pipeline, and why it is in this order:
    so "top ``k`` of a good match" and "top ``k`` of nothing relevant" arrive here in the same
    shape; this is the step that tells them apart. Measured on the served route before it
    existed: ``"a walnut coffee table for the lounge"`` returned four supplements, confidently.
-   Off-topic candidates are reported on :attr:`RetrievalResult.off_topic` with the reason,
-   never silently dropped — an empty answer whose emptiness cannot be explained is the same
-   defect wearing a shorter list.
+   It judges TWO surfaces, weighted: the candidate's own crawled identity
+   (:func:`~exchange.retrieval.relevance.candidate_surface`), and beside it the variant names
+   the platform observed for it (:func:`~exchange.retrieval.relevance.variant_surface`), which
+   may add to a match and may not make one. Off-topic candidates are reported on
+   :attr:`RetrievalResult.off_topic` with the reason, never silently dropped — an empty answer
+   whose emptiness cannot be explained is the same defect wearing a shorter list.
 5. **Measure** the features, over the *relevant* set. Preference alignment is min-max
    normalised across the candidates that survived both filters, so neither an ineligible nor
    an off-topic outlier can compress the scale everyone else is measured on.
@@ -43,7 +46,7 @@ from ingest.graph.model import canonical_text
 
 from .criteria import NEUTRAL_ALIGNMENT, RetrievalQuery, SoftPreference, build_query
 from .fit import FitAssessment, FitFeatures
-from .relevance import TopicalRelevance, candidate_surface
+from .relevance import TopicalRelevance, candidate_surface, variant_surface
 from .rerank import DeterministicReranker, Reranker, RerankItem, read_rerank
 from .sources import CandidateSource
 
@@ -225,7 +228,11 @@ class CandidateRetrieval:
             # already refused for a hard constraint would otherwise be reported twice, under
             # two reasons, and the shopper would be told the catalogue is off-topic when what
             # actually happened is that their own must-have excluded it.
-            verdict = self.relevance.judge(query.query_text, candidate_surface(candidate))
+            verdict = self.relevance.judge(
+                query.query_text,
+                candidate_surface(candidate),
+                variant_text=variant_surface(candidate),
+            )
             if not verdict.about:
                 off_topic.append(
                     ExcludedCandidate(

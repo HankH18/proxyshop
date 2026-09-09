@@ -63,3 +63,4 @@ coverage/
 
 # T-210 probe scratch trees (see the ruff extend-exclude note); ephemeral, never committed
 .t210-*
+*.py[co]

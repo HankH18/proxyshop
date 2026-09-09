@@ -91,15 +91,163 @@ refusals by this rule: the vector index surfaced no joint or hair product to jud
 before this module was four confidently wrong supplements; their answer now is nothing, with a
 reason. That is the trade this module is, stated plainly rather than rounded up.
 
+The variant arm, and the word that was in the index all along
+--------------------------------------------------------------
+``identity_surface`` reads title and brand; ``candidate_surface`` adds the graph's
+categories, ingredients and attribute keys. Neither reads ``Variant.name``, and for a whole
+class of product that is where the answer is. Measured over ``fixtures/real-catalogs-broad``
+directly — every row of every ``stores/*.products.jsonl.gz``, 17,409 products and 97,217
+variant names — **109 products offer a walnut finish and not one of them says so anywhere the
+old surfaces read**::
+
+    floydhome.com        "The Lift Off Coffee Table"
+        variant  'One Panel - 18" w x 67" l x 15" h / Walnut / Black'
+    branchfurniture.com  "Nested Coffee Tables"   variant 'Walnut / Medium'
+
+109 products carry ``walnut`` in a variant name, 20 carry it in the crawled name, brand or
+category, and **the two sets are disjoint**. Of the six products whose crawled name contains
+``coffee table``, five offer a walnut variant and none of the five names walnut.
+
+So :func:`variant_surface` is read, and :meth:`TopicalRelevance.judge` takes it as a third,
+weaker argument. **It may add to a match and may not make one**, and the whole of that
+weighting is :func:`head_term`: the platform's own record must already carry the word saying
+WHAT KIND OF THING the shopper asked for, before any word out of a listing option is counted
+at all. A variant list is colours, sizes, materials and counts — modifiers — so a variant name
+may describe a product and may not decide what the product IS.
+
+**The version of this arm that gated on a COUNT of identity words instead had to be thrown
+away, and the measurement that killed it is the reason this gate is structural.** With the
+arm opened by any one identity word, driven over the broad corpus above (17,409 products,
+97,217 variant names) against 22 queries the corpus has nothing for::
+
+    gate                                  furniture rows        apparel rows   off-corpus rows
+                                          for 12 furniture queries             for 22 queries
+    ------------------------------------- ---------------  ----------------  ----------------
+    identity surface alone, no variant arm       73                 0                19
+    any one identity word                       171                22               204
+    the head term, plus the share arm           142                 0                28
+
+``a large green ceramic plant pot`` answered by ``Women's Afternoon Hoodie in Sage Green``,
+on ``green`` from the title and ``large`` from a garment size; ``a small white desk lamp`` by
+``Signature Crewneck - Pure White`` on ``white`` plus ``small``. A count of one cannot tell
+those from ``a walnut side table`` against ``Nested Coffee Tables``, because the arithmetic is
+identical — one identity word, one variant word — and only WHICH word differs. So the gate is
+on which word.
+
+The second condition is that the widened agreement must meet :data:`MIN_SHARED_SHARE`; the
+COUNT arm is not available to it. That licence — two agreeing words out of nine — belongs to
+the product's own crawled identity, and a listing option does not inherit it. Measured, with
+the head gate in place and the count arm still available to the widened set, ``Elderberry
+Extract Capsules`` answers ``im looking for a high strength milk thistle supplement for liver
+support that is vegan`` on ``supplement`` from a category plus ``vegan`` from a variant name.
+Neither word is ``milk`` or ``thistle``.
+
+THE SERVED ROUTE, which is where a rule-level sweep has to be re-taken
+----------------------------------------------------------------------
+:class:`~exchange.retrieval.service.CandidateRetrieval` over
+:class:`~exchange.retrieval.sources.GraphCandidateSource`, against a private Neo4j holding
+seven stores of ``fixtures/real-catalogs-broad`` — furniture, apparel, coffee equipment and
+outdoor gear — verified at ``Product`` 4,253, ``Variant`` 33,110, ``Store`` 7, products
+missing an embedding 0 immediately before the run. Twelve queries a furniture catalogue
+answers and twenty-two it has nothing for, each arm ablated on the same graph::
+
+    arm                                  honest served   rows    off-corpus served   rows
+    ------------------------------------ --------------  -----   -----------------  -----
+    identity surface alone               9 / 12            57    4 / 22                 8
+    the variant arm gated on a count     10 / 12           87    8 / 22                32
+    the variant arm as it stands here    10 / 12           84    4 / 22                 8
+
+**The off-corpus column is byte-identical to the pre-variant rule** — the same four queries,
+the same eight rows — while the honest column gains 27 rows and one whole query. The count
+gate doubled the off-corpus queries served and quadrupled the rows. Per query, the rows this
+arm adds::
+
+    "a white oak dining table"               0 rows  ->   8 rows
+    "a walnut coffee table for the lounge"   3 rows  ->   8 rows
+    "a walnut side table"                    3 rows  ->  11 rows
+    "a standing desk in walnut"              9 rows  ->  13 rows
+    "a large green ceramic plant pot"        0 rows  ->   0 rows
+    "a small white desk lamp"                4 rows  ->   4 rows
+
+and through :meth:`~exchange.retrieval.roster.GraphShopRoster.solicit` on that same graph,
+``"a large green ceramic plant pot"`` solicits nobody both before and after, where the
+count-gated arm solicits ``rumpl.com`` on a ``Sage Green`` mat.
+
+What this arm costs is one family of query and it is named rather than averaged away: ``"a
+queen bed frame in birch"`` goes 8 rows -> 8 where the count gate gave 11, because the head
+of that phrase is ``frame`` and the beds are called ``The Floyd Bed``. See :func:`head_term`.
+
+**What it does NOT widen is RECALL, and that is the honest half.**
+``ingest.graph.reembed.embedding_text`` composes a product's vector out of name, brand,
+categories, attributes and ingredients, so no walnut word is in any embedding and the vector
+index cannot rank on one. This arm only ever rescues a product the index had already returned
+for its other words. Reaching the 109 through search itself is a change to that function, in
+another package, and not one this module can make.
+
+Re-taken on the recorded corpus for the discipline this widening could have cost — a private
+Neo4j holding ``fixtures/real-catalogs``, verified at 3,093 ``Product``, 9,667 ``Variant``,
+10 ``Store`` and 0 products missing an embedding immediately before the run, over the 16
+honest queries of ``test_organic_relevance.py``'s ``SERVED_PAIRS`` and 18 off-corpus ones::
+
+    arm                                  honest served   rows    off-corpus served   rows
+    ------------------------------------ --------------  -----   -----------------  -----
+    identity surface alone               15 / 16          169    1 / 18                 5
+    the variant arm gated on a count     15 / 16          169    1 / 18                 5
+    the variant arm as it stands here    15 / 16          169    1 / 18                 5
+
+**Not one query's result set changed size, in any direction, for any of the three.** A
+supplement's variants are its form and its count (``Powder / 250 Grams (8.8 oz)``, ``Capsule
+/ 60 Capsules``), so there is nothing in them for a furniture query to agree with — which is
+exactly why this corpus cannot be the evidence that a widening is safe. **A corpus whose
+variants are doses cannot express the cost of reading colours**, and the count-gated arm
+passed here and failed on the corpus above. The one off-corpus query served is ``"a stainless
+steel water bottle"``, and it is a fault in the query list rather than a leak: this catalogue
+really does sell ``Nutricost Trimr Classic Bottle (Black)`` and a ``5 Piece Stainless Steel
+Spice Measuring Set``, before the change and after.
+
+WHAT THE RANKING LAYER THEN DOES WITH THESE ROWS, which is a gap this arm cannot close
+--------------------------------------------------------------------------------------
+:func:`exchange.ranking.filters.organic_relevance_reason` re-judges an organic FALLBACK row —
+one no shop bid for — against :func:`identity_surface`, which is title and brand and neither
+categories nor variants. **Every row this arm rescues is refused there**, and it is a theorem
+rather than a measurement: the arm is reached only when the wider surface carried fewer than
+``min(2, len(asked))`` words and less than :data:`MIN_SHARED_SHARE` of them, and the narrower
+surface is a subset of the wider one, so it cannot carry more. The only way through is
+``shopper_named_the_product``. Measured over the broad corpus and 12 furniture queries, all
+69 of the rows this arm adds are refused there, and so are all 123 the count-gated version
+added.
+
+**The gap is not this arm's, and reading it as this arm's would fix the wrong layer.** The
+same measurement over the SAME rows with the variant arm removed entirely: 34 of the 93 rows
+the identity surface alone keeps (36.6%) are refused by that layer too, on categories it
+holds none of — ``"a queen bed frame in birch"`` keeps ``Percale Flat Sheet - Full/Queen`` on
+``queen`` and ``bed`` out of a category and the title-only rule refuses it. On the recorded
+corpus it is 58 of 1,355 (4.3%). The disagreement is the two-surface design's, it predates
+this arm, and that function's own docstring already names the fix — judge both layers on one
+surface, rather than loosening the narrower one.
+
 WHOSE WORDS ARE COMPARED, which is the D55 argument
 ---------------------------------------------------
 The query is the SHOPPER's. The surface it is compared against is the PLATFORM's — the crawled
-``canonical_name``, ``brand``, categories, ingredients and attribute keys that
+``canonical_name``, ``brand``, categories, ingredients, attribute keys and variant names that
 :mod:`~exchange.retrieval.catalogue` and ``ingest.graph`` hold because the platform observed
 them. **A shop's own message, pitch or claims are never read here**, and that is not an
 oversight to be tidied up later: relevance decided on a seller's prose would let a shop assert
 its way onto a shortlist for a query the platform's own crawl says it has nothing for, which is
 precisely the blurring of the organic and sponsored voices D55 exists to prevent.
+
+The variant names are the newest thing on that list and the one closest to the line, so the
+gate on them is stated rather than implied. ``Variant.name`` is what a shop PUBLISHES on its
+own storefront and the crawl reads, which is not the same as a shop telling the platform about
+itself — and :data:`~ingest.graph.query.PLATFORM_OBSERVED_SOURCE_CLASSES` is where the
+difference is enforced: :data:`exchange.retrieval.sources._VARIANT_NAMES` reads a variant only
+when the ``Variant`` node **and** the ``HAS_VARIANT`` edge are each supported by a ``Source``
+the platform authored, so a ``seller_asserted`` variant reaches no surface at all. What that
+gate does not stop, and no gate at this layer could, is a shop choosing what to publish: a
+storefront can spell its variants to catch a query, and :func:`head_term` is the bound on what
+that buys — a row whose crawled identity does not say it is the kind of thing asked for is
+refused however its variants are spelled, and a row whose crawled identity agrees with the
+query on nothing has no head term either.
 
 It follows that this module judges the ORGANIC half. A sponsored row is a shop that was
 solicited because the platform assigned the intent to a cluster that shop pursues, and that
@@ -145,18 +293,21 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from proxyshop_support.embedding import lexical_tokens
+from proxyshop_support.embedding import fold_for_lexical, lexical_tokens
 
 __all__ = [
     "MIN_SHARED_SHARE",
     "MIN_SHARED_TERMS",
     "OFF_TOPIC_DETAIL",
+    "PHRASE_BREAK_WORDS",
     "STOPWORDS",
     "RelevanceVerdict",
     "TopicalRelevance",
     "candidate_surface",
     "content_terms",
+    "head_term",
     "identity_surface",
+    "variant_surface",
 ]
 
 #: How many of the query's content words the platform's observed identity must carry for the
@@ -206,6 +357,25 @@ STOPWORDS: frozenset[str] = frozenset(
     purchase order ordering shop shopping recommend recommendation suggest help helps helping
     like love prefer trying try use using
     s t re ve ll d m im ive dont doesnt cant wont
+    """.split()
+)
+
+#: The function words that END the noun phrase a shopping query opens with, so that
+#: :func:`head_term` can find the word saying WHAT KIND OF THING was asked for.
+#:
+#: Every one of them is also in :data:`STOPWORDS` — asserted by
+#: ``test_every_phrase_break_is_a_word_the_rule_already_drops`` — so this set can only decide
+#: WHERE the leading phrase ends and can never remove a word the comparison would have used.
+#: ``which`` is the one obvious member that is deliberately absent for that reason: it is not
+#: a stopword, so breaking on it would drop a content word from the head walk that
+#: :func:`content_terms` keeps.
+#:
+#: It is English and hand-written, on the same terms and for the same reason as
+#: :data:`STOPWORDS`: this module sees one auction's candidates and not a grammar. What it
+#: buys is measured on :func:`head_term`.
+PHRASE_BREAK_WORDS: frozenset[str] = frozenset(
+    """
+    for with without of to from in into on at by under over near about around that and or but
     """.split()
 )
 
@@ -315,11 +485,7 @@ def _stem(token: str) -> str:
     """
     if token.endswith("ies") and len(token) - 3 >= 4:
         return token[:-3] + "y"
-    if (
-        token.endswith("es")
-        and len(token) - 2 >= 3
-        and token[:-2].endswith(ES_PLURAL_STEM_ENDINGS)
-    ):
+    if token.endswith("es") and len(token) - 2 >= 3 and token[:-2].endswith(ES_PLURAL_STEM_ENDINGS):
         return token[:-2]
     if token.endswith("s") and not token.endswith("ss") and len(token) - 1 >= 4:
         return token[:-1]
@@ -367,6 +533,73 @@ def content_terms(text: str) -> tuple[str, ...]:
     return tuple(terms)
 
 
+def head_term(query_text: str) -> str:
+    """WHAT KIND OF THING the shopper asked for: the last content word before the query's
+    first function word, stemmed. ``""`` when the query carries no content word at all.
+
+    English noun phrases are head-final, so the last word of the phrase a shopping query opens
+    with is the thing itself and everything before it modifies it. ``a large green ceramic
+    plant pot`` -> ``pot``; ``a small white desk lamp`` -> ``lamp``; ``a walnut side table``
+    -> ``table``. :data:`PHRASE_BREAK_WORDS` is what stops the trailing prepositional phrase
+    stealing it: ``a walnut coffee table for the lounge`` -> ``table``, not ``lounge``, and
+    ``something to help my joints`` -> ``joint`` because a break before any content word is
+    skipped rather than taken.
+
+    **What it is FOR, which is the whole of the variant arm's weighting.** A variant list is
+    colours, sizes, materials and counts — modifiers, not products — so a variant name may
+    only describe a thing the platform's own record already says this IS. That is the test
+    :meth:`TopicalRelevance.judge` applies: the identity must carry the head term before any
+    variant word is counted. Measured over ``fixtures/real-catalogs-broad`` (17,409 products,
+    97,217 variant names) with 22 queries the corpus has nothing for, comparing the rows the
+    rule admits with the variant arm gated on ONE identity word of any kind against this gate::
+
+        gate                                   furniture rows   apparel rows   off-corpus rows
+                                               for 12 furniture queries        for 22 queries
+        -------------------------------------- ---------------  ------------  ----------------
+        identity surface alone (no variant arm)      73                0              19
+        any one identity word                       171               22             204
+        the head term (this)                        142                0              28
+
+    The 22 apparel rows and most of the 185 extra off-corpus ones are one shape: the query's
+    COLOUR matched an apparel title and the query's SIZE matched a garment size in the variant
+    names — ``a large green ceramic plant pot`` answered by ``Women's Afternoon Hoodie in Sage
+    Green`` on ``green`` plus ``large``, ``a small white desk lamp`` by ``Signature Crewneck -
+    Pure White`` on ``white`` plus ``small``. Neither product's own record says it is a pot or
+    a lamp, and this gate is that sentence made executable. The 69 furniture rows it keeps are
+    the arm's whole purpose: for ``a walnut side table`` it adds 14 rows, among them ``Nested
+    Coffee Tables``, ``Personal Table``, ``Bistro Table``, ``The Lift Off Coffee Table`` and
+    ``The Modular Table`` — each a table whose walnut is only in its variants.
+
+    It is a HEURISTIC and its cost is stated rather than left to be found. The head of ``a
+    queen bed frame in birch`` is ``frame``, so ``The Floyd Bed - Original`` — a birch bed in
+    queen, and a genuinely good answer — is refused where the ungated arm kept it; same for
+    ``a modular sectional sofa`` against ``The Essential Corner Sectional``, whose own name
+    says ``sectional`` and whose variants say ``sofa``. Measured, those two families are 23 of
+    the 29 furniture rows this gate costs. A rule with no grammar cannot tell a compound
+    noun's two heads apart, and the alternative measured against it — accepting either of the
+    last TWO content words — takes the off-corpus rows from 28 back to 57 for 25 more
+    furniture rows, which is the wrong side of the same trade this module exists to make.
+    """
+    head = ""
+    # `fold_for_lexical(...).split()` rather than `lexical_tokens`, which is the same folding
+    # with a `dict.fromkeys` de-duplication on top. That de-duplication is right for a bag of
+    # words and wrong here: it drops the SECOND `for` of "im looking for a ... supplement for
+    # liver support", so the walk runs past the break that ends the leading phrase and answers
+    # `support` where the phrase head is `supplement`. Position is the whole of this function.
+    for token in fold_for_lexical(query_text).split():
+        if token in PHRASE_BREAK_WORDS:
+            if head:
+                return head
+            continue
+        if token in STOPWORDS or token.isdigit():
+            continue
+        stemmed = _stem(token)
+        if not stemmed or stemmed in STOPWORDS:
+            continue
+        head = stemmed
+    return head
+
+
 def _joined(parts: Iterable[Any]) -> str:
     return " ".join(str(part) for part in parts if part is not None and str(part).strip())
 
@@ -382,6 +615,11 @@ def candidate_surface(candidate: Any) -> str:
 
     **Nothing a seller asserted is read.** A :class:`ingest.graph.Candidate` carries only graph
     facts, and the graph drops any fact whose provenance does not resolve.
+
+    Variant names are deliberately NOT here, and :func:`variant_surface` is where they are
+    instead: this is the product's own identity, the surface both count arms decide on, and
+    pooling a store's forty listing options into it is the false positive :func:`head_term`
+    exists to refuse.
     """
     parts: list[Any] = [
         getattr(candidate, "canonical_name", None),
@@ -394,6 +632,39 @@ def candidate_surface(candidate: Any) -> str:
             parts.append(attribute.get("key"))
             parts.append(attribute.get("value_string"))
     return _joined(parts)
+
+
+def variant_surface(candidate: Any) -> str:
+    """The names of the purchasable VARIANTS the platform observed for one candidate.
+
+    ``Variant{name}`` is a real node in DESIGN's graph and the crawl fills it: a Shopify
+    variant title such as ``One Panel - 18" w x 67" l x 15" h / Walnut / Black``. It is
+    where a shop states the finish, the colour, the size and the count, and for a whole
+    class of product it is the ONLY place those words appear — a coffee table's title says
+    "coffee table" and its variants say "walnut".
+
+    It is a SEPARATE function from :func:`candidate_surface`, and separate is the point.
+    Variant names are the weaker half of the platform's record of a product and
+    :meth:`TopicalRelevance.judge` weighs them as such: a product with forty variants
+    contributes forty listings' worth of colour, size and material words, so a rule that
+    pooled them with the title would let a corpus of colour words decide relevance. What
+    the two surfaces are worth is decided in :meth:`TopicalRelevance.judge`, once, rather
+    than by which strings happened to be concatenated here.
+
+    ``candidate`` carries them on ``variant_names``, which
+    :class:`~exchange.retrieval.sources.GraphCandidateSource` reads out of the graph under
+    the same platform-observed provenance gate ``catalogue_entry`` uses, and which
+    :func:`~exchange.retrieval.sources.make_candidate` fills from a record so the offline
+    double drives this arm too. Read through :func:`getattr`, so a candidate from any other
+    implementation of the :class:`~exchange.retrieval.sources.CandidateSource` protocol —
+    which is typed on the plain ``Candidate`` and carries no such field — answers ``""`` and
+    nothing changes for it.
+
+    **Nothing a seller asserted is read**, on the same terms as :func:`candidate_surface`:
+    the names here are the crawl's reading of the shop's listing options, gated on
+    ``Source.source_class`` before they are returned.
+    """
+    return _joined(getattr(candidate, "variant_names", None) or ())
 
 
 def identity_surface(identity: Any) -> str:
@@ -410,6 +681,57 @@ def identity_surface(identity: Any) -> str:
     return _joined([identity.get("title"), identity.get("brand")])
 
 
+def _share_phrase(share: float) -> str:
+    """:data:`MIN_SHARED_SHARE` as a refusal can say it, whatever it was configured to.
+
+    The shipped 0.5 reads ``half``, which is the word this refusal has always used and the
+    word a shopper reads. It used to be a LITERAL in that sentence, so a rule built with a
+    different ``min_shared_share`` told the reader it needed half when it needed all — a
+    sentence that is true of the default and false of the object that printed it. Unreachable
+    through the served route, which builds the default; reachable through the constructor,
+    which is public and validates that argument precisely because it is meant to be used.
+    """
+    if share == 0.5:
+        return "half"
+    return f"{share:.0%} of them"
+
+
+def _variant_note(matched: tuple[str, ...], corroborated: tuple[str, ...], head: str) -> str:
+    """What a refusal says about the variant words it found, if it found any.
+
+    THREE sentences, one per way the variant arm can decline, because a refusal that named the
+    wrong reason is the same defect as a refusal with no reason at all. All three are reachable
+    at the shipped thresholds, and each is measured::
+
+        judge('a walnut nightstand', 'Nested Coffee Tables', variant_text='Walnut / Medium')
+            -> matched=() corroborated=('walnut',)          "cannot carry a match on its own"
+        judge('a small white desk lamp', 'Signature Crewneck - Pure White',
+              variant_text='Small')
+            -> matched=('white',) corroborated=('small',)   "does not carry lamp"
+        judge('a walnut coffee table for the living room', 'The Modular Table',
+              variant_text='Small / Walnut')
+            -> matched=('table',) corroborated=('walnut',)  "even counted with those it is short"
+
+    The middle one is the sentence this arm's gate needed and did not have: the variant words
+    were NOT counted there, because the platform's own record does not say the product is the
+    thing that was asked for, and telling that reader they were counted and fell short would
+    describe a rule that had not been applied. The third says the opposite, truthfully — the
+    head term WAS carried, the words WERE counted, and two of five is still short of half.
+    """
+    if not corroborated:
+        return ""
+    words = ", ".join(corroborated)
+    if not matched:
+        return f". Its observed variant names carry {words}, which cannot carry a match on its own"
+    if head not in matched:
+        return (
+            f". Its observed variant names carry {words}, which are not counted: the "
+            f"platform's own record of this product does not carry {head}, the thing the "
+            f"query asks for"
+        )
+    return f". Its observed variant names carry {words}, and even counted with those it is short"
+
+
 @dataclass(frozen=True)
 class RelevanceVerdict:
     """Whether one product is about one query, and what that was decided on.
@@ -422,7 +744,14 @@ class RelevanceVerdict:
             :attr:`about` is a default rather than a finding, and the two are separate fields
             precisely so a caller cannot read "kept" as "checked and passed".
         asked: the query's content terms, in order.
-        matched: the asked terms the platform's own record of this product carries.
+        matched: the asked terms the product's own identity carries — its crawled name,
+            brand, categories, ingredients and attribute keys.
+        corroborated: the asked terms that appear ONLY in the product's observed variant
+            names and nowhere in :attr:`matched`. Separate from :attr:`matched` because the
+            two are not worth the same and :meth:`TopicalRelevance.judge` does not treat them
+            as if they were: a term here never carries a decision on its own. Empty whenever
+            no variant text was supplied, which is every caller that judges an
+            :func:`identity_surface`.
         detail: a sentence naming what was decided and on which words. Non-empty always: a
             refusal a shopper cannot be given a reason for is the confidently-wrong answer this
             module replaces, wearing an empty shortlist instead of a full one.
@@ -433,10 +762,16 @@ class RelevanceVerdict:
     asked: tuple[str, ...]
     matched: tuple[str, ...]
     detail: str
+    corroborated: tuple[str, ...] = ()
 
     @property
     def share(self) -> float:
-        """The share of the query's content terms this product carries, in ``[0, 1]``."""
+        """The share of the query's content terms this product's own identity carries.
+
+        In ``[0, 1]``, and deliberately NOT widened by :attr:`corroborated`: this is the
+        number the count/share arms are decided on, and a share that silently counted variant
+        words would report a stronger agreement than the rule actually found.
+        """
         if not self.asked:
             return 0.0
         return len(self.matched) / len(self.asked)
@@ -453,7 +788,12 @@ class TopicalRelevance:
 
     #: Recorded on the audit trail beside a verdict, so a reader can tell which rule produced
     #: it. Versioned because the thresholds are the rule.
-    name = "content-word-agreement/1"
+    #:
+    #: ``/2`` adds the variant arm (:func:`head_term`). ``/1``'s two
+    #: thresholds are unchanged and every ``/1`` acceptance is still an acceptance, so the
+    #: version moved for what it now ALSO accepts: a product whose own identity carries some
+    #: of the query and whose observed variant names carry the rest.
+    name = "content-word-agreement/2"
 
     def __init__(
         self,
@@ -475,14 +815,19 @@ class TopicalRelevance:
         self.min_shared_terms = int(min_shared_terms)
         self.min_shared_share = float(min_shared_share)
 
-    def judge(self, query_text: str, observed_text: str) -> RelevanceVerdict:
+    def judge(
+        self, query_text: str, observed_text: str, *, variant_text: str = ""
+    ) -> RelevanceVerdict:
         """Is the product the platform observed as ``observed_text`` about ``query_text``?
 
         Args:
             query_text: the shopper's own words.
-            observed_text: what the PLATFORM observed about the product — a
+            observed_text: what the PLATFORM observed as this product's own identity — a
                 :func:`candidate_surface` or an :func:`identity_surface`. Never a seller's
                 message, pitch or claim.
+            variant_text: the platform's observed names for this product's purchasable
+                variants (:func:`variant_surface`), or ``""`` when the caller holds none.
+                See :func:`head_term` for what it can and cannot do.
 
         Returns:
             The verdict. See :class:`RelevanceVerdict`; an undecidable question answers
@@ -526,14 +871,50 @@ class TopicalRelevance:
                     f"{', '.join(matched)} out of {', '.join(asked)}"
                 ),
             )
+        # The variant arm, reached only after the identity arms have failed. TWO conditions,
+        # and neither is a count of words:
+        #
+        # 1. the platform's own record must carry `head_term` — the thing the shopper asked
+        #    FOR, as opposed to a colour or a size that modifies it. A variant name describes
+        #    a product; it may not decide what the product IS.
+        # 2. the widened agreement must meet the SHARE arm. The count arm's licence to admit
+        #    two words out of nine belongs to the product's own crawled identity and is not
+        #    inherited by a listing option: with the count arm available here, `head_term`
+        #    alone lets `Elderberry Extract Capsules` answer `im looking for a high strength
+        #    milk thistle supplement for liver support that is vegan` on `supplement` from a
+        #    category plus `vegan` from a variant name — two words of nine, neither of them
+        #    `milk` or `thistle`.
+        #
+        # `_variant_note` says which of the two refused, so a shopper is never told the words
+        # were counted when the arm never opened.
+        corroborating = set(content_terms(variant_text)) - observed
+        corroborated = tuple(term for term in asked if term in corroborating)
+        if corroborated and head_term(query_text) in matched:
+            widened = len(matched) + len(corroborated)
+            if widened / len(asked) >= self.min_shared_share:
+                return RelevanceVerdict(
+                    about=True,
+                    decidable=True,
+                    asked=asked,
+                    matched=matched,
+                    corroborated=corroborated,
+                    detail=(
+                        f"the platform's own record of this product carries "
+                        f"{', '.join(matched)} out of {', '.join(asked)}, and the variants it "
+                        f"observed this product listed under carry "
+                        f"{', '.join(corroborated)}"
+                    ),
+                )
         return RelevanceVerdict(
             about=False,
             decidable=True,
             asked=asked,
             matched=matched,
+            corroborated=corroborated,
             detail=(
                 f"{OFF_TOPIC_DETAIL}: it carries "
                 f"{', '.join(matched) if matched else 'none'} of {', '.join(asked)}, and an "
-                f"organic result needs {needed} of them or half"
+                f"organic result needs {needed} of them or {_share_phrase(self.min_shared_share)}"
+                + _variant_note(matched, corroborated, head_term(query_text))
             ),
         )

@@ -84,8 +84,8 @@ The four rules this module keeps
    price's share of the published weight would go from ``w_v = 0.15`` to ``w_v + w_m = 0.50``:
    a price auction wearing a fit term's name, which is the market SPEC's core tenet rules out.
 
-Two graph reads, and why
-------------------------
+Two VECTOR reads, and why
+-------------------------
 :meth:`GraphShopRoster.solicit` runs the product retrieval (:class:`CandidateRetrieval` over
 :class:`GraphCandidateSource`) **and** :func:`ingest.graph.candidate_shops`. Both go through
 ``candidate_products``, so the vector index is queried twice per solicitation. That is not an
@@ -98,6 +98,12 @@ oversight and it is not free:
 * the roster pivot alone cannot produce ``intent_match``. ``ShopCandidate.best_score`` is a
   raw cosine and nothing else; preference alignment is measured over the eligible *product*
   set, which only the retrieval pipeline holds.
+
+A THIRD statement runs inside the first of those, and it is not a third vector read:
+:data:`exchange.retrieval.sources._VARIANT_NAMES` expands the products the retrieval already
+chose to their observed variant names, keyed on their ids. It touches no index, carries no
+query text, and cannot change WHICH products were retrieved — only how fully the relevance
+rule sees each one.
 
 The cost is published rather than hidden: :attr:`ShopRoster.elapsed_ms` reports the whole
 solicitation, and it is measured inside R10's synchronous window like everything else the
