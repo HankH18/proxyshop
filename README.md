@@ -982,17 +982,32 @@ for the pitch. And a failed, slow or unkeyed model never costs a store its bid: 
 cannot raise, and every path out of it that is not the model's reply lands on the deterministic
 fallback.
 
-## The page keeps its own gap list
+## The page used to keep its own gap list
 
-The shopper page renders a **"What is not wired yet"** panel
-(`apps/buyer/app/journey/Journey.tsx`). Read the page rather than this paragraph — it is
-measured on the stack in front of you and prose is not. It currently carries **two** items:
-`gap-feedback-seeded`, and `gap-model` (the page cannot tell you which client wrote the
-clarifying questions, because no served response field says).
+The shopper page carried a **"What is not wired yet"** panel until the owner asked for it to
+come down. It is gone from `apps/buyer/app/journey/Journey.tsx`, and this section is kept
+rather than deleted because the retirement history below is still the honest record of which
+gaps CLOSED versus which were simply stopped being mentioned — and those are different facts.
 
-Five bullets that used to be on that list have retired, in two batches, and the file keeps the
-record of both because a gap that closes quietly is indistinguishable from a gap that was talked
-away. `gap-price` and `gap-domain` went first: a slot now carries a `price` and a `store_domain`
+**What the panel's removal did not remove.** Its first bullet disclosed that seeded
+post-purchase feedback carries a `sim-fb-` order reference so a manufactured answer cannot
+later be mistaken for an earned one. That marking is a property of the LEDGER, not of the
+page: it is read from the seed artifact's declared marker in `seeded-feedback.ts`, enforced by
+`assertSeeded` in `learning/loop.ts`, and copied verbatim onto the append-only hash chain by
+`apps/buyer/svc/src/feedback/routes.py`. It is pinned by tests on both sides. The seeded turn
+on the page still says so in its own copy.
+
+**What it did remove**, stated plainly because nothing else now says it: the page no longer
+discloses that it cannot tell you which client wrote the clarifying questions.
+`POST /buyer/intent/clarify` answers with `questions`, `intent`, `unresolved` and `confirmed`,
+and no field on it — nor on any other route this origin serves — names the client that
+answered. The service computes that fact internally and writes it to its own log, where it
+reaches no response body. Restoring the disclosure honestly needs a served field (a `model` or
+`source` on the clarify response), not a paragraph.
+
+Five bullets had already retired from that list before it came down, in two batches, and the
+file keeps the record of both because a gap that closes quietly is indistinguishable from a gap
+that was talked away. `gap-price` and `gap-domain` went first: a slot now carries a `price` and a `store_domain`
 read off the platform's registry. Then `gap-fallback`, `gap-product-name` and `gap-store-voice`
 together, because they were one gap wearing three faces — `ShortlistSlot` was `extra="forbid"`
 and declared no field for whose price it was, what the thing was called, or what the shop had

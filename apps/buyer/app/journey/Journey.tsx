@@ -19,9 +19,13 @@
  *     positional hooks and the suite's `getByLabelText` handles all at once. They read as
  *     stale copy and they are not copy: nothing a shopper sees says "step 5" any more.
  *     Renaming them is a separate change with its own blast radius, and it is not this one.
- *   * **Nothing was dropped.** Every honesty statement, every gloss, every `data-testid` and
- *     the whole "What is not wired yet" panel are where they were; what moved is the frame
- *     around them.
+ *   * **Nothing was dropped BY THAT REWRITE.** Every honesty statement, every gloss and
+ *     every `data-testid` came through it unmoved; what moved was the frame around them.
+ *     One thing has been dropped SINCE, by a separate and deliberate decision: the
+ *     "What is not wired yet" panel that used to close this page is gone, removed on the
+ *     owner's instruction ("let's get this section removed") because it is not wanted on
+ *     the demo surface. It was a product call, not a correctness one, and nothing it
+ *     disclosed became less true — see point 4.
  *   * **The two voices (D55) stayed two.** See the turn components' own block comment: it is
  *     the property a chat presentation most easily costs, and the one this change spent the
  *     most care on keeping.
@@ -88,18 +92,39 @@
  * 3. **A failure shows the status and the service's own words.** `instrumentFetcher` keeps
  *    the refused body so a bare `HTTP 503` from a reused module can be printed with the
  *    reason the service gave for it. Nothing is swallowed.
- * 4. **The gaps are on the screen, permanently.** Whichever of a price and a stand-in the
- *    slot is carrying is not on the slot; the product arrives as a reference rather than a
- *    name; the shop's own voice is dropped at the exchange's shortlist contract; step 5's
- *    order is seeded; and the clarifying questions come from the buyer service's offline
- *    model double rather than a live model. All five are stated in the UI rather than faked,
- *    because a demo that supplies its own join is the defect this app exists to not be.
+ * 4. **The standing gaps panel is GONE, and this point is now its record.** This page used
+ *    to close with a `<section aria-label="What is not wired yet">` listing, permanently,
+ *    what the demo did not do. That panel has been REMOVED on the owner's explicit
+ *    instruction — "let's get this section removed" — as a product decision about the demo
+ *    surface. Do not re-add it, and do not re-add a smaller version of it in its place.
  *
- *    THAT SENTENCE NOW NAMES TWO GAPS, NOT FIVE, and everything else in it is history kept
- *    on purpose. What remains listed below is step 5's seeded order and the page's inability
- *    to say whether a live model wrote the clarifying questions. The retirements, newest
- *    last, each recorded here because a gap that closes quietly is indistinguishable from a
- *    gap that was talked away:
+ *    WHAT THAT REMOVAL DID AND DID NOT CHANGE, because the distinction is the whole point
+ *    of keeping this paragraph. It removed a SUMMARY. It removed no disclosure that any
+ *    other surface was relying on it for, and it changed nothing about the data:
+ *
+ *      * The seeded post-purchase order is still disclosed where it actually matters — on
+ *        the seeded turn itself, which carries the SEEDED badge, states in its own copy
+ *        that the order was manufactured, prints the reference, and names the
+ *        `SEEDED_PREFIX` that marks it. That copy is `feedback-seeded-explanation` below
+ *        and it is pinned in `journey.test.tsx` ("renders the seeded Step 5 on arrival").
+ *      * The `sim-fb-` marking itself was never a property of the panel. It is read out of
+ *        the seed artifact by `seeded-feedback.ts`, enforced by `learning/loop.ts`'s
+ *        refusal to submit an unmarked reference, and copied verbatim onto the trust
+ *        ledger's hash chain by the buyer service. Deleting UI cannot unmark a ledger row.
+ *      * What DID go with the panel is the model-provenance disclosure: the page no longer
+ *        says anywhere that it cannot tell you whether a live model wrote the clarifying
+ *        questions. That remains TRUE of the code — no route this origin serves discloses
+ *        which client answered — it is simply no longer stated on this page. If that
+ *        disclosure is ever wanted back, the honest fix is to SERVE the fact rather than to
+ *        revive a panel: a `model` or `source` field on the `POST /buyer/intent/clarify`
+ *        response, or a small runtime route reporting what `resolve_provider()` answered.
+ *        The service already computes it and writes it to its own log; it reaches no
+ *        response body, which is why a page that told you either way would be guessing.
+ *
+ *    THE RETIREMENT HISTORY BELOW IS KEPT ON PURPOSE and is unchanged by the removal. Each
+ *    entry records a bullet that came off the panel because the GAP CLOSED, which is a
+ *    different event from the panel itself being taken down, and the two must not be
+ *    allowed to blur together. Newest last:
  *
  *    `gap-price` and `gap-domain` — the sentence used to open "the exchange's slot carries
  *    neither a store domain nor a price". Both closed. Re-measured on the devstack: a slot
@@ -910,17 +935,20 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
         <h1>Proxyshop</h1>
         <p className="lede">
           {/* The two exceptions are unchanged and still both named; only the WAY they are
-              pointed at is, because there is no numbered step 5 to point at any more. The
-              seeded turn carries the same SEEDED badge on its own attribution line and the
-              same bullet under "What is not wired yet", so nothing this sentence promises has
-              moved — a reader following it finds both. */}
+              pointed at is, because there is no numbered step 5 to point at any more.
+              THE POINTER ALSO LOST A DESTINATION: this sentence used to send a reader to the
+              "What is not wired yet" panel as well as to the badge, and that panel has been
+              removed on the owner's instruction. A promise to a section that is not on the
+              page is worse than no promise, so the clause naming it came out with it. What it
+              pointed AT is still here and still findable: the seeded turn carries the SEEDED
+              badge on its own attribution line and states, in its own copy, that the order was
+              manufactured and what marks it. */}
           Say what you need. Your agent asks the exchange, the exchange asks the stores, and
           the stores answer for themselves. Every value below arrived in an HTTP response from
           the service on this origin during this session, except in the two places that say so
           where they appear: the grey text inside the box is a hint rather than an answer, and
           the post-purchase question at the end of the conversation is about a manufactured
-          order &mdash; badged SEEDED on the turn itself and listed under &ldquo;What is not
-          wired yet&rdquo;.
+          order &mdash; badged SEEDED on the turn itself, which says so in its own words.
         </p>
       </header>
 
@@ -1046,10 +1074,14 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
        *     cannot sign in has to be able to SEE why: the refusal from a spent link, or a
        *     deployment with no mail transport answering 503, is rendered by that banner, and
        *     gating it would leave a blank wall as the only response to a broken sign-in.
-       *   * BELOW — "What is not wired yet". Those bullets are this page's standing account
-       *     of what it does not do, and none of them is about a signed-in buyer or reads any
-       *     session state. They are as true, and as worth reading, to somebody deciding
-       *     whether to sign in at all.
+       *   * BELOW — nothing, now. There used to be a "What is not wired yet" panel here,
+       *     deliberately outside the gate because its bullets read on any session state and
+       *     were as worth reading to somebody deciding whether to sign in at all. It has been
+       *     removed on the owner's instruction, so the gate's lower boundary is the end of the
+       *     page. This entry is kept rather than deleted because "there is deliberately
+       *     nothing outside the gate below" is itself a fact a future reader needs: the next
+       *     section added at the bottom of this file lands INSIDE the gate unless it is
+       *     placed after the `</ol>` on purpose.
        *
        * The SEEDED post-purchase turn is inside, though it takes no session of its own: it is
        * a post-purchase prompt, and showing a purchase-feedback form to a visitor who has not
@@ -1548,50 +1580,6 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
       </PlatformTurn>
         </ol>
       )}
-
-      <section aria-label="What is not wired yet" className="gaps">
-        <h2>What is not wired yet</h2>
-        <ul>
-          <li data-testid="gap-feedback-seeded">
-            <strong>The post-purchase question is seeded, and the real prompt is unreachable</strong>{' '}
-            &mdash; the question is real, the form is the real{' '}
-            <code>FeedbackPromptView</code>, and answering it posts to the real{' '}
-            <code>POST /buyer/feedback</code>. The <em>order</em> is not: Proxyshop asks that
-            question days after delivery, and this journey ends at the checkout handoff
-            without ever obtaining an order reference, so there is nothing here for a real
-            prompt to be about. Mounting the component was never the missing piece &mdash;
-            the order reference is &mdash; so the panel shows a manufactured one instead of an
-            empty box, and marks it: every seeded reference begins{' '}
-            <code>{SEEDED_PREFIX}</code>, and the buyer service copies that reference verbatim
-            onto the trust ledger&rsquo;s hash chain, which is why a seeded answer cannot
-            later be mistaken for an earned one.
-          </li>
-          <li data-testid="gap-model">
-            <strong>Whether a live model wrote the questions: this page cannot tell you</strong>{' '}
-            — the buyer service resolves its client with{' '}
-            <code>build_llm(&quot;buyer&quot;)</code>, which returns a real provider when{' '}
-            <code>LLM_PROVIDER</code> names one and D20&rsquo;s offline double when it does
-            not. Both are designed behaviour and neither is a failure. What is missing is the
-            disclosure: <code>POST /buyer/intent/clarify</code> answers with{' '}
-            <code>questions</code>, <code>intent</code>, <code>unresolved</code> and{' '}
-            <code>confirmed</code>, and no field on it &mdash; nor on any other route this
-            origin serves &mdash; says which client answered. The service computes that fact
-            internally and writes it to its own log, and it reaches no response body, so a
-            page that told you either way would be guessing.
-            <br />
-            <span className="gloss">
-              What this bullet used to say, and why it changed: it asserted flatly that the
-              clarifying questions had been written by the offline double, because{' '}
-              <code>LLM_PROVIDER</code> was unset. That was measured and true of the tree it
-              was written on, and it is false on any deployment configured with a key &mdash;
-              a claim the page had no way to check and therefore should never have made
-              unconditionally. Making it conditional needs a served field: a{' '}
-              <code>model</code> or <code>source</code> on the clarify response, or a small
-              runtime route reporting what <code>resolve_provider()</code> answered.
-            </span>
-          </li>
-        </ul>
-      </section>
     </main>
   )
 }

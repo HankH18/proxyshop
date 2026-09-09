@@ -98,7 +98,16 @@ export const SEEDED_PROMPT: FeedbackPromptData | null = seeded
 /** Why there is no seeded prompt, when there is none. */
 export const SEEDED_REFUSAL: SeedRefusal = refusal
 
-/** The prefix the artifact declares, for the panel to state on the page. */
+/**
+ * The prefix the artifact declares, for the seeded post-purchase turn to state on the page.
+ *
+ * It used to be stated in two places — that turn, and the journey's "What is not wired yet"
+ * panel. The panel has been removed on the owner's instruction and the turn's own copy
+ * (`feedback-seeded-explanation` in `Journey.tsx`) is now the only place a shopper reads it.
+ * That is a change to what is DISPLAYED and to nothing else: the marking itself is read here
+ * out of the artifact, enforced by `learning/loop.ts`'s `assertSeeded`, and copied verbatim
+ * onto the trust ledger's hash chain by the buyer service, none of which is UI.
+ */
 export const SEEDED_PREFIX: string = declaredMarker(collection)?.prefix ?? '(none declared)'
 
 /**

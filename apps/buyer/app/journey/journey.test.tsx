@@ -1090,114 +1090,84 @@ describe('the four beats', () => {
   // now asserted the other way round, against the service's own pseudonym, in
   // "opens the auction under the service pseudonym and the coarsened profile" below.
 
-  it('states the gaps that remain, permanently, and no longer claims sign-in is one', async () => {
+  /*
+   * WHAT STOOD HERE, AND WHY IT IS NOT HERE ANY MORE — recorded at the assertion, because a
+   * test whose subject was deleted is otherwise indistinguishable from a test that was
+   * quietly weakened until it went green.
+   *
+   * The retired test was `it('states the gaps that remain, permanently, and no longer claims
+   * sign-in is one')`, introduced in `8a1a01a`. It pinned this page's standing
+   * `<section aria-label="What is not wired yet">` panel: that `gap-feedback-seeded` and
+   * `gap-model` were on the page and survived to the end of the journey, the exact strings
+   * the model bullet had to contain (`cannot tell you`, `build_llm("buyer")`, `LLM_PROVIDER`)
+   * and the two it must never contain again (`no live model`, `double:buyer`), plus a list of
+   * `gap-*` ids that had to STAY absent because their gaps had closed.
+   *
+   * THE CONTRACT IT PINNED WAS REMOVED BY THE OWNER, in those words: "let's get this section
+   * removed". That is the one ground on which an assertion may go — a decision, cited, and
+   * the owner's rather than this file's. It is NOT that the assertions had become
+   * inconvenient: every one of them was true of the tree the moment before the panel came
+   * out, and reverting the removal would make every one of them pass again.
+   *
+   * WHAT WAS NOT ALLOWED TO HAPPEN, which is the whole reason the replacement is shaped the
+   * way it is. With the panel gone, every `queryByTestId('gap-…')).toBeNull()` in the old
+   * test passes for free — there is no panel, so nothing is in it. Keeping that list would
+   * have left a green test asserting nothing at all. The list is therefore GONE rather than
+   * kept, and what replaces it are three claims that can actually fail:
+   *
+   *   1. the panel is ABSENT — the owner's decision, pinned, so a revival turns this red;
+   *   2. the seeded-order disclosure SURVIVED the removal, on its own turn, prefix and all,
+   *      because the panel was not that statement's only carrier and must not have taken it;
+   *   3. the sign-in assertions the old test also carried, which had nothing to do with the
+   *      panel and are reproduced verbatim rather than dropped along with it.
+   *
+   * The model-provenance disclosure gets no replacement here, deliberately: it went with the
+   * panel under the same decision. `Journey.tsx` point 4 records what serving that fact back
+   * would take. An absent disclosure is not re-asserted here as though it were a feature.
+   */
+  it('no longer carries the gaps panel, and the seeded disclosure survived its removal', async () => {
     const { fetcher } = demoService()
     render(<Journey fetcher={fetcher} />)
 
-    // Sign-in and the browser-minted pseudonym were the first two entries on this list and
-    // are gone from it, because the gap closed rather than because the sentence softened.
-    expect(screen.queryByTestId('gap-signin')).toBeNull()
-    expect(screen.queryByTestId('gap-pseudonym')).toBeNull()
+    // 1. THE PANEL IS GONE, by the owner's decision. Checked before sign-in because the panel
+    // sat OUTSIDE the sign-in gate: if it came back it would be visible from here. The
+    // heading is checked as well as the label, so a revival under a different `aria-label`
+    // does not slip past.
+    expect(screen.queryByLabelText('What is not wired yet')).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'What is not wired yet' })).toBeNull()
 
-    // `gap-domain` went the same way, and it is the newest of them. It read "the exchange's
-    // shortlist slot carries no `store_domain`, so the checkout host could only be checked for
-    // scheme and host presence" — true when it was written, and false now: `ShortlistSlot`
-    // publishes `store_domain`, `ranking/serving.py` joins the platform registry's answer onto
-    // the slot, and `permalinkRefusal` pins the permalink's host against it. Absent still means
-    // absent — an exchange with no registry publishes `null` and the pin does not fire — but
-    // that is a deployment saying it vouches for no host, not this page being unable to ask.
-    expect(screen.queryByTestId('gap-domain')).toBeNull()
-
-    // The price gap is CLOSED — the slot carries `price` now — so `gap-price` is gone from
-    // this list, the same way sign-in and the browser-minted pseudonym went: because the gap
-    // closed, not because the sentence softened.
-    expect(screen.queryByTestId('gap-price')).toBeNull()
-
-    // THREE MORE went with them, and this block used to assert the opposite of what it now
-    // asserts, so the reason is recorded here rather than left to `git log`.
+    // 2. THE DISCLOSURE THE PANEL WAS NOT THE ONLY CARRIER OF. `gap-feedback-seeded` said the
+    // post-purchase order is manufactured and is marked by `SEEDED_PREFIX`. That statement is
+    // still on the page — on the seeded turn itself, where a reader meets the prompt, rather
+    // than in a footnote — so the removal took a summary and not the disclosure.
     //
-    // It read: `const product = screen.getByTestId('gap-product-name').textContent ?? ''`,
-    // then `expect(product).toContain('product_ref')` and `expect(product).toContain(
-    // 'catalogue')` — pinning the page's claim that the product arrives as a REFERENCE and
-    // never as a name, "because a title belongs to the store's own catalogue". Introduced in
-    // `0dffb80`, true when written, and false now for a reason that is not a softening: the
-    // name the card shows is NOT the store's catalogue's. `98529bd` published
-    // `ShortlistProduct.identity`, `exchange.ranking.verification.catalog_identity` reads it
-    // off the PLATFORM's own crawl (gated in Cypher to sources the platform observed itself,
-    // reachable from no bid), and `buyer_svc.accept.labels._slot_identity` forwards it with
-    // the snapshot id attached. The bullet's premise — that only the store could name the
-    // product — is what stopped being true, so the bullet went rather than its wording.
-    //
-    // `gap-fallback` and `gap-store-voice` are the same commit's other two: `ShortlistSlot`
-    // now declares `fallback`/`fallback_reason` and `message`, and `extra="forbid"` survived
-    // the change, so nothing was loosened to make room for them. What each of the three is
-    // replaced by is asserted positively on the card itself, in `shortlist.test.tsx` —
-    // absence here would otherwise be indistinguishable from the claim having been dropped.
-    expect(screen.queryByTestId('gap-product-name')).toBeNull()
-    expect(screen.queryByTestId('gap-fallback')).toBeNull()
-    expect(screen.queryByTestId('gap-store-voice')).toBeNull()
-
-    // The retired premise must not creep back into the panel as prose under another id.
-    const gaps = screen.getByLabelText('What is not wired yet').textContent ?? ''
-    expect(gaps).not.toContain('a reference, not a name')
-    expect(gaps).not.toContain('not on the wire to here')
-
-    // The model bullet no longer claims the questions came from the offline double, and the
-    // retirement of that claim is the assertion.
-    //
-    // It used to pin five strings — `build_llm("buyer")`, `LLM_PROVIDER`, `DeterministicLLM`,
-    // `double:buyer` and `no live model` — because the bullet stated FLATLY, as the page's
-    // own voice, that no live model had written anything.
-    //
-    // WHY THAT WAS RETIRED, stated carefully because the reason is not "the default
-    // changed". It has not: `.env.example` still ships `LLM_PROVIDER=double`, and `docs/`
-    // and `.gitlab-ci.yml` still say it is deliberately left unset. What was wrong is that
-    // the sentence was UNCONDITIONAL about something the page cannot read. `LLM_PROVIDER` is
-    // deployment configuration; `POST /buyer/intent/clarify` answers with `questions`,
-    // `intent`, `unresolved` and `confirmed`, and no field on that route or any other route
-    // this origin serves discloses which client answered. So on any deployment that does set
-    // a provider — which the default does not forbid, and which this project has been told is
-    // in use — the page asserted a falsehood it had no way to check, and on the default
-    // deployment it was right by luck rather than by measurement.
-    //
-    // The claim was therefore retired rather than softened, and the assertions on its
-    // wording went with the wording. What is pinned instead is the honest replacement: the
-    // page says it cannot tell, and names the served field that would let it. The two
-    // `not.toContain`s below are the guard that the unconditional claim does not creep back.
-    const model = screen.getByTestId('gap-model').textContent ?? ''
-    expect(model).toContain('cannot tell you')
-    expect(model).toContain('build_llm("buyer")')
-    expect(model).toContain('LLM_PROVIDER')
-    // The retired claim must not creep back: an unconditional "no live model" is exactly the
-    // sentence this deployment falsifies.
-    expect(model).not.toContain('no live model')
-    expect(model).not.toContain('double:buyer')
-
-    // Signed in from the emailed link, so the sign-in form has been replaced rather than
-    // hidden: the page asks for no address it has no use for.
+    // The marking itself was never a property of this UI in the first place: `seeded-feedback
+    // .ts` reads the prefix out of the seed artifact's declared marker, `learning/loop.ts`
+    // refuses to submit any reference that does not carry it, and the buyer service copies it
+    // verbatim onto the trust ledger's hash chain. Deleting a panel cannot unmark a row.
     await screen.findByTestId('signed-in')
+    const seeded = screen.getByTestId('feedback-seeded-explanation').textContent ?? ''
+    expect(seeded).toContain(SEEDED_PREFIX)
+    expect(seeded).toMatch(/manufactured/i)
+    expect(screen.getByTestId('feedback-seeded-badge').textContent).toContain('SEEDED')
+
+    // 3. UNRELATED TO THE PANEL AND THEREFORE UNCHANGED: signed in from the emailed link, so
+    // the sign-in form has been replaced rather than hidden — the page asks for no address it
+    // has no use for. Both lines are the retired test's own, reproduced rather than dropped.
     expect(screen.queryByLabelText('Email address')).toBeNull()
 
-    // Still there at the end of the journey, not only at the start.
+    // The removal holds to the END of the journey and not only on arrival. The old test drove
+    // this same walk to pin that the panel SURVIVED past the permalink; the walk is kept and
+    // the claim inverted, so the panel cannot creep back in a late-rendered branch.
     await walkToConfirm()
     fireEvent.click(screen.getByRole('button', { name: /confirm and ask stores/i }))
     await screen.findByLabelText('Shortlist')
     fireEvent.click(screen.getByRole('button', { name: /accept this one/i }))
     await screen.findByTestId('permalink-url')
 
-    // The PANEL is what is being pinned here — that it survives to the end of the journey
-    // rather than only appearing at the start — so the witness has to be a gap that is still
-    // open. It used to be `gap-product-name`; that bullet was retired above, so the witness
-    // moved to the two that remain rather than the assertion being dropped.
-    await waitFor(() => expect(screen.getByTestId('gap-feedback-seeded')).toBeInTheDocument())
-    expect(screen.getByTestId('gap-model')).toBeInTheDocument()
-    expect(screen.queryByTestId('gap-domain')).toBeNull()
-    expect(screen.queryByTestId('gap-price')).toBeNull()
-    expect(screen.queryByTestId('gap-signin')).toBeNull()
-    expect(screen.queryByTestId('gap-pseudonym')).toBeNull()
-    expect(screen.queryByTestId('gap-product-name')).toBeNull()
-    expect(screen.queryByTestId('gap-fallback')).toBeNull()
-    expect(screen.queryByTestId('gap-store-voice')).toBeNull()
+    expect(screen.queryByLabelText('What is not wired yet')).toBeNull()
+    expect(screen.queryByRole('heading', { name: 'What is not wired yet' })).toBeNull()
+    expect(screen.getByTestId('feedback-seeded-explanation').textContent).toContain(SEEDED_PREFIX)
   })
 
   it('prints the clock the service sent, and nothing at all when it sent none', async () => {
@@ -1579,7 +1549,9 @@ describe('the four beats', () => {
     // WHERE THIS MOVED, TWICE. It began as a sentence on the slot's price cell, written by
     // `bidPrice` off the joined `entries[]` row. When the price started coming off the slot
     // itself, the card lost the distinction — `contracts.protocol.ShortlistSlot` declared no
-    // `fallback` and forbids extras — and `gap-fallback` in the gaps panel said so.
+    // `fallback` and forbids extras — and `gap-fallback` in the gaps panel said so. (That
+    // panel is itself gone now, removed on the owner's instruction; do not go looking for it.
+    // Its removal is recorded above, at "no longer carries the gaps panel".)
     //
     // `98529bd` closed that: the slot carries `fallback` and `fallback_reason`, `gap-fallback`
     // is retired, and `ShortlistView` prints a price-provenance sentence off the slot's own

@@ -969,6 +969,21 @@ pre code { background: none; color: inherit; padding: 0; }
  *
  * Deliberately NOT alarming. These are stated facts about a working system, not warnings, so
  * the panel reads as a footnote: no wash, no coloured rail, muted body copy.
+ *
+ * NOT DEAD, THOUGH THE JOURNEY NO LONGER USES IT. The shopper journey's own
+ * `<section aria-label="What is not wired yet" className="gaps">` has been removed on the
+ * owner's instruction, so `Journey.tsx` sets this class nowhere any more. The rules stay
+ * because they were never this page's alone: `main.tsx` loads this stylesheet alongside
+ * `learning.css` and `metrics.css` into one bundle, and `.gaps` is set by five sections on
+ * the other two pages — `MetricsPage.tsx` ("What this page cannot source from this origin",
+ * "Metrics this stack does not record") and `LearningPage.tsx` ("What marks the manufactured
+ * data", "Which terms can move here", "What resets this demo"). Both of those stylesheets
+ * name `.gaps` in their own headers as borrowed from here. Deleting these rules would strip
+ * the footnote styling off all five. Check those call sites before treating this as dead.
+ *
+ * The same goes for `.gaps` in the shared `.step, .gaps, .diagnostics` box rule and the
+ * `.step > h2, .gaps > h2` heading rule above, and in the narrow-viewport rule at the foot
+ * of this file.
  */
 
 .gaps {
