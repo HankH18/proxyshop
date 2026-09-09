@@ -252,6 +252,26 @@ def _catalog_snapshot(store: dict[str, Any]) -> dict[str, Any]:
     Built from the same catalogue rows the agent read, which is what makes a *false* claim
     detectable: the agent asserts what its catalogue says, the verifier reads the catalogue
     independently, and a divergence is a contradiction rather than a matter of opinion.
+
+    ``canonical_name`` is the roster row's own, and it is NOT ``product_ref``. It used to be:
+    this function wrote ``"canonical_name": store["product_ref"]``, which made the platform's
+    crawled name for every product the string ``prod-<store>-hx``. Two things followed, and
+    both were wrong rather than merely ugly:
+
+    * every shortlist slot published ``identity.title == "prod-northroast-hx"`` — the opaque
+      reference :func:`exchange.ranking.verification.catalog_identity` exists precisely to
+      replace, so this run was asserting the served contract while defeating it; and
+    * ``exchange.ranking.filters.organic_relevance_reason`` refused the silent store's R10
+      fallback ``organic_result_off_topic`` — correctly. Judged on ``prod-slowreply-hx`` the
+      platform's own record carries none of ``heat, exchange, espresso, machine, office``, and
+      a fallback row is one no shop bid for, so the crawl is the only thing vouching for it.
+      R10 says a silent store MAY be represented at list price; it does not say it may be
+      shown for a question its product does not answer.
+
+    The fix is the fixture's, not the gate's: a store rostered into an espresso auction sells
+    an espresso machine, and the crawl records that name. ``product_ref`` stays the identifier
+    the envelope floor, the store's own catalogue key, the roster row and ``evidence_ref``
+    below are all keyed on — the two are different facts and are now spelled differently.
     """
     attributes = {
         key: {"value": value} for key, value in store["catalog"].items() if key != "product_ref"
@@ -266,7 +286,7 @@ def _catalog_snapshot(store: dict[str, Any]) -> dict[str, Any]:
         "products": [
             {
                 "product_ref": store["product_ref"],
-                "canonical_name": store["product_ref"],
+                "canonical_name": store["canonical_name"],
                 "evidence_ref": f"snap-{store['store_id']}#{store['product_ref']}",
                 "observed_at": AS_OF,
                 "attributes": attributes,

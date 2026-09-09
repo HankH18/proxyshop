@@ -468,6 +468,48 @@ def test_every_shortlist_slot_shows_the_product_and_the_price_it_is_offering(
     assert silent_slot["price"]["unit_price"] == pytest.approx(by_store[silent]["list_price"])
 
 
+def test_every_shortlist_slot_names_the_product_instead_of_its_reference(
+    s1_run, s1_fixture
+) -> None:
+    """A slot's title is the PLATFORM's crawled name, never the catalogue reference.
+
+    ``exchange.ranking.verification.catalog_identity`` exists for one reason, stated in its own
+    docstring: a shortlist slot carried ``product_ref`` and ``variant_ref`` and nothing else,
+    so "a shopper was asked to choose between two opaque references". This run asserted that
+    contract while defeating it — ``e2e/support/s1/flow.py``'s ``_catalog_snapshot`` wrote
+    ``"canonical_name": store["product_ref"]``, so the name every slot published was
+    ``prod-northroast-hx``. Nothing here read the title, so nothing said so.
+
+    The same placeholder had a second, louder consequence, and it is why this test is worth
+    more than a cosmetic check. ``exchange.ranking.filters.organic_relevance_reason`` judges a
+    FALLBACK row on exactly this string, and judged on ``prod-slowreply-hx`` it refused the
+    silent store ``organic_result_off_topic``: the platform's own record of that product
+    carried none of ``heat, exchange, espresso, machine, office``. That refusal was correct.
+    R10's fallback reaches the shortlist because the platform knows what the product IS, and
+    a fixture that will not say so is asking for the gate to be weakened instead.
+
+    So both halves are asserted: the title is the roster row's crawled name, and it is not the
+    reference. The second half is the one that fails if the placeholder ever comes back.
+    """
+    by_store = {store["store_id"]: store for store in s1_fixture["stores"]}
+    for slot in s1_run.shortlist["slots"]:
+        store_id = s1_run.entry_for_bid_ref(slot["bid_ref"])["store_id"]
+        identity = slot["product"]["identity"]
+        assert identity is not None, (
+            f"slot {slot['slot']!r} for {store_id} publishes no identity, so the shopper is "
+            "shown a catalogue reference and no name"
+        )
+        assert identity["title"] == by_store[store_id]["canonical_name"], (
+            f"slot {slot['slot']!r} for {store_id} publishes {identity['title']!r}, which is "
+            f"not the name the platform crawled for this product "
+            f"({by_store[store_id]['canonical_name']!r})"
+        )
+        assert identity["title"] != slot["product"]["product_ref"], (
+            f"slot {slot['slot']!r} for {store_id} publishes its catalogue reference "
+            f"{slot['product']['product_ref']!r} as the product's name"
+        )
+
+
 def test_the_ranking_moved_on_the_features_the_exchange_computed(s1_run, s1_fixture) -> None:
     """The published five-term formula ran with real inputs, not with five neutrals.
 
