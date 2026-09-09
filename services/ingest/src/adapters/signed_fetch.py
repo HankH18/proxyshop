@@ -300,15 +300,33 @@ class SignedFetchAdapter:
     ) -> list[ProductRecord]:
         raw: list[tuple[dict, str, str]] = []  # (payload, source_url, page_hash)
         page = 1
+        page_size = min(_PAGE_SIZE, request.max_products)
+        stopped_at_product_ceiling = False
         while len(raw) < request.max_products:
-            query = urlencode({"limit": min(_PAGE_SIZE, request.max_products), "page": page})
+            query = urlencode({"limit": page_size, "page": page})
             url = f"{base}{PRODUCTS_PATH}?{query}"
             if not may_fetch(robots_text, url, self.user_agent):
                 warnings.append(f"robots.txt disallows {url}")
                 break
             if not ledger.may_enqueue(0):
                 break
-            result = get(url)
+            try:
+                result = get(url)
+            except BudgetExceeded as exc:
+                # NOT re-raised to `fetch_catalog`. It used to be, and the products already
+                # read were lost with the stack: measured on `fixtures/real-catalogs-broad`,
+                # `cotopaxi.com` blew the per-response ceiling on page 5 and the crawl
+                # reported ZERO products having already parsed 1,000 of them across pages
+                # 1-4. This adapter's own contract is that a blown budget "ends the crawl and
+                # is reported in snapshot.warnings with whatever was gathered before it", and
+                # `catalog_mcp` has always done exactly that; only this path threw the
+                # gathered half away. The warning states the loss so the count is never
+                # mistaken for the catalogue.
+                warnings.append(
+                    f"budget: {exc}; abandoned {url} after {len(raw)} product(s) — this store's "
+                    f"product list is what was read before the ceiling, not its catalogue"
+                )
+                break
             if result is None or result.status != 200:
                 if result is not None and result.status != 200:
                     warnings.append(f"{url}: HTTP {result.status}")
@@ -322,14 +340,31 @@ class SignedFetchAdapter:
             entries = payload.get("products") if isinstance(payload, dict) else None
             if not isinstance(entries, list) or not entries:
                 break
-            for entry in entries:
+            full_page = len(entries) >= page_size
+            for position, entry in enumerate(entries):
                 if isinstance(entry, dict):
                     raw.append((entry, result.final_url, canonical_json_hash(entry)))
                 if len(raw) >= request.max_products:
+                    # Entries left unread on this page, or a page that came back full and so
+                    # implies another: either way it is the ceiling that ended the read, not
+                    # the catalogue running out.
+                    stopped_at_product_ceiling = position + 1 < len(entries) or full_page
                     break
-            if len(entries) < min(_PAGE_SIZE, request.max_products):
+            if not full_page:
                 break
             page += 1
+
+        if stopped_at_product_ceiling:
+            # This warning is new because the truncation was silent: the loop simply stopped,
+            # and the caller got a number with no way to tell a 250-product store from the
+            # first 250 products of a 3,805-product one. `StoreTarget.max_products` defaults
+            # to 250 and `taylorstitch.com` in `fixtures/real-catalogs-broad` really does have
+            # 3,805, so the difference is not hypothetical.
+            warnings.append(
+                f"{base}{PRODUCTS_PATH}: stopped at max_products={request.max_products} while "
+                f"the catalogue was still answering with full pages; this is the first "
+                f"{len(raw)} product(s), not the whole catalogue"
+            )
 
         products: list[ProductRecord] = []
         truncated_galleries = 0

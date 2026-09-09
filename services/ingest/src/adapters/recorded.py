@@ -52,7 +52,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs
 
-from .budgets import CrawlLedger
+from .budgets import CrawlBudget, CrawlLedger
 from .hashing import HASH_PREFIX, content_hash, snapshot_ref
 from .netguard import host_matches_allowlist, normalise_host, safe_split
 from .robots import USER_AGENT, may_fetch
@@ -69,6 +69,7 @@ __all__ = [
     "RecordedTransport",
     "UnrecordedRequest",
     "default_corpus_dir",
+    "replay_budget",
 ]
 
 #: Environment override for where the recorded corpus lives. A path rather than a literal
@@ -86,6 +87,11 @@ PRODUCTS_PATH = "/products.json"
 #: answer. ``SignedFetchAdapter`` asks for ``min(250, max_products)``, so a caller that sets
 #: ``max_products`` below this would ask for a page that was never recorded.
 RECORDED_PAGE_SIZE = 250
+
+#: What a storefront answers past its last page, and therefore what the replay answers past
+#: the end of the recording. Named because :attr:`RecordedStore.replay_bytes` has to count it:
+#: the pagination loop asks for one page beyond the last full one, so this really is served.
+_END_OF_PAGES = b'{"products":[]}'
 
 
 class CorpusIntegrityError(RuntimeError):
@@ -184,6 +190,28 @@ class RecordedStore:
     def page(self, number: int) -> RecordedPage | None:
         """The recorded page numbered ``number``, or ``None`` when it was never fetched."""
         return next((page for page in self.pages if page.number == number), None)
+
+    @property
+    def largest_page_bytes(self) -> int:
+        """The biggest single recorded response, in bytes. ``0`` when nothing was recorded."""
+        return max((len(page.body) for page in self.pages), default=0)
+
+    @property
+    def replay_bytes(self) -> int:
+        """Every byte one replay of this store hands back.
+
+        The recorded pages, plus the rendered robots.txt, plus the empty ``{"products":[]}``
+        page the transport answers past the end of the recording — which is to say the exact
+        total :meth:`RecordedTransport.fetch` will meter, known before a single byte of it is
+        charged.
+        """
+        pages = sum(len(page.body) for page in self.pages)
+        return pages + len(self.robots_body.encode("utf-8")) + len(_END_OF_PAGES)
+
+    @property
+    def replay_responses(self) -> int:
+        """How many responses one replay of this store serves: robots, its pages, and the end."""
+        return len(self.pages) + 2
 
 
 @dataclass(frozen=True)
@@ -362,6 +390,75 @@ def _read_lines(path: Path) -> list[bytes]:
     return [line for line in blob.split(b"\n") if line.strip()]
 
 
+def replay_budget(
+    subject: RecordedStore | RecordedCorpus, *, base: CrawlBudget | None = None
+) -> CrawlBudget:
+    """The ceilings a replay of ``subject`` runs under. **Never narrower than** ``base``.
+
+    WHY A REPLAY MUST NOT RUN UNDER THE LIVE BUDGET. ``CrawlBudget``'s byte ceilings are a
+    defence against a storefront that is hostile or broken: ``max_response_bytes`` stops a
+    single response filling memory, ``max_decompressed_bytes`` stops a gzip bomb, ``max_bytes``
+    bounds one crawl. The live transport enforces all three **while the body is still
+    arriving** — :meth:`~ingest.adapters.transport.SafeHTTPClient._read_body` charges each
+    chunk and abandons the socket — which is what makes them real.
+
+    A replay has already lost that argument before it starts. ``RecordedCorpus.load`` reads
+    every page off disk, reassembles it and verifies its digest against what the live fetch
+    recorded; by the time :meth:`RecordedTransport.fetch` is called the bytes are in memory
+    and the cost has been paid. Charging them against a live ceiling cannot prevent anything —
+    it can only *refuse data this repository already owns*, which is what it did: measured on
+    ``fixtures/real-catalogs-broad``, four of the 38 stores publish a ``products.json`` page
+    over the 4 MiB ``max_response_bytes``, and all four loaded **zero** products while the
+    load reported success. ``branchfurniture.com`` — one of two stores in that corpus stocking
+    a coffee table — was one of them.
+
+    SO THE CEILING COMES FROM THE RECORDING, not from the network posture. Every byte
+    dimension is widened to exactly what this verified recording holds and no further, so a
+    page the corpus does not contain is still refused, and the live path's ceilings are
+    untouched: nothing here mutates :class:`~ingest.adapters.budgets.CrawlBudget`'s defaults,
+    and a live crawl built without this function still runs under them.
+
+    :meth:`RecordedTransport._respond` already declines to arm the two *per-response* ceilings
+    for the same reason, so what this function is really sizing is the pair that still bites:
+    ``max_bytes`` for the whole crawl and ``max_pages``. Measured, they are the near miss
+    rather than the hit — ``taylorstitch.com`` replays 22.85 MiB against the 32 MiB default,
+    71% of the way to becoming the next silent zero — and sizing them from the recording is
+    what stops the next corpus re-collection reintroducing this bug.
+
+    ``max_seconds``, ``max_depth``, ``max_redirects`` and ``connect_timeout`` are taken from
+    ``base`` unchanged. They are not the problem — measured, the slowest store in the broad
+    corpus (``taylorstitch.com``, 16 pages, 22.85 MiB) replays in 0.48 s against the 60 s
+    default — and a replay that hangs should still be cut short.
+
+    Args:
+        subject: one recorded store, or a whole corpus (whose ceiling fits its largest store,
+            since ``max_bytes`` and ``max_pages`` are per crawl and a crawl is one store).
+        base: the budget to widen. Defaults to :class:`~ingest.adapters.budgets.CrawlBudget`'s
+            live posture.
+
+    Returns:
+        A budget that admits every recorded response of ``subject`` and is otherwise ``base``.
+    """
+    floor = base or CrawlBudget()
+    stores = subject.stores if isinstance(subject, RecordedCorpus) else (subject,)
+    largest = max((store.largest_page_bytes for store in stores), default=0)
+    heaviest = max((store.replay_bytes for store in stores), default=0)
+    responses = max((store.replay_responses for store in stores), default=0)
+    per_response = max(floor.max_response_bytes, largest)
+    return CrawlBudget(
+        max_pages=max(floor.max_pages, responses),
+        max_depth=floor.max_depth,
+        max_seconds=floor.max_seconds,
+        max_bytes=max(floor.max_bytes, heaviest),
+        max_response_bytes=per_response,
+        # The gzip-bomb ceiling has to stay above the per-response one to mean anything, and
+        # a replay decompresses nothing — `_respond` meters the same count through both.
+        max_decompressed_bytes=max(floor.max_decompressed_bytes, per_response),
+        max_redirects=floor.max_redirects,
+        connect_timeout=floor.connect_timeout,
+    )
+
+
 @dataclass
 class RecordedTransport:
     """A ``SafeHTTPClient``-shaped replay of one recorded store. Opens nothing.
@@ -370,10 +467,10 @@ class RecordedTransport:
     inherit ``_open``, and a replay that *could* connect is a replay that eventually does.
     This class has no code path to a socket because it imports no networking library.
 
-    The budget is still charged — pages, wire bytes, decompressed bytes and the clock — so a
-    replay is subject to the same :class:`~ingest.adapters.budgets.CrawlBudget` a live crawl
-    is, and a corpus larger than the budget fails the same way a large storefront does
-    rather than sailing past a ceiling the real path enforces.
+    The budget is still charged — pages, wire bytes, decompressed bytes and the clock — so
+    ``snapshot.usage`` reports what the replay actually read. What the caller must NOT do is
+    meter it against the *live* ceilings: see :func:`replay_budget` for why a byte ceiling
+    defends nothing here, and for the budget a replay belongs under.
 
     Attributes:
         store: the recorded store to answer for.
@@ -463,16 +560,33 @@ class RecordedTransport:
             # Past the end of what was recorded. An empty `products` array is exactly what a
             # storefront answers past its last page, and it is what ends the adapter's
             # pagination loop — so the replay ends the same way the live crawl did.
-            return self._respond(url, 200, b'{"products":[]}', "application/json", book)
+            return self._respond(url, 200, _END_OF_PAGES, "application/json", book)
         return self._respond(url, page.status, page.body, "application/json", book)
 
     def _respond(
         self, url: str, status: int, payload: bytes, media_type: str, book: CrawlLedger
     ) -> HTTPResult:
-        """Meter a recorded body through the budget and shape it as the live transport does."""
+        """Meter a recorded body through the budget and shape it as the live transport does.
+
+        THE PER-RESPONSE CEILINGS ARE DELIBERATELY NOT APPLIED, and this is the one place the
+        replay stops behaving like the live transport. ``response_total=`` is what arms
+        ``max_response_bytes`` and ``max_decompressed_bytes``, and both are defences against a
+        body that is *still arriving* from somebody else's server — the live client charges
+        them chunk by chunk and hangs up. Here the whole payload has been in memory since
+        :meth:`RecordedCorpus.load` read it off disk and checked its digest against what the
+        live fetch recorded, so refusing it now cannot prevent the memory it is objecting to.
+        It can only decline to read a page this repository fetched, verified and committed —
+        which is exactly what it did: four of the 38 stores in ``fixtures/real-catalogs-broad``
+        publish a page over the 4 MiB ceiling, and all four replayed as **zero products**.
+
+        What still applies: ``max_bytes`` for the whole crawl, ``max_pages``, and the clock.
+        Those bound the replay as a whole rather than second-guessing one verified page, and
+        :func:`replay_budget` sizes them from the recording so a corpus the repository owns
+        fits and a request it does not hold still does not.
+        """
         total = len(payload)
-        book.charge_bytes(total, response_total=total)
-        book.charge_decompressed(total, response_total=total)
+        book.charge_bytes(total)
+        book.charge_decompressed(total)
         digest = content_hash(payload)
         return HTTPResult(
             url=url,
