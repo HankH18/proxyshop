@@ -140,6 +140,18 @@ export const PINNED_ROUTES: readonly Route[] = [
   {domain: "buyer", method: "post", path: "/buyer/intent/confirm"},
   {domain: "buyer", method: "post", path: "/buyer/livecheck/run"},
   {domain: "buyer", method: "get", path: "/buyer/livecheck/{auction_id}"},
+  // The shopper's follow-up questions about a shortlist they are already looking at, from the
+  // ask-about-these-options stream (060225e). It is the one buyer door whose whole subject is
+  // what the PLATFORM may say in its own voice, so it is the last one that should escape
+  // contract review. Reads only: it fetches the exchange's live shortlist for one auction and
+  // answers from it, naming neither of the exchange's two writes.
+  //
+  // THIRD time, not the second the note above records. The Python tuple and
+  // `buyer.openapi.json` both carried it and this mirror did not, so `are the only routes
+  // declared` was red in TypeScript from 060225e until now. Detection was never the problem —
+  // the pair of tests names the route and the direction on the first run. Both times it sat
+  // red, it was because every lane that saw it correctly judged it outside its own file scope.
+  {domain: "buyer", method: "post", path: "/buyer/chat/ask"},
 ];
 
 const HTTP_METHODS = ["get", "put", "post", "delete", "patch", "head", "options", "trace"] as const;
