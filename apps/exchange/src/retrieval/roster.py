@@ -733,6 +733,14 @@ def _solicited(
     best ELIGIBLE fit instead. See the comment above the sort; the two halves only work
     together.
 
+    **A shop this chooses a product for may be one with a LIVE AGENT.** ``keeps`` decides which
+    of a shop's products the roster row carries; :func:`repoint_organic_products` is what puts
+    that decision onto a STATED roster's row, and on the demo it moves ``toniiq.com`` — a
+    tier-1 hosted bidder — onto a product the caller never named. Nothing here is insulated
+    from the agents by tier: every graph-rostered shop reads back tier 0 whatever it is, and
+    the exchange raises the four hosted ones to tier 1 afterwards. That function's
+    "Inert on the demo" section carries the measurement and the git provenance.
+
     Args:
         shops: the crawled shops to pivot, from ``ingest.graph.candidate_shops``.
         fit: ``{product_id: fit_score}`` for the products this retrieval vouched for.
@@ -814,8 +822,93 @@ def repoint_organic_products(
        ref present there is a product this exchange has just said is relevant. It is left
        exactly as stated — which is why this is a no-op on the auctions that already work:
        measured on ``"milk thistle liver support"`` when the demo roster was six rows, four of
-       them are returned by the search and do not move. (It states fifteen now; that reading has
-       not been retaken, and it needs a live graph run rather than a re-read of the document.)
+       them are returned by the search and do not move.
+
+       **RETAKEN ON THE FIFTEEN-ROW ROSTER, ON THE SERVED ROUTE, 2026-09-09.** That reading was
+       flagged here as un-retaken, and it is stale in the direction that matters. Driven through
+       the three calls the learning page itself makes — ``POST /buyer/intent/clarify`` ->
+       ``POST /buyer/intent/confirm`` -> ``GET /buyer/auctions/{id}`` on the compose stack, with
+       buyer-svc injecting ``deploy/demo/buyer-roster.json`` verbatim and the page's own default
+       query ``"milk thistle liver support supplement"`` — auction
+       ``auction-7fe8e755-7a53-4108-9b0e-5368359eda2c`` at 18:26:09.940Z answers::
+
+           roster_source.reason: "...the platform re-pointed 2 of 15 row(s) onto the product
+           its own crawl says answers this intent... (nutricost.com, toniiq.com)"
+
+       Thirteen rows hold. TWO move — and one of the two is a tier-1, agent-backed BIDDER.
+       ``toniiq.com`` is solicited about ``prod_c376b16ff...`` ("Milk Thistle 1000", list 29.97)
+       and not about the ``prod_94986d39...`` ("Liposomal Glutathione Complex", list 22.97) its
+       roster row pins; the served shortlist carries it in the ``specialist`` slot at 29.97,
+       ``fallback: false``, so the row a live agent bid on is the row this function re-pointed.
+
+       **Drive the PAGE's intent, not a hand-built one.** The intent that reproduces this is the
+       clarifier's, and it carries no ``category`` and no preferences. A hand-written ``POST
+       /auctions`` body that adds ``category: "supplements"`` narrows :func:`build_query` to zero
+       retrieved products, so ``fit`` is empty, nothing can be re-pointed, and the same stack
+       answers ``reason: null`` — which reads exactly like "this function is inert" and is not.
+
+       Its ``max_discount_pct`` of 20.0 rides through untouched onto a product the caller never
+       named, so the cap now multiplies a different base. **That is true of the ROW and dormant
+       on this stack, and the docstring has to say so or it overstates.** A cap multiplies
+       nothing until an agent asks for a depth, and on the cold demo none of them does:
+       ``sample_arm`` (``packages/store-agent/src/learning/state.py``) computes
+       ``depth=sample_depth(state, cluster, seed) if has_record else 0.0``, so a store with no
+       record in this cluster is pinned at rung zero, and
+       :meth:`~store_agent.modes.runner.AgentRunner._select_arm` independently declines to
+       overlay a learned policy at all until that record exists. Measured on the same auction:
+       all four bidders answered for real and every one quoted list price, ``discount: null``.
+       The changed base is real and it is LATENT — it becomes 20% of 29.97 rather than 20% of
+       22.97 the first time this store is taught anything in this cluster.
+
+    **"INERT ON THE DEMO" — THE CORRECTION, PUT WHERE THE QUESTION GETS ASKED.**
+    ``d71205e`` ("a shop died with the product it happened to lead with") ends its
+    behaviour note with: *"Inert on the demo — all four re-pointed shops are tier 0 with no
+    agent."* A pushed commit message cannot be edited, so the correction lives here, next to
+    the code that actually re-points. Two separate things are wrong with that sentence, and the
+    second is the one worth carrying forward:
+
+    * **The demo-wide reading of it is false, and d71205e is not what made it false — which is
+      shown by A/B, not by this function's bytes.** The sentence invites "no bidding store on
+      this demo is solicited about a product the caller did not name", and the measurement above
+      is the counterexample. THE ARGUMENT THAT DOES NOT WORK, recorded so nobody rebuilds it:
+      "this function is byte-identical across d71205e" proves nothing, because this function
+      does not choose the product — it calls ``source.solicit()``, and :func:`_solicited`'s
+      ``keeps`` filter is precisely what d71205e changed. (The sha once quoted here for that
+      identity did not reproduce under any function-boundary that was tried, which is a second
+      reason it is gone: an unreproducible digest in a docstring is worse than none.)
+
+      What discriminates is running BOTH revisions on the same inputs. Each was extracted
+      verbatim — ``d71205e^`` sha256 161b7ab461d31f72, 2171 bytes; ``d71205e`` and HEAD
+      a41b930f0145d92e, 5609 bytes — and executed inside ``proxyshop-exchange-1`` against ONE
+      captured fixture: the live graph's ``candidate_shops`` plus ``result.assessments`` for
+      this intent, replayed through ``build_query`` -> ``CandidateRetrieval.retrieve`` under the
+      deterministic ``lexical`` embedding provider, so two captures are byte-identical. **The
+      two revisions returned identical rows**, ``toniiq.com`` on ``prod_c376b16ff...`` at 29.97
+      in both. WHY they agree: toniiq's only two eligible products are ``prod_c376b16ff...``
+      ("Milk Thistle 1000", fit 0.617237) and ``prod_f7098a5d96...`` ("Milk Thistle 50:1", fit
+      0.605321), and :func:`~exchange.retrieval.relevance.identity_off_topic` refuses neither —
+      nor any of the eight products this query retrieves — so ``keepable == eligible`` and
+      ``max(keepable or eligible)`` reduces to the old ``max(eligible)``. The re-point is THIS
+      function's doing at both revisions, because the pinned ``prod_94986d39...`` is absent from
+      ``fit`` at both. Sabotage-checked so that "identical" is not vacuous: a planted ``keeps``
+      that refuses ``prod_c376b16ff...`` moves the d71205e revision onto ``prod_f7098a5d96...``
+      at 19.97, and ``identity_off_topic`` does refuse a furniture title on this query. So
+      d71205e's claim about ITS OWN change stands; the conclusion it drew about the demo does
+      not. (``9035181`` introduced this function and is an ancestor of d71205e — that
+      establishes only that it EXISTED, not what it did to a roster that was six rows then and
+      is fifteen now, which is why the A/B above is what carries the claim.)
+    * **"Tier 0 with no agent" is not evidence of anything, because tier 0 is the constant.**
+      Measured on the live graph, ``MATCH (s:Store) RETURN count(s), count(s.tier)`` answers
+      ``19, 0`` — nineteen Store nodes and not one of them carries a ``tier`` property — and
+      the shop Cypher reads ``coalesce(s.tier, 0) AS tier``
+      (``services/ingest/src/graph/query.py``), so EVERY shop the graph can roster reads back
+      tier 0. The two readings of that zero are "these are genuinely unpaid merchants" and "the
+      crawl never wrote a tier", and it is the second:
+      :func:`~exchange.orchestration.solicitation.stores_with_an_agent` RAISES a tier-0 row to
+      tier 1 for any store whose ``bid_endpoint`` the deployment document holds, which on this
+      demo is exactly the four hosted stores — all four came back ``tier: 1`` with real bids in
+      the auction above. A tier read upstream of that raise says nothing about whether a store
+      has an agent, so it cannot be the reason a re-point is harmless to one.
 
        **ABSENT FROM ``fit`` IS NOT "JUDGED AND REFUSED", and the sentence this rule publishes
        may not say it is.** ``fit`` is ``result.assessments``, and ``retrieve()`` is called with

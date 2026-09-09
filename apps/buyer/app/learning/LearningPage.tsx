@@ -18,9 +18,15 @@
  *   1. Every manufactured order carries the seed marker, INSIDE the trust ledger's hash
  *      chain, and the page prints both the prefix and the limit of what that prefix proves.
  *   2. Which ranking terms can move in this deployment and which cannot, with the reason.
- *      Four of the five are identical across every candidate here, and a page that let a
- *      viewer believe the shortlist is being decided by five live signals would be lying by
- *      omission about the one that is doing the work.
+ *      THREE of the five are identical across every candidate here — `intent_match`,
+ *      `verified_claim_ratio` and `delivery_fit`, each absent from these candidate records and
+ *      each therefore scored at the published 0.5 neutral. `trust` is NOT one of them: measured
+ *      on the served route, all four bidders carried a different one, and with `price_value` at
+ *      0.0 for the lot on a cold stack their `rank_score`s differ by exactly `0.20 x` their
+ *      trust difference. A page that let a viewer believe the shortlist is being decided by
+ *      five live signals would be lying by omission about which two are doing the work — and
+ *      the earlier version of this sentence, which said four terms were identical, was lying
+ *      by omission about `trust`.
  *   3. What resets what. The seller agents' learning is in process memory; the trust ledger
  *      is in Postgres. Those two facts have opposite consequences for a second run of the
  *      demo, and the person driving it should know which is which before they start.
@@ -516,9 +522,10 @@ export function LearningPage({
             A shopper reports satisfaction when the shop gave them a better deal than its list
             price and dissatisfaction when it did not. That is the one thing on this page that
             is modelled rather than measured, and it is stated here rather than buried: it is a
-            coherent synthetic buyer, and in a shortlist where four of the five ranking terms
-            are identical for every candidate, it teaches the sellers something true about what
-            converts here.
+            coherent synthetic buyer, and in a shortlist where three of the five ranking terms
+            are identical for every candidate and the only other one a SELLER sets is its
+            discount, it teaches the sellers something true about what converts here. The fourth
+            moving term, <code className="mono">trust</code>, is yours rather than theirs.
           </p>
         </section>
       )}
@@ -606,27 +613,38 @@ export function LearningPage({
         <ul>
           <li>
             <strong>
-              <code className="mono">price_value</code> moves, and it is the term doing the
-              work.
+              <code className="mono">price_value</code> moves, and the SELLER is what moves it.
             </strong>{' '}
             A shop&apos;s agent samples an arm — pitch variant &times; commitment set &times;
-            discount depth — for every auction, and a cold agent&apos;s depth is pinned at
-            zero until it has a record in this cluster. Feeding outcomes gives it one, and the
-            offer moves off list price. That is the seller half of the loop, and it is what you
-            are watching.
+            discount depth — for every auction, off the rungs 0 / 5 / 10 / 15 / 20 percent, and
+            an agent with no record in this cluster asks for nothing: list price, depth zero.
+            Feeding outcomes gives it a record and the offer comes off list. Measured on the
+            cold auction this stack served at 17:31:13 UTC on 2026-09-09: all four bidders
+            answered for real and every one of them quoted its list price with{' '}
+            <code className="mono">discount: null</code>, so <code className="mono">price_value
+            </code> was 0.0 for the lot.
           </li>
           <li>
             <strong>
-              <code className="mono">trust</code> cannot move here, and the reason is
-              configuration rather than code.
+              <code className="mono">trust</code> moves here too, and the SHOPPER is what moves
+              it.
             </strong>{' '}
-            The exchange ranks against the <code className="mono">trust_snapshot</code> written
-            into <code className="mono">deploy/demo/exchange-deployment.json</code>. A
-            deployment that states that key keeps it, deliberately — it is a person&apos;s
-            statement and the composition root does not overrule one — so the live trust
-            service is consulted for eligibility and not for the ranking&apos;s trust term.
-            The feedback below <em>is</em> reaching the ledger and <em>is</em> reaching the
-            shops&apos; agents; it is the ranker that is reading a frozen copy.
+            <code className="mono">deploy/demo/exchange-deployment.json</code> states no{' '}
+            <code className="mono">trust_snapshot</code> key — deliberately, and{' '}
+            <code className="mono">deploy/demo/README.md</code> says why — so{' '}
+            <code className="mono">exchange.composition</code> binds a live snapshot and the
+            ranking gate reads <code className="mono">GET /snapshot</code> off the running trust
+            service, once per 30-second refresh window rather than once per candidate. Measured
+            on that same auction: the <code className="mono">trust</code> figures the exchange
+            published fall strictly between two <code className="mono">GET /snapshot</code>{' '}
+            readings 315 seconds apart that bracket it, decaying across both intervals. A number
+            typed into a document cannot drift between two readings of a clock. (A deployment
+            that <em>does</em> state that
+            key keeps it — that is a person&apos;s statement and the composition root does not
+            overrule one — which is the deployment{' '}
+            <code className="mono">apps/buyer/devstack/run.py</code> writes, and not this one.)
+            So the feedback below reaches the ledger, reaches the shops&apos; agents, and
+            reaches the column you are watching.
           </li>
           <li>
             <strong>
@@ -634,11 +652,47 @@ export function LearningPage({
               <code className="mono">verified_claim_ratio</code> and{' '}
               <code className="mono">delivery_fit</code> read as neutral for everyone.
             </strong>{' '}
-            Each is absent from the candidate records this stack produces, and an absent
-            feature is scored at the published neutral of 0.5 rather than at zero — so they
-            contribute an identical constant to every candidate and cannot separate two shops.
-            You will see them hold at exactly the same value in both readings; that is
-            correct, not a bug in this page.
+            Each is absent from the candidate records this page&apos;s auction produces, and an
+            absent feature is scored at the published neutral of 0.5 rather than at zero — so
+            they contribute an identical constant and cannot separate two shops. Each for its
+            own reason: this page states its roster in{' '}
+            <code className="mono">deploy/demo/buyer-roster.json</code>, and on the stated-roster
+            branch the exchange hands the ranker no <code className="mono">intent_match</code>{' '}
+            measurement at all (it is a real number only on the exchange&apos;s own graph
+            roster); <code className="mono">verified_claim_ratio</code> needs an attested verdict
+            on a claim about something <em>this</em> shopper asked; and{' '}
+            <code className="mono">delivery_fit</code> needs at least two stores whose delivery
+            promise the trust record admits. Measured: every score in that shortlist reconstructs
+            exactly as 0.35&times;0.5 + 0.20&times;0.5 + 0.20&times;trust + 0.15&times;0 +
+            0.10&times;0.5 — 0.4709492, 0.4673169, 0.4632925, 0.4587007.
+          </li>
+          <li>
+            <strong>
+              What this demo does not promise is a new ORDER — and an UNTAUGHT seller cannot buy
+              one.
+            </strong>{' '}
+            Those four rows sat 0.0036, 0.0040 and 0.0046 apart in{' '}
+            <code className="mono">rank_score</code>, and ONE rung of the sellers&apos; discount
+            ladder is worth 0.0075 of it: five points of depth, scored against this auction&apos;s
+            own price band, which the fifteen rostered listings spread from 11.99 to 2345.00 —{' '}
+            <code className="mono">0.15 &times; 0.05 / 0.9949</code>. But depth is the one axis a
+            cold agent does not sample. <code className="mono">sample_arm</code> in{' '}
+            <code className="mono">packages/store-agent/src/learning/state.py</code> reads{' '}
+            <code className="mono">depth=sample_depth(...) if has_record else 0.0</code>, and{' '}
+            <code className="mono">AgentRunner._select_arm</code> overlays a learned policy at all
+            only once this store has a record in this cluster — so the pitch and commitment axes
+            explore from the very first auction while the discount rung stays pinned at zero until
+            the feed below gives this store a record. A seller with nothing taught steps no rung
+            and reorders nothing, which is why every price above is a list price. AFTER the feed
+            it can step one, and then the arithmetic is exact: one rung clears every single
+            adjacent gap here (the largest is 0.0046) and no pair of them (the smallest two sum to
+            0.0077), so one rung moves a shop at most ONE place — and a round in which all four
+            step the same rung moves nobody. A reorder here is possible, it is marginal, and it
+            has to be bought. The column that clears the noise decisively is{' '}
+            <code className="mono">trust</code>: with no feedback in flight the whole snapshot
+            drifted by under 0.000005 across the 315 seconds between two reads, while the
+            teaching round recorded on this stack moved four shops by 0.0025 to 0.0415. Read the
+            trust figures; treat the running order as weather.
           </li>
         </ul>
       </section>
@@ -666,10 +720,18 @@ export function LearningPage({
           <li>
             <strong>The exchange&apos;s bandit is in process memory too</strong>, and it is
             re-seeded from the trust snapshot on every call. Restarting the exchange clears it.
-            Nothing about it is visible on this page: in this deployment its exploration slice
-            never fires, because it promotes only a shop the trust snapshot positively marks{' '}
-            <code className="mono">low_data</code> and no row in the demo document carries that
-            flag.
+            Nothing about it is visible on this page, and the reason is not the one this bullet
+            used to give: its exploration slice promotes a BENCH candidate — one that was ranked
+            and missed the shortlist — that the LIVE trust snapshot marks{' '}
+            <code className="mono">low_data</code>, and ten of the twenty stores in that snapshot
+            carry the flag — nine of them on this demo&apos;s roster. On a milk-thistle query
+            every one of those nine is refused{' '}
+            <code className="mono">organic_result_off_topic</code> before a bench exists.
+            Measured on a cold auction this stack served on 2026-09-09: the bench was{' '}
+            <code className="mono">nutricost.com</code> and{' '}
+            <code className="mono">bulksupplements.com</code>, neither marked{' '}
+            <code className="mono">low_data</code>, and the response came back{' '}
+            <code className="mono">exploration: null</code>.
           </li>
           <li>
             <strong>Feeding again without a restart keeps teaching.</strong> The agents do not

@@ -34,7 +34,18 @@ function json(body: unknown, status = 200): Response {
   })
 }
 
-function auction(id: string, rows: { store: string; rank: number; price: number; pv: number }[]) {
+/**
+ * `trust` defaults to the one value every fixture in this file used to hard-code, so every
+ * assertion written against the old helper reads the same number it always did. It is a
+ * PARAMETER now because holding it constant is what made the suite blind: with one trust value
+ * in every fixture, no test in this file had ever rendered a trust term that MOVED, and the
+ * page's copy and the page's tests agreed with each other while disagreeing with the stack.
+ * See `renders a trust term that moved` below.
+ */
+function auction(
+  id: string,
+  rows: { store: string; rank: number; price: number; pv: number; trust?: number }[],
+) {
   return {
     auction_id: id,
     recorded_at: '2026-09-08T08:00:00Z',
@@ -58,7 +69,7 @@ function auction(id: string, rows: { store: string; rank: number; price: number;
       bid_ref: `${id}:${row.store}`,
       store_id: row.store,
       rank_score: row.rank,
-      components: { trust: 0.172, price_value: row.pv },
+      components: { trust: row.trust ?? 0.172, price_value: row.pv },
     })),
   }
 }
@@ -196,6 +207,39 @@ describe('the learning page', () => {
     expect(toniiq?.querySelector('li[data-delta="flat"]')?.textContent).toMatch(/trust/)
   })
 
+  it('renders a trust term that moved, rather than only one that held', async () => {
+    // The sibling of the case above, and the gap it closes is the suite's own blindness: every
+    // fixture in this file used to publish trust: 0.172 for both readings, so `held` was the
+    // ONLY trust rendering any test had ever seen — which is how the page came to say trust
+    // could not move here while the stack moved it. On the compose stack the ranker reads
+    // `GET /snapshot` live (see the panel test above for the measurement), so a shopper's
+    // feedback moves this term between two auctions and the page has to render that.
+    const TAUGHT = auction('auc-3', [
+      { store: 'gaia', rank: 0.497, price: 25.49, pv: 0, trust: 0.172 },
+      { store: 'toniiq', rank: 0.4813, price: 20.97, pv: 0, trust: 0.2135 },
+    ])
+    const { fetcher } = stack([COLD, TAUGHT])
+    render(<LearningPage fetcher={fetcher} {...SMALL} />)
+    await click(screen.getByRole('button', { name: /run this query/i }))
+    await screen.findByText(/auction auc-1/)
+    await click(screen.getByRole('button', { name: /run the same query again/i }))
+    const table = await screen.findByTestId('movement-table')
+    const toniiq = table.querySelector('tr[data-store="toniiq"]')
+    const trust = [...(toniiq?.querySelectorAll('li') ?? [])].find((li) =>
+      li.textContent?.startsWith('trust'),
+    )
+    // Not `held`, and the direction is the sign of the delta the exchange published.
+    expect(trust?.getAttribute('data-delta')).toBe('up')
+    expect(trust?.textContent).toContain('+0.0415')
+    expect(trust?.querySelector('em')).toBeNull()
+    // Price is what held in this pair, so the page cannot be reading the two terms off one
+    // switch: the same row must show `price_value` flat while `trust` moves.
+    const price = [...(toniiq?.querySelectorAll('li') ?? [])].find((li) =>
+      li.textContent?.startsWith('price_value'),
+    )
+    expect(price?.getAttribute('data-delta')).toBe('flat')
+  })
+
   it('does not present its two reference figures as a reading of the viewer\u2019s own stack', () => {
     // `NO_TEACHING_SPREAD` and `MEASURED_SHIFT_AT_64_EVENTS` are LITERALS. Nothing recomputes
     // them when the page runs, and they were rendered under the words "Measured on this
@@ -272,10 +316,63 @@ describe('the learning page', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/the exchange is not configured/)
   })
 
-  it('states which ranking terms cannot move here, and why', () => {
+  it('states which ranking terms can move here, and does not promise a reorder', () => {
     render(<LearningPage fetcher={stack([COLD]).fetcher} {...SMALL} />)
     const panel = screen.getByLabelText('Which terms can move here')
-    expect(panel.textContent).toMatch(/trust.*cannot move here/s)
+    // THIS ASSERTION REPLACED `toMatch(/trust.*cannot move here/s)`, WHICH WAS MEASURED FALSE.
+    //
+    // The old assertion pinned the page's claim that the exchange ranks against a frozen
+    // `trust_snapshot` literal in `deploy/demo/exchange-deployment.json`. That claim was true
+    // when 85b7ff7 wrote both the sentence and this test — its own commit body states the
+    // CONDITION, "`trust` cannot move while the deployment states a literal snapshot" — and
+    // b2981da ("trust stops being a constant, and the loop that moves it closes end to end"),
+    // a descendant of it, deleted the 372-line `trust_snapshot` block from that document. The
+    // condition went away; the sentence and this assertion did not.
+    //
+    // Re-measured on the running compose stack on 2026-09-09 rather than argued from the
+    // diff. `deploy/demo/exchange-deployment.json` parses (3,101,472 bytes) with top-level
+    // keys exactly sellers / intent_clusters / catalog / checkout_mode / trust_url, and
+    // `docker inspect proxyshop-exchange-1` shows that very directory bound read-only at
+    // /srv/deploy with EXCHANGE_DEPLOYMENT pointing into it — so the absence is the running
+    // exchange's, not a stale copy's. With that key absent,
+    // `exchange.composition._bind_live_ranking_snapshot` binds `LiveTrustSnapshot` and the
+    // ranking gate reads the trust service. Served-route proof, on auction
+    // auction-958b7fc3-e433-4499-95f0-4d3a6cba1680: the `trust` figures the exchange
+    // published at 17:31:13Z fall strictly BETWEEN two `GET /snapshot` reads that bracket it
+    // (17:26:25Z and 17:31:40Z), decaying across both intervals — gaiaherbs 0.729750460423 >
+    // 0.729746021961 > 0.729745612292, and the same for all four. A literal typed into a
+    // document cannot drift between two reads of a clock.
+    expect(panel.textContent).toMatch(/trust moves here too/)
+    expect(panel.textContent).toMatch(/states no trust_snapshot key/)
+    expect(panel.textContent).not.toMatch(/cannot move here/)
+    // And the page must not overcorrect into promising a reorder. Measured on the served route
+    // — POST /buyer/intent/clarify -> POST /buyer/intent/confirm -> GET /buyer/auctions/{id},
+    // the exact three calls `runQuery` makes — on 2026-09-09 at 18:26:09.940Z, auction
+    // auction-7fe8e755-7a53-4108-9b0e-5368359eda2c: adjacent `rank_score` gaps of 0.0036303 /
+    // 0.0040249 / 0.0045898, against 0.0075385 for ONE five-point rung of the sellers'
+    // discount ladder (0.15 x 0.05 / 0.9948870, the band the fifteen rostered listings spread
+    // — 11.99 to 2345.00). One rung therefore outweighs every SINGLE gap and no PAIR of them
+    // (the smallest two sum to 0.0076552), which is "at most one place" and nothing more.
+    expect(panel.textContent).toMatch(/does not promise is a new ORDER/)
+    expect(panel.textContent).toMatch(/0\.0075/)
+    expect(panel.textContent).toMatch(/at most ONE place/)
+    // THE CONTRADICTION THIS CLOSES, and it is the reason these four lines are assertions
+    // rather than a comment. The FIRST bullet of this panel says a cold agent asks for nothing
+    // — measured, all four bidders quoted list price with `discount: null` — while the draft
+    // of the LAST bullet said one rung is "sampled fresh every auction, taught or not" and that
+    // "a seller stepping one rung with nothing taught can reorder the board". The same panel
+    // asserted both. The code settles it: `sample_arm`
+    // (packages/store-agent/src/learning/state.py) computes
+    // `depth=sample_depth(state, cluster, seed) if has_record else 0.0`, so a store with no
+    // record in this cluster is pinned at rung zero however the other two axes are drawn; and
+    // `AgentRunner._select_arm` (packages/store-agent/src/modes/runner.py) independently
+    // declines to overlay a learned policy at all until that record exists, so a cold bid is
+    // byte-identical to what the agent served before the loop existed. A cold seller cannot
+    // step a rung, so it cannot reorder anything.
+    expect(panel.textContent).toMatch(/UNTAUGHT seller cannot buy one/)
+    expect(panel.textContent).toMatch(/steps no rung and reorders nothing/)
+    expect(panel.textContent).not.toMatch(/taught or not/)
+    expect(panel.textContent).not.toMatch(/nothing taught can reorder/)
     expect(panel.textContent).toMatch(/exchange-deployment\.json/)
     expect(panel.textContent).toMatch(/neutral of 0\.5/)
   })

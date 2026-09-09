@@ -49,8 +49,24 @@
  * synthetic buyer rather than a flattering one — it is the same shape as the checked-in seed
  * corpus, whose answers are derived from the measured verdict of the order rather than drawn
  * out of a hat (`services/sim/seed/population.py`) — and it teaches the sellers something
- * true about this market: in a shortlist where four of the five ranking terms are identical
- * across every candidate, price is what converts.
+ * true about this market: in a shortlist where THREE of the five ranking terms are identical
+ * across every candidate, price is what converts on the seller's side of the loop.
+ *
+ * Three, not four, and the difference is the whole reason this sentence is load-bearing rather
+ * than decorative. `intent_match`, `verified_claim_ratio` and `delivery_fit` are the identical
+ * three — every candidate scores the published neutral 0.5 on each. The other two BOTH move:
+ * `price_value` is the seller's, and `trust` is the SHOPPER's, because
+ * `deploy/demo/exchange-deployment.json` states no `trust_snapshot` key and the ranking gate
+ * therefore reads the live trust service. Measured on the compose stack on 2026-09-09, cold,
+ * auction `auction-958b7fc3-e433-4499-95f0-4d3a6cba1680`: every published `rank_score`
+ * reconstructs exactly as `0.35*0.5 + 0.20*0.5 + 0.20*trust + 0.15*price_value + 0.10*0.5`, and
+ * with all four bidders at list price (`price_value` 0.0 for every one) `trust` was the ONLY
+ * thing separating them.
+ *
+ * So `outcomeIsPositive` is still the right rule — a discount is the only thing about the OFFER
+ * that varies, so it is the only honest thing to condition a synthetic shopper's satisfaction
+ * on — but it is not true that price is the only thing that moves the board. Trust moves it
+ * too, and this page's feedback is what moves trust.
  *
  * It is also the honest thing to SAY, which is why the page says it: these outcomes are
  * manufactured, they are marked as manufactured, and this sentence is the rule that made
@@ -389,7 +405,8 @@ export function discountOffered(shortlist: unknown, storeId: string): number | n
  * Was this shopper satisfied? The single modelling choice in the demo, stated as a function.
  *
  * See this module's docstring: the sign follows the offer, so the sellers are taught something
- * true about a market whose other four ranking terms are identical across every candidate.
+ * true about a market whose three inert ranking terms are identical across every candidate and
+ * whose only other moving term, `trust`, is not the seller's to set.
  * A shop that gave a deal converted a happy buyer; a shop that held its list price did not.
  */
 export function outcomeIsPositive(discountPercent: number): boolean {
