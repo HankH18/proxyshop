@@ -337,7 +337,7 @@ jobs:
           .venv/bin/python scripts/ci_image_proof.py build \
             --profile demo --profile corpus --profile e2e
 
-      # The committed deployment documents are GENERATED from `fixtures/real-catalogs/` and
+      # The committed deployment documents are GENERATED from `fixtures/real-catalogs-demo/` and
       # then committed, and nothing anywhere checked the two still agree. They are bind-
       # mounted into `exchange` and `buyer-svc`, and the product ids in them are
       # `sha256(store_id \x1f native_key)` — so a corpus change that moves an id leaves the

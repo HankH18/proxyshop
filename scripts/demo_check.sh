@@ -23,11 +23,27 @@ EXCHANGE="${EXCHANGE_PROBE_URL:-http://localhost:${EXCHANGE_PORT:-8083}}"
 # The trust service is probed too, and not for its health. `deploy/demo/exchange-deployment.json`
 # states no `trust_snapshot`, so the exchange's ranking gate reads `GET /snapshot` live and R12
 # EXCLUDES every store that snapshot holds no row for. On a stack where `make demo-trust` has not
-# been run that is all ten of them, and the only symptom at the auction is `shortlist: []` — a
+# been run that is all nineteen of them, and the only symptom at the auction is `shortlist: []` — a
 # message that points at ranking and says nothing about trust. This probe reads the snapshot
 # itself so the operator is told which step is missing rather than left to guess.
 TRUST="${TRUST_PROBE_URL:-http://localhost:${TRUST_PORT:-8084}}"
 QUERY="${DEMO_QUERY:-milk thistle silymarin liver support extract}"
+# THE CLUSTER FOLLOWS THE QUERY, and is not stamped onto it.
+#
+# This probe used to put `cluster_id: cluster-liver-support` in every body it sent, whatever
+# QUERY it had been handed. `exchange.retrieval.clusters.assign_cluster`'s FIRST rule is "the
+# intent already names a cluster the catalogue knows -> SOURCE_STATED, unchanged" — a caller
+# that names a real cluster is deliberately not overruled by an inference — so that one line
+# addressed a *furniture* question to the liver-supplement cluster and authorised the four
+# hosted supplement agents to bid at it. Harmless while the demo was ten supplement shops;
+# with the nineteen-store roster (f9dcc1a) it is a trap, and it was measured filling three
+# shortlist slots with supplements on a walnut-coffee-table query.
+#
+# So the body carries NO `cluster_id` (the published `Intent` lists it optional) and the
+# exchange addresses the intent itself, against the `intent_clusters` its own deployment
+# document states — which is the code path the demo is supposed to be demonstrating.
+# DEMO_CLUSTER pins one anyway, for an operator deliberately testing a named cluster.
+CLUSTER="${DEMO_CLUSTER:-}"
 
 if ! command -v python3 >/dev/null 2>&1; then
   echo "FATAL: python3 is not on PATH." >&2
@@ -36,13 +52,20 @@ fi
 
 echo "opening an auction on ${EXCHANGE}/auctions with NO roster in the body ..."
 echo "  intent query: ${QUERY}"
+if [ -n "$CLUSTER" ]; then
+  echo "  intent cluster: ${CLUSTER} (pinned by DEMO_CLUSTER)"
+else
+  echo "  intent cluster: none stated — the exchange assigns one from the query"
+fi
 echo
 
-EXCHANGE="$EXCHANGE" TRUST="$TRUST" QUERY="$QUERY" python3 - <<'PY'
+EXCHANGE="$EXCHANGE" TRUST="$TRUST" QUERY="$QUERY" CLUSTER="$CLUSTER" python3 - <<'PY'
 import json
 import os
 import sys
+import pathlib
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -55,17 +78,24 @@ url = os.environ["EXCHANGE"].rstrip("/") + "/auctions"
 # `store_refused:422`, and nothing in the auction response saying which five fields were
 # missing. `preferences`, `created_at` and `schema_version` are required on `Intent`;
 # `pseudonym` and `buckets` are required on `BuyerProfile`.
+intent = {
+    "intent_id": "demo-probe-1",
+    "query": os.environ["QUERY"],
+    "hard_constraints": [],
+    "preferences": [],
+    "currency": "USD",
+    "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "schema_version": "1.0.0",
+}
+# Only when an operator pinned one. `cluster_id` is optional on the published `Intent`
+# (`packages/contracts/schemas/protocol.schema.json` requires intent_id, query,
+# hard_constraints, preferences, created_at, schema_version and nothing else), so omitting it
+# is a COMPLETE intent, not a partial one, and the store agents still validate it.
+pinned = os.environ.get("CLUSTER", "").strip()
+if pinned:
+    intent["cluster_id"] = pinned
 body = {
-    "intent": {
-        "intent_id": "demo-probe-1",
-        "cluster_id": "cluster-liver-support",
-        "query": os.environ["QUERY"],
-        "hard_constraints": [],
-        "preferences": [],
-        "currency": "USD",
-        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "schema_version": "1.0.0",
-    },
+    "intent": intent,
     # Coarse buckets and a rotating pseudonym: R13 forbids an identity field here, and the
     # store agent sees only this.
     "profile": {
@@ -108,6 +138,22 @@ print(
     f"reason={source.get('reason')!r} elapsed_ms={source.get('elapsed_ms')}"
 )
 print(f"entries={len(entries)}  ranked={len(ranked)}  shortlist slots={len(slots)}")
+
+# WHICH CLUSTER THE EXCHANGE ADDRESSED THIS TO, read back off a served route rather than
+# assumed. `POST /auctions` does not publish the assignment (`CreateAuctionResponse` has no
+# `cluster_id` field); `GET /auctions/{auction_id}` does, off the record `machine.create`
+# wrote AFTER `assign_cluster` ran. It is anonymous and cheap, and it is the only way this
+# probe can tell "no agent pursues this subject" apart from "the agents are broken".
+assigned = None
+auction_id = str(payload.get("auction_id") or "")
+if auction_id:
+    record_url = os.environ["EXCHANGE"].rstrip("/") + "/auctions/" + urllib.parse.quote(auction_id)
+    try:
+        with urllib.request.urlopen(record_url, timeout=30) as response:
+            assigned = str((json.loads(response.read().decode("utf-8")) or {}).get("cluster_id") or "")
+    except (urllib.error.HTTPError, OSError, ValueError) as exc:
+        print(f"NOTE: cannot read {record_url} ({exc}); the assigned cluster is unknown")
+print(f"assigned cluster: {assigned!r}")
 
 problems = []
 if source.get("source") != "neo4j":
@@ -203,15 +249,68 @@ if rostered:
 # EVERY entry being a fallback is the failure this probe exists to catch a second time.
 # The graph can find seven shops, the auction can answer 201, and not one hosted agent can
 # have bid -- which reads as a working market and is four containers refusing the request.
+#
+# CONDITIONED ON A HOSTED AGENT ACTUALLY PURSUING THIS CLUSTER, which is not decoration. Of
+# the nineteen sellers `deploy/demo/exchange-deployment.json` rosters, exactly four run a
+# hosted agent, and every one of their envelopes pursues `cluster-liver-support` alone
+# (`deploy/demo/store-contexts/*.json`, key `pursue_clusters`). `runtime.context.pursues`
+# fails closed on a cluster an envelope does not name, so on a furniture query every hosted
+# agent CORRECTLY answers `204 cluster_not_pursued` and every entry is honestly a list-price
+# fallback -- the fifteen organic storefronts have no agent at all. Failing the probe for
+# that would be a refusal firing on honest traffic, and would make the fail-closed
+# authorisation this demo exists to show look like an outage. So it stays a hard failure for
+# the liver queries the runbook drives, and becomes a NOTE for a subject no agent is
+# authorised to bid on.
+CONTEXTS = pathlib.Path("deploy/demo/store-contexts")
+hosted_clusters: dict[str, list[str]] = {}
+if not CONTEXTS.is_dir():
+    # NOT a silent empty mapping. An unreadable contexts directory would make `pursuers` empty
+    # for every cluster, which downgrades the hard failure below to a NOTE -- the probe would
+    # go quiet on exactly the stack where every agent is misconfigured. It is also the same
+    # directory `STORE_AGENT_CONTEXT` bind-mounts into the four agents.
+    problems.append(
+        f"cannot read {CONTEXTS}/. Those documents ARE the four hosted agents' envelopes -- "
+        f"each container bind-mounts one as STORE_AGENT_CONTEXT -- so without them no agent "
+        f"can bid and this probe cannot tell a refusal from an unpursued subject"
+    )
+for path in sorted(CONTEXTS.glob("*.json")):
+    try:
+        with path.open(encoding="utf-8") as handle:
+            context = json.load(handle)
+    except (OSError, ValueError):
+        continue
+    # `runtime.context.StoreContext.pursued_clusters` reads `envelope["pursue_clusters"]`,
+    # so this reads the same key off the same file the agent has mounted -- not a top-level
+    # one that would silently be empty for every store.
+    envelope = context.get("envelope") if isinstance(context.get("envelope"), dict) else {}
+    for cluster in (envelope.get("pursue_clusters") or []):
+        hosted_clusters.setdefault(str(cluster), []).append(str(context.get("store_id") or path.stem))
+pursuers = hosted_clusters.get(assigned or "", [])
+
 bidders = [e for e in entries if not e.get("fallback")]
 refused = sorted({str(e.get("fallback_reason")) for e in entries if e.get("fallback_reason")})
 print(f"hosted bids={len(bidders)}  fallback reasons={refused}")
-if not bidders:
+print(
+    f"hosted agents pursuing {assigned!r}: {len(pursuers)}"
+    f"{' (' + ', '.join(pursuers) + ')' if pursuers else ''}"
+)
+if not bidders and pursuers:
     problems.append(
-        f"not one rostered store BID -- every entry is a list-price fallback ({refused}). "
+        f"not one rostered store BID -- every entry is a list-price fallback ({refused}), and "
+        f"{len(pursuers)} hosted agent(s) DO pursue the assigned cluster {assigned!r} "
+        f"({', '.join(pursuers)}), so this is a refusal rather than an unpursued subject. "
         "`store_refused:422` means the agents rejected the BidRequest: the intent this probe "
         "sent is forwarded verbatim and must be a complete `Intent`. "
         "`no_response` on every row means no agent is running -- start the `demo` profile."
+    )
+elif not bidders:
+    print(
+        f"NOTE: no hosted agent bid, and none is authorised to: no envelope in "
+        f"{CONTEXTS}/ pursues {assigned!r} "
+        f"(the clusters they do pursue: {', '.join(sorted(hosted_clusters)) or 'none'}). "
+        f"Every entry is a list-price fallback from an ORGANIC storefront, which is the "
+        f"correct answer for this query, not a fault. Drive DEMO_QUERY at a subject a hosted "
+        f"agent pursues, or pin DEMO_CLUSTER, to exercise the sponsored half."
     )
 
 if problems:

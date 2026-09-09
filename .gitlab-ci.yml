@@ -167,7 +167,8 @@ stages:
 # short is how the next required init hook gets added and silently lost.
 # The other four: `buyer-svc` and `exchange` mount `deploy/demo`, the four
 # configured `store-agent-*` containers mount their context files, and `corpus-loader` mounts
-# `fixtures/real-catalogs`.
+# the curated demo corpus (`fixtures/real-catalogs-demo` by default; the fragment interpolates
+# `PROXYSHOP_DEMO_CORPUS` into both the mount and the loader's `PROXYSHOP_RECORDED_CATALOGS`).
 #
 # SO THIS JOB DOES NOT PRETEND TO RUN THEM. It starts only the services whose behaviour does
 # not depend on a mounted document, with `--no-deps` so compose does not pull the others in
@@ -271,8 +272,10 @@ images:
     # THE STEP THIS PIPELINE WAS MISSING. Every image in the repo — including any that no
     # compose fragment references yet, which `docker compose build` would silently skip.
     - .venv/bin/python scripts/ci_image_proof.py build --profile demo --profile corpus --profile e2e
-    # The committed deployment documents are GENERATED from `fixtures/real-catalogs/` and
-    # then committed, and nothing anywhere checked the two still agree. `--check` compares
+    # The committed deployment documents are GENERATED from `fixtures/real-catalogs-demo/` and
+    # then committed, and nothing anywhere checked the two still agree. (That the COMPOSE MOUNT
+    # still names that same corpus is a separate question, and a separate gate:
+    # `scripts/tests/test_demo_corpus_mount.py`, which the `verify` job's pytest collects.) `--check` compares
     # and never writes; it costs seconds and turns a corpus/document desync into one named
     # failure instead of a red auction twenty-five minutes later on the mirror. It runs HERE
     # even though this job cannot mount those documents, because the check is on the files in
@@ -328,7 +331,7 @@ images:
     # anything, so both are as meaningful here as on the mirror.
     - docker compose run --rm --no-deps seller-reference
     - docker compose run --rm sim
-    # NOT RUN HERE, and deliberately: `make demo-corpus` mounts `fixtures/real-catalogs` and
+    # NOT RUN HERE, and deliberately: `make demo-corpus` mounts `fixtures/real-catalogs-demo` and
     # `make demo-check` needs the corpus, the deployment documents and the four configured
     # store agents. Every one of those arrives through a bind mount this daemon cannot fill.
     # Running them anyway would produce a failure that says nothing about the commit, and

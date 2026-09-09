@@ -5,7 +5,7 @@ exchange ranks the sealed bids and returns a shortlist carrying both voices, and
 accepts one. All of it in a browser, on one laptop, out of a fresh clone.
 
 **This page is about the compose stack** — thirteen running containers after `make demo-up`,
-a real Postgres, a real Neo4j holding ten real storefronts. Thirteen is the ten services §3
+a real Postgres, a real Neo4j holding nineteen real storefronts. Thirteen is the ten services §3
 tables plus the three datastores their `depends_on` pulls in; this line used to promise
 fourteen, counting the generic unconfigured `store-agent` container that `demo-up` names no
 service for, on purpose (§3 says why). `starting-slice.md` beside it is about the in-process driver
@@ -65,20 +65,36 @@ step was a line an operator typed by hand and re-typed after every `make deps-do
 destroys the volumes). It is `make db-migrate`, it still exists as a target of its own for a
 database that predates a new migration, and it is idempotent.
 
-## 2. Load the ten real storefronts into the graph
+## 2. Load the nineteen real storefronts into the graph
 
 ```bash
 make demo-corpus
 ```
 
-This replays `fixtures/real-catalogs/` — a point-in-time recording of ten real supplement
-storefronts' public `products.json`, 3,093 products, taken under robots.txt — through the
+This replays `fixtures/real-catalogs-demo/` — a point-in-time recording of **nineteen** real
+storefronts' public `products.json`, **4,903 products across five stocked categories**
+(supplements, furniture, coffee, home-kitchen, outdoor), taken under robots.txt — through the
 same crawl, upsert and embed path a live crawl takes, and writes it into Neo4j. Nothing here
 opens a socket to the public network: the recorded transport reassembles each page from
 stored bytes and refuses to serve a page whose digest does not match what the live fetch saw.
 
-It is the slow step: about 44,803 graph writes, several minutes, and **it prints nothing at
-all until it finishes**. That silence is real — the loader accumulates its per-store report
+**Which corpus, and why it is not the other two.** `fixtures/real-catalogs/` is the incumbent
+ten supplement storefronts and is still in the tree, still gated by its own suite under
+`fixtures/tests/` — it is simply not what the demo runs on, because a graph
+that sells only supplements answers *"a walnut coffee table for the lounge"* with liver
+capsules. `fixtures/real-catalogs-broad/` is the 38-store breadth collection the curated roster
+is derived OUT of, and is too wide to demo: the exchange's catalogue snapshot is capped across
+every store, so at 38 stores each store's window is about 137 products.
+`deploy/demo/exchange-deployment.json` and the other generated documents are built from
+`real-catalogs-demo` specifically, so loading either of the others gives you a graph the
+documents in the containers do not describe.
+`test_demo_corpus_mount.py`, under `scripts/tests/`, is the gate that keeps the mount and the
+documents naming one corpus. To run a different corpus deliberately, export
+`PROXYSHOP_DEMO_CORPUS=real-catalogs` before the step above; the fragment interpolates that one
+name into both the bind mount and the loader's `PROXYSHOP_RECORDED_CATALOGS`.
+
+It is the slow step: tens of thousands of graph writes, several minutes, and **it prints nothing
+at all until it finishes**. That silence is real — the loader accumulates its per-store report
 and prints it in one block at the end — so do not read a quiet terminal as a hang. Watch the
 graph instead, from another shell:
 
@@ -86,9 +102,18 @@ graph instead, from another shell:
 docker compose exec neo4j cypher-shell -u neo4j -p proxyshop_dev_pw "MATCH (p:Product) RETURN count(p) AS products"
 ```
 
-The number climbs to 3,093. When the loader finishes it prints a per-store table, a node and
+The number climbs to 4,903. When the loader finishes it prints a per-store table, a node and
 relationship census, `provenance violations 0`, `products missing embedding 0`, and then the
 roster its `--probe` asked for — the shops the graph returns for the demo's own query.
+
+**Read the per-store table, and check no row says `products= 0`.** The target now passes
+`--build`, for a measured reason: without it the run reuses whatever
+`proxyshop-corpus-loader:latest` the daemon already holds, and an image built before `9ac007d`
+does not carry `adapters.recorded.replay_budget` or the `CorpusLoadShortfall` raise. Measured on
+one host with a stale image against a checkout at `f9dcc1a`: `branchfurniture.com` and
+`sabai.design` — the two largest furniture storefronts, 541 of the corpus's 714 furniture
+products — each loaded **zero**, the loader printed one warning line per store
+(`crawl budget exhausted: response_bytes limit=4194304`), and it exited `0`.
 
 Idempotent: run it again and it re-reads nothing that has not changed.
 
@@ -100,7 +125,7 @@ make demo-trust
 ```
 
 **Both, and in that order.** `make demo-up` brings the whole stack up under the `demo` compose
-profile and waits for it; `make demo-trust` puts the ten demo sellers into the trust service the
+profile and waits for it; `make demo-trust` puts the nineteen demo sellers into the trust service the
 exchange is about to read. Skipping the second one leaves you with a stack whose containers are
 all `(healthy)` and whose shortlist is empty — [why, and what it looks
 like](#the-other-one-that-will-catch-you-out-an-unseeded-trust-service) is below.
@@ -141,7 +166,7 @@ a snapshot could not read the trust service at all and its `trust` column would 
 of a hand-written table. With the key absent, the ranking gate binds `LiveTrustSnapshot` against
 the document's `trust_url` and reads `GET /snapshot` on the running trust service.
 
-Which means the trust service has to have heard of these ten storefronts, and on a fresh stack it
+Which means the trust service has to have heard of all nineteen of these storefronts, and on a fresh stack it
 has not. `exchange.ranking.filters.blacklist_reason` fails closed: a store the snapshot holds no
 row for cannot have its blacklist status established, so it is EXCLUDED from ranking rather than
 defaulted in. On an unseeded stack that is every store, and the auction answers `shortlist: []`.
@@ -154,7 +179,7 @@ defaulted in. On an unseeded stack that is every store, and the auction answers 
 
 It works over the trust service's own doors rather than by writing its tables:
 
-* it inserts the ten sellers into `app.sellers`, which `trust.snapshot.routes` joins against and
+* it inserts the nineteen sellers into `app.sellers`, which `trust.snapshot.routes` joins against and
   which nothing in the product ever writes; and
 * it appends each store's opening posture as sealed ledger events through `POST /events`, every
   one carrying the `sim-fb-` marker in `order_ref` — a top-level column inside the event digest,
@@ -189,8 +214,18 @@ snapshot actually holds, and when the shortlist is empty *and* rows are missing 
 The request it sends, if you would rather drive it yourself:
 
 ```bash
-curl -sS -X POST localhost:8083/auctions -H 'content-type: application/json' -d '{"intent":{"intent_id":"demo-probe-1","cluster_id":"cluster-liver-support","query":"milk thistle silymarin liver support extract","hard_constraints":[],"preferences":[],"currency":"USD","created_at":"2026-09-07T23:30:00Z","schema_version":"1.0.0"},"profile":{"pseudonym":"demo-probe-shopper","buckets":{"budget_band":"0-50","first_time":true}}}'
+curl -sS -X POST localhost:8083/auctions -H 'content-type: application/json' -d '{"intent":{"intent_id":"demo-probe-1","query":"milk thistle silymarin liver support extract","hard_constraints":[],"preferences":[],"currency":"USD","created_at":"2026-09-07T23:30:00Z","schema_version":"1.0.0"},"profile":{"pseudonym":"demo-probe-shopper","buckets":{"budget_band":"0-50","first_time":true}}}'
 ```
+
+**Do not put a `cluster_id` in it.** It is optional on the published `Intent`, and
+`exchange.retrieval.clusters.assign_cluster` addresses the intent from the query against the
+`intent_clusters` the deployment document states — but its FIRST rule is that a caller who names
+a cluster the catalogue knows is not overruled. So a pinned `cluster_id` is a cluster stamped
+onto whatever you asked: with the nineteen-store roster, sending `cluster-liver-support` with a
+furniture query authorises the four supplement agents to bid at a coffee-table shopper, and it
+was measured filling three shortlist slots that way. `scripts/demo_check.sh` sends none for the
+same reason and prints the cluster the exchange assigned, read back off
+`GET /auctions/{auction_id}`. Set `DEMO_CLUSTER` in the environment to pin one deliberately.
 
 **Send a COMPLETE `Intent` and `BuyerProfile`, not the minimum this door accepts.** The
 exchange types `intent` as a bare object and forwards it to each store agent verbatim, and the
@@ -208,21 +243,31 @@ candidate set was **found**, not supplied. `"unwired"` means the roster was neve
 ### What a good run looks like
 
 ```text
-roster_source: source='neo4j' shops=7 products_considered=25 reason=None elapsed_ms=32.58
+roster_source: source='neo4j' shops=7 products_considered=25 reason=None elapsed_ms=32.872
 entries=7  ranked=7  shortlist slots=4
-trust snapshot: 11 store(s); 10/10 rostered sellers present
+assigned cluster: 'cluster-liver-support'
+trust snapshot: 20 store(s); 19/19 rostered sellers present
+hosted bids=3  fallback reasons=['bid_price_unreconcilable', 'tier_0_no_agent:no_bid_endpoint']
+hosted agents pursuing 'cluster-liver-support': 4 (gaiaherbs.com, oregonswildharvest.com, paradiseherbs.com, toniiq.com)
 ```
 
-Seven shops out of ten, with no roster sent. `10/10 rostered sellers present` is the
-`make demo-trust` step reporting home; `0/10` there with an empty shortlist is that step missing.
-The eleventh store in the snapshot is `store-breaker`, the dishonest merchant the simulation
-writes, and it is on no roster here. The three the graph leaves out are the two the
-corpus calls negative controls — storefronts carrying no liver-support inventory at all —
-plus one more that carries none matching. A shortlist that never has to reject anybody
-demonstrates nothing, which is why the corpus ships those stores.
+Seven shops out of nineteen, with no roster sent. `19/19 rostered sellers present` is the
+`make demo-trust` step reporting home; `0/19` there with an empty shortlist is that step missing.
+The twentieth store in the snapshot is `store-breaker`, the dishonest merchant the simulation
+writes, and it is on no roster here.
 
-`entries` then carries both halves of the market in one response: four hosted stores that
-really bid (`"fallback": false`, at their agent's own price) and three with no agent
+`assigned cluster` is read back off `GET /auctions/{auction_id}` and is the exchange's own
+answer, not something the probe sent — the request carries no `cluster_id` at all. Twelve of the
+nineteen shops are absent from this roster because they sell furniture, coffee, cookware or
+outdoor gear, and two of the ten supplement shops carry no liver-support inventory and answer a
+milk-thistle query with protein stacks. A shortlist that never has to reject anybody demonstrates
+nothing, which is why the corpus ships those stores. Ask the same probe *"a walnut coffee table
+for the lounge"* (`DEMO_QUERY=...`) and the graph returns two shops, the assigned cluster is
+`''` — no cluster in this deployment matches a furniture question — and the shortlist fills with
+`The Lift Off Coffee Table` and `Coffee Table`, both real, both named, no supplement anywhere.
+
+`entries` then carries both halves of the market in one response: the hosted stores that
+really bid (`"fallback": false`, at their agent's own price) and the ones with no agent
 (`"fallback": true, "fallback_reason": "tier_0_no_agent:no_bid_endpoint"`) represented at their
 catalogue list price. That reason is the exchange saying it holds no bidding agent for the shop,
 not that the shop was asked and stayed quiet — `market` on the same response reads
@@ -534,8 +579,9 @@ own published bytes:
 
 That reports drift instead of writing; drop `--check` to regenerate. What it emits:
 
-- `deploy/demo/exchange-deployment.json` — ten eligible sellers with their real registered
-  domains, bid endpoints for the four hosted agents, the `trust_url` the ranking gate reads
+- `deploy/demo/exchange-deployment.json` — nineteen eligible sellers with their real registered
+  domains, bid endpoints for the four hosted agents (the other fifteen are organic and carry
+  none), the `trust_url` the ranking gate reads
   `GET /snapshot` on, the one named intent cluster those agents' envelopes pursue, and the
   catalogue snapshots the claim verifier grades against. **No `trust_snapshot` key**, and that
   absence is what makes the trust read happen at all — see
@@ -581,11 +627,13 @@ Re-run it after the corpus moves, and `--check` reports drift instead of writing
   writes. `starting-slice.md` §3.6/§3.7 measures that gap and §4's scripted proof is where the
   whole loop is exercised.
 - **The claim grading here is as good as the shipped catalogue snapshots.** They now carry
-  3,086 products across all ten storefronts — every row the corpus recorded that names a
-  priced variant, out of the 3,093 it recorded — under a 1,000-per-store trim the largest
-  store (805) does not reach. The seven rows outside that window are exactly the seven whose
-  storefront named no price. A `product_ref` the graph rosters from outside it grades
-  `ambiguous`, which R19 will not let satisfy a hard constraint.
+  3,241 products across all nineteen storefronts, under a `SNAPSHOT_PRODUCTS_PER_STORE = 250`
+  per-store trim that eight of the nineteen reach. That trim is what keeps the whole document
+  inside `composition.MAX_DEPLOYMENT_BYTES` at nineteen stores; the window is chosen by each
+  store's OWN inventory rather than by price, which is the `f9dcc1a` repair
+  `test_build_demo_deployment.py`, under `scripts/tests/`, gates and shows going red over the
+  old ordering. A `product_ref` the graph rosters from outside the window grades `ambiguous`,
+  which R19 will not let satisfy a hard constraint.
 - **The shopper journey in §5 supplies its own roster, and the graph still picks the
   products.** The buyer service refuses to open an auction with no candidate set — that is its
   own fail-closed posture — so the browser path sends `buyer-roster.json`, and WHICH SHOPS

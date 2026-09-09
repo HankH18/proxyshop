@@ -93,14 +93,16 @@ services:
     restart: unless-stopped
 
   # THE ONE-SHOT CORPUS LOADER. `make deps-up` starts an EMPTY Neo4j, and nothing in the
-  # repository ever put the ten recorded storefronts in `fixtures/real-catalogs/` into it —
+  # repository ever put the recorded storefronts in `fixtures/` into it —
   # `ingest.scheduler.load_corpus` had no make target, no script, no compose service and no
   # caller anywhere outside two tests. So the exchange's graph roster, once switched on, walked
   # a graph with no products in it and correctly found nobody.
   #
-  # Its own profile, not `demo`. It runs for MINUTES (44,803 graph writes over 3,093 products)
-  # and then exits, so a `--profile demo up -d --wait` that carried it would sit on a container
-  # that is supposed to stop. It is invoked once, explicitly, by `make demo-corpus`.
+  # Its own profile, not `demo`. It runs for MINUTES — measured on the nineteen-store corpus
+  # against a scratch Neo4j: 4,903/4,903 products, 96,907 graph ops, 92,004 written, 4,903
+  # embedded, `provenance violations 0`, `products missing embedding 0` — and then exits, so a
+  # `--profile demo up -d --wait` that carried it would sit on a container that is supposed to
+  # stop. It is invoked once, explicitly, by `make demo-corpus`.
   #
   # It is a SEPARATE service rather than a `docker compose exec` into `ingest`, for two
   # measured reasons: `ingest`'s healthcheck requires its HTTP server to be answering, so
@@ -114,18 +116,56 @@ services:
       context: ../..
       dockerfile: services/ingest/Dockerfile
     # ⚠️ THE MOUNT IS NOT OPTIONAL. `services/ingest/Dockerfile` copies the source, support and
-    # llm packages and NOT `fixtures/`, and `adapters/recorded.default_corpus_dir()` resolves
-    # the default to `/app/fixtures/real-catalogs` from its own `__file__`. Without this line
-    # the loader dies on its first call with a FileNotFoundError naming that path. Read-only:
-    # the corpus is a recording and the loader has no business writing to it.
+    # llm packages and NOT `fixtures/`, so without this line the loader dies on its first call
+    # with a FileNotFoundError. Read-only: the corpus is a recording and the loader has no
+    # business writing to it.
+    #
+    # WHICH CORPUS, and why the name is a variable. There are three recorded corpora in the
+    # tree and each has a legitimate reader:
+    #
+    #   `real-catalogs`       the incumbent ten supplement storefronts, 3,093 products. This is
+    #                         what `fixtures/tests/test_real_catalogs.py` measures, what
+    #                         `adapters/recorded.DEFAULT_CORPUS_DIR` still names, and what
+    #                         `scripts/collect_real_catalogs.py --out` still defaults to.
+    #                         Nothing about it changes; it is simply not what the demo runs on.
+    #   `real-catalogs-broad` 38 storefronts, 17,409 products. The breadth collection
+    #                         `scripts/build_demo_corpus.py` derives the demo roster OUT of.
+    #                         Too wide to demo: the exchange REFUSES a deployment document over
+    #                         `composition.MAX_DEPLOYMENT_BYTES` (4 MiB) and the per-store
+    #                         catalogue snapshots are most of it, so at 38 stores each store's
+    #                         window is about 137 products.
+    #   `real-catalogs-demo`  the curated nineteen, 4,903 products, five stocked categories —
+    #                         THE DEMO'S CORPUS, and the default below. `deploy/demo/*` is
+    #                         GENERATED from it by `scripts/build_demo_deployment.py`, so
+    #                         loading anything else puts documents in the containers that name
+    #                         products the graph does not hold. That is exactly the state
+    #                         f9dcc1a left: the documents were regenerated from the nineteen
+    #                         and this mount still named the ten.
+    #
+    # The name appears TWICE — this mount and `PROXYSHOP_RECORDED_CATALOGS` below — and is
+    # ONE variable in both places, because two literals is how they came to disagree.
+    # `scripts/tests/test_demo_corpus_mount.py` gates that this default is the corpus
+    # `deploy/demo/` was generated from. Override for a one-off run of a different corpus:
+    #
+    #     PROXYSHOP_DEMO_CORPUS=real-catalogs make demo-corpus
+    #
+    # (which is a graph the committed deployment documents do not match, so it is a
+    # deliberate experiment and not a supported demo state).
     volumes:
       # `../../`: a relative bind source in an included fragment resolves against THIS
       # file's directory. `./fixtures/real-catalogs` became `services/ingest/fixtures/
       # real-catalogs`, Docker created it empty, and the loader died on a FileNotFoundError
       # naming a path that looked right.
-      - ../../fixtures/real-catalogs:/app/fixtures/real-catalogs:ro
+      - ../../fixtures/${PROXYSHOP_DEMO_CORPUS:-real-catalogs-demo}:/app/fixtures/${PROXYSHOP_DEMO_CORPUS:-real-catalogs-demo}:ro
     environment:
       PROXYSHOP_WORKER: "${PROXYSHOP_WORKER:-1}"
+      # STATED, not inferred. `adapters/recorded.default_corpus_dir()` falls back to
+      # `parents[4] / "fixtures/real-catalogs"` off its own `__file__`, which inside this image
+      # is `/app/fixtures/real-catalogs` — a path this mount no longer fills. The env is the
+      # override that module publishes (`CORPUS_ENV`), it is read only as a default, and it
+      # interpolates the SAME variable as the mount above, so the loader cannot be pointed at a
+      # directory the mount did not put there.
+      PROXYSHOP_RECORDED_CATALOGS: "/app/fixtures/${PROXYSHOP_DEMO_CORPUS:-real-catalogs-demo}"
       NEO4J_URI: "bolt://neo4j:7687"
       NEO4J_USER: "${NEO4J_USER:-neo4j}"
       NEO4J_PASSWORD: "${NEO4J_PASSWORD:-proxyshop_dev_pw}"

@@ -33,10 +33,22 @@ demo-seed:  ; @./.venv/bin/python -m fixtures.seed --category "$(SEED_CATEGORY)"
 # empty directory and a 403 on a fresh clone. `buyer-web` now builds its own bundle in a
 # multi-stage image (db36a6f), so nothing has to precede `demo-up` and no host artefact is
 # mounted. If you find a runbook that still lists an SPA build step, that runbook is behind.
-# Load the ten recorded storefronts into Neo4j. Minutes, not seconds — 3,093 products and
-# 44,803 graph writes — and silent until it finishes, which is why the runbook watches the
-# product count rather than the log. Idempotent: a second run re-reads nothing unchanged.
-demo-corpus: ; @docker compose --profile corpus run --rm corpus-loader
+# Load the recorded storefronts into Neo4j. WHICH storefronts is `services/ingest/
+# compose.yaml`'s `corpus-loader` mount, and it is the curated nineteen in
+# `fixtures/real-catalogs-demo/` — the corpus `deploy/demo/*` is generated from, which
+# `scripts/tests/test_demo_corpus_mount.py` gates. Minutes, not seconds, and silent until it
+# finishes, which is why the runbook watches the product count rather than the log.
+# Idempotent: a second run re-reads nothing unchanged.
+#
+# `--build` IS LOAD-BEARING, and its absence was measured rather than theorised. `run` reuses
+# whatever `proxyshop-corpus-loader:latest` the daemon already holds, and it will happily reuse
+# one built before the source it is supposed to be running. Measured on this host: an image
+# built 2026-09-08T04:38Z ran against a checkout at f9dcc1a and loaded ZERO products for
+# `branchfurniture.com` and `sabai.design` — the two largest furniture storefronts, 541
+# products — because it predated 9ac007d's `adapters.recorded.replay_budget` and the
+# `CorpusLoadShortfall` raise that made a short load loud. It printed a per-store table, a
+# warning, and exited 0. The demo's own headline query is about a coffee table.
+demo-corpus: ; @docker compose --profile corpus run --build --rm corpus-loader
 # The services are NAMED rather than left to the profile, and that is a measured repair
 # rather than verbosity. `docker compose --profile demo up -d --wait` brings up every
 # unprofiled service too, and two of those — `sim` and `seller-reference` — are
@@ -46,7 +58,7 @@ demo-corpus: ; @docker compose --profile corpus run --rm corpus-loader
 # an operator a red exit on a working stack is how a runbook trains people to ignore exit
 # codes. Their datastore dependencies come up with them through `depends_on`.
 demo-up:    ; @docker compose --profile demo up -d --wait buyer-web buyer-svc merchant-svc exchange trust ingest store-agent-gaiaherbs store-agent-toniiq store-agent-paradiseherbs store-agent-oregonswildharvest
-# Put the ten demo sellers into the LIVE trust service. RUN THIS AFTER `demo-up`, ONCE.
+# Put the nineteen demo sellers into the LIVE trust service. RUN THIS AFTER `demo-up`, ONCE.
 #
 # It is a separate target from `demo-seed` (which seeds the Shopify STUB with products) and
 # from `demo-corpus` (which loads Neo4j) because it seeds a third thing entirely and needs a

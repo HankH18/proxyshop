@@ -28,12 +28,14 @@ and only `verified` can satisfy a hard constraint. An unknown is never treated a
 **Two things about that check on the demo deployment specifically**, because the mechanism being
 right is not the same as the mechanism doing work. First, the crawl the exchange grades against
 there is now all but the whole graph: `deploy/demo/exchange-deployment.json` carries a `catalog`
-snapshot of **3,086 products across all ten storefronts** — every row the corpus recorded that
-names a priced variant, against the 3,093 it recorded in total — under a 1,000-per-store trim
-no store comes near, the largest shipping 805. The seven rows outside that window are exactly
-the seven whose storefront named no price, and a product the graph rosters from outside it still
-has no platform evidence to check and grades `ambiguous`, which cannot satisfy a hard
-constraint. Second, the check pays nothing unless the shopper asked for something checkable: in
+snapshot of **3,241 products across all nineteen storefronts**, under a
+`SNAPSHOT_PRODUCTS_PER_STORE = 250` per-store trim that eight of the nineteen reach — the trim
+is what keeps the whole document inside `composition.MAX_DEPLOYMENT_BYTES` now that there are
+nineteen stores rather than ten. Which 250 is chosen by each store's OWN inventory rather than
+by price; `scripts/tests/test_build_demo_deployment.py` gates that and runs the old
+price-ordering through the same measurement to show it failing. A product the graph rosters
+from outside the window has no platform evidence to check and grades `ambiguous`, which cannot
+satisfy a hard constraint. Second, the check pays nothing unless the shopper asked for something checkable: in
 the worked example below, `verified_claim_ratio` reads its neutral for all seven candidates,
 because the query carries no hard constraints and a verified claim about something nobody asked
 is worth what silence is worth. Re-run with `price_usd lte 50` and the same term rises to 0.1595
@@ -82,9 +84,12 @@ answered `422`, the auction came back `sponsored: 0` with `fallback_reasons:
 {"store_refused": 4}`, and nothing in the auction response said which fields were missing.
 `scripts/demo_check.sh` sends the complete intent and carries a comment about exactly this.
 
-**Who was found.** The graph is a point-in-time recording of ten real supplement storefronts'
-public `products.json` — 3,093 products, taken under robots.txt — replayed through the live
-crawl path:
+**Who was found.** The graph is a point-in-time recording of real storefronts' public
+`products.json`, taken under robots.txt, replayed through the live crawl path. *This worked
+example was measured before `f9dcc1a` on `fixtures/real-catalogs/` — the ten supplement
+storefronts, 3,093 products — which is what `make demo-corpus` loaded at the time. It now loads
+`fixtures/real-catalogs-demo/`: nineteen storefronts, 4,903 products, five stocked categories.
+The shape below is what to read; the shop count and the names come from the smaller graph:*
 
 ```json
 "roster_source": {"source": "neo4j", "shops": 7, "products_considered": 25,
@@ -108,7 +113,7 @@ and the split, not the digits.
 Seven shops out of the ten in the corpus; the other three carry nothing matching. Of the seven,
 **four run an agent and really bid; the remaining three run none and were carried at their
 catalogue list price**. That split is not a coincidence of this run — it is the deployment
-document: exactly four of the ten sellers carry a `bid_endpoint` and six do not. Both halves of
+document: exactly four of the nineteen sellers carry a `bid_endpoint` and fifteen do not. Both halves of
 the market are in one response.
 
 **`solicited: 4`, not 7, and that number is the one this block used to get wrong.** The three
@@ -340,9 +345,9 @@ The runbook is [`docs/demo/shopper-demo.md`](docs/demo/shopper-demo.md). The sho
 ```sh
 cp .env.example .env
 make deps-up        # Postgres + Neo4j + Redis, then this worker's database and its migrations
-make demo-corpus    # replay ten recorded storefronts into the Neo4j catalogue graph
+make demo-corpus    # replay nineteen recorded storefronts into the Neo4j catalogue graph
 make demo-up        # ten named services, plus the datastores they depend on
-make demo-trust     # register those ten sellers with the LIVE trust service — not optional
+make demo-trust     # register those nineteen sellers with the LIVE trust service — not optional
 make demo-check     # drive a real auction over HTTP and fail loudly if the market is dead
 ```
 
@@ -364,11 +369,21 @@ agent both ship the SDK and both images forward those two variables. What that b
 still does not prove is in [About the model, precisely](#about-the-model-precisely).
 
 `make demo-corpus` is the slow one and the one worth understanding. It replays
-`fixtures/real-catalogs/` — **3,093 products across ten stores, 44,803 graph operations** — through
-the same crawl, upsert and embed path a live crawl takes. Whole catalogues, not a category
-sample: two of the ten stores carry no liver-support inventory at all and answer a milk-thistle
-query with protein stacks. They are there deliberately. A graph in which everything matches
-proves nothing about matching.
+`fixtures/real-catalogs-demo/` — **4,903 products across nineteen stores in five stocked
+categories** — through the same crawl, upsert and embed path a live crawl takes. Whole
+catalogues, not a category sample: ten of the nineteen are supplement storefronts (two of which
+carry no liver-support inventory at all and answer a milk-thistle query with protein stacks) and
+the other nine sell furniture, coffee, cookware and outdoor gear. They are there deliberately. A
+graph in which everything matches proves nothing about matching, and a graph that sells only
+supplements cannot be asked for a coffee table.
+
+Which corpus that is is not a detail. There are three in the tree — `real-catalogs` (the
+incumbent ten, still what `fixtures/tests/test_real_catalogs.py` measures), `real-catalogs-broad`
+(the 38-store breadth collection), and `real-catalogs-demo` (the curated nineteen the demo runs
+on) — and `deploy/demo/*` is GENERATED from the third. Loading either of the others puts
+documents in the containers that name products the graph does not hold.
+`scripts/tests/test_demo_corpus_mount.py` gates the compose mount against the corpus the
+documents came from, because that is exactly what drifted once.
 
 `make demo-trust` is the short one and the easy one to skip, and skipping it produces the most
 confusing failure in this repository: every container `(healthy)`, the graph finding its shops,
@@ -379,7 +394,7 @@ closed on a store it holds no row for: `blacklist_unreadable: no trust snapshot 
 'gaiaherbs.com', so its blacklist status could not be established; failing closed (R12)`, once per
 candidate. Eligibility is untouched — the deployment document states every seller's status itself,
 so `entries` is its normal count and only the ranking empties out. `scripts/seed_demo_trust.py`
-puts the ten sellers into `app.sellers` and appends their opening posture as sealed ledger events
+puts the nineteen sellers into `app.sellers` and appends their opening posture as sealed ledger events
 through the trust service's own `POST /events`, every one marked `sim-fb-` in `order_ref`.
 Run it once after `make demo-up`; `--check` re-verifies without writing.
 
@@ -434,9 +449,10 @@ minutes later, with every container still reporting `(healthy)`, the auction ans
 `PROXYSHOP_WORKER` isolates Postgres and Redis only.
 
 **A re-run of `make demo-corpus` may not repair it.** The loader is idempotent by *content
-hash*, not by graph state, so after a wipe it decides eight of the ten stores are unchanged and
-writes nothing back for them. Measured: a clean exit 0, a summary line reading
-`TOTAL products=3093`, and a graph holding 199. **The loader's exit code is not a statement
+hash*, not by graph state, so after a wipe it decides most stores are unchanged and writes
+nothing back for them. Measured on the ten-store corpus this ran on before `f9dcc1a`: a clean
+exit 0, a summary line reading `TOTAL products=3093`, and a graph holding 199. The mechanism is
+unchanged at nineteen stores; only the numbers would be bigger. **The loader's exit code is not a statement
 about the graph** — a later `--force` run on this same stack also exited 0 while a concurrent
 test wiped it underneath, printing `nodes {}`. **Read the `graph:` block, not the `TOTAL`
 line, and not the exit code** — the block counts what is in Neo4j and the total counts what was
@@ -609,7 +625,7 @@ shortlist's question box and took the buyer from 17 to 18.
 On the compose demo the store agents are one container per shop —
 `store-agent-gaiaherbs`, `-toniiq`, `-paradiseherbs`, `-oregonswildharvest` on 8090–8093. The
 exchange's deployment document is where organic and sponsored are actually decided: four of the
-ten sellers carry a `bid_endpoint`, six do not.
+nineteen sellers carry a `bid_endpoint`, fifteen do not.
 
 Supporting directories: `packages/contracts` (dual Python + npm — the JSON-schema registry,
 protocol models, JCS signing, OpenAPI helpers, codegen), `packages/llm` (the Anthropic client
@@ -886,7 +902,7 @@ let go.
   **No served route reads it back** — one test uses it as a prose corpus and that is all — so
   opening the console shows you that stack, not the seeded page.
 - **Every demo store's trust score starts from a manufactured posture, and it is marked.**
-  `make demo-trust` appends 568 observations for the ten sellers — an opening posture a person
+  `make demo-trust` appends 667 observations for the nineteen sellers — an opening posture a person
   chose, because no storefront publishes one — through the trust service's own `POST /events`,
   never a direct table write, so replay still reproduces the number the ranker served. Each one
   carries `sim-fb-` in `order_ref`, a top-level column inside the event digest, so a manufactured
