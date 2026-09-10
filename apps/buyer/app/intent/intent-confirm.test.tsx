@@ -113,8 +113,14 @@ describe('IntentConfirm', () => {
     )
     expect(screen.getByTestId('intent-query')).toHaveTextContent('a light roast under $20')
     expect(screen.getByTestId('intent-budget-band')).toHaveTextContent('0-50')
-    expect(screen.getByLabelText('Requirements').textContent).toContain('roast_level is light')
-    expect(screen.getByLabelText('Preferences').textContent).toContain('days_since_roast')
+    // `roast_level`, not `roast level`, was what this asserted. The underscore is a machine
+    // token and this is the screen a shopper reads — the owner's screenshot complaint was
+    // exactly this shape one field over (`price_usd at most 200` under "Must have"), and
+    // `describeSoftened` in the same module has always read a field's unit suffix off. The
+    // renderers now agree; the assertion is updated to the corrected wording rather than
+    // deleted, so the change of contract is visible.
+    expect(screen.getByLabelText('Requirements').textContent).toContain('roast level is light')
+    expect(screen.getByLabelText('Preferences').textContent).toContain('days since roast')
   })
 
   it('says so rather than inventing a band when the buyer never named one', () => {
@@ -251,7 +257,11 @@ describe('the R19 split, client side', () => {
 
   it('never calls a preference a requirement', () => {
     expect(describePreference(INTENT.preferences[0]!)).not.toMatch(/must|require/i)
-    expect(describeConstraint(INTENT.hard_constraints[1]!)).toBe('price_usd at most 20')
+    // Was `'price_usd at most 20'`. That asserted the raw field name as the shopper-facing
+    // contract — the same defect the owner screenshotted — while `describeSoftened` next
+    // door already spelled `width_in` as "width … inches". Both renderers now go through
+    // one `describeTriple`, so `usd` is read off as the currency it is.
+    expect(describeConstraint(INTENT.hard_constraints[1]!)).toBe('price at most 20 dollars')
   })
 
   it('lets three questions through and refuses the fourth', () => {

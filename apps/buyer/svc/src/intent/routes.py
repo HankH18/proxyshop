@@ -340,7 +340,28 @@ class ClarifyResponse(BaseModel):
 
     questions: list[str]
     intent: dict[str, Any]
+    #: Gaps the shopper never answered. The page renders this as "We never got an answer
+    #: about: X. We have not guessed.", so an entry is a claim about what they did — which
+    #: is why a gap they answered unusably is on ``understood`` instead and not here.
     unresolved: list[str]
+    #: One row per question actually asked: ``gap``, ``question``, ``answer``, ``used``,
+    #: ``addressed``, ``understood``. A row with ``used`` empty and ``understood`` false is
+    #: this service saying, in the shopper's own words, "you told us and we could not use
+    #: it" — the sentence that had nowhere to live when the page could only say "we never
+    #: got an answer".
+    #:
+    #: ``gap`` is the question that was ASKED and ``addressed`` is what the answer turned
+    #: out to be about; the page renders a row against the gaps in ``addressed``, falling
+    #: back to ``gap`` only when the answer produced nothing at all. They are two fields
+    #: because they come apart: measured, a row ``{"gap": "budget", "answer": "It must be
+    #: cherry wood, and at least 48 inches wide", "used": ["material is cherry-wood"]}``
+    #: made the page assert "You did answer about budget" over a sentence naming no money.
+    understood: list[dict[str, Any]] = []
+    #: Must-haves kept but not enforced, each with the reason. A hard constraint on a field
+    #: nothing here established is an eligibility filter this network may be unable to
+    #: decide, and measured against the served exchange that empties a three-slot shortlist
+    #: to zero — so it is scored instead, and said out loud rather than applied in silence.
+    softened: list[dict[str, Any]] = []
     #: There is deliberately NO field here for "must-haves this network cannot satisfy", and
     #: its absence is the correction rather than an omission. This service holds no
     #: candidates, so the only thing it could report is a guess from a catalogue CONFIG — and
@@ -399,6 +420,8 @@ async def clarify_route(body: ClarifyBody) -> ClarifyResponse:
         intent=outcome.intent.to_dict(),
         unresolved=list(outcome.unresolved),
         confirmed=outcome.confirmed,
+        understood=[record.to_dict() for record in outcome.understood],
+        softened=[record.to_dict() for record in outcome.softened],
     )
 
 

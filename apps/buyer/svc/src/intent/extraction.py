@@ -42,6 +42,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from contracts.ranking import preference_term_conflict
+
 from ..profile import coarsen_budget_band
 from .errors import InvalidConstraint, InvalidPreference
 from .models import BUDGET_BAND_UNSPECIFIED, HardConstraint, Preference
@@ -51,10 +53,13 @@ __all__ = [
     "GAP_CONSTRAINTS",
     "GAP_ORDER",
     "GAP_USE_CASE",
+    "VOUCHED_FILTER_FIELDS",
     "BudgetReading",
     "Extraction",
+    "GapAnswer",
     "IntentDraft",
     "LLMProposal",
+    "SoftenedReading",
     "band_for_amount",
     "extract",
     "parse_llm_reply",
@@ -81,7 +86,15 @@ GAP_ORDER: tuple[str, ...] = (GAP_USE_CASE, GAP_BUDGET, GAP_CONSTRAINTS)
 # money
 # --------------------------------------------------------------------------------------
 
-_DIGIT_AMOUNT = r"\d{1,7}(?:\.\d{1,2})?"
+#: An amount written in digits, with or without thousands separators.
+#:
+#: The grouped alternative comes FIRST and is not optional decoration. Without it the
+#: pattern matched the leading group and stopped at the comma, and every caller took that
+#: prefix as the whole amount — measured, on the served route: "a sofa under $1,200"
+#: produced ``price_usd lte 1.0`` and ``budget_band "0-50"``, an eligibility filter one
+#: twelve-hundredth of what the shopper said. Four figures is exactly where a furniture
+#: budget lives, and a comma is how people write four figures.
+_DIGIT_AMOUNT = r"\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d{1,7}(?:\.\d{1,2})?"
 
 #: English number words, and only these. A shopper says "about five hundred dollars" at
 #: least as often as "$500" — measured: the S1 run fixture's own shopper says exactly that,
@@ -236,6 +249,171 @@ _SIZE_SPAN_RE = re.compile(
     r"\b(?:size|us|uk|eu)\s*\d{1,2}(?:\.\d)?(?:\s*(?:-|–|—|to|and)\s*\d{1,2}(?:\.\d)?)?\b"
 )
 
+#: A number followed by a unit of MEASURE — for blanking only, exactly like the size span
+#: above and for the same reason, one unit further out.
+#:
+#: Measured on the served route before this existed: the turn "It must be cherry wood, and
+#: at least 48 inches wide", absorbed as the answer to the budget question, produced
+#: ``price_usd lte 48.0``. The shopper stated a width and was given a $48 budget. The
+#: bare-number rule is right — a lone "40" answering "what's your budget?" IS dollars — and
+#: it has no way to know that this 48 already has a unit attached to it, so the unit is
+#: taken off the table before the money reader runs.
+#:
+#: Currency words are deliberately absent: "$48" and "48 dollars" are money and must stay
+#: readable. This is only for units that make a number NOT money — and the one unit that is
+#: also an English word is read through :data:`_INCHES` rather than literally.
+
+#: The number half of a measurement. Thousands separators are accepted for the same
+#: reason :data:`_DIGIT_AMOUNT` accepts them: without it the span started AFTER the
+#: comma, so "1,200 mm wide" blanked only "200 mm" and left "1," for the money reader to
+#: read as a $1 budget.
+_MEASURED_NUMBER = r"\b\d{1,4}(?:,\d{3})*(?:\.\d{1,2})?"
+
+#: Every unit EXCEPT ``in``. A number carrying one of these is not money, whatever else the
+#: sentence says — including when a money pattern would otherwise have claimed it, which is
+#: the whole point: "under 5 lbs" reaches :data:`_CEILING_RE` as "under 5" and has to lose.
+_UNAMBIGUOUS_UNITS = (
+    r"inch(?:es)?|cm\b|centimet(?:er|re)s?|mm\b|millimet(?:er|re)s?|"
+    r"m\b|met(?:er|re)s?|ft\b|feet|foot|yards?|yds?\b|"
+    r"lbs?\b|pounds?|oz\b|ounces?|kg\b|kilos?|kilograms?|grams?|g\b|"
+    r"litres?|liters?|l\b|ml\b|gallons?|quarts?|"
+    r"watts?|w\b|volts?|v\b|amps?|hz\b|hours?|hrs?\b|mins?\b|minutes?|days?|"
+    r'"|″|”'
+)
+
+_MEASURE_SPAN_RE = re.compile(rf"{_MEASURED_NUMBER}\s*(?:{_UNAMBIGUOUS_UNITS})")
+
+#: A number followed by a bare ``in``. Whether that ``in`` is the unit INCHES or the English
+#: preposition is decided by :func:`_measure_spans`, not here.
+#:
+#: A DIGIT after the word disqualifies it outright, and that is measured rather than tidy:
+#: "under 400 in 2 weeks" read the ``in`` as inches, blanked "400 in", and left
+#: :data:`_CEILING_RE` to pair the cue with the number on the other side — a $2 ceiling out
+#: of a $400 budget, which is worse than losing the budget because it ships a filter nobody
+#: stated. No measurement is written "48 in 2".
+_INCHES_SPAN_RE = re.compile(rf"{_MEASURED_NUMBER}\s*in(?![a-z])(?!\s*\d)")
+
+#: Dimension words — what is being measured. They settle a bare ``in`` as INCHES, but ONLY
+#: when terminal: at the end of the phrase, before punctuation, or before "and"/"or".
+#:
+#: The terminal test is the whole of what makes this list safe, and it is measured rather
+#: than careful. Every word here doubles as a colour, finish or weave adjective sitting in
+#: front of a noun, and without the test all thirteen of these lost the stated budget:
+#: "a rug under 300 in **deep** blue", "a lamp under 400 in **high** gloss", "a rug under
+#: 400 in **thick** wool", "a table under 500 in **long** grain oak", "curtains under 200 in
+#: **wide** stripe", "a bowl under 90 in **square** profile", "a mirror under 150 in **tall**
+#: format". In each the adjective is followed by another word; in "48 in wide" and "no more
+#: than 48 in wide" it is not, and that is the difference the list alone could not see.
+_INCH_DIMENSION = (
+    r"wide|width|tall|high|height|long|length|deep|depth|thick|thickness|across|diameter|"
+    r"square|overall|unassembled|assembled|folded|apart"
+)
+
+#: Words the PREPOSITION ``in`` cannot be followed by. "in of", "in on", "in from", "in
+#: per", "in when", "in in" are not English, so a bare ``in`` in front of one of them is the
+#: unit — with no terminal test and no money test, because there is nothing to weigh.
+#:
+#: This is the half that reads a measurement written the way people actually write one:
+#: "at most 60 in **on** the diagonal", "no more than 36 in **from** the floor", "at most 30
+#: in **per** side", "under 48 in **when** folded", "48 in **of** clearance", "about 48 in
+#: **in** total". Each carries a ceiling cue, so the money test claimed the number and
+#: turned a width into a budget.
+#:
+#: **Every word here has to be one the preposition genuinely cannot take**, and a first
+#: draft of this list was not: ``about``, ``around``, ``over``, ``under``, ``between``,
+#: ``into``, ``out``, ``up``, ``down``, ``to``, ``front``, ``back`` and ``through`` all
+#: follow it perfectly well — "in about two weeks", "in under an hour", "in front of the
+#: window", "in between the studs" — and with them here a stated budget was eaten in each.
+#: ``front to back`` is handled as its own phrase below rather than by the bare word.
+_AFTER_INCHES_ONLY = r"of|on|from|per|when|in|and|or|at|after|before|plus|off|while|though"
+
+#: What settles a bare ``in`` as INCHES regardless of what precedes it. Matched at the end
+#: of the in-span; when it does NOT match, :func:`_measure_spans` falls through to the money
+#: test rather than to a verdict, which is what keeps "under 400 in oak" a budget.
+#:
+#: ``x``/``by`` are here only as the DIMENSION-PAIR shape "24 in by 36 in" — a number and
+#: another unit behind them. Bare, they ate "under 400 in by friday"; in front of a bare
+#: number they ate "under 400 in by 2 weeks". Bare punctuation is absent for the same
+#: reason — it ate "under 400 in, oak". ``front to back`` is the one phrase from the
+#: preposition list that earns a place here, because "in front OF" is ordinary English and
+#: "in front TO back" is not.
+_INCH_DIMENSION_RE = re.compile(
+    rf"\s*(?:{_INCH_DIMENSION})\b(?=\s*(?:$|[,.;:)]|(?:and|or)\b))"
+    rf"|\s*(?:{_AFTER_INCHES_ONLY})\b"
+    rf"|\s*(?:x|by)\s*\d{{1,4}}\s*(?:in\b|inch(?:es)?|\"|″|”)"
+    rf"|\s*front\s+to\s+back\b"
+    rf"|\s*$"
+)
+
+#: A currency marker standing immediately in front of a number, which makes that number
+#: MONEY whatever unit-shaped word happens to follow it.
+_PRICED_NUMBER_RE = re.compile(r"[$€£]\s*$")
+
+
+def _overlaps(span: tuple[int, int], spans: Iterable[tuple[int, int]]) -> bool:
+    return any(span[0] < end and start < span[1] for start, end in spans)
+
+
+def _measure_spans(text: str) -> list[tuple[int, int]]:
+    """Every span of ``text`` that is a number carrying a unit of MEASURE.
+
+    Blanked before the money reader runs, because a number that already has a unit attached
+    is not available to be a price. Measured, before any of this existed: "It must be cherry
+    wood, and at least 48 inches wide", absorbed as the answer to the budget question,
+    produced ``price_usd lte 48.0``.
+
+    **``in`` is decided differently from every other unit, and the difference is the whole
+    of this function.** It is the only entry in the table that is also an ordinary English
+    word, and reading it as a unit unconditionally ate a stated budget — the blanking runs
+    before ANY money pattern, so the amount was gone before :data:`_CEILING_RE` ever
+    looked::
+
+        'a coffee table under $400 in oak'  ->  'a coffee table under $       oak'
+        'a rug under $300 in wool'          ->  'a rug under $       wool'
+
+    Served, through ``POST /buyer/intent/clarify``: the turns "a coffee table under $400 in
+    oak" / "I already told you" came back with ``hard_constraints: []``, ``budget_band:
+    "unspecified"`` and BOTH canned budget questions asked — the owner's own screenshot,
+    recreated by the repair written for it.
+
+    **Two signals decide it, in this order, and both were needed.** Each on its own was
+    tried and each on its own is wrong in the other direction:
+
+    1. **A dimension word after the ``in`` settles it as inches, whatever precedes.** A
+       closed list of those words was the first rule and, used ALONE, it read "48 in of
+       clearance", "48 in from the wall", "60 in tv stand" and "48 in or wider" as $48
+       budgets — everything outside the list fell to money.
+    2. **Otherwise, a number some money pattern already claims is money.** That test alone
+       was the second rule, and it is backwards for every ceiling, hedge and range cue: "no
+       more than 48 in wide" and "between 40 and 60 in wide" are claimed by
+       :data:`_CEILING_RE` and :data:`_BETWEEN_RANGE_RE`, so a stated width became a $48
+       ceiling — measured on the served route, overwriting a real $400 budget stated one
+       turn earlier. Its apparent success rested on :data:`_FLOOR_RE` needing a literal
+       ``$``, which is true of "at least 48 in wide" and of nothing else.
+
+    So the list decides when it matches and the money test decides when it does not, and
+    neither is asked to answer a question it gets wrong.
+
+    The currency guard is separate and applies to every unit, ``in`` included: ``$5 m`` and
+    ``$300 l`` are money followed by a letter, and blanking either takes the shopper's own
+    budget off the table.
+    """
+    claimed = [match.span() for pattern in _MONEY_SPANS for match in pattern.finditer(text)]
+    spans = [
+        match.span()
+        for match in _MEASURE_SPAN_RE.finditer(text)
+        if not _PRICED_NUMBER_RE.search(text[: match.start()])
+    ]
+    for match in _INCHES_SPAN_RE.finditer(text):
+        if _PRICED_NUMBER_RE.search(text[: match.start()]):
+            continue  # `$400 in oak` — the currency marker already spent this number
+        if _INCH_DIMENSION_RE.match(text, match.end()) is not None:
+            spans.append(match.span())  # `48 in wide` — a dimension, whatever precedes it
+            continue
+        if not _overlaps(match.span(), claimed):
+            spans.append(match.span())  # `48 in of clearance` — no money pattern wants it
+    return spans
+
 
 @dataclass(frozen=True)
 class BudgetReading:
@@ -301,7 +479,8 @@ def _amount_value(raw: str | None) -> float | None:
     if not text:
         return None
     if re.fullmatch(_DIGIT_AMOUNT, text):
-        return float(text)
+        # The separators are punctuation, not part of the number. `float("1,200")` raises.
+        return float(text.replace(",", ""))
     return _parse_number_words(text)
 
 
@@ -345,7 +524,20 @@ def read_budget(text: str, *, allow_bare_number: bool = False) -> tuple[BudgetRe
     floor: float | None = None
     band: str | None = None
 
-    range_match = _RANGE_RE.search(text) or _BETWEEN_RANGE_RE.search(text)
+    # A number that already carries a unit of measure is not available to be money, and it
+    # is taken off the table before ANY money pattern runs rather than only before the
+    # bare-number one. Both halves of that were measured: "at least 48 inches wide" reached
+    # the bare-number rule and produced `price_usd lte 48.0`, and "under 5 lbs" never got
+    # that far because the CUED ceiling pattern matched "under 5" first. Blanking in one
+    # place would have fixed one of them and left the other exactly as it was.
+    #
+    # `$` and currency words are not units of measure, so "$500" and "500 dollars" are
+    # untouched — see `_MEASURE_SPAN_RE`. The text this scans is a working copy; what the
+    # lexicon later scans is still built from the original, so "48 inches wide" keeps
+    # contributing its content words to whether the utterance names a product.
+    priced = _blank(text, _measure_spans(text))
+
+    range_match = _RANGE_RE.search(priced) or _BETWEEN_RANGE_RE.search(priced)
     range_values = (
         (_amount_value(range_match.group(1)), _amount_value(range_match.group(2)))
         if range_match
@@ -360,7 +552,7 @@ def read_budget(text: str, *, allow_bare_number: bool = False) -> tuple[BudgetRe
         # sentence produced `price_usd lte 25` and `price_usd gte 25` together — a filter
         # that admits exactly $25.00 and nothing else. Searching the two patterns over the
         # same text independently is what made a negation readable as its own opposite.
-        work = text
+        work = priced
         ceiling_match = _CEILING_RE.search(work)
         if ceiling_match:
             amount = _amount_value(ceiling_match.group("amount"))
@@ -379,7 +571,7 @@ def read_budget(text: str, *, allow_bare_number: bool = False) -> tuple[BudgetRe
         if floor_match:
             floor = _amount_value(floor_match.group(1))
         if ceiling is None and floor is None and band is None:
-            band, ceiling = _read_uncued_money(text)
+            band, ceiling = _read_uncued_money(priced)
 
     blanked = _blank_money(text)
     if ceiling is None and floor is None and band is None and allow_bare_number:
@@ -421,11 +613,14 @@ def _read_uncued_money(text: str) -> tuple[str | None, float | None]:
 def _read_bare_money(blanked: str) -> tuple[float | None, float | None, str]:
     """``(ceiling, floor, blanked)`` for a budget ANSWER that names bare numbers.
 
-    Sizes are blanked out of the working copy first: "size 8 to 10" is an answer a shopper
-    really gives, and both the bare range and the bare number would otherwise turn it into a
-    price of $8.
+    Sizes and measurements are blanked out of the working copy first: "size 8 to 10" is an
+    answer a shopper really gives, and both the bare range and the bare number would
+    otherwise turn it into a price of $8. "at least 48 inches wide" is the same shape with a
+    different unit, and it really did produce ``price_usd lte 48.0`` — measured on the served
+    route, from the owner's own second utterance.
     """
     work = _blank(blanked, [match.span() for match in _SIZE_SPAN_RE.finditer(blanked)])
+    work = _blank(work, _measure_spans(work))
     span = _PLAIN_RANGE_RE.search(work)
     if span:
         low, high = _amount_value(span.group("low")), _amount_value(span.group("high"))
@@ -461,6 +656,7 @@ def _blank(text: str, spans: Iterable[tuple[int, int]]) -> str:
 
 _KIND_CATEGORY = "category"
 _KIND_CONSTRAINT = "constraint"
+_KIND_SOFT_CONSTRAINT = "soft_constraint"
 _KIND_PREFERENCE = "preference"
 _KIND_VAGUE = "vague"
 _KIND_FILLER = "filler"
@@ -504,6 +700,23 @@ _CATEGORIES: dict[str, str] = {
     "desk": "furniture",
     "chair": "furniture",
     "lamp": "furniture",
+    # NOTHING is added to this table for the cherry-wood defect, and the reason is measured
+    # rather than cautious. `intent.category` is not inert: the exchange's retrieval filters
+    # on it, and the corpus's own category taxonomy does not use these words. Driven three
+    # times against the served exchange with the query "a modular table" (which the corpus
+    # answers), varying only this field:
+    #
+    #     category absent      -> products_considered 25, shortlist 3
+    #     category "furniture" -> products_considered  0, shortlist 0
+    #     category "coffee"    -> products_considered  1, shortlist 0
+    #     category null        -> products_considered 25, shortlist 3
+    #
+    # So adding "table" here would have taken a working three-slot query to an empty page —
+    # the same failure as an undecidable hard constraint, one field over and with no
+    # relaxation path at all. (That "coffee", a word this table has always carried, also
+    # costs 24 of 25 candidates is a separate defect in the exchange's retrieval and is
+    # reported rather than fixed here.) Specificity is instead restored where it broke, in
+    # `extract`, by letting a softened match keep contributing its content words.
     "keyboard": "computing",
     "monitor": "computing",
     "laptop": "computing",
@@ -558,6 +771,41 @@ _CONSTRAINTS: dict[str, tuple[str, str, Any]] = {
     "olive": ("color", "eq", "olive"),
     "burgundy": ("color", "eq", "burgundy"),
     "teal": ("color", "eq", "teal"),
+}
+
+#: Materials the buyer's own words name but this network cannot filter on, so they are read
+#: as SOFTENED readings — kept with their value, scored, never a gate. Same destination as
+#: an unvouched model proposal, deliberately: one mechanism, so the offline double and the
+#: live model cannot disagree about what happens to "cherry wood".
+#:
+#: Measured on the nineteen-store corpus, which is why these are here and not in
+#: ``_CONSTRAINTS``: ``MATCH (a:AttributeValue) WHERE a.canonical_key='material'`` returns
+#: **3** nodes in a 98,001-node graph, with the values "powder", "fabric" and "metal". The
+#: word "cherry" appears four times and never as a material — twice as a colour ("cherry
+#: red"), once as a flavour, once inside "sienna (cherry)". ``wood-type`` carries six
+#: values (oak, american oak, walnut, birch, ash, maple) across six variants. A filter on
+#: any of that decides nothing and excludes everyone.
+#:
+#: Bare "cherry" is deliberately absent: on this corpus it is a colour and a flavour more
+#: often than a wood, and a lexicon that guesses is the thing this module refuses to be.
+#: "cherry wood" and "cherrywood" are unambiguous and are what the shopper typed.
+_SOFT_CONSTRAINTS: dict[str, tuple[str, str, Any]] = {
+    "cherry wood": ("material", "eq", "cherry-wood"),
+    "cherrywood": ("material", "eq", "cherry-wood"),
+    "solid wood": ("material", "eq", "solid-wood"),
+    "reclaimed wood": ("material", "eq", "reclaimed-wood"),
+    "hardwood": ("material", "eq", "hardwood"),
+    "plywood": ("material", "eq", "plywood"),
+    "oak": ("material", "eq", "oak"),
+    "walnut": ("material", "eq", "walnut"),
+    "maple": ("material", "eq", "maple"),
+    "birch": ("material", "eq", "birch"),
+    "teak": ("material", "eq", "teak"),
+    "mahogany": ("material", "eq", "mahogany"),
+    "rattan": ("material", "eq", "rattan"),
+    "velvet": ("material", "eq", "velvet"),
+    "linen": ("material", "eq", "linen"),
+    "boucle": ("material", "eq", "boucle"),
 }
 
 _PREFERENCES: dict[str, tuple[str, str, float]] = {
@@ -770,6 +1018,8 @@ def _build_phrase_table() -> dict[tuple[str, ...], tuple[tuple[str, Any], ...]]:
         add(phrase, _KIND_CATEGORY, category)
     for phrase, spec in _CONSTRAINTS.items():
         add(phrase, _KIND_CONSTRAINT, spec)
+    for phrase, spec in _SOFT_CONSTRAINTS.items():
+        add(phrase, _KIND_SOFT_CONSTRAINT, spec)
     for phrase, pref in _PREFERENCES.items():
         add(phrase, _KIND_PREFERENCE, pref)
     for word in _VAGUE:
@@ -783,6 +1033,285 @@ _PHRASES = _build_phrase_table()
 _LONGEST_PHRASE = max(len(key) for key in _PHRASES)
 
 
+# --------------------------------------------------------------------------------------
+# which fields this service is willing to turn into an ELIGIBILITY FILTER
+# --------------------------------------------------------------------------------------
+
+#: Every field the deterministic lexicon can mint from the buyer's literal words, plus the
+#: two the money and size readers add. Derived from the tables rather than hand-listed, so
+#: a new lexicon entry cannot silently fall outside the set that vouches for it.
+#:
+#: **Why a closed set exists at all, measured rather than reasoned about.** A hard
+#: constraint is an eligibility filter (R19), and a filter this network cannot decide does
+#: not narrow a shortlist — it empties one. Driven three times each against the served
+#: exchange (``POST http://localhost:8083/auctions``) with the query "a sofa" on the
+#: nineteen-store corpus:
+#:
+#: ===========================================  =====  ==================
+#: hard constraints on the intent               slots  relaxed_constraints
+#: ===========================================  =====  ==================
+#: (none)                                           3  []
+#: ``color eq terra`` (a value a slot carries)      1  [the constraint]
+#: ``color eq navy``                                0  []
+#: ``material eq cherry-wood``                      0  []
+#: ``width_in gte 48``                              0  []
+#: ===========================================  =====  ==================
+#:
+#: The same query with a ``material``, ``width_in`` or entirely invented ``cherry_wood``
+#: PREFERENCE shortlists 3 of 3 every time. So the scoring half of R19 is survivable and
+#: the filtering half is not, and the exchange's own relaxation escape hatch fired in
+#: exactly one of the four cases — it is a backstop, not a licence.
+#:
+#: This set is therefore what the BUYER'S OWN WORDS established through a table that was
+#: built alongside the fixtures. A model may confirm one of these; it may not invent a new
+#: one, because nothing here can check whether the network can answer it. See
+#: :meth:`IntentDraft.absorb_proposal`.
+VOUCHED_FILTER_FIELDS: frozenset[str] = frozenset(
+    {spec[0] for spec in _CONSTRAINTS.values()} | {"size", "price_usd"}
+)
+
+#: The (field, value) PAIRS the lexicon can mint, which is the granularity that actually
+#: decides this. The field alone is not enough and the table above is the proof: ``color eq
+#: terra`` left one slot standing and ``color eq navy`` left none, on the same corpus,
+#: through the same field. What separates them is whether any candidate carries the value,
+#: and a value is exactly what this service has no way to check.
+#:
+#: So the rule is the narrowest one that is still true: this service vouches for a filter
+#: when its own table, built beside the fixtures, produces that same field AND that same
+#: value from a buyer's literal words. Everything else is softened.
+#: The OP is part of the term and not a detail. Measured against the live model on the
+#: demo's own beanie utterance: with the pair checked but the op ignored, Sonnet's
+#: ``{"field": "material", "op": "contains", "value": "merino wool"}`` was vouched — because
+#: the lexicon does know ``material``/``merino-wool`` — and landed as a SECOND eligibility
+#: filter beside the lexicon's own ``material eq merino-wool``. ``HardConstraint.key`` is
+#: ``(field, op)``, so the two did not even collide. `contains` is a filter this lexicon can
+#: never mint and this service cannot check, on the demo's headline query.
+VOUCHED_FILTER_TERMS: frozenset[tuple[str, str, Any]] = frozenset(
+    (spec[0], spec[1], spec[2]) for spec in _CONSTRAINTS.values()
+)
+
+#: ``price_usd`` and ``size`` used to sit here in an ``_OPEN_VALUE_TERMS`` exemption that
+#: vouched for them on FIELD AND OP ALONE — "their values are numbers, so there is no term
+#: to check". The exemption is gone, and the measurement is why.
+#:
+#: The reasoning was backwards. "Nothing to check" is a reason to trust a model LESS on a
+#: field, not more: it is the one case where this service cannot even tell that the value
+#: is nonsense. And price is not a safe field to be wrong about — it is the one this corpus
+#: cannot decide at all. Driven against the served exchange (``POST
+#: http://localhost:8083/auctions``, nineteen-store demo corpus), query "a sofa":
+#:
+#: ==============================  =====  =====  ===================
+#: hard constraints on the intent  slots  shops  products_considered
+#: ==============================  =====  =====  ===================
+#: (none)                              3      3                   25
+#: ``price_usd lte 5000``              0      0                    0
+#: ``price_usd lte 200``               0      0                    0
+#: ``size eq queen``                   0      0                    0
+#: ==============================  =====  =====  ===================
+#:
+#: $5000 is above every price in the corpus, so the empty page is not a ceiling doing its
+#: job. ``MATCH (a:AttributeValue) WHERE a.canonical_key CONTAINS 'price'`` returns **zero**
+#: nodes in that graph and no ``Product`` or ``Variant`` node carries a price property, so
+#: ``retrieval.criteria.HardCriterion.pushdown`` — which turns an ``lte``/``gte`` into a
+#: graph-side ``AttributeFilter`` — matches nothing and the roster comes back empty. A model
+#: that names a price bound therefore costs the whole page, which is exactly the outcome
+#: softening exists to prevent.
+#:
+#: **This narrows what a MODEL may propose and nothing else.** :func:`vouched_as_filter` is
+#: asked only about :meth:`IntentDraft.absorb_proposal`'s input; a ceiling the SHOPPER typed
+#: is minted by :func:`read_budget` inside :func:`extract` and added with
+#: ``authoritative=True``, never passing through here. R19 gives the buyer's own stated
+#: ceiling the filtering half and ``exchange.ranking.filters.budget_reasons`` decides it
+#: against the offer's own price; that is untouched.
+
+
+def vouched_as_filter(constraint: HardConstraint) -> bool:
+    """May this MODEL-PROPOSED constraint be applied as an eligibility filter?
+
+    True only for a term the deterministic lexicon could itself have minted from the
+    buyer's own words — same field, same op, same value. See :data:`VOUCHED_FILTER_TERMS`
+    for why all three have to match and not just the field, and the note above it for why
+    there is no longer an exemption for fields whose values are numbers.
+
+    Only :meth:`IntentDraft.absorb_proposal` asks this question. The buyer's own words are
+    vouched by having been minted from a table built beside the fixtures, and they reach
+    the draft by a different door.
+
+    **An UNHASHABLE value answers False rather than raising**, and that is a served defect
+    rather than defensiveness. ``in`` is a published ``CONSTRAINT_OPS`` member whose value is
+    a LIST — ``intent.ts::describeConstraint`` has a branch that joins one, and
+    ``test_intent_models`` builds a model reply carrying ``{"op": "in", "value": [...]}`` —
+    and a list is not hashable, so the membership test below raised ``TypeError`` straight
+    out of the route: measured, ``POST /buyer/intent/clarify`` answered **HTTP 500** for a
+    model reply of ``{"field": "material", "op": "in", "value": ["oak", "walnut"]}``. The
+    honest answer for a value this lexicon cannot possibly have minted is "no", which is
+    what every unhashable value is.
+    """
+    value = constraint.value
+    if isinstance(value, str):
+        value = value.strip().casefold().replace(" ", "-")
+    try:
+        return (constraint.field, constraint.op, value) in VOUCHED_FILTER_TERMS
+    except TypeError:
+        return False
+
+
+#: How an op that cannot be a filter is re-read as a score direction. ``eq`` on an
+#: unvouched field becomes a soft "I would rather it were this"; a floor becomes "more is
+#: better" and a ceiling "less is better". Nothing outside this map is softened at all —
+#: it is dropped and recorded, on the same principle that keeps ``lt`` from becoming
+#: ``lte``.
+_SOFTENED_DIRECTIONS: dict[str, str] = {
+    "eq": "prefer",
+    "in": "prefer",
+    "contains": "prefer",
+    "gte": "maximize",
+    "lte": "minimize",
+}
+
+#: What a softened reading is worth as a score term. Below every weight the lexicon mints
+#: from the buyer's own words (the lowest of those is 0.4), because a softened reading is
+#: this service saying "somebody said this and we could not verify it".
+SOFTENED_WEIGHT = 0.3
+
+
+@dataclass(frozen=True)
+class SoftenedReading:
+    """A must-have this service kept but refused to enforce, and why.
+
+    The buyer said it, so it is not dropped. This network cannot decide it, so it is not a
+    filter. Both halves have to be said out loud or the intent is lying in one direction or
+    the other — silently widening the search, or silently emptying it.
+
+    ``value`` is preserved here and **not** in the preference minted beside it, because
+    R19's ``Preference`` is ``field``/``direction``/``weight`` with nowhere to put one. A
+    store therefore learns the direction and the shopper learns the whole sentence, which
+    is the honest split given the published contract.
+    """
+
+    field: str
+    op: str
+    value: Any
+    reason: str
+    source: str = "model"
+    #: Does the preference minted beside this reading actually SCORE anything?
+    #:
+    #: False for a field a published ranking term already answers for. Measured through
+    #: ``exchange.retrieval.criteria.build_query``, which calls
+    #: ``contracts.ranking.preference_term_conflict`` and REFUSES every ``price_usd``,
+    #: ``delivery_*`` and ``trust`` preference before scoring: a softened ``price_usd lte
+    #: 300`` produced ``preferences: [price_usd minimize 0.3]`` on the intent and
+    #: ``preferences kept: []`` in the query built from it. The confirmation screen was
+    #: telling the shopper "we use these to rank rather than to exclude" over a reading that
+    #: was neither ranking nor excluding, and this is the field that lets it stop.
+    scored: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "field": self.field,
+            "op": self.op,
+            "value": self.value,
+            "reason": self.reason,
+            "source": self.source,
+            "scored": self.scored,
+        }
+
+    def describe(self) -> str:
+        """The reading in the shopper's terms, for the confirmation screen."""
+        spelling = _OP_IN_WORDS.get(self.op, self.op)
+        name, unit = _field_in_words(self.field)
+        value = _value_in_words(self.value)
+        return f"{name} {spelling} {value}{f' {unit}' if unit else ''}".strip()
+
+
+@dataclass(frozen=True)
+class GapAnswer:
+    """One question, the shopper's answer to it, and what came of that answer.
+
+    This is the record that makes "We never got an answer about: X" a checkable claim
+    rather than a guess. Before it existed there was nothing anywhere that distinguished
+    *not answered* from *answered and unusable*, so the page rendered the first sentence
+    for both — which is the sentence the owner screenshotted.
+
+    ``gap`` is what was ASKED and ``addressed`` is what the answer turned out to be about.
+    They are separate fields because they really do come apart, and a record that carried
+    only the first told a second untruth in place of the first one. Measured on the served
+    route with the turns "I want a cherry wood table" / "It must be cherry wood, and at
+    least 48 inches wide" / "no, that is everything" / "nothing else"::
+
+        {"gap": "budget",
+         "question": "What is the most you would want to spend?",
+         "answer": "It must be cherry wood, and at least 48 inches wide",
+         "used": ["material is cherry-wood"],
+         "understood": true}
+
+    A shopper who named a material was recorded as having answered about MONEY — which the
+    page renders as "You did answer about budget", and which told :meth:`IntentDraft
+    .next_gap` the budget was settled, so it was never asked again. The answer is filed
+    against what it produced; ``gap`` stays so the question it followed is still on the
+    record.
+    """
+
+    gap: str
+    question: str
+    answer: str
+    used: tuple[str, ...] = ()
+    #: The gaps this answer actually spoke to. Empty means it produced nothing at all,
+    #: which is the honest "you told us and we could not use it" — and the one case where
+    #: the row still belongs to the gap it was asked under, because there is nowhere else
+    #: for it to go.
+    addressed: tuple[str, ...] = ()
+
+    @property
+    def understood(self) -> bool:
+        return bool(self.used)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "gap": self.gap,
+            "question": self.question,
+            "answer": self.answer,
+            "used": list(self.used),
+            "addressed": list(self.addressed),
+            "understood": self.understood,
+        }
+
+
+def soften(
+    constraint: HardConstraint, *, reason: str, source: str = "model"
+) -> tuple[SoftenedReading | None, Preference | None]:
+    """Re-read a filter this service cannot vouch for as a score term plus a record.
+
+    Returns ``(None, None)`` for an op with no honest score reading, so a constraint is
+    never bent into a direction it does not mean.
+
+    The preference is withheld — and :attr:`SoftenedReading.scored` set False — when a
+    published ranking term already answers for the field, because the exchange refuses such
+    a preference anyway (``contracts.ranking.preference_term_conflict``, applied in
+    ``exchange.retrieval.criteria.build_query``). Minting one would put a term on the intent
+    that is discarded before any candidate is scored, and the shopper would be told it ranks.
+    """
+    direction = _SOFTENED_DIRECTIONS.get(constraint.op)
+    if direction is None:
+        return None, None
+    scored = preference_term_conflict(constraint.field) is None
+    reading = SoftenedReading(
+        field=constraint.field,
+        op=constraint.op,
+        value=constraint.value,
+        reason=reason,
+        source=source,
+        scored=scored,
+    )
+    if not scored:
+        return reading, None
+    try:
+        preference = Preference(field=constraint.field, direction=direction, weight=SOFTENED_WEIGHT)
+    except InvalidPreference:
+        return reading, None
+    return reading, preference
+
+
 @dataclass(frozen=True)
 class Extraction:
     """Everything one buyer utterance said, in R19's vocabulary."""
@@ -793,6 +1322,10 @@ class Extraction:
     preferences: tuple[Preference, ...] = ()
     budget: BudgetReading = field(default_factory=BudgetReading)
     content_tokens: tuple[str, ...] = ()
+    #: Must-haves this utterance stated that cannot be eligibility filters here. Read from
+    #: the buyer's own words, so unlike a model's they are never in doubt about *what was
+    #: said* — only about whether this network can answer it.
+    softened: tuple[SoftenedReading, ...] = ()
 
     @property
     def specific(self) -> bool:
@@ -813,6 +1346,7 @@ def extract(utterance: str, *, budget_answer: bool = False) -> Extraction:
 
     constraints: list[HardConstraint] = []
     preferences: list[Preference] = []
+    softened: list[SoftenedReading] = []
     category: str | None = None
 
     for match in _SIZE_RE.finditer(blanked):
@@ -839,6 +1373,35 @@ def extract(utterance: str, *, budget_answer: bool = False) -> Extraction:
             elif kind == _KIND_CONSTRAINT:
                 name, op, value = payload
                 constraints.append(HardConstraint(field=name, op=op, value=value))
+            elif kind == _KIND_SOFT_CONSTRAINT:
+                # A softened phrase still DESCRIBES the product, so its words keep counting
+                # toward whether this utterance names what the shopper wants. Without this,
+                # teaching the lexicon "cherry wood" made "a cherry wood table" LESS
+                # specific than before — three loose content words became one, `specific`
+                # went false, and the loop opened by asking a shopper who had just said what
+                # they wanted what they were shopping for. A hard-constraint phrase does not
+                # need this because it is nearly always accompanied by a category word the
+                # table knows ("leather backpack"); a softened one, by construction, is a
+                # word the network cannot place.
+                content.extend(
+                    token
+                    for token in tokens[index : index + width]
+                    if not token.isdigit() and len(token) >= MIN_CONTENT_TOKEN_CHARS
+                )
+                name, op, value = payload
+                reading, preference = soften(
+                    HardConstraint(field=name, op=op, value=value),
+                    reason=(
+                        f"you said {value!r}, and this network has almost no readings for "
+                        f"{name} — requiring it would exclude every store rather than narrow "
+                        f"the list, so it is used to rank rather than to filter"
+                    ),
+                    source="buyer",
+                )
+                if reading is not None:
+                    softened.append(reading)
+                if preference is not None:
+                    preferences.append(preference)
             elif kind == _KIND_PREFERENCE:
                 name, direction, weight = payload
                 preferences.append(
@@ -858,6 +1421,7 @@ def extract(utterance: str, *, budget_answer: bool = False) -> Extraction:
         preferences=tuple(preferences),
         budget=budget,
         content_tokens=tuple(content),
+        softened=tuple(softened),
     )
 
 
@@ -966,7 +1530,23 @@ def parse_llm_reply(reply: Any) -> LLMProposal:
     if payload is None:
         if text.endswith("?") and "\n" not in text and len(text) <= MAX_QUESTION_CHARS:
             return LLMProposal(question=text, raw=text)
-        return LLMProposal(raw=text)
+        # A reply arrived, carried no JSON object and was not a bare question, so the whole
+        # of it is being discarded. That used to happen in silence, and the silence is what
+        # hid Defect A for as long as it hid: measured against the live model on this
+        # stack, the HEAD contract produced a Markdown table reading `| material | = |
+        # cherry wood |` and `| width | >= | 48 in |` — both correct — and this branch threw
+        # it away with `dropped` empty, so no test, no log and no response field could tell
+        # "the model proposed nothing" apart from "the model proposed the right thing and we
+        # could not read it". Recording it does not recover the reading; it makes the loss
+        # observable, which is the precondition for ever noticing it again.
+        return LLMProposal(
+            dropped=(
+                f"the model's reply carried no JSON object and was not a bare clarifying "
+                f"question, so all {len(text)} characters of it were discarded unread; "
+                f"first 120: {text[:120]!r}",
+            ),
+            raw=text,
+        )
 
     dropped: list[str] = []
     constraints = _proposed_constraints(payload, dropped)
@@ -1084,14 +1664,25 @@ class IntentDraft:
     budget_band: str | None = None
     specific: bool = False
     dropped: list[str] = field(default_factory=list)
+    #: Must-haves kept but not enforced, with the reason. See :data:`VOUCHED_FILTER_FIELDS`.
+    softened: list[SoftenedReading] = field(default_factory=list)
+    #: Every question put to the shopper and what their answer produced. The record that
+    #: makes ``unresolved`` a checkable claim rather than a guess.
+    understood: list[GapAnswer] = field(default_factory=list)
+    #: Which terms came from the buyer's own literal words. The cluster hash is taken over
+    #: these alone — see :func:`buyer_svc.intent.clarifier._cluster_id`.
+    authoritative_constraints: set[tuple[str, str]] = field(default_factory=set)
+    authoritative_preferences: set[str] = field(default_factory=set)
 
-    def absorb(self, utterance: str, *, gap: str | None = None) -> Extraction:
+    def absorb(self, utterance: str, *, gap: str | None = None, question: str = "") -> Extraction:
         """Fold one buyer turn into the draft.
 
-        ``gap`` names the question this turn is answering, and it changes two things: a
-        bare number is read as money only while answering the budget question, and only a
-        turn that describes the *need* joins ``query``. An answer to "what's your budget?"
-        is not part of what the buyer is shopping for.
+        ``gap`` names the question this turn is answering, and it changes three things: a
+        bare number is read as money only while answering the budget question; only a turn
+        that describes the *need* joins ``query`` (an answer to "what's your budget?" is
+        not part of what the buyer is shopping for); and the turn is filed against the gap
+        it answers, so this draft can later tell a question that went unanswered apart from
+        one that was answered and could not be used.
         """
         text = " ".join(str(utterance).split())
         if not text:
@@ -1110,19 +1701,127 @@ class IntentDraft:
             self._add_constraint(constraint, authoritative=True)
         for preference in reading.preferences:
             self._add_preference(preference, authoritative=True)
+        for softened in reading.softened:
+            self._add_softened(softened)
         self._note_budget(reading.budget)
+        # A record is written only when a QUESTION was actually put to the shopper, and the
+        # two conditions are not the same thing. `clarifier.clarify` absorbs every turn the
+        # buyer volunteered beyond the questions it asked with `gap=GAP_USE_CASE` — not
+        # because anybody asked about the use case, but because that is the gap whose
+        # answers join `query`. Recording those produced a row reading `{"gap": "use_case",
+        # "question": ""}`, which the confirmation screen renders as "You did answer when we
+        # asked about what you are shopping for" over a question that was never asked.
+        # `_question_for` never returns a blank, so a missing question is exactly this case.
+        if gap is not None and question:
+            self.understood.append(
+                GapAnswer(
+                    gap=gap,
+                    question=question,
+                    answer=text,
+                    used=_terms_of(reading),
+                    addressed=_gaps_addressed(reading),
+                )
+            )
         return reading
 
     def absorb_proposal(self, proposal: LLMProposal) -> None:
-        """Fold a model proposal in **additively**; it never overwrites the buyer."""
+        """Fold a model proposal in **additively**; it never overwrites the buyer.
+
+        A proposed constraint on a field :data:`VOUCHED_FILTER_FIELDS` does not carry is
+        **softened** rather than applied: kept as a :class:`SoftenedReading`, scored as a
+        preference, and never turned into an eligibility filter. The model is reading the
+        shopper's prose, which it is good at; it is not reading this network's catalogues,
+        which it has never seen. Measured, a filter on a field nothing here can decide
+        takes a three-slot shortlist to zero (see :data:`VOUCHED_FILTER_FIELDS`), so the
+        cost of trusting the model on that question is the whole page.
+        """
         self.dropped.extend(proposal.dropped)
         self._learn_category(proposal.category)
+        settled_by_the_buyer = {
+            key[0] for key in self.authoritative_constraints if key[1] in _SETTLED_OPS
+        }
         for constraint in proposal.constraints:
-            self._add_constraint(constraint, authoritative=False)
+            if constraint.field in settled_by_the_buyer and (
+                constraint.op in _SETTLED_OPS or constraint.field in _NUMERIC_FIELDS
+            ):
+                # A SECOND definite statement about a subject the shopper has already
+                # settled in their own words. `_add_constraint` has always refused to let a
+                # model overwrite the buyer, but falling through to `soften` put the second
+                # statement on `softened`, and the confirmation screen printed both — the
+                # shopper's under "Budget" and the model's under "Noted, but not used to
+                # rule anything out". Two headings, one subject, contradicting each other.
+                #
+                # This is ONE test and not two, and the pair-wise version it replaces is why
+                # it is worth saying so: testing `constraint.key in
+                # self.authoritative_constraints` catches only the exact echo, and every op
+                # that walked past it was measured. With the shopper's `price_usd lte 200`
+                # on file, a model `price_usd gte 100` rendered "price at least 100 dollars"
+                # beside their own ceiling — a floor they never uttered, with a `maximize
+                # price` preference behind it — and a model `price_usd eq 200` rendered
+                # "price is 200 dollars" beside it. With `size eq 10` on file, a model `size
+                # gte 10` did the same on the one other field `VOUCHED_FILTER_FIELDS` names.
+                # The key test is also strictly redundant: every op the buyer's own words can
+                # mint is in `_SETTLED_OPS`, so an exact echo is always caught here too.
+                #
+                # `_SETTLED_OPS` and not every op: a model proposing an op this lexicon
+                # cannot mint on a field the buyer named (`material contains "merino wool"`
+                # beside their own `material eq merino-wool`) is still softened and still
+                # shown, because that is the model being REFUSED rather than the model
+                # contradicting the shopper, and the shopper is owed the record of it.
+                # "stated ... themselves" and not "settled the subject": a shopper who said
+                # "over $100" settled one END of a range, and telling them they had settled
+                # the whole of it would be this record making the same class of overclaim
+                # the confirmation screen was repaired for.
+                self._note_dropped(
+                    f"the model proposed {constraint.field} {constraint.op} "
+                    f"{constraint.value!r}, and the shopper had stated {constraint.field} "
+                    f"themselves; theirs stands and the model's is not shown beside it"
+                )
+                continue
+            if vouched_as_filter(constraint):
+                self._add_constraint(constraint, authoritative=False)
+                continue
+            reading, preference = soften(
+                constraint,
+                reason=(
+                    f"nothing in this service established {constraint.field} "
+                    f"{constraint.value!r} from your own words, and it cannot check whether "
+                    f"stores can answer it, so it is a preference rather than a filter that "
+                    f"might exclude every store"
+                ),
+            )
+            if reading is not None:
+                self._add_softened(reading)
+            if preference is not None:
+                self._add_preference(preference, authoritative=False)
+            if reading is None:
+                self.dropped.append(
+                    f"constraint {constraint.field} carries op {constraint.op!r}, which has "
+                    f"no honest reading as a score direction; dropped rather than bent"
+                )
         for preference in proposal.preferences:
             self._add_preference(preference, authoritative=False)
         if self.budget_band is None and proposal.budget_band:
             self.budget_band = proposal.budget_band
+
+    def _note_dropped(self, note: str) -> None:
+        """Record one refusal, once.
+
+        The clarify loop consults the model once per round and a scripted or deterministic
+        model says the same thing each time, so an unguarded ``append`` writes the identical
+        sentence two and three times over. ``_add_softened`` next door has always
+        de-duplicated; this list did not, and it is read by a human.
+        """
+        if note not in self.dropped:
+            self.dropped.append(note)
+
+    def _add_softened(self, reading: SoftenedReading) -> None:
+        if any(
+            existing.field == reading.field and existing.op == reading.op
+            for existing in self.softened
+        ):
+            return
+        self.softened.append(reading)
 
     def _learn_category(self, category: str | None) -> None:
         """Take the first category anybody names. Nothing already on file is re-judged.
@@ -1151,6 +1850,8 @@ class IntentDraft:
         existing = self.constraints.get(constraint.key)
         if existing is not None and not authoritative:
             return
+        if authoritative:
+            self.authoritative_constraints.add(constraint.key)
         if existing is not None and existing.value == constraint.value:
             return
         self.constraints[constraint.key] = constraint
@@ -1161,6 +1862,8 @@ class IntentDraft:
 
     def _add_preference(self, preference: Preference, *, authoritative: bool) -> None:
         existing = self.preferences.get(preference.key)
+        if authoritative:
+            self.authoritative_preferences.add(preference.key)
         if existing is not None and not authoritative:
             return
         self.preferences[preference.key] = preference
@@ -1179,7 +1882,15 @@ class IntentDraft:
     # -- what is still missing ---------------------------------------------------------
 
     def gaps(self) -> tuple[str, ...]:
-        """Every gap still open, in the order R1's questions close them."""
+        """Every gap still open, in the order R1's questions close them.
+
+        "Open" means *the intent is still missing this*, which is a fact about the intent
+        and not about the conversation. A gap the shopper answered unusably is still open
+        by this measure, and deliberately so: a shopper who answers "what's your budget?"
+        with "no idea honestly" has answered, and the budget is still missing. Both are
+        true and they are different facts, so :attr:`understood` carries the second rather
+        than this list shifting its meaning to cover it.
+        """
         open_gaps: list[str] = []
         if not self.specific:
             open_gaps.append(GAP_USE_CASE)
@@ -1189,9 +1900,59 @@ class IntentDraft:
             open_gaps.append(GAP_CONSTRAINTS)
         return tuple(open_gaps)
 
+    def answered_gaps(self) -> frozenset[str]:
+        """Gaps the shopper has been asked about and replied to at all."""
+        return frozenset(record.gap for record in self.understood)
+
+    def gaps_the_shopper_addressed(self) -> frozenset[str]:
+        """Gaps whose answer told this service *something*, however little.
+
+        The distinction between this and :meth:`answered_gaps` is the whole of when a
+        question may be asked twice, and it is finer than it first looks.
+
+        "not sure, something nice" is a hedge: every word of it is in ``_VAGUE`` or
+        ``_FILLER``, it yields no term of any kind, and asking again is exactly what R1's
+        three questions are for — ``fixtures/dialogues/maximally_vague_gift.json`` is the
+        golden built around precisely that. (Its ``expected_intent`` is graded, by
+        ``.swarm-loop/acceptance/test_e7_buyer.py``; its QUESTION COUNT and order were
+        graded by nothing until ``test_every_shipped_dialogue_still_asks_the_number_of
+        _questions_it_declares``, which this method's behaviour is what that test protects.)
+
+        "It must be cherry wood, and at least 48 inches wide" is not a hedge. It yields a
+        material this service records (softly, because nothing here can filter on it), and
+        re-asking it in different words is the app telling the shopper it was not
+        listening. That is the second half of the owner's screenshot.
+
+        So: a gap is closed to further questions when the answer produced something FOR
+        THAT GAP. Not merely when the answer produced something: keyed that way, "at least
+        48 inches wide" answered to "what's your budget?" closed the budget — the shopper
+        was never asked about money again, and the page then asserted they had answered
+        about it. An answer is filed against what it produced (:attr:`GapAnswer.addressed`),
+        so a subject nobody has spoken to yet stays open. A gap answered with nothing at all
+        stays open too, which costs the shopper a question but never costs them a false
+        claim — what they said is on :attr:`understood` either way.
+        """
+        return frozenset(
+            gap for record in self.understood for gap in record.addressed if record.used
+        )
+
     def next_gap(self) -> str | None:
-        gaps = self.gaps()
-        return gaps[0] if gaps else None
+        """The next gap worth putting to the shopper.
+
+        A gap the shopper has already told this service something about is not asked again,
+        even when what they said could not become a filter. Re-asking is how the loop spent
+        two of R1's three questions on one gap and still reported it had heard nothing — the
+        second half of the owner's screenshot. If the answer was real but unusable, the fix
+        is to say so, not to ask the same thing in different words.
+
+        A gap answered with a pure hedge is still open to a second question; see
+        :meth:`gaps_the_shopper_addressed` for where that line falls and why.
+        """
+        addressed = self.gaps_the_shopper_addressed()
+        for gap in self.gaps():
+            if gap not in addressed:
+                return gap
+        return None
 
     def _has_narrowing_constraint(self) -> bool:
         """Is anything but price narrowing the search?
@@ -1212,6 +1973,195 @@ class IntentDraft:
 
     def sorted_preferences(self) -> tuple[Preference, ...]:
         return tuple(sorted(self.preferences.values(), key=lambda item: item.field))
+
+    def stated_constraints(self) -> tuple[HardConstraint, ...]:
+        """Only the constraints the buyer's own literal words established."""
+        return tuple(
+            item for item in self.sorted_constraints() if item.key in self.authoritative_constraints
+        )
+
+    def stated_preferences(self) -> tuple[Preference, ...]:
+        """Only the preferences the buyer's own literal words established."""
+        return tuple(
+            item for item in self.sorted_preferences() if item.key in self.authoritative_preferences
+        )
+
+
+def _gaps_addressed(reading: Extraction) -> tuple[str, ...]:
+    """Which of R1's three subjects one utterance actually spoke to.
+
+    The mirror of :meth:`IntentDraft.gaps`, one utterance at a time: that method asks what
+    the INTENT is still missing, this one asks what this ANSWER was about. The two are
+    different questions and the confirmation screen needs both — an answer can speak to a
+    subject without closing it (a softened material narrows nothing and is still an answer
+    about must-haves), and it can close one it was never asked about.
+
+    Empty means the utterance produced nothing at all — a pure hedge. That is not a failure
+    to classify it; it is the fact :meth:`IntentDraft.gaps_the_shopper_addressed` acts on,
+    and the reason a hedge may be followed by a second question.
+    """
+    terms = _terms_of(reading)
+    addressed: list[str] = []
+    # `specific` is a token COUNT — "two content words that are neither filler nor a hedge"
+    # — so on its own it credits utterances that told this service nothing. Measured, all
+    # answering the budget question: "no idea honestly" and "not sure" yield no gap, while
+    # "i really cannot say" and "depends honestly" clear the two-word floor and used to be
+    # filed against the use-case gap. Two hedges that mean the same thing produced opposite
+    # sentences on the page. An utterance that yielded no term at all addressed nothing,
+    # whatever its word count; a recognised CATEGORY is a term, so it still counts.
+    if reading.category is not None or (reading.specific and terms):
+        addressed.append(GAP_USE_CASE)
+    # Money, in either of the two shapes a money reading can take: a band on its own
+    # ("around $40") or the ceiling/floor `extract` mints a `price_usd` constraint from.
+    # A "cheaper is better" preference counts too — a shopper who answers "what's your
+    # budget?" with "as cheap as possible" has answered about money, and re-asking is the
+    # deafness this whole record exists to stop.
+    if (
+        not reading.budget.empty
+        or any(constraint.field == "price_usd" for constraint in reading.constraints)
+        or any(preference.field == "price_usd" for preference in reading.preferences)
+    ):
+        addressed.append(GAP_BUDGET)
+    # Must-haves. A price bound is deliberately not one of them, for the same reason
+    # `IntentDraft._has_narrowing_constraint` excludes it: a ceiling leaves every product in
+    # the category eligible, which is what the third question exists to fix.
+    if (
+        any(constraint.field != "price_usd" for constraint in reading.constraints)
+        or reading.softened
+        or any(preference.field != "price_usd" for preference in reading.preferences)
+    ):
+        addressed.append(GAP_CONSTRAINTS)
+    return tuple(addressed)
+
+
+def _terms_of(reading: Extraction) -> tuple[str, ...]:
+    """What one utterance actually yielded, in words a shopper would recognise.
+
+    Empty means the turn produced nothing — which is the fact the confirmation screen needs
+    in order to be honest about an answer it could not use.
+
+    Every entry is printed verbatim at the shopper, inside "We kept …", so none of them may
+    be a machine term. Measured before :func:`_describe_constraint` existed: the turns "I
+    want a cherry wood table" / "oak, under $300" put ``We kept price usd lte 300.0,
+    material is oak`` on the confirmation screen — the raw field, the raw op and a float.
+    """
+    used: list[str] = []
+    for constraint in reading.constraints:
+        used.append(_describe_constraint(constraint))
+    for softened in reading.softened:
+        used.append(softened.describe())
+    for preference in reading.preferences:
+        if any(softened.field == preference.field for softened in reading.softened):
+            continue
+        # The field goes through `_field_in_words` here too, not only in the constraint
+        # branch: "as cheap as possible" was printing "the lowest possible price usd", and
+        # "something lightweight" "the lowest possible weight grams".
+        name, unit = _field_in_words(preference.field)
+        spelling = _PREFERENCE_SPELLINGS.get(preference.direction, preference.direction)
+        used.append(f"{spelling} {name}{f' in {unit}' if unit else ''}")
+    if reading.category is not None:
+        used.append(f"category {reading.category}")
+    if reading.budget.band is not None and not reading.constraints:
+        used.append(f"a budget around {reading.budget.band}")
+    return tuple(used)
+
+
+#: How an op reads in a SENTENCE, for text put in front of the shopper. Deliberately not
+#: named ``_OP_SPELLINGS``: that name is already taken in this module, by the map that reads
+#: a MODEL's op spelling back into R19's vocabulary, and shadowing it turned every proposed
+#: ``lte`` into the string "at most" and had `_proposed_constraints` drop it as an op the
+#: vocabulary cannot express.
+_OP_IN_WORDS: dict[str, str] = {
+    "eq": "is",
+    "in": "is one of",
+    "contains": "includes",
+    "gte": "at least",
+    "lte": "at most",
+}
+
+#: The ops that state ONE definite thing about a field — a bound or an exact value. Two of
+#: them on the same field are two claims about one subject, which is what a shopper reads as
+#: a contradiction. ``in`` and ``contains`` are deliberately absent: this lexicon can never
+#: mint either, so a model proposing one on a field of VOCABULARY is being refused rather
+#: than disagreeing, and the shopper is owed the record of the refusal.
+_SETTLED_OPS: frozenset[str] = frozenset({"lte", "gte", "eq"})
+
+#: The fields whose values are NUMBERS. On these the op does not separate a refusal from a
+#: contradiction, so nothing the model says about one the shopper has already settled is
+#: shown beside theirs. Measured: with "a linen duvet cover under $200" on file, a model
+#: ``price_usd in [100, 200]`` walked past the op test and the page printed "price is one of
+#: 100, 200" under `Budget: at most $200`; ``price_usd contains "200"`` did the same, and
+#: with "running shoes size 10" on file so did ``size in [10, 11]``. A range and a bound are
+#: competing claims about one number however they are spelled.
+_NUMERIC_FIELDS: frozenset[str] = frozenset({"price_usd", "size"})
+
+_PREFERENCE_SPELLINGS: dict[str, str] = {
+    "minimize": "the lowest possible",
+    "maximize": "the highest possible",
+    "prefer": "preferably",
+}
+
+
+#: Field-name suffixes that are UNITS rather than part of the name. The contract asks a
+#: model to put the unit in the field ("a width in inches is ``width_in``"), and the lexicon
+#: mints ``price_usd`` the same way, so the tail has to be read back off or the sentence is
+#: "price usd at most 300" instead of "price at most $300". The same table
+#: ``intent.ts::FIELD_UNITS`` keeps for the same reason, on the other side of the wire.
+_FIELD_UNITS: dict[str, str] = {
+    "in": "inches",
+    "cm": "cm",
+    "mm": "mm",
+    "ft": "feet",
+    "m": "metres",
+    "g": "grams",
+    "grams": "grams",
+    "kg": "kg",
+    "lb": "lb",
+    "lbs": "lb",
+    "oz": "oz",
+    "ml": "ml",
+    "l": "litres",
+    "usd": "",
+    "days": "days",
+    "hours": "hours",
+}
+
+
+def _field_in_words(field: str) -> tuple[str, str]:
+    """``("width", "inches")`` for ``width_in``; ``("material", "")`` for ``material``."""
+    parts = field.split("_")
+    if len(parts) > 1 and parts[-1].lower() in _FIELD_UNITS:
+        return " ".join(parts[:-1]), _FIELD_UNITS[parts[-1].lower()]
+    return " ".join(parts), ""
+
+
+def _value_in_words(value: Any) -> str:
+    """A value as a shopper would write it — never a Python literal.
+
+    Measured: "something lightweight and waterproof" put ``waterproof is True`` on the
+    confirmation screen, and "size 10" put ``size is 10.0``. A capitalised ``True`` and a
+    float with a trailing zero are both this service showing its insides.
+    """
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    if isinstance(value, (list, tuple)):
+        return ", ".join(_value_in_words(item) for item in value)
+    return str(value)
+
+
+def _describe_constraint(constraint: HardConstraint) -> str:
+    """One hard constraint in the shopper's own terms, money spelled as money."""
+    spelling = _OP_IN_WORDS.get(constraint.op, constraint.op)
+    if constraint.field == "price_usd":
+        amount = _as_float(constraint.value)
+        if amount is not None:
+            money = f"${amount:,.2f}".removesuffix(".00")
+            return f"a budget of {spelling} {money}"
+    name, unit = _field_in_words(constraint.field)
+    value = _value_in_words(constraint.value)
+    return f"{name} {spelling} {value}{f' {unit}' if unit else ''}".strip()
 
 
 def _as_float(value: Any) -> float | None:

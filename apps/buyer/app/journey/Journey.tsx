@@ -1235,6 +1235,13 @@ export function Journey({ fetcher = browserFetch }: JourneyProps = {}) {
             answers={answers}
             intent={outcome.intent}
             unresolved={outcome.unresolved}
+            // Forwarded, not derived. `unresolved` alone cannot tell a gap nobody answered
+            // from one the shopper answered in words this service could not convert, and
+            // rendering the same "we never got an answer" sentence for both is what told a
+            // shopper who had just typed "It must be cherry wood, and at least 48 inches
+            // wide" that they had said nothing.
+            understood={outcome.understood}
+            softened={outcome.softened}
             onAnswer={say}
             onConfirm={confirm}
             busy={busy}

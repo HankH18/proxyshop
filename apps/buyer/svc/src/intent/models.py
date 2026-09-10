@@ -222,6 +222,18 @@ def _as_text_tuple(values: Iterable[Any]) -> tuple[str, ...]:
     return tuple(_clean(value) for value in values if _clean(value))
 
 
+def _as_plain(record: Any) -> Any:
+    """A record's own ``to_dict`` if it has one, otherwise the record unchanged.
+
+    ``ClarifyOutcome`` carries ``GapAnswer`` and ``SoftenedReading`` rows that live in
+    ``buyer_svc.intent.extraction``, and importing them here would close the loop
+    ``extraction -> models -> extraction``. Duck-typing the serialiser keeps the dependency
+    pointing one way, which is why these fields are typed ``Any``.
+    """
+    to_dict = getattr(record, "to_dict", None)
+    return to_dict() if callable(to_dict) else record
+
+
 @dataclass(frozen=True)
 class HardConstraint:
     """R19: an eligibility **filter** — ``field``/``op``/``value``, never weighted.
@@ -374,9 +386,24 @@ class ClarifyOutcome:
     questions: tuple[str, ...] = ()
     answers: tuple[str, ...] = ()
     transcript: tuple[str, ...] = ()
+    #: Gaps the shopper was never asked about, or was asked and never answered. **Not**
+    #: every gap still open: a gap they answered unusably belongs on ``understood``, and
+    #: putting it here is what made the confirmation screen say "We never got an answer
+    #: about: constraints" to a shopper who had just answered.
     unresolved: tuple[str, ...] = ()
     llm_calls: int = 0
     confirmed: bool = False
+    #: One record per question actually put to the shopper: what was asked, what they said,
+    #: and what this service managed to make of it. ``used`` empty is the honest form of
+    #: "you answered and we could not use it".
+    understood: tuple[Any, ...] = ()
+    #: Must-haves kept but deliberately not enforced as eligibility filters, with the
+    #: reason. See ``buyer_svc.intent.extraction.VOUCHED_FILTER_FIELDS``.
+    softened: tuple[Any, ...] = ()
+    #: Everything a model proposed that this service refused, with the reason. Write-only
+    #: at HEAD — ``IntentDraft.dropped`` was extended and read by nobody — which is the same
+    #: blindness that hid the dropped answer, one layer down.
+    dropped: tuple[str, ...] = ()
 
     _FIELDS = (
         "intent",
@@ -386,6 +413,9 @@ class ClarifyOutcome:
         "unresolved",
         "llm_calls",
         "confirmed",
+        "understood",
+        "softened",
+        "dropped",
     )
 
     def __post_init__(self) -> None:
@@ -394,6 +424,9 @@ class ClarifyOutcome:
         object.__setattr__(self, "transcript", _as_text_tuple(self.transcript))
         object.__setattr__(self, "unresolved", tuple(self.unresolved))
         object.__setattr__(self, "confirmed", False)
+        object.__setattr__(self, "understood", tuple(self.understood))
+        object.__setattr__(self, "softened", tuple(self.softened))
+        object.__setattr__(self, "dropped", _as_text_tuple(self.dropped))
         if len(self.questions) > MAX_CLARIFYING_QUESTIONS:
             raise QuestionCapBroken(
                 f"R1 caps the clarification loop at {MAX_CLARIFYING_QUESTIONS} questions; "
@@ -417,6 +450,9 @@ class ClarifyOutcome:
             "unresolved": list(self.unresolved),
             "llm_calls": self.llm_calls,
             "confirmed": self.confirmed,
+            "understood": [_as_plain(record) for record in self.understood],
+            "softened": [_as_plain(record) for record in self.softened],
+            "dropped": list(self.dropped),
         }
 
 

@@ -75,11 +75,32 @@ __all__ = [
 #: ``(system, prompt)`` PAIR, so a reworded contract here silently stops every recorded
 #: reply from matching and the loop quietly falls back to its canned wording with a green
 #: suite. If this text has to change, the fixture changes with it.
+#:
+#: **Why it now names a reply format, which it did not.** The contract described the
+#: *split* R19 wants and never said how to write it down, while
+#: :func:`~buyer_svc.intent.extraction.parse_llm_reply` reads a JSON object and nothing
+#: else. Measured against the live model on this stack (``LLM_PROVIDER=anthropic``,
+#: ``BUYER_MODEL=claude-sonnet-5``), one call with the old contract and the turns "I want a
+#: cherry wood table under $200" / "It must be cherry wood, and at least 48 inches wide"
+#: came back as prose whose first block was a Markdown table reading ``| material | = |
+#: cherry wood |`` and ``| width | >= | 48 in |``. The model had read the shopper
+#: correctly; ``_load_json_object`` found no ``{``, the bare-question fallback needs one
+#: line ending in ``?``, and the whole reply was discarded. Nothing caught it because every
+#: reply in the fixture and every ``llm_script`` in the goldens is hand-authored JSON, so
+#: the suite proved the parser reads JSON and nothing anywhere proved a model writes it.
 INTENT_CONTRACT = (
     "INTENT CONTRACT\n"
     "Split the request into hard constraints (field/op/value, filters) and preferences "
     "(field/direction/weight, scores). Ask a clarifying question only when a constraint "
-    "is unusable."
+    "is unusable.\n"
+    "Reply with a single JSON object and nothing else - no prose, no Markdown, no code "
+    'fence. Its keys are "hard_constraints" (a list of {"field","op","value"}), '
+    '"preferences" (a list of {"field","direction","weight"}) and "clarifying_question" '
+    "(a string, or null when nothing needs asking).\n"
+    'op is one of "eq", "lte", "gte", "in", "contains". direction is one of "maximize", '
+    '"minimize", "prefer". weight is a number between 0 and 1. field is a snake_case '
+    "attribute name; put a unit in the name rather than in the value, so a width in inches "
+    'is "width_in". Omit a list rather than inventing an entry for it.'
 )
 
 #: How the buyer's turns are rendered into the user half of the prompt. Also the recorded
@@ -167,13 +188,14 @@ def clarify(
         if len(questions) >= cap:
             break
 
-        questions.append(_question_for(gap, proposal, questions))
+        question = _question_for(gap, proposal, questions)
+        questions.append(question)
         if not pending:
             # The buyer walked away mid-loop. The question was asked and stays on the
             # record; the intent is built from what they did say, with the gap named in
             # `unresolved` rather than filled in with a plausible invention.
             break
-        draft.absorb(pending.pop(0), gap=gap)
+        draft.absorb(pending.pop(0), gap=gap, question=question)
 
     # Anything the buyer volunteered beyond the questions we asked is still theirs to say.
     for extra in pending:
@@ -184,8 +206,16 @@ def clarify(
         questions=tuple(questions),
         answers=tuple(draft.answers),
         transcript=tuple(draft.transcript),
+        # Every gap the INTENT is still missing, which is what "unresolved" has always
+        # meant here and still does: a shopper who answers the budget question with "no
+        # idea honestly" has answered, and the budget is still unresolved. Both facts are
+        # true and they are different facts, so they get different fields rather than one
+        # field with a shifting meaning — `understood` below carries the second.
         unresolved=draft.gaps(),
         llm_calls=llm_calls,
+        understood=tuple(draft.understood),
+        softened=tuple(draft.softened),
+        dropped=tuple(draft.dropped),
     )
 
 
@@ -251,7 +281,7 @@ def _build_intent(draft: IntentDraft, *, intent_id: str | None, now: datetime | 
         query=query,
         budget_band=band,
         intent_id=intent_id or f"int-{uuid.uuid4().hex}",
-        cluster_id=_cluster_id(query, band, constraints, preferences),
+        cluster_id=_cluster_id(query, band, draft.stated_constraints(), draft.stated_preferences()),
         created_at=moment.astimezone(UTC).isoformat().replace("+00:00", "Z"),
         hard_constraints=constraints,
         preferences=preferences,
@@ -266,6 +296,20 @@ def _cluster_id(query: str, band: str, constraints: Any, preferences: Any) -> st
     never from the session: two buyers who ask for the same thing in the same words land
     in the same cluster, which is the whole point. ``intent_id`` stays unique per session
     precisely because these two identities are different questions.
+
+    **Only the buyer's own terms go in**, which is why the callers pass
+    ``draft.stated_constraints()`` rather than everything on the draft. A model's
+    contribution is not part of "the same thing in the same words": ask twice and a live
+    model may embellish differently, so hashing its output makes the cluster a function of
+    sampling temperature rather than of the need. That is not hypothetical here — the
+    contract now asks the model for JSON, so from this commit it really does contribute,
+    where before its reply was discarded unread and the distinction cost nothing.
+
+    It is also load-bearing for the demo, which is how a drifting hash would be noticed:
+    ``apps/buyer/devstack/demo-market.json`` hardcodes two cluster ids in every envelope's
+    ``pursue_clusters``, and a store agent declines any solicitation whose cluster it does
+    not pursue (``DeclineReason.cluster_not_pursued``). A hash that moved with the model
+    would empty the demo shortlist and read as a market failure rather than as a hash.
     """
     payload = json.dumps(
         {

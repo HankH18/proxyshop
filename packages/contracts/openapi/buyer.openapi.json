@@ -1842,6 +1842,24 @@
                       "type": "array",
                       "title": "Unresolved"
                     },
+                    "understood": {
+                      "items": {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      "type": "array",
+                      "title": "Understood",
+                      "default": []
+                    },
+                    "softened": {
+                      "items": {
+                        "additionalProperties": true,
+                        "type": "object"
+                      },
+                      "type": "array",
+                      "title": "Softened",
+                      "default": []
+                    },
                     "confirmed": {
                       "type": "boolean",
                       "title": "Confirmed",
@@ -1864,7 +1882,7 @@
                     "Are there any must-haves - a size, a colour, a material - that would rule an option out?"
                   ],
                   "intent": {
-                    "intent_id": "int-92b6816bdfe941269086a32fd6d6936f",
+                    "intent_id": "int-e128db37ed7c40269e7453b8d79efb6d",
                     "cluster_id": "cl-f63ee102f7a96f9e",
                     "query": "I need a gift for my brother; he drinks a lot of coffee",
                     "hard_constraints": [
@@ -1877,13 +1895,48 @@
                     "preferences": [],
                     "currency": "USD",
                     "budget_band": "0-50",
-                    "created_at": "2026-09-07T23:55:09.887633Z",
+                    "created_at": "2026-09-09T21:20:36.432849Z",
                     "schema_version": "1.0.0",
                     "category": "coffee"
                   },
                   "unresolved": [
                     "constraints"
                   ],
+                  "understood": [
+                    {
+                      "gap": "use_case",
+                      "question": "What are you shopping for, and what will you use it for?",
+                      "answer": "he drinks a lot of coffee",
+                      "used": [
+                        "category coffee"
+                      ],
+                      "addressed": [
+                        "use_case"
+                      ],
+                      "understood": true
+                    },
+                    {
+                      "gap": "budget",
+                      "question": "What is the most you would want to spend?",
+                      "answer": "under $30",
+                      "used": [
+                        "a budget of at most $30"
+                      ],
+                      "addressed": [
+                        "budget"
+                      ],
+                      "understood": true
+                    },
+                    {
+                      "gap": "constraints",
+                      "question": "Are there any must-haves - a size, a colour, a material - that would rule an option out?",
+                      "answer": "not really",
+                      "used": [],
+                      "addressed": [],
+                      "understood": false
+                    }
+                  ],
+                  "softened": [],
                   "confirmed": false
                 }
               }
