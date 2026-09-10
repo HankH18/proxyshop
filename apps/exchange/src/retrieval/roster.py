@@ -124,6 +124,7 @@ from ingest.graph import (
     DEFAULT_OVERSAMPLE,
     DEFAULT_ROSTER_PRODUCTS,
     ShopCandidate,
+    ShopOffer,
     UnretrievableQuery,
     VectorIndexUnusable,
     candidate_shops,
@@ -131,7 +132,7 @@ from ingest.graph import (
 
 from proxyshop_support.neo4j_auth import graph_credentials
 
-from .criteria import MalformedIntent, UndecidableCriterion, build_query
+from .criteria import MalformedIntent, UndecidableCriterion, build_query, is_budget_bound
 from .fit import FitAssessment
 from .relevance import identity_off_topic
 from .service import CandidateRetrieval, RetrievalResult
@@ -139,14 +140,18 @@ from .sources import GraphCandidateSource
 
 __all__ = [
     "DEFAULT_SOLICITED_SHOPS",
+    "SUBSTITUTED_OFF_TOPIC",
+    "SUBSTITUTED_OVER_BUDGET",
     "GraphShopRoster",
     "NoShopRoster",
+    "PassedOver",
     "ShopRoster",
     "ShopRosterSource",
     "SolicitedShop",
     "graph_roster_from_env",
     "graph_sessions_from_env",
     "repoint_organic_products",
+    "substitution_reason",
 ]
 
 #: How many shops one graph-sourced solicitation may name.
@@ -157,6 +162,36 @@ __all__ = [
 #: states one. The route clamps this against ``MAX_ROSTER_ENTRIES`` as well, so the graph door
 #: can never be the wider of the two.
 DEFAULT_SOLICITED_SHOPS = 8
+
+#: :attr:`PassedOver.reason` when the BUDGET wall moved a shop off its best answer.
+SUBSTITUTED_OVER_BUDGET = "over_budget"
+
+#: :attr:`PassedOver.reason` when the ORGANIC gate moved a shop off its best answer.
+SUBSTITUTED_OFF_TOPIC = "off_topic"
+
+
+@dataclass(frozen=True)
+class PassedOver:
+    """The product a shop's one row was NOT staked on, and which rule moved it.
+
+    :func:`_solicited` spends a shop's single roster row on the best product it has that BOTH
+    the organic gate would keep and the buyer's budget admits. When that is not the shop's
+    best-fitting product, the shopper is shown a SUBSTITUTE — a different answer to their
+    question, at a different price, from a shop that had a closer one — and before this record
+    existed nothing on the served response said so. :meth:`GraphShopRoster.solicit` turns these
+    into ``roster_source.reason``, which is where :func:`repoint_organic_products` already
+    publishes the same class of fact about a STATED row.
+
+    It is deliberately NOT on :meth:`SolicitedShop.as_roster_row`: the roster row is the
+    question the exchange asks a store, and what the platform passed over is not part of it.
+    """
+
+    #: The product the shop would have been rostered on had neither rule narrowed the choice.
+    product_ref: str
+    #: :data:`SUBSTITUTED_OVER_BUDGET` or :data:`SUBSTITUTED_OFF_TOPIC`.
+    reason: str
+    #: The cheapest provenanced price for that product, or ``None`` if the crawl saw none.
+    list_price: float | None = None
 
 
 @dataclass(frozen=True)
@@ -201,6 +236,9 @@ class SolicitedShop:
     currency: str | None = None
     source_ids: tuple[str, ...] = ()
     variant_ref: str | None = None
+    #: What this shop's row was staked OFF, or ``None`` when it carries the shop's best
+    #: answer. See :class:`PassedOver`; it is reported on the response and never on the row.
+    passed_over: PassedOver | None = None
 
     @property
     def priced(self) -> bool:
@@ -242,9 +280,16 @@ class ShopRoster:
 
     ``reason`` is served back on the auction response, and on the SOLICITED path — anything
     :meth:`GraphShopRoster.solicit` or :class:`NoShopRoster` returns — it is non-``None``
-    exactly when :attr:`shops` is empty. An empty solicitation with no reason would be
+    whenever :attr:`shops` is empty. An empty solicitation with no reason would be
     indistinguishable from "the exchange never asked", which is the one reading that is
     certainly wrong once a graph is wired.
+
+    **It USED to be non-``None`` exactly when `shops` was empty, and that half is gone.**
+    :func:`substitution_reason` now also fills it on a roster that found shops, to say that a
+    shop is being shown on a product other than its best answer to the intent — the fact
+    :func:`repoint_organic_products` publishes here for a STATED row, said for the graph path.
+    A reader still cannot take a reason to mean "nobody was found"; it never could, which is
+    what the next paragraph was already about.
 
     **That biconditional is not a class invariant, and the wire is where it stops.**
     ``auction/routes.py`` builds ``ShopRoster(source="request", reason=repointed)`` for a
@@ -552,7 +597,33 @@ class GraphShopRoster:
                 keeps_cache[product_id] = cached
             return cached
 
-        solicited = _solicited(shops, fit=fit, keeps=keeps)
+        # WHAT THE SHOPPER CAN AFFORD, asked here for the same reason `keeps` is asked here:
+        # it decides WHICH product a shop is rostered on, never whether. `budget_reasons` is
+        # imported at call time because it lives in `exchange.ranking`, which imports this
+        # package — the dependency runs one way and a module-level import here would close the
+        # loop. It is the shipped wall itself rather than a restatement of it, so a row this
+        # passes and the shortlist then refuses can only be a live bid differing from the
+        # crawled price, never two spellings of the same rule drifting apart.
+        from ..ranking.filters import budget_reasons  # noqa: PLC0415 — see the comment above
+
+        bounds = [criterion for criterion in query.criteria if is_budget_bound(criterion)]
+
+        def affords(offer: ShopOffer | None) -> bool:
+            if not bounds:
+                return True
+            if offer is None:
+                return False
+            # Shaped exactly as `auction/collect.py::_list_price_bid` mints the fallback offer
+            # — `unit_price` and `total_price` both the observed price — so the prediction and
+            # the verdict read the same field of the same number.
+            priced = {
+                "unit_price": float(offer.price),
+                "total_price": float(offer.price),
+                "currency": offer.currency,
+            }
+            return not budget_reasons(priced, bounds)
+
+        solicited = _solicited(shops, fit=fit, keeps=keeps, affords=affords)
 
         # WHICH SHOPS, and WHICH PRODUCT, ARE TWO QUESTIONS AND THEY TAKE TWO NUMBERS.
         #
@@ -603,7 +674,11 @@ class GraphShopRoster:
             shops=kept,
             source=self.name,
             considered=result.considered,
-            reason=None,
+            # NOT always `None` on a non-empty roster, and that is the change this line
+            # carries: a shop staked on a substitute is a fact about a roster that FOUND
+            # shops, so it has nowhere else to be said. `substitution_reason` answers `None`
+            # when nothing was substituted, which is every auction that states no budget.
+            reason=substitution_reason(kept),
             elapsed_ms=elapsed_ms,
             fit=tuple(result.assessments),
         )
@@ -678,6 +753,7 @@ def _solicited(
     *,
     fit: Mapping[str, float],
     keeps: Callable[[str], bool] = lambda _product_id: True,
+    affords: Callable[[ShopOffer | None], bool] = lambda _offer: True,
 ) -> list[SolicitedShop]:
     """Pivot graph shops onto roster rows, dropping any that carries nothing eligible.
 
@@ -741,21 +817,84 @@ def _solicited(
     the exchange raises the four hosted ones to tier 1 afterwards. That function's
     "Inert on the demo" section carries the measurement and the git provenance.
 
+    WHY ``affords`` EXISTS — the same defect, one gate further down
+    ---------------------------------------------------------------
+    ``keeps`` predicts the ORGANIC gate's verdict. ``affords`` predicts the BUDGET wall's
+    (``exchange.ranking.filters.budget_reasons``), and it is here for the identical reason:
+    a shop gets one row, the row meets a rule it was not chosen against, and the shop dies
+    holding a product that rule would have kept. Measured on the served route against the
+    nineteen-store demo graph, ``"an office chair"`` with ``price_usd lte 500``::
+
+        www.branchfurniture.com  fit 0.613  "Verve Chair"      $599  wall: REFUSED
+        www.branchfurniture.com  fit 0.608  "Multitask Chair"  $279  wall: kept
+
+    0.008 apart, and five more of that shop's chairs sat under the ceiling in the same 125-row
+    window ($239, $249, $287, $319, $319). The roster took the Verve, the wall cut it at $599,
+    and the shopper was shown a blank page by a shop with six chairs they could afford.
+
+    It is a PREDICTION, like ``keeps``, and it predicts the fallback case exactly: the offer
+    judged here is the cheapest provenanced offer for the product, which is the number
+    ``auction/collect.py::_list_price_bid`` mints the fallback bid from. A shop with a LIVE
+    AGENT may bid something else — higher, and then the wall refuses a row this kept, which is
+    today's behaviour and no worse; or lower, and the wall keeps a row this passed over. Being
+    wrong in either direction costs a shop nothing it was not already at risk of, because it
+    cannot cost a shop its PLACE — see the paragraph above and the call site's own comment.
+
     Args:
         shops: the crawled shops to pivot, from ``ingest.graph.candidate_shops``.
         fit: ``{product_id: fit_score}`` for the products this retrieval vouched for.
         keeps: whether the shortlist's organic gate would keep this product's row. Consulted
             only to CHOOSE between products a shop already has; it never removes a shop.
+        affords: whether the buyer's stated budget admits this product's cheapest provenanced
+            offer, given as the offer itself so the predicate reads the same number the
+            fallback bid will carry. ``None`` is a product the shop has no provenanced offer
+            for — unaffordable by the same fail-closed rule ``budget_reasons`` applies to an
+            unreadable price. Consulted only to CHOOSE; it never removes a shop.
     """
     rows: list[SolicitedShop] = []
     for shop in shops:
         eligible = [pid for pid in shop.product_ids if pid in fit]
         if not eligible:
             continue
+        # The cheapest provenanced offer per product, computed BEFORE the choice rather than
+        # after it, because `affords` has to judge the same number the chosen row will carry.
+        # `(price, offer_id)` is the tie-break the single-product read used and is kept here so
+        # which offer a row quotes does not depend on which predicate asked for it.
+        cheapest_for: dict[str, ShopOffer] = {}
+        for offer in shop.offers:
+            held = cheapest_for.get(offer.product_id)
+            if held is None or (offer.price, offer.offer_id) < (held.price, held.offer_id):
+                cheapest_for[offer.product_id] = offer
         keepable = [pid for pid in eligible if keeps(pid)]
-        product_ref = max(keepable or eligible, key=lambda pid: (fit[pid], pid))
-        priced = [offer for offer in shop.offers if offer.product_id == product_ref]
-        cheapest = min(priced, key=lambda offer: (offer.price, offer.offer_id), default=None)
+        # Two narrowings, then the fallback, and the ORDER of the `or` chain is the rule: a
+        # product the organic gate keeps AND the shopper can afford, else one the gate keeps,
+        # else the shop's plain best. Each `or` is a shop that would otherwise reach nothing.
+        choices = keepable or eligible
+        affordable = [pid for pid in choices if affords(cheapest_for.get(pid))]
+        product_ref = max(affordable or choices, key=lambda pid: (fit[pid], pid))
+        # WHAT WAS PASSED OVER, recorded here because here is the only place that knows.
+        # `best` is the row this shop would have carried with neither predicate — the plain
+        # `max(eligible)` this function computed before `keeps` and `affords` existed — so
+        # `product_ref != best` is exactly "the shopper is being shown a substitute". The
+        # attribution asks the narrowings in the order they were applied: if the gate refused
+        # the shop's best answer then the gate is why it is not on the row, whatever the wall
+        # would also have said about it. Neither branch can be reached when its narrowing was
+        # empty, because an empty narrowing falls through to `choices` and `product_ref` is
+        # then `best` again.
+        best = max(eligible, key=lambda pid: (fit[pid], pid))
+        passed_over: PassedOver | None = None
+        if product_ref != best:
+            over = cheapest_for.get(best)
+            passed_over = PassedOver(
+                product_ref=best,
+                reason=(
+                    SUBSTITUTED_OFF_TOPIC
+                    if keepable and best not in keepable
+                    else SUBSTITUTED_OVER_BUDGET
+                ),
+                list_price=None if over is None else float(over.price),
+            )
+        cheapest = cheapest_for.get(product_ref)
         rows.append(
             SolicitedShop(
                 store_id=shop.store_id,
@@ -775,9 +914,56 @@ def _solicited(
                     else str(cheapest.native_variant_id)
                 ),
                 source_ids=tuple(shop.source_ids),
+                passed_over=passed_over,
             )
         )
     return rows
+
+
+def substitution_reason(shops: Sequence[SolicitedShop]) -> str | None:
+    """The sentence naming every shop shown as a SUBSTITUTE, or ``None`` when none was.
+
+    A shop gets one roster row. :func:`_solicited` may spend it on a product that is not the
+    shop's best answer to the intent — because the organic gate would refuse the best answer,
+    or because the buyer's own ceiling excludes it — and the shopper then sees a different
+    product, at a different price, with nothing saying either happened. The refusal that
+    WOULD have explained it (``offer_price_outside_budget`` naming the passed-over price, or
+    ``organic_row_off_topic``) is never written, because the substitution is what stops the
+    refusal from happening.
+
+    **Why here and not on the slot.** ``ranking.candidates.CANDIDATE_FIELDS`` carries no
+    roster field at all and ``ranking.rank()`` is not given the roster rows — the list price
+    reaches the ranker only as a positional sideband into ``attach_features`` — so there is no
+    seam at which a slot could carry "your best answer was $599". ``roster_source.reason`` is
+    the surface :func:`repoint_organic_products` already uses to say the platform chose a
+    product the caller did not, and this is the same fact about the graph path.
+
+    Measured on the live nineteen-store graph over the twelve intents
+    ``POST /buyer/intent/clarify`` produced for twelve shopper sentences, ``affords`` alone
+    moved five shops across four queries — ``nemoequipment.com`` from a $379.95 product to a
+    $69.95 one, ``purebulk.com`` from $1,035.95 to $8.95 — and ``roster_source.reason`` was
+    ``null`` on every one of them.
+    """
+    moved = [shop for shop in shops if shop.passed_over is not None]
+    if not moved:
+        return None
+    parts: list[str] = []
+    for shop in sorted(moved, key=lambda shop: shop.store_id):
+        over = shop.passed_over
+        assert over is not None  # noqa: S101 — narrowed by the filter above
+        priced = "" if over.list_price is None else f" at {over.list_price}"
+        why = (
+            "is above the budget this intent states"
+            if over.reason == SUBSTITUTED_OVER_BUDGET
+            else "is not what this intent asked for"
+        )
+        parts.append(f"{shop.store_id} (its closest product{priced} {why})")
+    return (
+        f"{len(moved)} of {len(shops)} rostered shop(s) are shown on a product OTHER than the "
+        f"one that best answers this intent, because the closest product each carries was "
+        f"passed over: {', '.join(parts)}. A shop gets one row, so what is shown for these "
+        f"shops is a substitute rather than their best answer"
+    )
 
 
 def repoint_organic_products(
@@ -1033,6 +1219,15 @@ def repoint_organic_products(
         stated: the roster rows off the request body, already validated by ``RosterEntry``.
         intent: the intent, as the route holds it.
 
+    **THE PRODUCT IT RE-POINTS ONTO MAY ITSELF BE A SUBSTITUTE**, and the sentence says so.
+    :func:`_solicited` stakes a graph shop on the best product it has that the organic gate
+    keeps and the buyer's budget admits — which is not always the shop's best answer to the
+    intent — so a stated row re-pointed onto that shop's row inherits the substitution. The
+    caller-facing sentence would otherwise read "the platform re-pointed this row onto the
+    product its own crawl says answers this intent" about a product the crawl says is the
+    shop's SECOND answer, which is a stronger claim than the platform can make.
+    :func:`substitution_reason` composes that clause, exactly as it does on the graph path.
+
     Returns:
         ``(rows, reason)`` — the rows to run the auction on, and a sentence naming what moved
         for the response's ``roster_source``, or ``None`` when nothing did.
@@ -1053,6 +1248,7 @@ def repoint_organic_products(
     for shop in found.shops:
         best.setdefault(str(shop.store_id), shop)
     moved: list[str] = []
+    substituted: list[SolicitedShop] = []
     for row in rows:
         pinned = row.get("product_ref")
         if pinned is not None and str(pinned) in vouched:
@@ -1076,13 +1272,19 @@ def repoint_organic_products(
         else:
             row.pop("variant_ref", None)
         moved.append(str(row.get("store_id") or ""))
+        # EVERY re-pointed row's shop, not just the substituted ones, so the clause below
+        # reads "1 of 2 re-pointed" rather than "2 of 2" — `substitution_reason` counts the
+        # substituted against the population it is handed.
+        substituted.append(shop)
     if not moved:
         return rows, None
+    substitution = substitution_reason(substituted)
     return rows, (
         f"the roster was stated by the caller and its shops are unchanged; the platform "
         f"re-pointed {len(moved)} of {len(rows)} row(s) onto the product its own crawl says "
         f"answers this intent, because this exchange's own search for this intent did not "
         f"return the product each named ({', '.join(sorted(set(moved)))})"
+        + ("" if substitution is None else f". Of those, {substitution}")
     )
 
 

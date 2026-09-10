@@ -614,3 +614,223 @@ def test_a_bid_whose_price_cannot_be_read_loses_the_budget_filter(price: float) 
 
     ceiling = HardCriterion(field="price_usd", op="lte", value=50.0)
     assert unanswerable_criteria([candidate], [ceiling], [{"key": "capacity_l"}]) == []
+
+
+# =====================================================================================
+# 5. The wall and the slot have to mean the SAME number
+# =====================================================================================
+# Everything above judges a bid whose two prices agree, which is every honest bid: with no
+# quantity field on the published `Offer` there is no arithmetic that makes a total smaller
+# than a unit. A bid where they DISAGREE is the case nothing in this tree drove, and it is
+# the one where "which number is the ceiling about" stops being rhetorical.
+#
+# Readers of ONE slot disagree about which field they mean, and the disagreement is loudest in
+# exactly this case:
+#
+#   * `apps/buyer/app/shortlist/ShortlistView.tsx::priceLine` leads with `total_price` and
+#     appends `"<unit_price> each"` ONLY WHEN THE TWO DIFFER — so the shopper reads
+#     "USD 19.99 — USD 500.00 each", the over-ceiling number, rendered.
+#   * `apps/buyer/app/learning/LearningPage.tsx` prints `unit_price` alone, and
+#     `docs/driving-the-stack.md` tells an API reader "the price is `price.unit_price`".
+#   * `_slot_prices` at the top of THIS file reads `total_price`.
+#
+# So a wall that reads one field is a wall that judges a number some reader is not shown. The
+# rule these tests pin is the only one that survives every reader: a ceiling is a promise
+# about EVERY price the exchange puts on the slot, so every price the offer states is judged.
+
+
+def test_no_price_the_slot_publishes_may_be_above_the_ceiling_the_wall_applied():
+    """A bid stating unit 500.00 and total 19.99 must not reach a $25 shopper's screen.
+
+    `total_price` alone clears the ceiling and `unit_price` alone does not, so a wall reading
+    either field on its own admits or refuses this bid for a reason the other field
+    contradicts. `shortlist_price` copies both onto the slot verbatim
+    (`exchange/ranking/serving.py`), and the SPA renders the 500.00 — under a ceiling the
+    shopper themselves stated at 25.00.
+
+    Driven over `POST /auctions`, then read back over
+    `GET /auctions/{auction_id}/shortlist`, because those two doors serve the slot through
+    different serialisers and a price published by only one of them is still published.
+    """
+    bid = _bid(STORE_A, 500.0)
+    bid["offer"] = {**bid["offer"], "unit_price": 500.0, "total_price": 19.99}
+    app = _wired_app(
+        bidders=Bidders({STORE_A: bid}),
+        catalog_prices={STORE_A: None},
+        stores=(STORE_A,),
+    )
+
+    body = _post(
+        app,
+        [_rostered(STORE_A, 25.0)],
+        _intent([{"field": "price_usd", "op": "lte", "value": 25.0}]),
+    )
+    served = [body["shortlist"], _shortlist(app, body["auction_id"])]
+
+    for shortlist in served:
+        for slot in shortlist["slots"]:
+            price = slot.get("price") or {}
+            over = {
+                field: value
+                for field, value in price.items()
+                if isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and field in ("unit_price", "total_price")
+                and value > 25.0
+            }
+            assert not over, (
+                f"a slot served under a 25.00 ceiling publishes {over} — the shopper is shown "
+                f"a price they said they could not pay: {json.dumps(slot)}"
+            )
+
+
+def test_the_refusal_names_the_field_whose_price_was_over_the_ceiling():
+    """And it is refused with a reason, not merely absent.
+
+    R10 keeps a rostered store visible, so "no slot" is not by itself the answer — the store
+    is in `excluded` and the sentence there has to name the number that failed, or a merchant
+    reading it cannot tell an over-ceiling bid from an unreadable one.
+    """
+    bid = _bid(STORE_A, 500.0)
+    bid["offer"] = {**bid["offer"], "unit_price": 500.0, "total_price": 19.99}
+    app = _wired_app(
+        bidders=Bidders({STORE_A: bid}),
+        catalog_prices={STORE_A: None},
+        stores=(STORE_A,),
+    )
+
+    body = _post(
+        app,
+        [_rostered(STORE_A, 25.0)],
+        _intent([{"field": "price_usd", "op": "lte", "value": 25.0}]),
+    )
+    reasons = _reasons_for(body, STORE_A)
+
+    assert any(reason.startswith(BUDGET_PREFIX) for reason in reasons), reasons
+    assert any("unit_price" in reason and "500.0" in reason for reason in reasons), reasons
+
+
+def test_a_bid_whose_two_prices_both_clear_the_ceiling_is_still_shortlisted():
+    """The positive control, and the one that keeps this from being a blanket refusal.
+
+    Nothing about judging every stated price refuses a bid that states two DIFFERENT prices
+    honestly — a multi-unit total above its unit price is judged on the total, which is what
+    it always was, and both numbers here are under the ceiling.
+    """
+    bid = _bid(STORE_A, 20.0)
+    bid["offer"] = {**bid["offer"], "unit_price": 10.0, "total_price": 20.0}
+    app = _wired_app(
+        bidders=Bidders({STORE_A: bid}),
+        catalog_prices={STORE_A: None},
+        stores=(STORE_A,),
+    )
+
+    body = _post(
+        app,
+        [_rostered(STORE_A, 10.0)],
+        _intent([{"field": "price_usd", "op": "lte", "value": 25.0}]),
+    )
+    slots = body["shortlist"]["slots"]
+
+    assert [slot["bid_ref"] for slot in slots] == [mint_bid_id(body["auction_id"], STORE_A)], body
+    assert (slots[0].get("price") or {}).get("unit_price") == pytest.approx(10.0), slots[0]
+
+
+# =====================================================================================
+# 6. R19 — the ceiling is decided against the STORE'S OWN NUMBER, and this pins that
+# =====================================================================================
+# These two do NOT assert a repair. They pin an exposure that is open at HEAD and is not
+# closable from `ranking/filters.py`, so that it is written down and cannot regress quietly
+# into something worse. `budget_reasons`' docstring carries the argument; this is the
+# measurement.
+#
+# The bound is compared against `offer_price(offer)` — the number the bidding store typed —
+# while the exchange holds a crawled price for the same product on the same auction, on
+# `BidEntry.list_price`. It never looks at it. R19 says unverified data cannot satisfy a hard
+# constraint and a price bound is a hard constraint; a bid-stated price is exactly unverified
+# data.
+#
+# Whether that is exploitable turns entirely on one field the CALLER supplies:
+#
+#   row states NO max_discount_pct  ->  `collect._price_refusal` ABSTAINS by design (its own
+#                                       docstring: "an undeclared undercut on a row that
+#                                       states no authorized depth, which R10 requires the
+#                                       exchange to keep"), so the bid is admitted at whatever
+#                                       it says.
+#   row states max_discount_pct: N  ->  the bid may not go below N% under list, or it is
+#                                       `bid_price_unreconcilable` and the store is
+#                                       represented at the crawled price instead.
+#
+# And the GRAPH path never states one: `SolicitedShop.as_roster_row` writes `store_id`, `tier`,
+# `product_ref`, `list_price`, `currency` and `variant_ref` and nothing else. So the exchange's
+# own crawl-sourced roster is the UNGUARDED shape, and the demo's stated roster
+# (`deploy/demo/buyer-roster.json`, 12-20% on its four bidding stores) is the guarded one.
+# The four shipped demo agents decline rather than send an under-ceiling lie — they fold the
+# buyer's field through `PRICE_CONSTRAINT_FIELDS` and check their own catalogue's
+# `LIST_PRICE_KEY` — but that is the agent's manners, not this exchange's wall.
+
+
+def test_a_store_answers_the_ceiling_with_its_own_number_and_the_crawl_is_not_consulted():
+    """PINS AN EXPOSURE. Read the assertion as "this is what happens", not "this is right".
+
+    The roster prices this store's product at 180.00 — on the graph path that number is the
+    platform's own crawl (`ingest.graph.candidate_shops` -> `SolicitedShop.list_price`) — and
+    the store answers a 25.00 ceiling with 24.00. It takes the slot at 24.00, `fallback` is
+    `False`, and nothing anywhere compared 24.00 to the 180.00 the exchange is holding.
+
+    Not closable here. `ranking.candidates.CANDIDATE_FIELDS` is
+    `(bid_id, store_id, store_domain, offer, claims, message, fallback, fallback_reason)` and
+    carries no roster field; `ranking.rank()` is never handed the `BidEntry` list at all — the
+    list price reaches the ranker only as a positional sideband into `features.attach_features`
+    one frame up in `serving.rank_auction`. So `budget_reasons` cannot see the crawled price
+    without either widening a projection R11 built to stay narrow, or threading a new argument
+    through `rank()`. See that function's docstring for why neither is done inside this change.
+    """
+    bid = _bid(STORE_A, 24.0)
+    app = _wired_app(
+        bidders=Bidders({STORE_A: bid}), catalog_prices={STORE_A: None}, stores=(STORE_A,)
+    )
+
+    body = _post(
+        app,
+        [_rostered(STORE_A, 180.0)],  # no `max_discount_pct` — the graph path's row shape
+        _intent([{"field": "price_usd", "op": "lte", "value": 25.0}]),
+    )
+    slots = body["shortlist"]["slots"]
+
+    assert len(slots) == 1, body
+    assert (slots[0].get("price") or {})["unit_price"] == pytest.approx(24.0), slots[0]
+    assert slots[0]["fallback"] is False, slots[0]
+    assert _reasons_for(body, STORE_A) == [], body["excluded"]
+    # And the 180.00 the caller stated is not merely unconsulted — it is not on the served
+    # answer at all. `BidEntry.list_price` holds it inside the auction; nothing publishes it,
+    # so a buyer's agent reading this response cannot make the comparison either.
+    assert "180" not in json.dumps(body), body["entries"][0]
+
+
+def test_a_declared_discount_cap_is_the_only_thing_bounding_that_answer():
+    """The same bid, on the same list price, with the row stating a 20% cap: refused.
+
+    `contracts.boundary._price_reasons` prices the floor at `list_price * (100 - cap) / 100`
+    = 144.00, the 24.00 bid is under it, and `collect_bids` represents the store at its list
+    price of 180.00 — which the budget wall then refuses as over the 25.00 ceiling. So the
+    guard that exists is the CALLER's cap, and it is the caller's to omit.
+    """
+    bid = _bid(STORE_A, 24.0)
+    app = _wired_app(
+        bidders=Bidders({STORE_A: bid}), catalog_prices={STORE_A: None}, stores=(STORE_A,)
+    )
+
+    body = _post(
+        app,
+        [{**_rostered(STORE_A, 180.0), "max_discount_pct": 20.0}],
+        _intent([{"field": "price_usd", "op": "lte", "value": 25.0}]),
+    )
+
+    assert body["shortlist"]["slots"] == [], body["shortlist"]
+    assert body["entries"][0]["fallback"] is True, body["entries"][0]
+    assert body["entries"][0]["fallback_reason"] == "bid_price_unreconcilable", body["entries"][0]
+    reasons = _reasons_for(body, STORE_A)
+    assert any(reason.startswith(BUDGET_PREFIX) and "180.0" in reason for reason in reasons), (
+        reasons
+    )

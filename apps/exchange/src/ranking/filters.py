@@ -68,11 +68,16 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from claim_verification.statuses import DECIDED_STATUSES
-from ingest.graph.model import slug
 
 from ..checkout.codes import UnusableOffer, expiry_epoch
 from ..checkout.domain import is_on_domain
-from ..retrieval.criteria import HardCriterion, MalformedIntent
+from ..retrieval.criteria import (
+    BUDGET_FIELDS,
+    BUDGET_OPS,
+    HardCriterion,
+    MalformedIntent,
+    is_budget_bound,
+)
 
 # `NAMING_MODIFIERS`, `query_noun_phrases` and `shopper_named_the_product` are DEFINED there
 # and re-exported here (see `__all__`), so every existing `from exchange.ranking.filters import
@@ -548,26 +553,49 @@ def hard_constraint_reasons(
 # ---------------------------------------------------------------------------------
 # The buyer's budget, decided against the price BID
 # ---------------------------------------------------------------------------------
-#: The constraint fields that state the buyer's budget in money, folded through the same
-#: :func:`slug` that :attr:`HardCriterion.canonical_field` folds with — so ``price_usd``,
-#: ``Price USD`` and ``price-usd`` are one field here and not three.
+# `BUDGET_FIELDS`, `BUDGET_OPS` and `is_budget_bound` are re-exported from
+# `..retrieval.criteria`, which is where they are DEFINED — imported at the top of this module
+# and named here so this section still reads as the one place the budget vocabulary lives.
+#
+# They moved down a layer because RETRIEVAL needs the same predicate: a money bound must not be
+# pushed into the catalogue query and must not be re-decided against product attributes, and
+# both of those decisions happen in `criteria.py`, which this module imports. The dependency
+# only runs one way (`ranking` -> `retrieval`), so the definition has to live at the bottom of
+# it or there would be two lists of price spellings that could drift apart — and a bound
+# exempted in one place and not the other is exactly the defect that emptied every
+# graph-rostered shortlist that stated a ceiling.
+
+
+#: The offer fields that state a price, in the order :func:`offer_price` prefers them.
 #:
-#: ``budget_band`` is deliberately absent, and it is the obvious wrong answer. The band is a
-#: LOSSY PROJECTION minted *from* the parsed number
-#: (``apps/buyer/svc/src/intent/extraction.py`` turns a ceiling into one of a handful of
-#: buckets), so binding the wall to it would judge a bid against a bucket the shopper never
-#: said — and against a bound the buyer service, not the buyer, chose.
-BUDGET_FIELDS: frozenset[str] = frozenset({slug("price_usd")})
-
-#: The ops that state a money BOUND. ``eq``, ``in`` and ``contains`` on a price field are not
-#: budgets — "exactly $40" is a description of a product, not a ceiling — and they keep
-#: whatever meaning they already had, decided against claims like any other constraint.
-BUDGET_OPS: tuple[str, ...] = ("lte", "gte")
+#: The first two are the published ``Offer``'s own (``protocol.schema.json``) and are the two
+#: :func:`~exchange.ranking.serving.shortlist_price` copies onto the slot. ``price`` is not a
+#: published field and no bid can carry one; it is here because callers inside this tree hand
+#: :func:`budget_reasons` plain mappings, and a mapping stating only ``price`` must be JUDGED
+#: rather than counted unreadable.
+PRICE_FIELDS: tuple[str, ...] = ("total_price", "unit_price", "price")
 
 
-def is_budget_bound(criterion: HardCriterion) -> bool:
-    """Is this criterion the buyer's stated budget, rather than a claim about a product?"""
-    return criterion.canonical_field in BUDGET_FIELDS and criterion.op in BUDGET_OPS
+def offer_prices(offer: Any) -> list[tuple[str, float]]:
+    """EVERY finite price this offer states, as ``(field, amount)`` in :data:`PRICE_FIELDS` order.
+
+    :func:`offer_price` answers "what would this cost" and has to pick one number.
+    :func:`budget_reasons` is asking a different question — "is there a number here the buyer
+    said they could not pay" — and picking one number is what made that question answerable
+    two different ways.
+    """
+    prices: list[tuple[str, float]] = []
+    for name in PRICE_FIELDS:
+        raw = read(offer, name, None)
+        if raw is None or isinstance(raw, bool):
+            continue
+        try:
+            price = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(price):
+            prices.append((name, price))
+    return prices
 
 
 def offer_price(offer: Any) -> float | None:
@@ -582,20 +610,18 @@ def offer_price(offer: Any) -> float | None:
     path only mints the redemption code against it (`checkout/protocol.py`), so there is no
     later reduction to thread through here.
 
-    A non-finite price is not a price. It is `None` to both callers, and they disagree about
-    nothing: the price tie-break sorts an unreadable price LAST, and :func:`budget_reasons`
-    refuses it outright.
+    A non-finite price is not a price, and an offer stating none is `None` here — which the
+    price tie-break reads as "sort last".
+
+    **This is the RANKING number and it is deliberately not the wall's.** The tie-break sorts
+    by what the buyer pays, which is one number; :func:`budget_reasons` judges every number the
+    offer states, because the slot publishes every number the offer states. Collapsing the two
+    questions into this one function is what let a bid stating ``unit_price 500.00`` and
+    ``total_price 19.99`` clear a 25.00 ceiling on the total and then publish the 500.00 —
+    see that function's "THE WALL AND THE SLOT" section for the measurement.
     """
-    for name in ("total_price", "unit_price", "price"):
-        raw = read(offer, name, None)
-        if raw is None or isinstance(raw, bool):
-            continue
-        try:
-            price = float(raw)
-        except (TypeError, ValueError):
-            continue
-        if math.isfinite(price):
-            return price
+    for _name, price in offer_prices(offer):
+        return price
     return None
 
 
@@ -627,6 +653,88 @@ def budget_reasons(offer: Any, criteria: Sequence[HardCriterion]) -> list[str]:
     compared — would make "my price is unreadable" the cheapest bid in the auction, and R12
     already settled which way an unreadable answer fails.
 
+    **THE WALL AND THE SLOT HAVE TO MEAN THE SAME NUMBER, so every stated price is judged.**
+    The bound is applied to EVERY finite price the offer states (:func:`offer_prices`), not to
+    the one :func:`offer_price` picks. Measured over ``POST /auctions`` before this, with a
+    roster row at ``list_price 25.00``, no ``max_discount_pct`` and a bid of
+    ``{"unit_price": 500.0, "total_price": 19.99}`` under ``price_usd lte 25``::
+
+        excluded: []
+        slot:  {"slot": "fit", "fallback": false,
+                "price": {"unit_price": 500.0, "total_price": 19.99, "currency": "USD"}}
+
+    19.99 cleared the ceiling on the total, and the 500.00 went to the shopper, because
+    ``ranking.serving.shortlist_price`` copies BOTH fields onto the slot verbatim and the
+    surfaces read them differently. That is the worst direction for this filter to be wrong
+    in: it exists to make a ceiling mean something, and it put a number above the ceiling on
+    screen.
+
+    **Why judge both, rather than switch the wall to "the rendered field".** There is no such
+    field — the readers of one slot disagree, and the disagreement is worst in exactly this
+    case. ``apps/buyer/app/shortlist/ShortlistView.tsx::priceLine`` leads with ``total_price``
+    and appends ``"<unit_price> each"`` *only when the two differ*, so the shopper reads
+    "USD 19.99 — USD 500.00 each" — the over-ceiling number, rendered, because the fields
+    disagree. ``apps/buyer/app/learning/LearningPage.tsx`` prints ``unit_price`` alone, and
+    ``docs/driving-the-stack.md`` tells a reader driving the API by hand that "the price is
+    ``price.unit_price``". Nothing binds a surface to either field: the published
+    ``ShortlistPrice`` requires the two together and this exchange publishes both. So "the
+    wall reads what the display renders" is a rule about another module's current choice and
+    would be silently wrong again the next time a surface changes. What is invariant is that a
+    ceiling is a promise about every price this exchange puts in front of the shopper, and the
+    offer states them all. Making the SLOT render only the judged number is the other
+    direction and it is worse: it would delete a field the contract requires, across
+    ``apps/buyer/``, to hide a number the bid really did state.
+
+    This is a REFINEMENT, not a new class of refusal, and no honest bid can feel it: with no
+    quantity field on the published ``Offer`` there is no bid for which a total is legitimately
+    SMALLER than a unit price, so the only bids this newly refuses are the malformed ones. A
+    genuine multi-unit bid — ``unit 10.00, total 20.00`` — is still judged on its total, which
+    is what it was judged on before.
+
+    **OPEN EXPOSURE — the bound is decided against the STORE'S OWN NUMBER, and the exchange is
+    holding a crawled one it never looks at.** R19 says unverified data cannot satisfy a hard
+    constraint. A bid-stated price is unverified data by this docstring's own argument, and the
+    exchange holds the platform's crawled price for the same product on the same auction, at
+    ``auction.collect.BidEntry.list_price``. Nothing compares them. Measured over
+    ``POST /auctions``, roster row ``{list_price: 180.0}`` with no ``max_discount_pct``,
+    ``price_usd lte 25``, one hosted bid of 24.00::
+
+        slots=1  price.unit_price=24.00  fallback=false  excluded=[]
+
+    Whether that is exploitable turns on one caller-supplied field:
+
+    * **row states no ``max_discount_pct``** — ``auction.collect._price_refusal`` ABSTAINS, by
+      design and by its own docstring ("an undeclared undercut on a row that states no
+      authorized depth, which R10 requires the exchange to keep"), so the bid is admitted at
+      whatever it says. **This is the shape the GRAPH path produces**:
+      ``retrieval.roster.SolicitedShop.as_roster_row`` writes ``store_id``, ``tier``,
+      ``product_ref``, ``list_price``, ``currency`` and ``variant_ref`` and no cap at all.
+    * **row states ``max_discount_pct: N``** — the same 24.00 bid is refused
+      ``bid_price_unreconcilable`` and the store is represented at 180.00, which this function
+      then refuses as over the ceiling. Measured alongside the above. The demo's stated roster
+      (``deploy/demo/buyer-roster.json``) carries 12-20% on its four bidding stores, so the
+      demo path is the guarded one and the exchange's own graph roster is not.
+
+    The four shipped store agents decline rather than send an under-ceiling lie — they fold the
+    buyer's field through ``PRICE_CONSTRAINT_FIELDS`` and look the ceiling up against their own
+    ``LIST_PRICE_KEY``. That is the AGENT's manners and not this exchange's wall.
+
+    **Why it is not closed here, rather than closed badly here.** The crawled price is not
+    reachable from this frame. ``ranking.candidates.CANDIDATE_FIELDS`` is ``(bid_id, store_id,
+    store_domain, offer, claims, message, fallback, fallback_reason)`` — no roster field — and
+    ``ranking.rank()`` is not given the ``BidEntry`` list at all; the list price reaches the
+    ranker only as a positional sideband into ``features.attach_features``, one frame up in
+    ``serving.rank_auction``. Closing it means either widening a projection R11 deliberately
+    keeps narrow so a bidder cannot write a published feature into its own reply, or threading
+    a new argument through ``rank()``. And on the STATED path the number would not be worth
+    reaching: ``auction.routes.RosterEntry.list_price`` is caller-supplied on an
+    unauthenticated endpoint, so a ceiling decided against it is a ceiling the CALLER sets —
+    ``BidEntry.list_price`` mixes crawled and caller-asserted provenance with nothing recording
+    which. The honest repair is a provenance flag on that field plus a wall in
+    ``auction/collect.py`` that stops treating "no declared cap" as "no bound", and both are
+    outside this function. ``test_ranking_budget_ceiling.py``'s section 6 pins the two
+    measurements above so this cannot regress into something worse unnoticed.
+
     **Currency is reported and not gated on**, and neither is the criterion's ``unit``.
     ``Offer.currency`` is optional and bidder-set, so refusing a mismatch would refuse every
     honest bid that omits it, and *accepting* a mismatch costs a bidder nothing it could
@@ -635,15 +743,16 @@ def budget_reasons(offer: Any, criteria: Sequence[HardCriterion]) -> list[str]:
     capability with a rate source behind it, and this exchange has neither.
 
     Returns:
-        One reason per bound this offer misses, or a single unreadable-price reason naming
-        every bound it could not be judged against. Empty when the buyer stated no budget.
+        One reason per bound this offer misses — naming every stated price that missed it —
+        or a single unreadable-price reason naming every bound it could not be judged
+        against. Empty when the buyer stated no budget.
     """
     bounds = [criterion for criterion in criteria if is_budget_bound(criterion)]
     if not bounds:
         return []
 
-    price = offer_price(offer)
-    if price is None:
+    prices = offer_prices(offer)
+    if not prices:
         stated = ", ".join(_bound_text(criterion) for criterion in bounds)
         return [
             f"{REASON_PRICE_UNREADABLE}: the buyer stated {stated} and this offer carries no "
@@ -654,7 +763,6 @@ def budget_reasons(offer: Any, criteria: Sequence[HardCriterion]) -> list[str]:
         ]
 
     currency = read(offer, "currency", None)
-    priced = f"{price} {currency}" if currency else f"{price}"
     reasons: list[str] = []
     for criterion in bounds:
         bound = float(criterion.value)
@@ -669,16 +777,35 @@ def budget_reasons(offer: Any, criteria: Sequence[HardCriterion]) -> list[str]:
                 f"excludes rather than admitting everybody (R19)"
             )
             continue
-        if criterion.op == "lte" and price > bound:
+        if criterion.op == "lte":
+            missed = [(name, price) for name, price in prices if price > bound]
             side = f"above the buyer's ceiling ({_bound_text(criterion)})"
-        elif criterion.op == "gte" and price < bound:
+        elif criterion.op == "gte":
+            missed = [(name, price) for name, price in prices if price < bound]
             side = f"below the buyer's floor ({_bound_text(criterion)})"
         else:
             continue
+        if not missed:
+            continue
+        # The FIELD is named only when this offer states more than one distinct price, and
+        # then every missed field is named rather than the first. An offer whose prices agree
+        # — every honest bid, and every fallback `_list_price_bid` mints — reads exactly as it
+        # read before every stated price was judged, because naming a field there tells a
+        # merchant nothing they do not already know. When the prices DISAGREE the field is the
+        # whole content of the refusal, and naming one of two missed fields would be a partial
+        # explanation presented as a complete one.
+        suffix = f" {currency}" if currency else ""
+        priced = (
+            f"{missed[0][1]}{suffix}"
+            if len({price for _name, price in prices}) == 1
+            else ", ".join(f"{name} {price}{suffix}" for name, price in missed)
+        )
         reasons.append(
             f"{REASON_OVER_BUDGET}: this bid's own price of {priced} is {side} — a price bound "
             f"is decided against the PRICE BID, not against the catalogue price a store claims "
-            f"for itself, and a bid the buyer cannot afford is not a shortlist answer"
+            f"for itself, and a bid the buyer cannot afford is not a shortlist answer. Every "
+            f"price the offer states is judged, because the slot publishes every price the "
+            f"offer states and the shopper is shown one of them"
         )
     return reasons
 
@@ -989,7 +1116,9 @@ __all__ = [
     "hard_constraint_reasons",
     "is_budget_bound",
     "identity_off_topic",
+    "PRICE_FIELDS",
     "offer_price",
+    "offer_prices",
     "organic_relevance_reason",
     "query_noun_phrases",
     "read",

@@ -47,6 +47,8 @@ from ingest.graph import AttributeFilter
 from ingest.graph.model import canonical_text, slug
 
 __all__ = [
+    "BUDGET_FIELDS",
+    "BUDGET_OPS",
     "CONSTRAINT_OPS",
     "DEFAULT_CANDIDATE_LIMIT",
     "MAX_CANDIDATE_LIMIT",
@@ -60,11 +62,41 @@ __all__ = [
     "SoftPreference",
     "UndecidableCriterion",
     "build_query",
+    "is_budget_bound",
 ]
 
 #: The pinned `ConstraintOp` vocabulary (`packages/contracts`). No regex: an eligibility
 #: filter has to be decidable against an attribute value, not against a pattern language.
 CONSTRAINT_OPS: tuple[str, ...] = ("eq", "lte", "gte", "in", "contains")
+
+#: The constraint fields that state the buyer's budget in MONEY rather than a claim about a
+#: product, folded through the same :func:`slug` that :attr:`HardCriterion.canonical_field`
+#: folds with — so ``price_usd``, ``Price USD`` and ``price-usd`` are one field here and not
+#: three.
+#:
+#: ``budget_band`` is deliberately absent, and it is the obvious wrong answer. The band is a
+#: LOSSY PROJECTION minted *from* the parsed number
+#: (``apps/buyer/svc/src/intent/extraction.py`` turns a ceiling into one of a handful of
+#: buckets), so binding a money rule to it would judge a bid against a bucket the shopper never
+#: said — and against a bound the buyer service, not the buyer, chose.
+#:
+#: **This lives here, in retrieval, and is re-exported by ``ranking.filters``** — which is
+#: where it used to be defined and where :func:`~exchange.ranking.filters.budget_reasons` still
+#: decides it. It moved down because THREE decisions have to agree about which fields are money
+#: and only one of them is in ranking: this module's :meth:`HardCriterion.pushdown` must not
+#: push a money bound into the catalogue query, this module's
+#: :meth:`RetrievalQuery.exclusion_reasons` must not re-decide it against product attributes,
+#: and ``ranking.filters.hard_constraint_reasons`` must keep it out of
+#: ``verified_hard_fit_count``. ``ranking`` imports ``retrieval`` and not the other way round,
+#: so a definition up there would have forced a second list of price spellings down here — and
+#: a bound exempted in one list and not the other is precisely the defect this vocabulary was
+#: extended to close.
+BUDGET_FIELDS: frozenset[str] = frozenset({slug("price_usd")})
+
+#: The ops that state a money BOUND. ``eq``, ``in`` and ``contains`` on a price field are not
+#: budgets — "exactly $40" is a description of a product, not a ceiling — and they keep
+#: whatever meaning they already had, decided against claims like any other constraint.
+BUDGET_OPS: tuple[str, ...] = ("lte", "gte")
 
 #: The pinned `PreferenceDirection` vocabulary.
 PREFERENCE_DIRECTIONS: tuple[str, ...] = ("maximize", "minimize", "prefer")
@@ -229,11 +261,34 @@ class HardCriterion:
               admitted here, so pushing it down would make the graph strictly narrower than
               the rule. ``lte``/``gte`` are safe because both sides compare the same two
               floats with the same operator.
+            * a **money bound** (:func:`is_budget_bound`) — the buyer's ceiling or floor. Not
+              "Cypher expresses it badly" but "Cypher is being asked the wrong node": a price
+              is not an attribute of a thing, it is a property of an ``Offer``, because it
+              belongs to an offer at a moment with a currency and a timestamp. Measured on the
+              nineteen-store demo graph, ``MATCH (o:Offer) RETURN keys(o)`` is exactly
+              ``['offer_id', 'price', 'observed_at', 'currency', 'availability']``, while
+              ``MATCH (a:AttributeValue) WHERE toLower(a.canonical_key) CONTAINS 'price' OR
+              ... 'cost'`` returns **0** out of 147 distinct attribute keys. So an
+              ``AttributeFilter('price_usd', max_number=...)`` joins ``HAS_ATTRIBUTE``, finds
+              no reading on any product, and excludes **every** candidate the local decision
+              would admit — the invariant above, violated maximally. Driven before the repair,
+              ``POST /auctions`` with ``price_usd lte 2000`` on ``"a sofa"`` returned
+              ``products_considered: 0`` against a corpus holding two sofas under $2,000, and
+              ``lte 5000`` — above every price in the graph — returned 0 as well.
 
         The declined ops become :attr:`RetrievalQuery.local_only_criteria`, which is what
         makes :data:`~exchange.retrieval.sources.LOCAL_FILTER_OVERSAMPLE` fetch headroom for
         them.
+
+        **Declining the money bound here is only half of it**, and the other half is next door
+        in :meth:`RetrievalQuery.exclusion_reasons`. Every other ``None`` above is a constraint
+        the local decision still answers; a money bound is one it *cannot* answer, for the same
+        reason Cypher cannot. Measured on the live graph with only this edit applied, ``"a
+        sofa"`` under $2,000 went from ``considered 0, eligible 0`` to ``considered 125,
+        eligible 0`` — the identical empty shortlist with a different sentence on it.
         """
+        if is_budget_bound(self):
+            return None
         if self.op == "eq":
             if isinstance(self.value, bool):
                 return AttributeFilter(self.field, value_bool=self.value, unit=self.unit)
@@ -336,6 +391,24 @@ class HardCriterion:
             if attribute.get(key) is not None:
                 return attribute[key]
         return None
+
+
+def is_budget_bound(criterion: HardCriterion) -> bool:
+    """Is this criterion the buyer's stated budget, rather than a claim about a product?
+
+    Keys on the field AND the op, because ``price_usd eq 40`` is a description of a product and
+    ``price_usd lte 40`` is a wallet. Only the second is money this exchange has to decide
+    against an offer; the first keeps its ordinary attribute meaning.
+
+    Three callers, and they are the same rule stated three times rather than three rules:
+    :meth:`HardCriterion.pushdown` declines to ask the catalogue,
+    :meth:`RetrievalQuery.exclusion_reasons` declines to decide it locally, and
+    ``ranking.filters.hard_constraint_reasons`` declines to count it towards
+    ``verified_hard_fit_count`` (D13's first published tie-break, which a bidder must not be
+    able to set). What is left is ``ranking.filters.budget_reasons``, which decides it once,
+    against the offer's own price — the only place the number exists.
+    """
+    return criterion.canonical_field in BUDGET_FIELDS and criterion.op in BUDGET_OPS
 
 
 @dataclass(frozen=True)
@@ -483,7 +556,19 @@ class RetrievalQuery:
 
     @property
     def local_only_criteria(self) -> tuple[HardCriterion, ...]:
-        """The criteria no source can pre-filter — the reason retrieval oversamples."""
+        """The criteria no source can pre-filter — the reason retrieval oversamples.
+
+        A money bound is in here and is the one member :meth:`exclusion_reasons` does not
+        decide either; it is decided further down the pipe, by
+        :func:`~exchange.ranking.filters.budget_reasons` against the offer's own price. The
+        membership is still right, because what this property is FOR is telling
+        :data:`~exchange.retrieval.sources.LOCAL_FILTER_OVERSAMPLE` that rows will be discarded
+        after the fetch: asking for ``limit`` rows when something later throws some away
+        returns fewer satisfying candidates than were asked for, and it makes no difference to
+        that arithmetic whether the thrower-away is this module or the budget wall. Measured on
+        the live graph, the oversample takes a ceiling query's fetch from 25 products to 125,
+        of which 60-91% carry an offer at or under the ceiling.
+        """
         return tuple(c for c in self.criteria if c.pushdown() is None)
 
     def exclusion_reasons(self, attributes: Sequence[Mapping[str, Any]]) -> tuple[str, ...]:
@@ -492,9 +577,33 @@ class RetrievalQuery:
         All criteria are evaluated, not just the first failing one: an exclusion label that
         named one of three violated constraints would be a partial explanation presented as a
         complete one.
+
+        **A money bound is not evaluated here at all**, and that is the same rule
+        ``ranking.filters.hard_constraint_reasons`` already applies one layer up, stated once
+        more rather than an exception to it. These ``attributes`` are the CATALOGUE's readings
+        about a product; the buyer's ceiling is about an OFFER, and no reading a catalogue can
+        carry answers it — there is no attribute for "what this will cost you today". Feeding
+        it to :meth:`HardCriterion.decide` therefore does not decide it, it refuses everybody:
+        ``decide`` correctly answers R19's "the candidate carries no such attribute" for every
+        product in the corpus, and an exclusion filter that excludes the whole corpus is not a
+        filter.
+
+        Skipping it here is NOT dropping the bound. It is decided exactly once, by
+        :func:`~exchange.ranking.filters.budget_reasons`, against the price the offer itself
+        names — which is the only place the number exists and the only place it can be compared.
+        ``ranking.filters.unanswerable_criteria`` skips it for the mirror-image reason:
+        relaxing a ceiling would re-admit every bid the budget wall just excluded.
+
+        Measured, and this is why the skip is not cosmetic: with the pushdown declined
+        (:meth:`HardCriterion.pushdown`) and this loop left alone, ``"a sofa"`` under $2,000
+        against the live nineteen-store graph answered ``considered 125, eligible 0`` — all 125
+        refused for carrying no ``price_usd`` attribute. The shortlist was as empty as before
+        the pushdown was touched. Both edits, or neither is worth making.
         """
         reasons: list[str] = []
         for criterion in self.criteria:
+            if is_budget_bound(criterion):
+                continue
             verdict = criterion.decide(attributes)
             if not verdict.satisfied:
                 reasons.append(verdict.reason)

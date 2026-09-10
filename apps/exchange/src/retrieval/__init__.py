@@ -93,6 +93,8 @@ from .clusters import (
     intent_clusters_of,
 )
 from .criteria import (
+    BUDGET_FIELDS,
+    BUDGET_OPS,
     CONSTRAINT_OPS,
     DEFAULT_CANDIDATE_LIMIT,
     MAX_CANDIDATE_LIMIT,
@@ -106,6 +108,7 @@ from .criteria import (
     SoftPreference,
     UndecidableCriterion,
     build_query,
+    is_budget_bound,
 )
 from .fit import (
     FIT_LEDGER_KIND,
@@ -169,6 +172,8 @@ from .sources import (
 )
 
 __all__ = [
+    "BUDGET_FIELDS",
+    "BUDGET_OPS",
     "CATALOG_SNAPSHOT_PREFIX",
     "CATEGORY_WEIGHT",
     "CONSTRAINT_OPS",
@@ -241,6 +246,7 @@ __all__ = [
     "graph_roster_from_env",
     "graph_sessions_from_env",
     "intent_clusters_of",
+    "is_budget_bound",
     "head_term",
     "identity_off_topic",
     "identity_surface",
